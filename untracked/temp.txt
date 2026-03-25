@@ -1,0 +1,61 @@
+
+
+The normal Lava Protocol flow (what's running now):
+
+
+lavap rpcconsumer pod       lavap provider pod         Real blockchain node
+(receives HTTP from        (acts as gRPC bridge)       (Google, QuickNode)
+ your tests)
+      │                           │                           │
+      │──── gRPC RelayRequest ───▶│                           │
+      │     (relay.proto)         │──── HTTP JSON-RPC ───────▶│
+      │                           │◀─── HTTP response ────────│
+      │◀─── gRPC RelayReply ──────│
+
+The chains[].providers[].endpoints[].url in values.yml is the HTTP URL that the lavap provider pod connects to.
+The consumer and provider pods always talk gRPC to each other.
+
+Option A — HTTP simulator in lava-infra
+
+lavap rpcconsumer pod       lavap provider pod         HTTP simulator pod
+                                                        (new Python pod in
+      │                           │                      lava-infra)
+      │──── gRPC RelayRequest ───▶│                           │
+      │                           │──── HTTP JSON-RPC ───────▶│
+      │                           │◀─── fake response ────────│
+      │◀─── gRPC RelayReply ──────│
+
+
+Option B — static-providers with gRPC simulator
+
+static-providers is a lavap rpcconsumer flag that tells the consumer: skip the Lava blockchain entirely, connect
+directly to these hardcoded gRPC addresses. No lavap provider pods needed at all — the consumer talks gRPC directly
+to whatever is at those addresses.
+
+lavap rpcconsumer pod       provider_simulator pod
+(static-providers mode)     (gRPC, relay.proto — the
+                             EXISTING provider_simulator
+      │                      in your project)
+      │──── gRPC RelayRequest (relay.proto) ───────────────▶│
+      │◀─── gRPC RelayReply ───────────────────────────────│
+
+
+What to ask your DevOps
+Option B is simpler and the simulator already written.
+The one question is whether the Helm chart exposes the static-providers flag to lavap rpcconsumer.
+
+"Does the smart-router Helm chart support static-providers in values.yml?
+I want to configure lavap rpcconsumer to skip provider pods and connect directly to a gRPC endpoint we can control,
+instead of using real blockchain nodes."
+
+
+If yes → Option B, deploy provider_simulator as a pod in lava-infra, no new simulator to write.
+If no → Option A, build a small HTTP simulator pod and just change the url: in values.yml.
+
+
+What option is preferable in long term it is not important what already written, if needed i will write a new small HTTP simulator -
+
+I need a reliable infra to create new tests to test regression in features like retry, error handling, this is why
+Ihave to be able to simulate the providers with different scenarios, like latency, rate limit, errors, outages.
+
+in the future there will be unified version will be no separated consumer -provider it will be one smart router that use wrs to route rpc request in the best way to the best node
