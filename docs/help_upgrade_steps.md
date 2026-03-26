@@ -588,6 +588,35 @@ cd ~/provider-simulator
 bash scripts/deploy.sh
 ```
 
+### ⚠️ After deploy.sh — always force a rollout restart
+
+`deploy.sh` builds a new Docker image tagged `provider-simulator:latest` and imports
+it into MicroK8s. However, **Kubernetes will not replace the running pod automatically**
+unless the image tag changes. Because the tag is always `latest`, Kubernetes sees the
+pod as already running the correct image and does nothing.
+
+You must explicitly restart the deployment to force Kubernetes to use the new image:
+
+```bash
+kubectl rollout restart deployment/provider-simulator -n lava-infra
+kubectl rollout status deployment/provider-simulator -n lava-infra --timeout=60s
+```
+
+`kubectl rollout restart` tells Kubernetes to replace the running pod with a new one.
+The new pod will pull (or in this case, use the already-imported) latest image from
+the MicroK8s image store — which now contains your updated code.
+
+`kubectl rollout status` waits until the new pod is `1/1 Running` before returning.
+
+**Why does this happen?**
+
+Kubernetes decides whether to restart a pod based on the image reference in the
+Deployment spec. If the tag is `latest` and `imagePullPolicy` is `IfNotPresent`
+(the default for locally-imported images), Kubernetes assumes the image is already
+correct and never re-checks. Changing the tag (e.g. `v1`, `v2`) would trigger a
+restart automatically, but using `latest` + `IfNotPresent` requires an explicit
+`rollout restart` after every redeploy.
+
 `scripts/deploy.sh` does three things in order:
 
 **1. Builds the Docker image:**

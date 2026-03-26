@@ -4,10 +4,12 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="99262f38-ab2e-4f15-b829-d5daa07d354d" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/untracked/values_sim.yml" afterDir="false" />
+    <list default="true" id="99262f38-ab2e-4f15-b829-d5daa07d354d" name="Changes" comment="feat: add .gitignore and update workspace configuration">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/config/values_sim.yml" beforeDir="false" afterPath="$PROJECT_DIR$/config/values_sim.yml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/help_upgrade_steps.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/help_upgrade_steps.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/scripts/deploy.sh" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/deploy.sh" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/server.py" beforeDir="false" afterPath="$PROJECT_DIR$/server.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -75,6 +77,10 @@
       <recent name="$PROJECT_DIR$/docs" />
       <recent name="$PROJECT_DIR$/untracked" />
     </key>
+    <key name="MoveFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/docs" />
+      <recent name="$PROJECT_DIR$/config" />
+    </key>
   </component>
   <component name="SharedIndexes">
     <attachedChunks>
@@ -92,12 +98,25 @@
       <option name="presentableId" value="Default" />
       <updated>1774453367042</updated>
       <workItem from="1774453370587" duration="342000" />
-      <workItem from="1774453747774" duration="14821000" />
+      <workItem from="1774453747774" duration="27504000" />
     </task>
+    <task id="LOCAL-00001" summary="feat: add .gitignore and update workspace configuration">
+      <option name="closed" value="true" />
+      <created>1774518995761</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1774518995761</updated>
+    </task>
+    <option name="localTasksCounter" value="2" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
     <option name="version" value="3" />
+  </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="feat: add .gitignore and update workspace configuration" />
+    <option name="LAST_COMMIT_MESSAGE" value="feat: add .gitignore and update workspace configuration" />
   </component>
   <component name="github-copilot-workspace">
     <instructionFileLocations>
