@@ -8,9 +8,13 @@
 # Provider URLs below use internal Kubernetes cluster DNS — they never change.
 
 routers:
+  # ⚠️ Helm replaces lists entirely — this file MUST include ALL routers (base, eth, eth-sim).
+  # Copy the base and eth blocks from values/core/values.yml above this entry.
+  # Use the key  nodes:  (not providers:) — chart 4.0.0 schema.
+
   - id: "eth-sim"
     network: "eth1"
-    providers:
+    nodes:
       - name: "SimProvider1"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18545"

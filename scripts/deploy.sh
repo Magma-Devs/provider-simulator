@@ -49,6 +49,13 @@ kubectl apply -f "$RENDERED_HTTPROUTE"
 echo "=== Waiting for pod to be ready ==="
 kubectl rollout status deployment/provider-simulator -n "$NAMESPACE" --timeout=60s
 
+echo "=== Restarting pod to pick up new image ==="
+# The image tag is always 'latest' — Kubernetes will not replace the running pod
+# automatically (imagePullPolicy: IfNotPresent). An explicit rollout restart is
+# required so the new image imported above is actually used.
+kubectl rollout restart deployment/provider-simulator -n "$NAMESPACE"
+kubectl rollout status deployment/provider-simulator -n "$NAMESPACE" --timeout=60s
+
 echo "=== Updating TLS certificate to include new hostname ==="
 # This regenerates the TLS cert to include $CONTROL_HOSTNAME and any other HTTPRoute hostnames.
 # Run the existing TLS certificate script from smart-router-standalone if available:
