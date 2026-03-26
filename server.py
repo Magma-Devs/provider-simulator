@@ -7,29 +7,38 @@ plus one control API (port 19000).
 Each provider's behaviour is changed at runtime via POST /scenario.
 
 Supported modes per provider:
-  success       — returns {"jsonrpc":"2.0","result":"..."} with optional latency
-  error         — returns {"jsonrpc":"2.0","error":{"code":-32000,"message":"..."}}
-  rate_limit    — returns HTTP 429
-  down          — returns HTTP 503 (router treats provider as unavailable)
+  success           — returns {"jsonrpc":"2.0","result":"..."} with optional latency
+  error             — returns {"jsonrpc":"2.0","error":{"code":-32000,"message":"..."}}
+  rate_limit        — returns HTTP 429
+  down              — returns HTTP 503 (router treats provider as unavailable)
   error_probability — randomly returns error on X% of requests (0.0–1.0)
 
 Control API:
-  POST /scenario  {"providers": {"1": {"mode": "rate_limit"}, "2": {"mode": "down"}, "3": {"mode": "success"}}}
-  POST /reset     {}
-  GET  /scenario  → current state of all providers
-  GET  /health    → {"status": "ok"}
+  POST /scenario   {"providers": {"1": {"mode": "rate_limit"}, "2": {"mode": "down"}}}
+  POST /reset      {}
+  GET  /scenario   → current state of all providers
+  GET  /health     → {"status": "ok"}
+  GET  /stats      → call counts and per-status breakdown per provider
+  GET  /history    → last 200 calls across all providers, sorted by time
+                     shows which providers were tried and in what order
 """
 
 import json
 import random
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Dict, Any
+from typing import Any, Dict
+
+from stubs import METHOD_DEFAULTS
 
 
 # ── Provider state ────────────────────────────────────────────────────────────
+
+HISTORY_MAX = 200   # call log entries kept per provider
+
 
 @dataclass
 class ProviderState:
@@ -38,6 +47,8 @@ class ProviderState:
     error_probability: float = 0.0
     responses: Dict[str, Any] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # call history — each entry: {ts, method, status, latency_ms}
+    history: deque = field(default_factory=lambda: deque(maxlen=HISTORY_MAX), repr=False)
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -61,81 +72,44 @@ class ProviderState:
             self.latency_ms        = 0
             self.error_probability = 0.0
             self.responses         = {}
+            self.history.clear()
+
+    def log_call(self, method: str, status: str, latency_ms: int) -> None:
+        with self.lock:
+            self.history.append({
+                "ts":         time.time(),
+                "method":     method,
+                "status":     status,
+                "latency_ms": latency_ms,
+            })
+
+    def stats(self) -> dict:
+        with self.lock:
+            by_status: Dict[str, int] = {}
+            for entry in self.history:
+                by_status[entry["status"]] = by_status.get(entry["status"], 0) + 1
+            return {"total": len(self.history), "by_status": by_status}
+
+    def get_history(self) -> list:
+        with self.lock:
+            return list(self.history)
 
 
 # ── JSON-RPC handler ──────────────────────────────────────────────────────────
 
-# ── Per-method default results ────────────────────────────────────────────────
-# The router sends eth_getBlockByNumber on startup (pruning verification) and
-# expects a full block object — returning a bare hex string causes a PANIC.
-
-METHOD_DEFAULTS: Dict[str, Any] = {
-    "eth_blockNumber":          "0x1312D00",  # 20,000,000 — realistic ETH mainnet height
-    # distance from block 0 = 20M >> 128, satisfies router pruning verification
-    "eth_chainId":              "0x1",
-    "net_version":              "1",
-    "web3_clientVersion":       "simulator/v1.0.0",
-    "eth_gasPrice":             "0x3b9aca00",
-    "eth_estimateGas":          "0x5208",
-    "eth_getBalance":           "0x0",
-    "eth_getTransactionCount":  "0x0",
-    "eth_getCode":              "0x",
-    "eth_call":                 "0x",
-    "eth_getBlockByNumber": {
-        "number":           "0x1",
-        "hash":             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "parentHash":       "0x0000000000000000000000000000000000000000000000000000000000000000",
-        "nonce":            "0x0000000000000000",
-        "sha3Uncles":       "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
-        "logsBloom":        "0x" + "0" * 512,
-        "transactionsRoot": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
-        "stateRoot":        "0xd7f8974fb5ac78d9ac099b9ad5018bedc2ce0a72dad1827a1709da30580f0544",
-        "receiptsRoot":     "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
-        "miner":            "0x0000000000000000000000000000000000000000",
-        "difficulty":       "0x0",
-        "totalDifficulty":  "0x0",
-        "extraData":        "0x",
-        "size":             "0x1f4",
-        "gasLimit":         "0x1c9c380",
-        "gasUsed":          "0x0",
-        "timestamp":        "0x65f3d4c0",
-        "transactions":     [],
-        "uncles":           [],
-    },
-    "eth_getBlockByHash": {
-        "number":           "0x1",
-        "hash":             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "parentHash":       "0x0000000000000000000000000000000000000000000000000000000000000000",
-        "nonce":            "0x0000000000000000",
-        "sha3Uncles":       "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
-        "logsBloom":        "0x" + "0" * 512,
-        "transactionsRoot": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
-        "stateRoot":        "0xd7f8974fb5ac78d9ac099b9ad5018bedc2ce0a72dad1827a1709da30580f0544",
-        "receiptsRoot":     "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
-        "miner":            "0x0000000000000000000000000000000000000000",
-        "difficulty":       "0x0",
-        "totalDifficulty":  "0x0",
-        "extraData":        "0x",
-        "size":             "0x1f4",
-        "gasLimit":         "0x1c9c380",
-        "gasUsed":          "0x0",
-        "timestamp":        "0x65f3d4c0",
-        "transactions":     [],
-        "uncles":           [],
-    },
-}
-
-
 class JSONRPCHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
+        t_start = time.monotonic()
         state: ProviderState = self.server.state
+        provider_id: str     = self.server.provider_id
         snap = state.snapshot()
 
-        # Outage — return 503 (router treats provider as unavailable)
+        # Outage — return 503
         if snap["mode"] == "down":
             self.send_response(503)
             self.end_headers()
+            state.log_call("*", "down", 0)
             return
 
         # Latency injection
@@ -145,24 +119,20 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body   = json.loads(self.rfile.read(length)) if length else {}
         req_id = body.get("id", 1)
-        method = body.get("method", "default")
+        method = body.get("method", "unknown")
 
         # Rate limit — return HTTP 429
         if snap["mode"] == "rate_limit":
-            self._reply(429, {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "error": {"code": 429, "message": "Too many requests"}
-            })
+            self._reply(429, {"jsonrpc": "2.0", "id": req_id,
+                              "error": {"code": 429, "message": "Too many requests"}})
+            state.log_call(method, "rate_limit", self._elapsed_ms(t_start))
             return
 
-        # Probabilistic error
+        # Probabilistic / forced error
         if snap["mode"] == "error" or random.random() < snap["error_probability"]:
-            self._reply(200, {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "error": {"code": -32000, "message": "Internal error"}
-            })
+            self._reply(200, {"jsonrpc": "2.0", "id": req_id,
+                              "error": {"code": -32000, "message": "Internal error"}})
+            state.log_call(method, "error", self._elapsed_ms(t_start))
             return
 
         # Success — look up method-specific result
@@ -170,19 +140,22 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             method_cfg = state.responses.get(method) or state.responses.get("default", {})
         result = method_cfg.get("result", METHOD_DEFAULTS.get(method, "0x1"))
 
-        # eth_getBlockByNumber: echo the requested block number back in the response.
-        # The router's pruning verification calls with e.g. ["0x0", false] and checks
-        # that result.number == "0x0". A static "0x1" causes a mismatch → PANIC.
+        # eth_getBlockByNumber: echo the requested block number so the router's
+        # pruning verification sees the correct block number in the response.
         if method == "eth_getBlockByNumber" and isinstance(result, dict):
             params = body.get("params", [])
             if params:
-                block_ref = params[0]
                 named = {"latest": "0x1312D00", "earliest": "0x0", "pending": "0x1312D01",
-                         "safe": "0x1312D00", "finalized": "0x1312CFF"}
-                result = dict(result)           # shallow copy — don't mutate the default
-                result["number"] = named.get(block_ref, block_ref)
+                         "safe": "0x1312D00",   "finalized": "0x1312CFF"}
+                result = dict(result)
+                result["number"] = named.get(params[0], params[0])
 
         self._reply(200, {"jsonrpc": "2.0", "id": req_id, "result": result})
+        state.log_call(method, "success", self._elapsed_ms(t_start))
+
+    @staticmethod
+    def _elapsed_ms(t_start: float) -> int:
+        return int((time.monotonic() - t_start) * 1000)
 
     def _reply(self, status: int, data: dict):
         body = json.dumps(data).encode()
@@ -222,13 +195,34 @@ class ControlHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self._reply(200, {"status": "ok"})
-            return
-        if self.path == "/scenario":
-            snapshot = {pid: s.snapshot()
-                        for pid, s in self.server.provider_states.items()}
-            self._reply(200, {"providers": snapshot})
-            return
-        self._reply(404, {"error": "unknown path"})
+
+        elif self.path == "/scenario":
+            self._reply(200, {
+                "providers": {pid: s.snapshot()
+                              for pid, s in self.server.provider_states.items()}
+            })
+
+        elif self.path == "/stats":
+            # Per-provider call counts and status breakdown.
+            # Use this to see if one provider is being skipped or hammered.
+            self._reply(200, {
+                "providers": {pid: s.stats()
+                              for pid, s in self.server.provider_states.items()}
+            })
+
+        elif self.path == "/history":
+            # All calls across all providers merged and sorted by time.
+            # Shows exactly which providers were tried, in what order, and
+            # what happened (success / error / rate_limit / down).
+            all_calls = []
+            for pid, s in self.server.provider_states.items():
+                for entry in s.get_history():
+                    all_calls.append({"provider": pid, **entry})
+            all_calls.sort(key=lambda x: x["ts"])
+            self._reply(200, {"history": all_calls[-HISTORY_MAX:]})
+
+        else:
+            self._reply(404, {"error": "unknown path"})
 
     def _reply(self, status: int, data: dict):
         body = json.dumps(data).encode()
@@ -254,7 +248,8 @@ def main():
     servers = []
     for pid, port in PROVIDER_PORTS.items():
         srv = HTTPServer(("0.0.0.0", port), JSONRPCHandler)
-        srv.state = states[pid]
+        srv.state       = states[pid]
+        srv.provider_id = pid          # available as self.server.provider_id in handler
         servers.append(srv)
 
     ctrl = HTTPServer(("0.0.0.0", CONTROL_PORT), ControlHandler)
@@ -265,6 +260,8 @@ def main():
     for pid, port in PROVIDER_PORTS.items():
         print(f"  provider {pid} → :{port}")
     print(f"  control API  → :{CONTROL_PORT}")
+    print(f"  GET /stats   → call counts per provider")
+    print(f"  GET /history → ordered call log (who was tried first)")
 
     threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in servers]
     for t in threads:
