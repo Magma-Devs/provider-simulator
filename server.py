@@ -169,6 +169,18 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             method_cfg = state.responses.get(method) or state.responses.get("default", {})
         result = method_cfg.get("result", METHOD_DEFAULTS.get(method, "0x1"))
 
+        # eth_getBlockByNumber: echo the requested block number back in the response.
+        # The router's pruning verification calls with e.g. ["0x0", false] and checks
+        # that result.number == "0x0". A static "0x1" causes a mismatch → PANIC.
+        if method == "eth_getBlockByNumber" and isinstance(result, dict):
+            params = body.get("params", [])
+            if params:
+                block_ref = params[0]
+                named = {"latest": "0x1", "earliest": "0x0", "pending": "0x2",
+                         "safe": "0x1", "finalized": "0x1"}
+                result = dict(result)           # shallow copy — don't mutate the default
+                result["number"] = named.get(block_ref, block_ref)
+
         self._reply(200, {"jsonrpc": "2.0", "id": req_id, "result": result})
 
     def _reply(self, status: int, data: dict):
