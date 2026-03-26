@@ -19,8 +19,14 @@ Control API:
   GET  /scenario   → current state of all providers
   GET  /health     → {"status": "ok"}
   GET  /stats      → call counts and per-status breakdown per provider
-  GET  /history    → last 200 calls across all providers, sorted by time
-                     shows which providers were tried and in what order
+  GET  /history    → ordered call log — supports filtering:
+                       ?last=60          last 60 seconds
+                       ?from=<ts>        from unix timestamp
+                       ?to=<ts>          to unix timestamp
+                       ?provider=1       single provider (1/2/3)
+                       ?method=eth_call  specific RPC method
+                       ?status=error     success | error | rate_limit | down
+                     params are combinable: ?last=120&provider=2&status=error
 """
 
 import json
@@ -31,6 +37,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, Dict
+from urllib.parse import urlparse, parse_qs
 
 from stubs import METHOD_DEFAULTS
 
@@ -210,16 +217,45 @@ class ControlHandler(BaseHTTPRequestHandler):
                               for pid, s in self.server.provider_states.items()}
             })
 
-        elif self.path == "/history":
-            # All calls across all providers merged and sorted by time.
-            # Shows exactly which providers were tried, in what order, and
-            # what happened (success / error / rate_limit / down).
+        elif self.path.startswith("/history"):
+            # Supported query params (all optional, combinable):
+            #   ?from=<unix_ts>   — include only calls at or after this timestamp
+            #   ?to=<unix_ts>     — include only calls at or before this timestamp
+            #   ?last=<seconds>   — shorthand: calls in the last N seconds
+            #   ?provider=<id>    — filter to a single provider (1, 2, or 3)
+            #   ?method=<name>    — filter to a specific RPC method
+            #   ?status=<name>    — filter by status (success, error, rate_limit, down)
+            #
+            # Examples:
+            #   /history?last=60
+            #   /history?from=1774534600&to=1774534700
+            #   /history?last=120&provider=2
+            #   /history?last=60&status=error
+            qs = parse_qs(urlparse(self.path).query)
+
+            t_from     = float(qs["from"][0])     if "from"     in qs else None
+            t_to       = float(qs["to"][0])       if "to"       in qs else None
+            last_secs  = float(qs["last"][0])      if "last"     in qs else None
+            f_provider = qs["provider"][0]         if "provider" in qs else None
+            f_method   = qs["method"][0]           if "method"   in qs else None
+            f_status   = qs["status"][0]           if "status"   in qs else None
+
+            if last_secs is not None:
+                t_from = time.time() - last_secs
+
             all_calls = []
             for pid, s in self.server.provider_states.items():
+                if f_provider and pid != f_provider:
+                    continue
                 for entry in s.get_history():
+                    if t_from   and entry["ts"] < t_from:   continue
+                    if t_to     and entry["ts"] > t_to:     continue
+                    if f_method and entry["method"] != f_method: continue
+                    if f_status and entry["status"] != f_status: continue
                     all_calls.append({"provider": pid, **entry})
+
             all_calls.sort(key=lambda x: x["ts"])
-            self._reply(200, {"history": all_calls[-HISTORY_MAX:]})
+            self._reply(200, {"count": len(all_calls), "history": all_calls})
 
         else:
             self._reply(404, {"error": "unknown path"})
