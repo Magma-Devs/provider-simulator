@@ -1,0 +1,2 @@
+# No external dependencies — stdlib only (http.server, json, threading)
+

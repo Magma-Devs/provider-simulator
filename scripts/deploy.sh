@@ -1,0 +1,65 @@
+#!/bin/bash
+set -euo pipefail
+
+NAMESPACE="lava-infra"
+CONFIG_FILE="${CONFIG_FILE:-config/base-domain.env}"
+HTTPROUTE_TEMPLATE="k8s/httproute-control.yml"
+
+if [ ! -f "$CONFIG_FILE" ]; then
+	echo "Missing config file: $CONFIG_FILE"
+	exit 1
+fi
+
+source "$CONFIG_FILE"
+
+if [ -z "${BASE_DOMAIN:-}" ]; then
+	echo "BASE_DOMAIN must be set in $CONFIG_FILE"
+	exit 1
+fi
+
+CONTROL_HOSTNAME="sim-control.${BASE_DOMAIN}"
+SIM_ROUTER_HOSTNAME="eth-sim-jsonrpc.${BASE_DOMAIN}"
+RENDERED_HTTPROUTE="$(mktemp)"
+
+cleanup() {
+	rm -f "$RENDERED_HTTPROUTE"
+}
+
+trap cleanup EXIT
+
+sed "s|__CONTROL_HOSTNAME__|$CONTROL_HOSTNAME|g" "$HTTPROUTE_TEMPLATE" > "$RENDERED_HTTPROUTE"
+
+echo "=== Deployment configuration ==="
+echo "Config file         : $CONFIG_FILE"
+echo "Base domain         : $BASE_DOMAIN"
+echo "Control hostname    : $CONTROL_HOSTNAME"
+echo "Simulator router    : $SIM_ROUTER_HOSTNAME"
+
+echo "=== Building Docker image ==="
+docker build -t provider-simulator:latest .
+
+echo "=== Importing image into MicroK8s ==="
+docker save provider-simulator:latest | microk8s ctr image import -
+
+echo "=== Applying Kubernetes manifests ==="
+kubectl apply -f k8s/deployment.yml
+kubectl apply -f k8s/service.yml
+kubectl apply -f "$RENDERED_HTTPROUTE"
+
+echo "=== Waiting for pod to be ready ==="
+kubectl rollout status deployment/provider-simulator -n "$NAMESPACE" --timeout=60s
+
+echo "=== Updating TLS certificate to include new hostname ==="
+# This regenerates the TLS cert to include $CONTROL_HOSTNAME and any other HTTPRoute hostnames.
+# Run the existing TLS certificate script from smart-router-standalone if available:
+#   cd /path/to/smart-router-standalone && bash scripts/install_gateway_api_tls_certificate.sh
+
+echo ""
+echo "Provider simulator deployed."
+echo "  JSON-RPC providers : ClusterDNS provider-simulator.lava-infra.svc.cluster.local:18545/18546/18547"
+echo "  Control API        : https://$CONTROL_HOSTNAME"
+echo "  Simulator router   : https://$SIM_ROUTER_HOSTNAME"
+echo ""
+echo "Verify:"
+echo "  curl https://$CONTROL_HOSTNAME/health"
+
