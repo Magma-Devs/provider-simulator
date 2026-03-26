@@ -5,15 +5,9 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="99262f38-ab2e-4f15-b829-d5daa07d354d" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/config/base-domain.env" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/untracked/values_sim.yml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/Dockerfile" beforeDir="false" afterPath="$PROJECT_DIR$/Dockerfile" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/k8s/deployment.yml" beforeDir="false" afterPath="$PROJECT_DIR$/k8s/deployment.yml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/k8s/httproute-control.yml" beforeDir="false" afterPath="$PROJECT_DIR$/k8s/httproute-control.yml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/k8s/service.yml" beforeDir="false" afterPath="$PROJECT_DIR$/k8s/service.yml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/scripts/deploy.sh" beforeDir="false" afterPath="$PROJECT_DIR$/scripts/deploy.sh" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/server.py" beforeDir="false" afterPath="$PROJECT_DIR$/server.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -24,6 +18,15 @@
     <persistenceIdMap>
       <entry key="_/Users/victoria/provider-simulator" value="3BRYUe0rGC6Wz2rlhFIYCCJK4xd" />
     </persistenceIdMap>
+  </component>
+  <component name="CopilotUserSelectedChatMode">
+    <option name="chatModeId" value="Agent" />
+  </component>
+  <component name="CopilotUserSelectedModel">
+    <selectedModels>
+      <entry key="chat-panel" value="Claude Sonnet 4.6" />
+      <entry key="agent-panel" value="Claude Sonnet 4.6" />
+    </selectedModels>
   </component>
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
@@ -89,7 +92,7 @@
       <option name="presentableId" value="Default" />
       <updated>1774453367042</updated>
       <workItem from="1774453370587" duration="342000" />
-      <workItem from="1774453747774" duration="5570000" />
+      <workItem from="1774453747774" duration="14821000" />
     </task>
     <servers />
   </component>
