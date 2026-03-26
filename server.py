@@ -70,7 +70,8 @@ class ProviderState:
 # expects a full block object — returning a bare hex string causes a PANIC.
 
 METHOD_DEFAULTS: Dict[str, Any] = {
-    "eth_blockNumber":          "0x1",
+    "eth_blockNumber":          "0x1312D00",  # 20,000,000 — realistic ETH mainnet height
+    # distance from block 0 = 20M >> 128, satisfies router pruning verification
     "eth_chainId":              "0x1",
     "net_version":              "1",
     "web3_clientVersion":       "simulator/v1.0.0",
@@ -176,8 +177,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             params = body.get("params", [])
             if params:
                 block_ref = params[0]
-                named = {"latest": "0x1", "earliest": "0x0", "pending": "0x2",
-                         "safe": "0x1", "finalized": "0x1"}
+                named = {"latest": "0x1312D00", "earliest": "0x0", "pending": "0x1312D01",
+                         "safe": "0x1312D00", "finalized": "0x1312CFF"}
                 result = dict(result)           # shallow copy — don't mutate the default
                 result["number"] = named.get(block_ref, block_ref)
 
