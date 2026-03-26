@@ -1,0 +1,29 @@
+# Simulator chain for smart-router-standalone.
+# Add this file to: values/simulator/values_sim.yml in smart-router-standalone.
+#
+# base_domain on this server: victoria.magmadevs.com
+# The Helm chart will automatically create the public route:
+#   https://eth-sim-jsonrpc.victoria.magmadevs.com
+#
+# Provider URLs below use internal Kubernetes cluster DNS — they never change.
+
+routers:
+  - id: "eth-sim"
+    network: "eth1"
+    providers:
+      - name: "SimProvider1"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18545"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
+      - name: "SimProvider2"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18546"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
+      - name: "SimProvider3"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18547"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
+

@@ -65,6 +65,66 @@ class ProviderState:
 
 # ── JSON-RPC handler ──────────────────────────────────────────────────────────
 
+# ── Per-method default results ────────────────────────────────────────────────
+# The router sends eth_getBlockByNumber on startup (pruning verification) and
+# expects a full block object — returning a bare hex string causes a PANIC.
+
+METHOD_DEFAULTS: Dict[str, Any] = {
+    "eth_blockNumber":          "0x1",
+    "eth_chainId":              "0x1",
+    "net_version":              "1",
+    "web3_clientVersion":       "simulator/v1.0.0",
+    "eth_gasPrice":             "0x3b9aca00",
+    "eth_estimateGas":          "0x5208",
+    "eth_getBalance":           "0x0",
+    "eth_getTransactionCount":  "0x0",
+    "eth_getCode":              "0x",
+    "eth_call":                 "0x",
+    "eth_getBlockByNumber": {
+        "number":           "0x1",
+        "hash":             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "parentHash":       "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "nonce":            "0x0000000000000000",
+        "sha3Uncles":       "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+        "logsBloom":        "0x" + "0" * 512,
+        "transactionsRoot": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+        "stateRoot":        "0xd7f8974fb5ac78d9ac099b9ad5018bedc2ce0a72dad1827a1709da30580f0544",
+        "receiptsRoot":     "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+        "miner":            "0x0000000000000000000000000000000000000000",
+        "difficulty":       "0x0",
+        "totalDifficulty":  "0x0",
+        "extraData":        "0x",
+        "size":             "0x1f4",
+        "gasLimit":         "0x1c9c380",
+        "gasUsed":          "0x0",
+        "timestamp":        "0x65f3d4c0",
+        "transactions":     [],
+        "uncles":           [],
+    },
+    "eth_getBlockByHash": {
+        "number":           "0x1",
+        "hash":             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "parentHash":       "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "nonce":            "0x0000000000000000",
+        "sha3Uncles":       "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+        "logsBloom":        "0x" + "0" * 512,
+        "transactionsRoot": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+        "stateRoot":        "0xd7f8974fb5ac78d9ac099b9ad5018bedc2ce0a72dad1827a1709da30580f0544",
+        "receiptsRoot":     "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+        "miner":            "0x0000000000000000000000000000000000000000",
+        "difficulty":       "0x0",
+        "totalDifficulty":  "0x0",
+        "extraData":        "0x",
+        "size":             "0x1f4",
+        "gasLimit":         "0x1c9c380",
+        "gasUsed":          "0x0",
+        "timestamp":        "0x65f3d4c0",
+        "transactions":     [],
+        "uncles":           [],
+    },
+}
+
+
 class JSONRPCHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
@@ -107,7 +167,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # Success — look up method-specific result
         with state.lock:
             method_cfg = state.responses.get(method) or state.responses.get("default", {})
-        result = method_cfg.get("result", "0x1")
+        result = method_cfg.get("result", METHOD_DEFAULTS.get(method, "0x1"))
 
         self._reply(200, {"jsonrpc": "2.0", "id": req_id, "result": result})
 
