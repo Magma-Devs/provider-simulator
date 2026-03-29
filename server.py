@@ -29,6 +29,7 @@ Control API:
                      params are combinable: ?last=120&provider=2&status=error
 """
 
+import datetime
 import json
 import random
 import threading
@@ -82,9 +83,11 @@ class ProviderState:
             self.history.clear()
 
     def log_call(self, method: str, status: str, latency_ms: int) -> None:
+        now = time.time()
         with self.lock:
             self.history.append({
-                "ts":         time.time(),
+                "ts":         now,
+                "time":       datetime.datetime.utcfromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S UTC"),
                 "method":     method,
                 "status":     status,
                 "latency_ms": latency_ms,
