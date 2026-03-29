@@ -57,6 +57,9 @@ class ProviderState:
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # call history — each entry: {ts, method, status, latency_ms}
     history: deque = field(default_factory=lambda: deque(maxlen=HISTORY_MAX), repr=False)
+    # all-time counters — never capped, survives history ring-buffer rollover
+    total_calls: int = 0
+    calls_by_status: Dict[str, int] = field(default_factory=dict, repr=False)
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -81,6 +84,8 @@ class ProviderState:
             self.error_probability = 0.0
             self.responses         = {}
             self.history.clear()
+            self.total_calls       = 0
+            self.calls_by_status   = {}
 
     def log_call(self, method: str, status: str, latency_ms: int) -> None:
         now = time.time()
@@ -92,13 +97,16 @@ class ProviderState:
                 "status":     status,
                 "latency_ms": latency_ms,
             })
+            self.total_calls += 1
+            self.calls_by_status[status] = self.calls_by_status.get(status, 0) + 1
 
     def stats(self) -> dict:
         with self.lock:
-            by_status: Dict[str, int] = {}
-            for entry in self.history:
-                by_status[entry["status"]] = by_status.get(entry["status"], 0) + 1
-            return {"total": len(self.history), "by_status": by_status}
+            return {
+                "total_alltime":    self.total_calls,
+                "by_status_alltime": dict(self.calls_by_status),
+                "history_window":   len(self.history),   # capped at HISTORY_MAX
+            }
 
     def get_history(self) -> list:
         with self.lock:
