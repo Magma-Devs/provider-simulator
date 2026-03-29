@@ -41,11 +41,11 @@ from typing import Any, Dict
 from urllib.parse import urlparse, parse_qs
 
 from stubs import METHOD_DEFAULTS
+from constants import HISTORY_MAX, PROVIDER_PORTS, CONTROL_PORT
 
 
 # ── Provider state ────────────────────────────────────────────────────────────
 
-HISTORY_MAX = 200   # call log entries kept per provider
 
 
 @dataclass
@@ -103,9 +103,9 @@ class ProviderState:
     def stats(self) -> dict:
         with self.lock:
             return {
-                "total_alltime":    self.total_calls,
-                "by_status_alltime": dict(self.calls_by_status),
-                "history_window":   len(self.history),   # capped at HISTORY_MAX
+                "total_requests_all_time":    self.total_calls,
+                "requests_by_status_all_time": dict(self.calls_by_status),
+                "history_ring_buffer_entries": len(self.history),  # max = HISTORY_MAX
             }
 
     def get_history(self) -> list:
@@ -285,8 +285,6 @@ class ControlHandler(BaseHTTPRequestHandler):
 
 # ── Server startup ────────────────────────────────────────────────────────────
 
-PROVIDER_PORTS = {"1": 18545, "2": 18546, "3": 18547}
-CONTROL_PORT   = 19000
 
 
 def main():

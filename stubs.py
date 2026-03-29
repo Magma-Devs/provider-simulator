@@ -17,15 +17,15 @@ Adding a new method
 
 from typing import Any, Dict
 
-# ── Shared constants ──────────────────────────────────────────────────────────
-
-LATEST     = "0x1312D00"           # 20 000 000 — realistic ETH mainnet height
-CHAIN_ID   = "0x1"                 # Ethereum mainnet
-ZERO_ADDR  = "0x" + "0" * 40
-ZERO_HASH  = "0x" + "0" * 64
-BLK_HASH   = "0xaaaa" + "a" * 60  # fake but correctly-formatted block hash
-TX_HASH    = "0xbbbb" + "b" * 60  # fake but correctly-formatted tx hash
-BLOOM      = "0x" + "0" * 512
+from constants import (
+    ETH_LATEST_BLOCK as LATEST,
+    ETH_CHAIN_ID     as CHAIN_ID,
+    ETH_ZERO_ADDR    as ZERO_ADDR,
+    ETH_ZERO_HASH    as ZERO_HASH,
+    ETH_BLOCK_HASH   as BLK_HASH,
+    ETH_TX_HASH      as TX_HASH,
+    ETH_BLOOM        as BLOOM,
+)
 
 
 # ── Object factories ──────────────────────────────────────────────────────────
