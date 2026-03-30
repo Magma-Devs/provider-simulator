@@ -321,7 +321,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                               for pid, s in self.server.provider_states.items()}
             })
 
-        elif self.path.startswith("/history"):
+        elif self.path == "/history" or self.path.startswith("/history?"):
             # Supported query params (all optional, combinable):
             #   ?from=<unix_ts>   — include only calls at or after this timestamp
             #   ?to=<unix_ts>     — include only calls at or before this timestamp
