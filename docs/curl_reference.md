@@ -4,16 +4,22 @@
 
 ```bash
 # health check
-curl -i https://sim-control.victoria.magmadevs.com/health
+curl -si https://sim-control.victoria.magmadevs.com/health
 
 # current scenario state for all providers
-curl -si https://sim-control.victoria.magmadevs.com/scenario
+curl -s https://sim-control.victoria.magmadevs.com/scenario | python3 -m json.tool
 
-# reset all providers to defaults
+# reset scenario config only (mode/latency/responses → defaults, history untouched)
 curl -si -X POST https://sim-control.victoria.magmadevs.com/reset
 
+# clear call history and counters only (scenario config untouched)
+curl -si -X POST https://sim-control.victoria.magmadevs.com/history/clear
+
+# reset everything — scenario config AND history
+curl -si -X POST https://sim-control.victoria.magmadevs.com/reset/all
+
 # per-provider call counts + status breakdown
-curl -si https://sim-control.victoria.magmadevs.com/stats
+curl -s https://sim-control.victoria.magmadevs.com/stats | python3 -m json.tool
 ```
 
 ---
@@ -50,8 +56,8 @@ curl -s "https://sim-control.victoria.magmadevs.com/history?last=30" | python3 -
 The simplest 100% correct approach — reset first so history is empty, then query with no filters:
 
 ```bash
-# 1. wipe history
-curl -s -X POST https://sim-control.victoria.magmadevs.com/reset
+# 1. wipe history only (leaves scenario config untouched)
+curl -s -X POST https://sim-control.victoria.magmadevs.com/history/clear
 
 # 2. send your request
 curl -si -X POST https://eth-sim-jsonrpc.victoria.magmadevs.com \
