@@ -5,6 +5,24 @@
 
 ---
 
+## Connect to the server
+
+```bash
+ssh 64.176.170.39        # connects as victoria, drops straight into root shell
+```
+
+`~/.ssh/config` entry that makes this work:
+```
+Host 64.176.170.39
+  User victoria
+  IdentityFile ~/.ssh/id_github
+  ServerAliveInterval 60
+  RemoteCommand sudo -s
+  RequestTTY yes
+```
+
+---
+
 ## Status
 
 ```bash
