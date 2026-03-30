@@ -1456,7 +1456,9 @@ HTTP control API. Tests import it from `tests/simulator/sim_control.py`.
 | Method | Endpoint | What it does |
 |---|---|---|
 | `POST` | `/scenario` | Set per-provider behaviour for the current test |
-| `POST` | `/reset` | Restore all providers to `success` mode, no latency, no error probability |
+| `POST` | `/reset` | Reset scenario config only (mode, latency, responses → defaults). Does **not** clear history. |
+| `POST` | `/history/clear` | Wipe call history and counters only. Does **not** touch scenario config. |
+| `POST` | `/reset/all` | Reset scenario config AND clear history — full clean slate. |
 | `GET` | `/scenario` | Return the current state of all providers as JSON |
 | `GET` | `/health` | Returns `{"status": "ok"}` when the simulator is reachable |
 | `GET` | `/stats` | Per-provider call counts and status breakdown (all-time counters, never reset) |
@@ -1567,10 +1569,19 @@ Keys are provider numbers (1, 2, 3). Values are either a shorthand mode string
 sim_control.reset()
 ```
 
-Equivalent to calling `set_scenario({1: "success", 2: "success", 3: "success"})`
-with all optional fields at their defaults (0 latency, 0 error probability, no
-custom responses). Called automatically before every test by the `reset_simulator`
+Calls `POST /reset` — resets scenario config only (mode, latency, responses → defaults).
+Does **not** clear history. Called automatically before every test by the `reset_simulator`
 autouse fixture in `conftest.py`.
+
+### `SimulatorControl.clear_history()`
+
+```python
+sim_control.clear_history()
+```
+
+Calls `POST /history/clear` — wipes the call buffer and counters only.
+Does **not** touch scenario config. Use this before sending a specific request
+you want to isolate in history.
 
 ### `SimulatorControl.get_scenario()`
 
