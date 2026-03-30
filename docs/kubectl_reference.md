@@ -15,7 +15,7 @@ ssh 64.176.170.39        # connects as victoria, drops straight into root shell
 ```
 Host 64.176.170.39
   User victoria
-  IdentityFile ~/.ssh/id_github
+  IdentityFile ~/.ssh/id_ed25519
   ServerAliveInterval 60
   RemoteCommand sudo -s
   RequestTTY yes
