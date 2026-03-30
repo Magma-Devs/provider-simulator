@@ -62,6 +62,9 @@ class ProviderState:
     calls_by_status: Dict[str, int] = field(default_factory=dict, repr=False)
 
     def snapshot(self) -> dict:
+        """Return a thread-safe copy of the mutable config fields (mode, latency_ms, error_probability).
+        Used by JSONRPCHandler at the start of every request so the handler works
+        on a stable snapshot even if a test updates the state mid-request."""
         with self.lock:
             return {
                 "mode":              self.mode,
@@ -70,6 +73,9 @@ class ProviderState:
             }
 
     def update(self, cfg: dict) -> None:
+        """Apply a partial config dict received from POST /scenario.
+        Only keys present in cfg are updated; omitted keys keep their current value.
+        Acquires the lock so updates are atomic and safe to call from any thread."""
         with self.lock:
             self.mode              = cfg.get("mode",              self.mode)
             self.latency_ms        = cfg.get("latency_ms",        self.latency_ms)
@@ -78,6 +84,9 @@ class ProviderState:
                 self.responses = cfg["responses"]
 
     def reset(self) -> None:
+        """Restore all fields to their startup defaults and wipe the in-memory call buffer.
+        Called by POST /reset and by the test fixture before every test to guarantee
+        a clean slate — no leftover state from a previous scenario."""
         with self.lock:
             self.mode              = "success"
             self.latency_ms        = 0
@@ -87,12 +96,26 @@ class ProviderState:
             self.total_calls       = 0
             self.calls_by_status   = {}
 
-    def log_call(self, method: str, status: str, latency_ms: int) -> None:
+    def push_call_to_buffer(self, method: str, status: str, latency_ms: int) -> None:
+        """Push one call record into the in-memory ring-buffer and update all-time counters.
+
+        Storage is entirely in RAM — nothing is written to disk or any logging framework.
+        The ring-buffer (deque) automatically drops the oldest entry once it reaches
+        HISTORY_MAX (200) entries. All-time counters (total_calls, calls_by_status)
+        are never capped and survive buffer rollovers.
+
+        Args:
+            method:     JSON-RPC method name, e.g. "eth_blockNumber". Use "*" for
+                        requests that were rejected before the body was parsed (mode=down).
+            status:     Outcome string — "success" | "error" | "rate_limit" | "down".
+            latency_ms: Simulated delay that was injected before the response, in ms.
+                        0 when no latency was configured or the request was rejected early.
+        """
         now = time.time()
         with self.lock:
             self.history.append({
                 "ts":         now,
-                "time":       datetime.datetime.utcfromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "time":       datetime.datetime.utcfromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S.") + f"{int(now % 1 * 1000):03d} UTC",
                 "method":     method,
                 "status":     status,
                 "latency_ms": latency_ms,
@@ -101,6 +124,9 @@ class ProviderState:
             self.calls_by_status[status] = self.calls_by_status.get(status, 0) + 1
 
     def stats(self) -> dict:
+        """Return a thread-safe snapshot of the all-time call counters for this provider.
+        Counters are never reset (unlike the ring-buffer which is cleared on reset()).
+        Used by GET /stats to show cumulative traffic since the pod started."""
         with self.lock:
             return {
                 "total_requests_all_time":    self.total_calls,
@@ -109,6 +135,9 @@ class ProviderState:
             }
 
     def get_history(self) -> list:
+        """Return a thread-safe copy of the in-memory ring-buffer as a plain list.
+        The returned list is a snapshot — mutations to it do not affect the buffer.
+        Used by ControlHandler.do_GET() to build the /history response."""
         with self.lock:
             return list(self.history)
 
@@ -118,6 +147,20 @@ class ProviderState:
 class JSONRPCHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
+        """Handle every incoming JSON-RPC POST request for one simulated provider.
+
+        Decision flow (evaluated in order, first match wins):
+          1. mode == "down"          → 503, no body parsed.
+          2. latency_ms > 0          → sleep before continuing.
+          3. mode == "rate_limit"    → 429 JSON-RPC error.
+          4. mode == "error" or
+             random() < error_prob   → 200 JSON-RPC error body.
+          5. custom response defined → return configured result.
+          6. default stub            → return METHOD_DEFAULTS value.
+
+        Every branch calls push_call_to_buffer() so the outcome is always recorded
+        in the in-memory ring-buffer regardless of which path was taken.
+        """
         t_start = time.monotonic()
         state: ProviderState = self.server.state
         provider_id: str     = self.server.provider_id
@@ -127,7 +170,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if snap["mode"] == "down":
             self.send_response(503)
             self.end_headers()
-            state.log_call("*", "down", 0)
+            state.push_call_to_buffer("*", "down", 0)
             return
 
         # Latency injection
@@ -143,14 +186,14 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if snap["mode"] == "rate_limit":
             self._reply(429, {"jsonrpc": "2.0", "id": req_id,
                               "error": {"code": 429, "message": "Too many requests"}})
-            state.log_call(method, "rate_limit", self._elapsed_ms(t_start))
+            state.push_call_to_buffer(method, "rate_limit", self._elapsed_ms(t_start))
             return
 
         # Probabilistic / forced error
         if snap["mode"] == "error" or random.random() < snap["error_probability"]:
             self._reply(200, {"jsonrpc": "2.0", "id": req_id,
                               "error": {"code": -32000, "message": "Internal error"}})
-            state.log_call(method, "error", self._elapsed_ms(t_start))
+            state.push_call_to_buffer(method, "error", self._elapsed_ms(t_start))
             return
 
         # Success — look up method-specific result
@@ -169,13 +212,20 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 result["number"] = named.get(params[0], params[0])
 
         self._reply(200, {"jsonrpc": "2.0", "id": req_id, "result": result})
-        state.log_call(method, "success", self._elapsed_ms(t_start))
+        state.push_call_to_buffer(method, "success", self._elapsed_ms(t_start))
 
     @staticmethod
     def _elapsed_ms(t_start: float) -> int:
+        """Return the integer milliseconds elapsed since t_start (from time.monotonic())."""
         return int((time.monotonic() - t_start) * 1000)
 
     def _reply(self, status: int, data: dict):
+        """Serialise data as JSON and write a complete HTTP response with correct headers.
+
+        Args:
+            status: HTTP status code (e.g. 200, 429, 503).
+            data:   Response payload — will be JSON-encoded and sent as the body.
+        """
         body = json.dumps(data).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -184,6 +234,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, *_):
+        """Suppress the default per-request stdout logging from BaseHTTPRequestHandler."""
         pass
 
 
@@ -192,6 +243,15 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
 class ControlHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
+        """Handle POST requests on the control API.
+
+        Routes:
+          POST /scenario  — update per-provider config from the request body.
+                            Body: {"providers": {"1": {...}, "2": {...}}}
+          POST /reset     — call reset() on all providers, wipe history and counters.
+
+        Returns 404 for any unrecognised path.
+        """
         length = int(self.headers.get("Content-Length", 0))
         body   = json.loads(self.rfile.read(length)) if length else {}
 
@@ -211,6 +271,18 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._reply(404, {"error": "unknown path"})
 
     def do_GET(self):
+        """Handle GET requests on the control API.
+
+        Routes:
+          GET /health    — liveness probe, always returns {"status": "ok"}.
+          GET /scenario  — current snapshot of all provider configs.
+          GET /stats     — all-time call counters and per-status breakdown per provider.
+          GET /history   — merged, time-sorted call buffer across all providers.
+                           Supports query params: last, from, to, provider, method, status.
+                           Every entry includes a call_order field (1 = first attempted).
+
+        Returns 404 for any unrecognised path.
+        """
         if self.path == "/health":
             self._reply(200, {"status": "ok"})
 
@@ -236,6 +308,11 @@ class ControlHandler(BaseHTTPRequestHandler):
             #   ?provider=<id>    — filter to a single provider (1, 2, or 3)
             #   ?method=<name>    — filter to a specific RPC method
             #   ?status=<name>    — filter by status (success, error, rate_limit, down)
+            #
+            # Each entry in the response includes:
+            #   call_order        — 1-based position in the merged timeline (sorted by ts).
+            #                       call_order=1 is the provider the router tried FIRST,
+            #                       call_order=2 is the second attempt, etc.
             #
             # Examples:
             #   /history?last=60
@@ -266,12 +343,20 @@ class ControlHandler(BaseHTTPRequestHandler):
                     all_calls.append({"provider": pid, **entry})
 
             all_calls.sort(key=lambda x: x["ts"])
+            for i, entry in enumerate(all_calls, start=1):
+                entry["call_order"] = i
             self._reply(200, {"count": len(all_calls), "history": all_calls})
 
         else:
             self._reply(404, {"error": "unknown path"})
 
     def _reply(self, status: int, data: dict):
+        """Serialise data as JSON and write a complete HTTP response with correct headers.
+
+        Args:
+            status: HTTP status code (e.g. 200, 404).
+            data:   Response payload — will be JSON-encoded and sent as the body.
+        """
         body = json.dumps(data).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -280,6 +365,7 @@ class ControlHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, *_):
+        """Suppress the default per-request stdout logging from BaseHTTPRequestHandler."""
         pass
 
 
@@ -288,6 +374,17 @@ class ControlHandler(BaseHTTPRequestHandler):
 
 
 def main():
+    """Start all simulator servers and block until interrupted.
+
+    Spins up four HTTPServer instances in daemon threads:
+      - Three JSONRPCHandler servers (ports 18545 / 18546 / 18547), one per provider.
+      - One ControlHandler server (port 19000) for scenario config and history queries.
+
+    All four servers share the same dict of ProviderState objects so control API
+    changes are immediately visible to the JSON-RPC handlers.
+
+    Blocks on thread.join() and shuts all servers down cleanly on KeyboardInterrupt.
+    """
     states = {pid: ProviderState() for pid in PROVIDER_PORTS}
 
     servers = []

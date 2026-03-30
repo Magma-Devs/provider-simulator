@@ -20,24 +20,62 @@ curl -si https://sim-control.victoria.magmadevs.com/stats
 
 ## History
 
-> **Note on ordering:** history is sorted by `ts` (wall-clock arrival time).
-> Because each provider is a separate server, if the router queries them
-> sequentially the order naturally reflects which provider was tried first —
-> the earliest `ts` was attempted first. There is no explicit "attempt #"
-> field; order is inferred from time.
+> **`call_order` field:** every entry now includes a `call_order` integer (1-based).
+> The list is sorted by `ts` (wall-clock arrival time) and then each entry is
+> numbered sequentially, so `call_order: 1` is the provider the router hit
+> **first**, `call_order: 2` is the second attempt, and so on.
+> This works because each provider is a separate server — if the router tries
+> them sequentially, the earliest `ts` is always the first attempt.
+
+### Two ways to display the response
+
+**With response headers** (use `-si`):
+```bash
+curl -si "https://sim-control.victoria.magmadevs.com/history?last=30"
+```
+
+**Pretty-printed JSON, no headers** (use `-s` and pipe to `python3 -m json.tool`):
+```bash
+curl -s "https://sim-control.victoria.magmadevs.com/history?last=30" | python3 -m json.tool
+```
+
+> Both styles work for every endpoint. Use `-si` when you need to inspect HTTP
+> status codes / headers; use `-s | python3 -m json.tool` when you want readable
+> JSON in the terminal.
+
+---
+
+### Examples
 
 ```bash
-# last 30 seconds
+# last 30 seconds — with headers
 curl -si "https://sim-control.victoria.magmadevs.com/history?last=30"
 
-# specific time window
-curl -si "https://sim-control.victoria.magmadevs.com/history?from=1774534600&to=1774534700"
+# last 30 seconds — pretty JSON
+curl -s "https://sim-control.victoria.magmadevs.com/history?last=30" | python3 -m json.tool
 
-# only errors on provider 2 in the last 2 minutes
-curl -si "https://sim-control.victoria.magmadevs.com/history?last=120&provider=2&status=error"
+# specific time window — pretty JSON
+curl -s "https://sim-control.victoria.magmadevs.com/history?from=1774534600&to=1774534700" | python3 -m json.tool
 
-# all calls for a specific method
-curl -si "https://sim-control.victoria.magmadevs.com/history?method=eth_getBlockByNumber"
+# only errors on provider 2 in the last 2 minutes — pretty JSON
+curl -s "https://sim-control.victoria.magmadevs.com/history?last=120&provider=2&status=error" | python3 -m json.tool
+
+# all calls for a specific method — pretty JSON
+curl -s "https://sim-control.victoria.magmadevs.com/history?method=eth_getBlockByNumber" | python3 -m json.tool
+```
+
+#### Example response (shows call_order and time with milliseconds)
+```json
+{
+    "count": 3,
+    "history": [
+        { "call_order": 1, "provider": "1", "method": "eth_blockNumber", "status": "rate_limit", "ts": 1743300001.164, "time": "2026-03-30 10:12:40.164 UTC", "latency_ms": 2 },
+        { "call_order": 2, "provider": "2", "method": "eth_blockNumber", "status": "down",       "ts": 1743300001.331, "time": "2026-03-30 10:12:40.331 UTC", "latency_ms": 0 },
+        { "call_order": 3, "provider": "3", "method": "eth_blockNumber", "status": "success",    "ts": 1743300001.512, "time": "2026-03-30 10:12:40.512 UTC", "latency_ms": 8 }
+    ]
+}
+    ]
+}
 ```
 
 ---
