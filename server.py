@@ -83,15 +83,21 @@ class ProviderState:
             if "responses" in cfg:
                 self.responses = cfg["responses"]
 
-    def reset(self) -> None:
-        """Restore all fields to their startup defaults and wipe the in-memory call buffer.
-        Called by POST /reset and by the test fixture before every test to guarantee
-        a clean slate — no leftover state from a previous scenario."""
+    def reset_scenario(self) -> None:
+        """Reset only the scenario config fields back to startup defaults (mode, latency, responses).
+        Does NOT touch the call history or counters.
+        Called by POST /reset — use between test scenarios to put providers back to healthy."""
         with self.lock:
             self.mode              = "success"
             self.latency_ms        = 0
             self.error_probability = 0.0
             self.responses         = {}
+
+    def clear_history(self) -> None:
+        """Wipe the in-memory call buffer and reset all-time counters to zero.
+        Does NOT touch the scenario config (mode, latency, responses).
+        Called by POST /history/clear — use before a specific request to isolate its history."""
+        with self.lock:
             self.history.clear()
             self.total_calls       = 0
             self.calls_by_status   = {}
@@ -115,7 +121,7 @@ class ProviderState:
         with self.lock:
             self.history.append({
                 "ts":         now,
-                "time":       datetime.datetime.utcfromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S.") + f"{int(now % 1 * 1000):03d} UTC",
+                "time":       datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S.") + f"{int(now % 1 * 1000):03d} UTC",
                 "method":     method,
                 "status":     status,
                 "latency_ms": latency_ms,
@@ -246,9 +252,13 @@ class ControlHandler(BaseHTTPRequestHandler):
         """Handle POST requests on the control API.
 
         Routes:
-          POST /scenario  — update per-provider config from the request body.
-                            Body: {"providers": {"1": {...}, "2": {...}}}
-          POST /reset     — call reset() on all providers, wipe history and counters.
+          POST /scenario       — update per-provider config from the request body.
+                                 Body: {"providers": {"1": {...}, "2": {...}}}
+          POST /reset          — reset scenario config only (mode, latency, responses → defaults).
+                                 Does NOT clear history.
+          POST /history/clear  — wipe call history and counters only.
+                                 Does NOT touch scenario config.
+          POST /reset/all      — reset scenario config AND clear history.
 
         Returns 404 for any unrecognised path.
         """
@@ -264,8 +274,19 @@ class ControlHandler(BaseHTTPRequestHandler):
 
         elif self.path == "/reset":
             for state in self.server.provider_states.values():
-                state.reset()
-            self._reply(200, {"status": "reset"})
+                state.reset_scenario()
+            self._reply(200, {"status": "scenario reset"})
+
+        elif self.path == "/history/clear":
+            for state in self.server.provider_states.values():
+                state.clear_history()
+            self._reply(200, {"status": "history cleared"})
+
+        elif self.path == "/reset/all":
+            for state in self.server.provider_states.values():
+                state.reset_scenario()
+                state.clear_history()
+            self._reply(200, {"status": "scenario reset and history cleared"})
 
         else:
             self._reply(404, {"error": "unknown path"})
