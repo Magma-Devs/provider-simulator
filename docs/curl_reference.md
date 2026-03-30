@@ -45,6 +45,31 @@ curl -s "https://sim-control.victoria.magmadevs.com/history?last=30" | python3 -
 
 ---
 
+### Isolating history for one specific request
+
+The simplest 100% correct approach — reset first so history is empty, then query with no filters:
+
+```bash
+# 1. wipe history
+curl -s -X POST https://sim-control.victoria.magmadevs.com/reset
+
+# 2. send your request
+curl -si -X POST https://eth-sim-jsonrpc.victoria.magmadevs.com \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+
+# 3. read history — no filters needed, only your request is in there
+curl -s "https://sim-control.victoria.magmadevs.com/history" | python3 -m json.tool
+```
+
+> **Why not filter by method or timestamp?**
+> The Lava rpcconsumer makes continuous background calls to providers (sync scoring,
+> pruning verification) — so in any live window you will see many entries you did not
+> send. Resetting before your request is the only approach that is always correct,
+> regardless of method name or timing.
+
+---
+
 ### Examples
 
 ```bash
@@ -72,8 +97,6 @@ curl -s "https://sim-control.victoria.magmadevs.com/history?method=eth_getBlockB
         { "call_order": 1, "provider": "1", "method": "eth_blockNumber", "status": "rate_limit", "ts": 1743300001.164, "time": "2026-03-30 10:12:40.164 UTC", "latency_ms": 2 },
         { "call_order": 2, "provider": "2", "method": "eth_blockNumber", "status": "down",       "ts": 1743300001.331, "time": "2026-03-30 10:12:40.331 UTC", "latency_ms": 0 },
         { "call_order": 3, "provider": "3", "method": "eth_blockNumber", "status": "success",    "ts": 1743300001.512, "time": "2026-03-30 10:12:40.512 UTC", "latency_ms": 8 }
-    ]
-}
     ]
 }
 ```

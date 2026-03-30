@@ -3,3 +3,9 @@ untracked/
 __pycache__/
 *.pyc
 *.pyo
+
+# Ignore virtual environment directories
+venv/
+# ignore IDE specific files
+workspace.xml
+.idea/
