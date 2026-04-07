@@ -1,0 +1,1275 @@
+"""
+Unit tests for the provider-simulator.
+
+Starts all 4 servers (3 JSON-RPC + 1 control) in-process on test ports so the
+tests are fully self-contained — no running pod or network required.
+
+Coverage
+--------
+  /health                   liveness probe
+  /scenario  GET + POST     read and change provider config
+  /stats                    all-time call counters
+  /reset                    scenario reset only (history untouched)
+  /history/clear            history wipe only (scenario untouched)
+  /reset/all                both together
+  /history                  all filter params:
+                              ?last=, ?from=, ?to=, ?provider=, ?method=, ?status=
+                            call_order sequential numbering
+  provider modes            success, error, rate_limit, down,
+                            error_probability, latency_ms
+  custom responses          per-method overrides via /scenario
+  eth_getBlockByNumber      block number echo from params[0]
+  unknown paths             404 on control API
+
+Architectural facts verified by these tests
+-------------------------------------------
+  1. HISTORY_MAX cap
+       HISTORY_MAX = 200 per provider × 3 providers = 600 total ring-buffer entries.
+       In the deployed environment the router's background calls (scoring/pruning)
+       fill the buffer continuously, so it is always at 600.
+       In unit tests there is no background traffic — history starts at 0 and
+       only grows with calls the tests explicitly make.
+
+  2. Method filter is the correct isolation tool (deployed env)
+       The router's background calls are exclusively eth_blockNumber and
+       eth_getBlockByNumber (pruning verification). Using ?method=eth_gasPrice
+       therefore returns only the one call you explicitly sent (count=1).
+       Not relevant in unit tests — there is no background traffic to filter out.
+
+  3. Clear-timestamp invariant
+       /reset          — does NOT touch history. Every entry survives unchanged.
+       /history/clear  — wipes all entries. Every entry that appears after
+                         the clear has ts >= timestamp_of_the_clear_call.
+       /reset/all      — same clear guarantee, plus scenario reset.
+       No pre-clear entry can ever appear in history after a clear.
+
+Run with:
+  pytest tests/test_simulator.py -v
+"""
+
+import json
+import threading
+import time
+import urllib.error
+import urllib.request
+from http.server import HTTPServer
+
+import pytest
+
+from constants import HISTORY_MAX
+from server import ControlHandler, JSONRPCHandler, ProviderState
+
+# ── Test ports (different from production 18545-18547 / 19000) ────────────────
+
+_PROVIDER_PORTS = {"1": 28545, "2": 28546, "3": 28547}
+_CONTROL_PORT   = 29000
+
+
+# ── HTTP helpers ──────────────────────────────────────────────────────────────
+
+def _post(url: str, body: dict) -> tuple[int, dict]:
+    """POST JSON body, return (status_code, parsed_response_body)."""
+    data = json.dumps(body).encode()
+    req  = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            raw = resp.read()
+            return resp.status, json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        try:
+            raw = e.read()
+            return e.code, json.loads(raw) if raw else {}
+        except (ConnectionResetError, OSError):
+            # server closed connection with no body (e.g. mode=down returns 503 + no body)
+            return e.code, {}
+
+
+def _get(url: str) -> tuple[int, dict]:
+    """GET url, return (status_code, parsed_response_body)."""
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        return e.code, json.loads(raw) if raw else {}
+
+
+def _rpc(url: str, method: str, params: list | None = None) -> tuple[int, dict]:
+    """Send a JSON-RPC request, return (http_status, response_body)."""
+    return _post(url, {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []})
+
+
+def _ctrl(sim: dict, path: str) -> str:
+    return sim["control"] + path
+
+
+# ── Module-scoped fixture: start all servers once ─────────────────────────────
+
+@pytest.fixture(scope="module")
+def sim():
+    """Start 3 JSON-RPC servers + 1 control server on test ports.
+
+    Yields a dict with base URLs:
+      sim["control"]   → http://127.0.0.1:29000
+      sim["provider1"] → http://127.0.0.1:28545
+      sim["provider2"] → http://127.0.0.1:28546
+      sim["provider3"] → http://127.0.0.1:28547
+    """
+    states = {pid: ProviderState() for pid in _PROVIDER_PORTS}
+
+    servers = []
+    for pid, port in _PROVIDER_PORTS.items():
+        srv             = HTTPServer(("127.0.0.1", port), JSONRPCHandler)
+        srv.state       = states[pid]
+        srv.provider_id = pid
+        servers.append(srv)
+
+    ctrl                  = HTTPServer(("127.0.0.1", _CONTROL_PORT), ControlHandler)
+    ctrl.provider_states  = states
+    servers.append(ctrl)
+
+    threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in servers]
+    for t in threads:
+        t.start()
+
+    time.sleep(0.15)  # allow all servers to finish binding
+
+    yield {
+        "control":   f"http://127.0.0.1:{_CONTROL_PORT}",
+        "provider1": f"http://127.0.0.1:{_PROVIDER_PORTS['1']}",
+        "provider2": f"http://127.0.0.1:{_PROVIDER_PORTS['2']}",
+        "provider3": f"http://127.0.0.1:{_PROVIDER_PORTS['3']}",
+    }
+
+    for s in servers:
+        s.shutdown()
+
+
+# ── Function-scoped autouse: clean slate before/after every test ──────────────
+
+@pytest.fixture(autouse=True)
+def clean_state(sim):
+    """Reset scenario config AND clear history before and after every test."""
+    _post(_ctrl(sim, "/reset/all"), {})
+    yield
+    _post(_ctrl(sim, "/reset/all"), {})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /health
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestHealth:
+
+    def test_returns_ok(self, sim):
+        status, body = _get(_ctrl(sim, "/health"))
+        assert status == 200
+        assert body == {"status": "ok"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /scenario  GET + POST
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestScenario:
+
+    def test_get_returns_defaults_after_reset(self, sim):
+        _, body = _get(_ctrl(sim, "/scenario"))
+        for pid in ["1", "2", "3"]:
+            p = body["providers"][pid]
+            assert p["mode"]              == "success"
+            assert p["latency_ms"]        == 0
+            assert p["error_probability"] == 0.0
+
+    def test_post_updates_target_provider_only(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "error"}}})
+        _, body = _get(_ctrl(sim, "/scenario"))
+        assert body["providers"]["1"]["mode"] == "error"
+        assert body["providers"]["2"]["mode"] == "success"   # untouched
+        assert body["providers"]["3"]["mode"] == "success"   # untouched
+
+    def test_post_partial_update_preserves_other_fields(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"2": {"latency_ms": 100}}})
+        _, body = _get(_ctrl(sim, "/scenario"))
+        assert body["providers"]["2"]["latency_ms"] == 100
+        assert body["providers"]["2"]["mode"]       == "success"   # unchanged
+
+    def test_post_error_probability(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"3": {"error_probability": 0.7}}})
+        _, body = _get(_ctrl(sim, "/scenario"))
+        assert body["providers"]["3"]["error_probability"] == 0.7
+
+    def test_unknown_path_returns_404(self, sim):
+        status, body = _get(_ctrl(sim, "/nonexistent"))
+        assert status == 404
+        assert "error" in body
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Provider modes
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestProviderModes:
+
+    def test_success_returns_result(self, sim):
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200
+        assert "result" in body
+        assert "error" not in body
+
+    def test_error_mode_returns_jsonrpc_error(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "error"}}})
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200
+        assert "error" in body
+        assert body["error"]["code"] == -32000
+
+    def test_rate_limit_returns_429(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "rate_limit"}}})
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 429
+        assert body["error"]["code"] == 429
+
+    def test_down_returns_503_with_no_body(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "down"}}})
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 503
+        assert body == {}   # server sends no body for 503
+
+    def test_error_probability_1_always_errors(self, sim):
+        _post(_ctrl(sim, "/scenario"),
+              {"providers": {"1": {"mode": "success", "error_probability": 1.0}}})
+        for _ in range(5):
+            _, body = _rpc(sim["provider1"], "eth_blockNumber")
+            assert "error" in body
+
+    def test_error_probability_0_never_errors(self, sim):
+        _post(_ctrl(sim, "/scenario"),
+              {"providers": {"1": {"mode": "success", "error_probability": 0.0}}})
+        for _ in range(5):
+            _, body = _rpc(sim["provider1"], "eth_blockNumber")
+            assert "result" in body
+
+    def test_latency_ms_delays_response(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"latency_ms": 200}}})
+        t0 = time.monotonic()
+        _rpc(sim["provider1"], "eth_blockNumber")
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        assert elapsed_ms >= 180   # allow a little clock slack
+
+    def test_custom_response_per_method(self, sim):
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"responses": {"eth_blockNumber": {"result": "0xDEAD"}}}}
+        })
+        _, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert body["result"] == "0xDEAD"
+
+    def test_custom_default_response(self, sim):
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"responses": {"default": {"result": "0xBEEF"}}}}
+        })
+        _, body = _rpc(sim["provider1"], "eth_unknownMethod")
+        assert body["result"] == "0xBEEF"
+
+    def test_eth_get_block_by_number_echoes_block_number(self, sim):
+        _, body = _rpc(sim["provider1"], "eth_getBlockByNumber", ["0xABC123", False])
+        assert body["result"]["number"] == "0xABC123"
+
+    def test_eth_get_block_by_number_latest(self, sim):
+        _, body = _rpc(sim["provider1"], "eth_getBlockByNumber", ["latest", False])
+        assert body["result"]["number"] == "0x1312D00"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /reset
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestReset:
+
+    def test_reset_restores_scenario_to_defaults(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {
+            "1": {"mode": "error", "latency_ms": 500, "error_probability": 0.9}
+        }})
+        status, body = _post(_ctrl(sim, "/reset"), {})
+        assert status == 200
+        _, scenario = _get(_ctrl(sim, "/scenario"))
+        p = scenario["providers"]["1"]
+        assert p["mode"]              == "success"
+        assert p["latency_ms"]        == 0
+        assert p["error_probability"] == 0.0
+
+    def test_reset_does_NOT_clear_history(self, sim):
+        """history/clear — /reset must leave history intact."""
+        # populate history on all 3 providers
+        for provider in ("provider1", "provider2", "provider3"):
+            _rpc(sim[provider], "eth_blockNumber")
+
+        _, before = _get(_ctrl(sim, "/history"))
+        assert before["count"] == 3, \
+            f"expected 3 entries before reset, got {before['count']}"
+
+        _post(_ctrl(sim, "/reset"), {})   # scenario reset only
+
+        _, after = _get(_ctrl(sim, "/history"))
+        assert after["count"] == 3, \
+            f"/reset must not touch history — expected 3, got {after['count']}"
+        assert after["history"] == before["history"], \
+            "/reset must not modify existing history entries"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /history/clear
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestHistoryClear:
+
+    def test_history_is_empty_immediately_after_clear(self, sim):
+        """Core guarantee: /history/clear wipes every entry from all providers."""
+        # populate history on all 3 providers
+        for provider in ("provider1", "provider2", "provider3"):
+            _rpc(sim[provider], "eth_blockNumber")
+
+        _, before = _get(_ctrl(sim, "/history"))
+        assert before["count"] == 3, \
+            f"precondition failed — expected 3 entries before clear, got {before['count']}"
+
+        status, body = _post(_ctrl(sim, "/history/clear"), {})
+        assert status == 200
+
+        _, after = _get(_ctrl(sim, "/history"))
+        assert after == {"count": 0, "history": []}, \
+            f"/history/clear did not wipe history — got: {after}"
+
+    def test_new_call_after_clear_starts_at_count_1(self, sim):
+        """After a clear, the very next call must be the only entry — no resurrection."""
+        for provider in ("provider1", "provider2", "provider3"):
+            _rpc(sim[provider], "eth_blockNumber")
+
+        _post(_ctrl(sim, "/history/clear"), {})
+
+        _rpc(sim["provider1"], "eth_blockNumber")   # exactly one new call
+
+        _, after = _get(_ctrl(sim, "/history"))
+        assert after["count"] == 1, \
+            f"expected exactly 1 entry after clear + 1 call, got {after['count']}"
+        assert after["history"][0]["call_order"] == 1
+
+    def test_clear_wipes_all_three_providers(self, sim):
+        """All 3 provider ring-buffers must be empty after clear, not just one."""
+        for provider in ("provider1", "provider2", "provider3"):
+            _rpc(sim[provider], "eth_blockNumber")
+
+        _post(_ctrl(sim, "/history/clear"), {})
+
+        for pid in ("1", "2", "3"):
+            _, body = _get(_ctrl(sim, f"/history?provider={pid}"))
+            assert body == {"count": 0, "history": []}, \
+                f"provider {pid} history not cleared — got: {body}"
+
+    def test_stats_counters_reset_to_zero_after_clear(self, sim):
+        """All-time counters must be zeroed for all providers after clear."""
+        for provider in ("provider1", "provider2", "provider3"):
+            _rpc(sim[provider], "eth_blockNumber")
+
+        _post(_ctrl(sim, "/history/clear"), {})
+
+        _, stats = _get(_ctrl(sim, "/stats"))
+        for pid in ("1", "2", "3"):
+            total = stats["providers"][pid]["total_requests_all_time"]
+            assert total == 0, \
+                f"provider {pid} total_requests_all_time should be 0 after clear, got {total}"
+
+    def test_does_not_change_scenario_config(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"2": {"mode": "error"}}})
+        _post(_ctrl(sim, "/history/clear"), {})
+        _, scenario = _get(_ctrl(sim, "/scenario"))
+        assert scenario["providers"]["2"]["mode"] == "error"   # untouched
+
+    def test_all_entries_after_clear_have_ts_after_clear_time(self, sim):
+        """Architectural fact 3 — clear-timestamp invariant.
+
+        Every entry that appears in history after /history/clear must have
+        ts >= the moment the clear was called.  No pre-clear entry can survive.
+        """
+        # make calls BEFORE the clear
+        for provider in ("provider1", "provider2", "provider3"):
+            _rpc(sim[provider], "eth_blockNumber")
+
+        t_clear = time.time()
+        _post(_ctrl(sim, "/history/clear"), {})
+
+        # make calls AFTER the clear
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(sim["provider2"], "eth_blockNumber")
+
+        _, body = _get(_ctrl(sim, "/history"))
+        assert body["count"] == 2, \
+            f"expected exactly 2 post-clear entries, got {body['count']}"
+        for entry in body["history"]:
+            assert entry["ts"] >= t_clear, (
+                f"pre-clear entry leaked into history: "
+                f"entry ts={entry['ts']:.3f} < clear ts={t_clear:.3f}"
+            )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /reset/all
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestResetAll:
+
+    def test_history_is_empty_immediately_after_reset_all(self, sim):
+        """Core guarantee: /reset/all wipes every entry from all providers."""
+        for provider in ("provider1", "provider2", "provider3"):
+            _rpc(sim[provider], "eth_blockNumber")
+
+        _, before = _get(_ctrl(sim, "/history"))
+        assert before["count"] == 3, \
+            f"precondition failed — expected 3 entries before reset/all, got {before['count']}"
+
+        status, body = _post(_ctrl(sim, "/reset/all"), {})
+        assert status == 200
+
+        _, after = _get(_ctrl(sim, "/history"))
+        assert after == {"count": 0, "history": []}, \
+            f"/reset/all did not wipe history — got: {after}"
+
+    def test_new_call_after_reset_all_starts_at_count_1(self, sim):
+        """After reset/all, the very next call must be the only entry."""
+        for provider in ("provider1", "provider2", "provider3"):
+            _rpc(sim[provider], "eth_blockNumber")
+
+        _post(_ctrl(sim, "/reset/all"), {})
+
+        _rpc(sim["provider2"], "eth_blockNumber")   # exactly one new call
+
+        _, after = _get(_ctrl(sim, "/history"))
+        assert after["count"] == 1, \
+            f"expected exactly 1 entry after reset/all + 1 call, got {after['count']}"
+        assert after["history"][0]["call_order"] == 1
+
+    def test_reset_all_clears_all_three_providers(self, sim):
+        """All 3 provider ring-buffers must be empty after reset/all."""
+        for provider in ("provider1", "provider2", "provider3"):
+            _rpc(sim[provider], "eth_blockNumber")
+
+        _post(_ctrl(sim, "/reset/all"), {})
+
+        for pid in ("1", "2", "3"):
+            _, body = _get(_ctrl(sim, f"/history?provider={pid}"))
+            assert body == {"count": 0, "history": []}, \
+                f"provider {pid} history not cleared — got: {body}"
+
+    def test_reset_all_also_resets_scenario(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"3": {"mode": "down"}}})
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _post(_ctrl(sim, "/reset/all"), {})
+        _, scenario = _get(_ctrl(sim, "/scenario"))
+        assert scenario["providers"]["3"]["mode"] == "success"
+
+    def test_all_entries_after_reset_all_have_ts_after_reset_time(self, sim):
+        """Architectural fact 3 — clear-timestamp invariant for /reset/all.
+
+        Every entry that appears in history after /reset/all must have
+        ts >= the moment the reset was called.  No pre-reset entry can survive.
+        """
+        # make calls BEFORE the reset
+        for provider in ("provider1", "provider2", "provider3"):
+            _rpc(sim[provider], "eth_blockNumber")
+
+        t_reset = time.time()
+        _post(_ctrl(sim, "/reset/all"), {})
+
+        # make calls AFTER the reset
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(sim["provider3"], "eth_blockNumber")
+
+        _, body = _get(_ctrl(sim, "/history"))
+        assert body["count"] == 2, \
+            f"expected exactly 2 post-reset entries, got {body['count']}"
+        for entry in body["history"]:
+            assert entry["ts"] >= t_reset, (
+                f"pre-reset entry leaked into history: "
+                f"entry ts={entry['ts']:.3f} < reset ts={t_reset:.3f}"
+            )
+
+    def test_history_max_cap_per_provider(self, sim):
+        """Architectural fact 1 — HISTORY_MAX = 200 per provider.
+
+        Each provider's ring-buffer holds at most HISTORY_MAX entries.
+        In the deployed environment the buffer is always full (200 × 3 = 600)
+        because the router's background calls fill it continuously.
+        In unit tests we verify the cap by making HISTORY_MAX + 5 calls to one
+        provider and confirming the buffer never exceeds HISTORY_MAX.
+        """
+        for _ in range(HISTORY_MAX + 5):
+            _rpc(sim["provider1"], "eth_blockNumber")
+
+        _, stats = _get(_ctrl(sim, "/stats"))
+        ring_entries = stats["providers"]["1"]["history_ring_buffer_entries"]
+        total_calls  = stats["providers"]["1"]["total_requests_all_time"]
+
+        assert ring_entries == HISTORY_MAX, \
+            f"ring buffer should be capped at {HISTORY_MAX}, got {ring_entries}"
+        assert total_calls == HISTORY_MAX + 5, \
+            f"all-time counter must count every call — expected {HISTORY_MAX + 5}, got {total_calls}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /stats
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestStats:
+
+    def test_counts_successful_calls(self, sim):
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/stats"))
+        p1 = body["providers"]["1"]
+        assert p1["total_requests_all_time"] >= 2
+        assert p1["requests_by_status_all_time"].get("success", 0) >= 2
+
+    def test_tracks_status_breakdown(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "error"}}})
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "rate_limit"}}})
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/stats"))
+        breakdown = body["providers"]["1"]["requests_by_status_all_time"]
+        assert breakdown.get("error",      0) >= 1
+        assert breakdown.get("rate_limit", 0) >= 1
+
+    def test_down_mode_counted_in_stats(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "down"}}})
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/stats"))
+        assert body["providers"]["1"]["requests_by_status_all_time"].get("down", 0) >= 1
+
+    def test_history_ring_buffer_entries_in_stats(self, sim):
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/stats"))
+        assert body["providers"]["1"]["history_ring_buffer_entries"] >= 1
+
+    def test_independent_per_provider(self, sim):
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/stats"))
+        assert body["providers"]["1"]["total_requests_all_time"] >= 2
+        assert body["providers"]["2"]["total_requests_all_time"] == 0
+        assert body["providers"]["3"]["total_requests_all_time"] == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /history  —  entries, call_order, all filter params
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestHistory:
+
+    # ── entry structure ───────────────────────────────────────────────────────
+
+    def test_entry_has_required_fields(self, sim):
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history"))
+        entry = body["history"][0]
+        for field in ("ts", "time", "request_id", "method", "status", "latency_ms",
+                      "provider", "call_order"):
+            assert field in entry, f"missing field: {field}"
+
+    def test_request_id_echoed_in_history(self, sim):
+        """The history entry must carry the JSON-RPC id that was sent in the request."""
+        _post(sim["provider1"], {"jsonrpc": "2.0", "id": 99, "method": "eth_blockNumber", "params": []})
+        _, hist = _get(_ctrl(sim, "/history?provider=1"))
+        assert hist["count"] >= 1
+        last = hist["history"][-1]
+        assert last["request_id"] == 99, (
+            f"history entry should record request_id=99, got {last['request_id']!r}"
+        )
+
+    def test_request_id_string_echoed_in_history(self, sim):
+        """String JSON-RPC ids must also be echoed correctly in history."""
+        _post(sim["provider1"], {"jsonrpc": "2.0", "id": "trace-abc", "method": "eth_chainId", "params": []})
+        _, hist = _get(_ctrl(sim, "/history?provider=1&method=eth_chainId"))
+        assert hist["count"] >= 1
+        assert hist["history"][-1]["request_id"] == "trace-abc"
+
+    def test_down_mode_request_id_is_null(self, sim):
+        """Down-mode entries must have request_id=None (body is never parsed)."""
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "down"}}})
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _, hist = _get(_ctrl(sim, "/history?provider=1"))
+        assert hist["count"] >= 1
+        assert hist["history"][-1]["request_id"] is None
+
+    def test_filter_request_id_returns_matching_only(self, sim):
+        """?request_id= must return only the entry(ies) that carried that JSON-RPC id."""
+        _post(sim["provider1"], {"jsonrpc": "2.0", "id": 7, "method": "eth_blockNumber", "params": []})
+        _post(sim["provider1"], {"jsonrpc": "2.0", "id": 8, "method": "eth_blockNumber", "params": []})
+        _, hist = _get(_ctrl(sim, "/history?request_id=7"))
+        assert hist["count"] >= 1
+        assert all(e["request_id"] == 7 for e in hist["history"])
+
+    def test_time_field_contains_utc_string(self, sim):
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history"))
+        assert "UTC" in body["history"][0]["time"]
+
+    def test_latency_ms_present_even_when_zero(self, sim):
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history"))
+        assert body["history"][0]["latency_ms"] == 0
+
+    def test_latency_ms_reflects_configured_delay(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"latency_ms": 150}}})
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history"))
+        assert body["history"][0]["latency_ms"] >= 100
+
+    # ── call_order ────────────────────────────────────────────────────────────
+
+    def test_call_order_is_1_based_sequential(self, sim):
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(sim["provider2"], "eth_blockNumber")
+        _rpc(sim["provider3"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history"))
+        orders = [e["call_order"] for e in body["history"]]
+        assert orders == list(range(1, len(orders) + 1))
+
+    def test_call_order_restarts_after_clear(self, sim):
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _post(_ctrl(sim, "/history/clear"), {})
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history"))
+        assert body["history"][0]["call_order"] == 1
+
+    # ── ?provider= ────────────────────────────────────────────────────────────
+
+    def test_filter_provider_only_returns_that_provider(self, sim):
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(sim["provider2"], "eth_blockNumber")
+        _rpc(sim["provider3"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history?provider=2"))
+        assert body["count"] >= 1
+        assert all(e["provider"] == "2" for e in body["history"])
+
+    def test_filter_provider_excludes_others(self, sim):
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(sim["provider2"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history?provider=1"))
+        assert all(e["provider"] == "1" for e in body["history"])
+
+    # ── ?method= ─────────────────────────────────────────────────────────────
+
+    def test_filter_method_returns_matching_only(self, sim):
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(sim["provider1"], "eth_chainId")
+        _, body = _get(_ctrl(sim, "/history?method=eth_blockNumber"))
+        assert body["count"] >= 1
+        assert all(e["method"] == "eth_blockNumber" for e in body["history"])
+
+    def test_filter_method_excludes_others(self, sim):
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(sim["provider1"], "eth_chainId")
+        _, body = _get(_ctrl(sim, "/history?method=eth_chainId"))
+        assert all(e["method"] == "eth_chainId" for e in body["history"])
+
+    # ── ?status= ─────────────────────────────────────────────────────────────
+
+    def test_filter_status_success(self, sim):
+        _rpc(sim["provider1"], "eth_blockNumber")               # success
+        _post(_ctrl(sim, "/scenario"), {"providers": {"2": {"mode": "error"}}})
+        _rpc(sim["provider2"], "eth_blockNumber")               # error
+        _, body = _get(_ctrl(sim, "/history?status=success"))
+        assert body["count"] >= 1
+        assert all(e["status"] == "success" for e in body["history"])
+
+    def test_filter_status_error(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "error"}}})
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(sim["provider2"], "eth_blockNumber")               # success
+        _, body = _get(_ctrl(sim, "/history?status=error"))
+        assert body["count"] >= 1
+        assert all(e["status"] == "error" for e in body["history"])
+
+    def test_filter_status_rate_limit(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "rate_limit"}}})
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history?status=rate_limit"))
+        assert body["count"] >= 1
+        assert all(e["status"] == "rate_limit" for e in body["history"])
+
+    def test_filter_status_down(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "down"}}})
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history?status=down"))
+        assert body["count"] >= 1
+        assert all(e["status"] == "down" for e in body["history"])
+
+    def test_down_mode_recorded_with_wildcard_method(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "down"}}})
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history?provider=1"))
+        assert any(e["method"] == "*" for e in body["history"])
+
+    # ── ?last= ────────────────────────────────────────────────────────────────
+
+    def test_filter_last_includes_recent_calls(self, sim):
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history?last=10"))
+        assert body["count"] >= 1
+
+    def test_filter_last_0_excludes_all(self, sim):
+        _rpc(sim["provider1"], "eth_blockNumber")
+        time.sleep(0.05)   # make sure the call is at least 50ms in the past
+        _, body = _get(_ctrl(sim, "/history?last=0"))
+        assert body["count"] == 0
+
+    # ── ?from= / ?to= ─────────────────────────────────────────────────────────
+
+    def test_filter_from_to_includes_call_in_window(self, sim):
+        t_before = time.time() - 1
+        _rpc(sim["provider1"], "eth_blockNumber")
+        t_after  = time.time() + 1
+        _, body = _get(_ctrl(sim, f"/history?from={t_before}&to={t_after}"))
+        assert body["count"] >= 1
+
+    def test_filter_from_future_excludes_all(self, sim):
+        _rpc(sim["provider1"], "eth_blockNumber")
+        t_future = time.time() + 9999
+        _, body = _get(_ctrl(sim, f"/history?from={t_future}"))
+        assert body["count"] == 0
+
+    def test_filter_to_past_excludes_all(self, sim):
+        t_past = time.time() - 9999
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, f"/history?to={t_past}"))
+        assert body["count"] == 0
+
+    # ── combined filters ──────────────────────────────────────────────────────
+
+    def test_combined_last_provider_status(self, sim):
+        _rpc(sim["provider1"], "eth_blockNumber")               # success
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "error"}}})
+        _rpc(sim["provider1"], "eth_blockNumber")               # error
+        _rpc(sim["provider2"], "eth_blockNumber")               # success on p2
+        _, body = _get(_ctrl(sim, "/history?last=30&provider=1&status=error"))
+        assert body["count"] >= 1
+        for e in body["history"]:
+            assert e["provider"] == "1"
+            assert e["status"]   == "error"
+
+    def test_combined_provider_method(self, sim):
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(sim["provider1"], "eth_chainId")
+        _rpc(sim["provider2"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history?provider=1&method=eth_blockNumber"))
+        assert body["count"] >= 1
+        for e in body["history"]:
+            assert e["provider"] == "1"
+            assert e["method"]   == "eth_blockNumber"
+
+    # ── empty results ─────────────────────────────────────────────────────────
+
+    def test_empty_history_after_reset_all(self, sim):
+        for provider in ("provider1", "provider2", "provider3"):
+            _rpc(sim[provider], "eth_blockNumber")
+        _, before = _get(_ctrl(sim, "/history"))
+        assert before["count"] == 3, \
+            f"precondition failed — expected 3 entries, got {before['count']}"
+        _post(_ctrl(sim, "/reset/all"), {})
+        _, body = _get(_ctrl(sim, "/history"))
+        assert body == {"count": 0, "history": []}, \
+            f"/reset/all did not produce empty history — got: {body}"
+
+    def test_history_sorted_by_timestamp(self, sim):
+        _rpc(sim["provider1"], "eth_blockNumber")
+        time.sleep(0.02)
+        _rpc(sim["provider2"], "eth_blockNumber")
+        time.sleep(0.02)
+        _rpc(sim["provider3"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history"))
+        timestamps = [e["ts"] for e in body["history"]]
+        assert timestamps == sorted(timestamps)
+
+    def test_method_filter_isolates_exactly_one_call(self, sim):
+        """Architectural fact 2 — method filter is the correct isolation tool.
+
+        In the deployed environment the router sends eth_blockNumber and
+        eth_getBlockByNumber as background calls continuously.  Using a method
+        the router never sends (e.g. eth_gasPrice) means ?method=eth_gasPrice
+        returns exactly one entry — your call and nothing else.
+
+        In unit tests there is no background traffic, so this test instead
+        verifies the isolation property directly: make N calls with method A
+        and M calls with method B, then confirm ?method=A returns exactly N
+        entries and every entry has method == A.
+        """
+        _rpc(sim["provider1"], "eth_blockNumber")   # noise — 3 calls
+        _rpc(sim["provider2"], "eth_blockNumber")
+        _rpc(sim["provider3"], "eth_blockNumber")
+
+        _rpc(sim["provider1"], "eth_gasPrice")      # signal — 1 call
+
+        _, body = _get(_ctrl(sim, "/history?method=eth_gasPrice"))
+        assert body["count"] == 1, \
+            f"method filter should return exactly 1 entry, got {body['count']}"
+        assert body["history"][0]["method"] == "eth_gasPrice"
+        assert body["history"][0]["provider"] == "1"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JSON-RPC protocol details
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestJSONRPCProtocol:
+
+    def test_response_id_echoes_request_id(self, sim):
+        """The response id must match whatever id was sent in the request."""
+        _, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert body["id"] == 1
+
+        body2 = json.loads(
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    sim["provider1"],
+                    data=json.dumps({"jsonrpc": "2.0", "id": 42, "method": "eth_blockNumber", "params": []}).encode(),
+                    headers={"Content-Type": "application/json"},
+                ),
+                timeout=5,
+            ).read()
+        )
+        assert body2["id"] == 42
+
+    def test_response_id_string(self, sim):
+        """id can be a string — must be echoed as-is."""
+        body = json.loads(
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    sim["provider1"],
+                    data=json.dumps({"jsonrpc": "2.0", "id": "my-req-1", "method": "eth_blockNumber", "params": []}).encode(),
+                    headers={"Content-Type": "application/json"},
+                ),
+                timeout=5,
+            ).read()
+        )
+        assert body["id"] == "my-req-1"
+
+    def test_unknown_method_returns_fallback_result(self, sim):
+        """A method not in METHOD_DEFAULTS must return '0x1' fallback, not crash."""
+        _, body = _rpc(sim["provider1"], "eth_notARealMethod")
+        assert body.get("result") == "0x1"
+        assert "error" not in body
+
+    def test_unknown_method_recorded_in_history(self, sim):
+        _rpc(sim["provider1"], "eth_notARealMethod")
+        _, hist = _get(_ctrl(sim, "/history?method=eth_notARealMethod"))
+        assert hist["count"] == 1
+        assert hist["history"][0]["status"] == "success"
+
+    def test_eth_get_block_by_number_earliest(self, sim):
+        _, body = _rpc(sim["provider1"], "eth_getBlockByNumber", ["earliest", False])
+        assert body["result"]["number"] == "0x0"
+
+    def test_eth_get_block_by_number_pending(self, sim):
+        _, body = _rpc(sim["provider1"], "eth_getBlockByNumber", ["pending", False])
+        assert body["result"]["number"] == "0x1312D01"
+
+    def test_eth_get_block_by_number_safe(self, sim):
+        _, body = _rpc(sim["provider1"], "eth_getBlockByNumber", ["safe", False])
+        assert body["result"]["number"] == "0x1312D00"
+
+    def test_eth_get_block_by_number_finalized(self, sim):
+        _, body = _rpc(sim["provider1"], "eth_getBlockByNumber", ["finalized", False])
+        assert body["result"]["number"] == "0x1312CFF"
+
+    def test_empty_body_handled_gracefully(self, sim):
+        """POST with no body must not crash — defaults to empty dict."""
+        req = urllib.request.Request(
+            sim["provider1"],
+            data=b"",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                body = json.loads(resp.read())
+                assert "result" in body   # success with default id
+        except urllib.error.HTTPError as e:
+            raw = e.read()
+            assert e.code != 500, f"server crashed on empty body: {raw}"
+
+    def test_missing_method_field_defaults_to_unknown_in_history(self, sim):
+        """A request body that omits 'method' must record method='unknown' in history."""
+        # Send a valid JSON body that has no "method" key at all
+        _post(sim["provider1"], {"jsonrpc": "2.0", "id": 1, "params": []})
+
+        _, hist = _get(_ctrl(sim, "/history?provider=1"))
+        assert hist["count"] >= 1
+        last_entry = hist["history"][-1]
+        assert last_entry["method"] == "unknown", (
+            f"missing 'method' field should record 'unknown', "
+            f"got {last_entry['method']!r}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mode priority — down / rate_limit / error take full priority
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestModePriority:
+
+    def test_down_skips_latency_responds_immediately(self, sim):
+        """mode=down must return 503 without sleeping, even when latency_ms is set."""
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "down", "latency_ms": 5000}}})
+        t0 = time.monotonic()
+        _rpc(sim["provider1"], "eth_blockNumber")
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        assert elapsed_ms < 500, \
+            f"down mode should respond immediately, took {elapsed_ms:.0f}ms"
+
+    def test_error_mode_always_errors_regardless_of_probability(self, sim):
+        """mode=error must always return error even if error_probability=0.0."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"mode": "error", "error_probability": 0.0}}
+        })
+        for _ in range(5):
+            _, body = _rpc(sim["provider1"], "eth_blockNumber")
+            assert "error" in body, "mode=error must always return error"
+
+    def test_rate_limit_takes_priority_over_error_probability(self, sim):
+        """mode=rate_limit must always return 429 even if error_probability=1.0."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"mode": "rate_limit", "error_probability": 1.0}}
+        })
+        for _ in range(3):
+            status, _ = _rpc(sim["provider1"], "eth_blockNumber")
+            assert status == 429, "mode=rate_limit must always return 429"
+
+    def test_down_takes_priority_over_error_probability(self, sim):
+        """mode=down must always return 503 regardless of error_probability."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"mode": "down", "error_probability": 1.0}}
+        })
+        status, _ = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 503
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scenario edge cases
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestScenarioEdgeCases:
+
+    def test_empty_providers_dict_is_accepted(self, sim):
+        """POST /scenario with {} providers must return 200 and change nothing."""
+        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {}})
+        assert status == 200
+        _, scenario = _get(_ctrl(sim, "/scenario"))
+        for pid in ("1", "2", "3"):
+            assert scenario["providers"][pid]["mode"] == "success"
+
+    def test_unknown_provider_id_gracefully_ignored(self, sim):
+        """Posting to a non-existent provider id (e.g. '99') must not crash."""
+        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"99": {"mode": "error"}}})
+        assert status == 200
+        # real providers unchanged
+        _, scenario = _get(_ctrl(sim, "/scenario"))
+        for pid in ("1", "2", "3"):
+            assert scenario["providers"][pid]["mode"] == "success"
+
+    def test_all_three_providers_updated_in_one_call(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {
+            "1": {"mode": "error"},
+            "2": {"mode": "rate_limit"},
+            "3": {"mode": "down"},
+        }})
+        _, scenario = _get(_ctrl(sim, "/scenario"))
+        assert scenario["providers"]["1"]["mode"] == "error"
+        assert scenario["providers"]["2"]["mode"] == "rate_limit"
+        assert scenario["providers"]["3"]["mode"] == "down"
+
+    def test_custom_responses_cleared_by_reset(self, sim):
+        """POST /reset must wipe custom responses, not just mode/latency."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"responses": {"eth_blockNumber": {"result": "0xCAFE"}}}}
+        })
+        _, before = _rpc(sim["provider1"], "eth_blockNumber")
+        assert before["result"] == "0xCAFE"
+
+        _post(_ctrl(sim, "/reset"), {})
+        _, after = _rpc(sim["provider1"], "eth_blockNumber")
+        assert after["result"] != "0xCAFE", \
+            "custom response should be cleared by /reset"
+
+    def test_custom_responses_cleared_by_reset_all(self, sim):
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"2": {"responses": {"eth_blockNumber": {"result": "0xDEAD"}}}}
+        })
+        _post(_ctrl(sim, "/reset/all"), {})
+        _, body = _rpc(sim["provider2"], "eth_blockNumber")
+        assert body["result"] != "0xDEAD", \
+            "custom response should be cleared by /reset/all"
+
+    def test_custom_responses_survive_history_clear(self, sim):
+        """/history/clear must NOT touch scenario config — custom responses must persist."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"3": {"responses": {"eth_blockNumber": {"result": "0xBEEF"}}}}
+        })
+        _post(_ctrl(sim, "/history/clear"), {})
+        _, body = _rpc(sim["provider3"], "eth_blockNumber")
+        assert body["result"] == "0xBEEF", \
+            "custom response must survive /history/clear"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ring buffer rollover
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestRingBufferRollover:
+
+    def test_oldest_entry_is_dropped_when_buffer_full(self, sim):
+        """When the ring buffer is full, the oldest entry is replaced by the newest."""
+        # fill the buffer exactly
+        for i in range(HISTORY_MAX):
+            _rpc(sim["provider1"], "eth_blockNumber")
+
+        # record the oldest ts currently in the buffer
+        _, hist_before = _get(_ctrl(sim, "/history?provider=1"))
+        oldest_ts = hist_before["history"][0]["ts"]
+
+        # push one more — oldest must be gone
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _, hist_after = _get(_ctrl(sim, "/history?provider=1"))
+
+        assert hist_after["count"] == HISTORY_MAX, \
+            f"ring buffer should stay at HISTORY_MAX after overflow, got {hist_after['count']}"
+        assert hist_after["history"][0]["ts"] > oldest_ts, \
+            "oldest entry should have been dropped after overflow"
+
+    def test_all_time_counter_survives_rollover(self, sim):
+        """total_requests_all_time must keep counting past HISTORY_MAX."""
+        extra = 10
+        for _ in range(HISTORY_MAX + extra):
+            _rpc(sim["provider1"], "eth_blockNumber")
+
+        _, stats = _get(_ctrl(sim, "/stats"))
+        total = stats["providers"]["1"]["total_requests_all_time"]
+        ring  = stats["providers"]["1"]["history_ring_buffer_entries"]
+
+        assert total == HISTORY_MAX + extra, \
+            f"all-time counter should be {HISTORY_MAX + extra}, got {total}"
+        assert ring == HISTORY_MAX, \
+            f"ring buffer should be capped at {HISTORY_MAX}, got {ring}"
+
+    def test_newest_entry_always_survives_rollover(self, sim):
+        """The most recently pushed entry must always be present after rollover."""
+        for _ in range(HISTORY_MAX + 5):
+            _rpc(sim["provider1"], "eth_blockNumber")
+
+        # push a unique method as the very last call
+        _rpc(sim["provider1"], "eth_gasPrice")
+
+        _, hist = _get(_ctrl(sim, "/history?provider=1&method=eth_gasPrice"))
+        assert hist["count"] == 1, \
+            "the most recent entry must always survive in the ring buffer"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HTTP wrong method (POST to GET-only, GET to POST-only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestHTTPWrongMethod:
+
+    def _get_raw(self, url: str) -> int:
+        """GET request that returns only the HTTP status code."""
+        try:
+            with urllib.request.urlopen(url, timeout=5) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    def _post_raw(self, url: str) -> int:
+        req = urllib.request.Request(
+            url, data=b"{}", headers={"Content-Type": "application/json"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    def test_get_reset_returns_404(self, sim):
+        assert self._get_raw(_ctrl(sim, "/reset")) == 404
+
+    def test_get_history_clear_returns_404(self, sim):
+        assert self._get_raw(_ctrl(sim, "/history/clear")) == 404
+
+    def test_get_reset_all_returns_404(self, sim):
+        assert self._get_raw(_ctrl(sim, "/reset/all")) == 404
+
+    def test_post_health_returns_404(self, sim):
+        assert self._post_raw(_ctrl(sim, "/health")) == 404
+
+    def test_post_stats_returns_404(self, sim):
+        assert self._post_raw(_ctrl(sim, "/stats")) == 404
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Concurrency — simultaneous requests must all be recorded, no data corruption
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestConcurrency:
+
+    def test_concurrent_requests_all_recorded(self, sim):
+        """20 simultaneous requests to one provider must all appear in history."""
+        n = 20
+        results = []
+
+        def call():
+            status, body = _rpc(sim["provider1"], "eth_blockNumber")
+            results.append(status)
+
+        threads = [threading.Thread(target=call) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert all(s == 200 for s in results), \
+            f"some concurrent requests failed: {results}"
+
+        _, hist = _get(_ctrl(sim, "/history?provider=1"))
+        assert hist["count"] == n, \
+            f"expected {n} history entries, got {hist['count']}"
+
+    def test_concurrent_requests_to_different_providers(self, sim):
+        """Simultaneous requests to all 3 providers must all be recorded independently."""
+        n_per_provider = 5
+        results = []
+
+        def call(url):
+            status, _ = _rpc(url, "eth_blockNumber")
+            results.append(status)
+
+        threads = [
+            threading.Thread(target=call, args=(sim[f"provider{p}"],))
+            for p in (1, 2, 3)
+            for _ in range(n_per_provider)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert all(s == 200 for s in results)
+
+        _, hist = _get(_ctrl(sim, "/history"))
+        assert hist["count"] == n_per_provider * 3, \
+            f"expected {n_per_provider * 3} total entries, got {hist['count']}"
+
+    def test_concurrent_scenario_update_and_requests_no_crash(self, sim):
+        """Updating the scenario mid-flight must not corrupt state or crash."""
+        errors = []
+
+        def spam():
+            for _ in range(10):
+                try:
+                    _rpc(sim["provider1"], "eth_blockNumber")
+                except Exception as e:
+                    errors.append(str(e))
+
+        def flip():
+            for mode in ("success", "error", "success", "error", "success"):
+                _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": mode}}})
+                time.sleep(0.01)
+
+        t1 = threading.Thread(target=spam)
+        t2 = threading.Thread(target=flip)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert not errors, f"concurrent scenario update caused errors: {errors}"
+
+    def test_concurrent_history_clear_and_push_no_corruption(self, sim):
+        """Simultaneous /history/clear and incoming RPC calls must not corrupt state.
+
+        The ring-buffer deque and counters are protected by a per-provider lock.
+        This test races 20 rapid RPC calls against repeated clears to confirm
+        no exception is raised and the final state is internally consistent
+        (history_ring_buffer_entries <= total_requests_all_time).
+        """
+        errors = []
+
+        def spam():
+            for _ in range(20):
+                try:
+                    _rpc(sim["provider2"], "eth_blockNumber")
+                except Exception as e:
+                    errors.append(str(e))
+
+        def clear_repeatedly():
+            for _ in range(10):
+                try:
+                    _post(_ctrl(sim, "/history/clear"), {})
+                    time.sleep(0.005)
+                except Exception as e:
+                    errors.append(str(e))
+
+        t1 = threading.Thread(target=spam)
+        t2 = threading.Thread(target=clear_repeatedly)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        assert not errors, f"concurrent clear+push raised errors: {errors}"
+
+        # Structural integrity check: ring entries can never exceed total calls
+        _, stats = _get(_ctrl(sim, "/stats"))
+        p = stats["providers"]["2"]
+        assert p["history_ring_buffer_entries"] <= p["total_requests_all_time"], (
+            f"ring entries ({p['history_ring_buffer_entries']}) > "
+            f"total calls ({p['total_requests_all_time']}) — state corrupted"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stats edge cases
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestStatsEdgeCases:
+
+    def test_stats_all_zero_when_no_calls(self, sim):
+        """After reset/all, stats must show zero for all providers."""
+        _, stats = _get(_ctrl(sim, "/stats"))
+        for pid in ("1", "2", "3"):
+            p = stats["providers"][pid]
+            assert p["total_requests_all_time"]    == 0
+            assert p["requests_by_status_all_time"] == {}
+            assert p["history_ring_buffer_entries"] == 0
+
+    def test_ring_buffer_entries_drop_to_zero_after_clear(self, sim):
+        """history_ring_buffer_entries in /stats must be 0 after /history/clear."""
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(sim["provider2"], "eth_blockNumber")
+
+        _, before = _get(_ctrl(sim, "/stats"))
+        assert before["providers"]["1"]["history_ring_buffer_entries"] >= 1
+
+        _post(_ctrl(sim, "/history/clear"), {})
+
+        _, after = _get(_ctrl(sim, "/stats"))
+        for pid in ("1", "2", "3"):
+            assert after["providers"][pid]["history_ring_buffer_entries"] == 0, \
+                f"ring buffer entries for provider {pid} should be 0 after clear"
+
+    def test_stats_not_affected_by_reset_scenario_only(self, sim):
+        """/reset must NOT zero stats counters — only /history/clear does that."""
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _post(_ctrl(sim, "/reset"), {})
+        _, stats = _get(_ctrl(sim, "/stats"))
+        assert stats["providers"]["1"]["total_requests_all_time"] >= 1, \
+            "/reset must not touch all-time counters"
+

@@ -102,7 +102,8 @@ class ProviderState:
             self.total_calls       = 0
             self.calls_by_status   = {}
 
-    def push_call_to_buffer(self, method: str, status: str, latency_ms: int) -> None:
+    def push_call_to_buffer(self, method: str, status: str, latency_ms: int,
+                             request_id: object = None) -> None:
         """Push one call record into the in-memory ring-buffer and update all-time counters.
 
         Storage is entirely in RAM — nothing is written to disk or any logging framework.
@@ -116,12 +117,16 @@ class ProviderState:
             status:     Outcome string — "success" | "error" | "rate_limit" | "down".
             latency_ms: Simulated delay that was injected before the response, in ms.
                         0 when no latency was configured or the request was rejected early.
+            request_id: The JSON-RPC ``id`` field from the request body (echoed back in
+                        the response). ``None`` for down-mode rejections where the body
+                        is never parsed.
         """
         now = time.time()
         with self.lock:
             self.history.append({
                 "ts":         now,
                 "time":       datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S.") + f"{int(now % 1 * 1000):03d} UTC",
+                "request_id": request_id,
                 "method":     method,
                 "status":     status,
                 "latency_ms": latency_ms,
@@ -176,7 +181,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if snap["mode"] == "down":
             self.send_response(503)
             self.end_headers()
-            state.push_call_to_buffer("*", "down", 0)
+            state.push_call_to_buffer("*", "down", 0, request_id=None)
             return
 
         # Latency injection
@@ -192,14 +197,16 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if snap["mode"] == "rate_limit":
             self._reply(429, {"jsonrpc": "2.0", "id": req_id,
                               "error": {"code": 429, "message": "Too many requests"}})
-            state.push_call_to_buffer(method, "rate_limit", self._elapsed_ms(t_start))
+            state.push_call_to_buffer(method, "rate_limit", self._elapsed_ms(t_start),
+                                      request_id=req_id)
             return
 
         # Probabilistic / forced error
         if snap["mode"] == "error" or random.random() < snap["error_probability"]:
             self._reply(200, {"jsonrpc": "2.0", "id": req_id,
                               "error": {"code": -32000, "message": "Internal error"}})
-            state.push_call_to_buffer(method, "error", self._elapsed_ms(t_start))
+            state.push_call_to_buffer(method, "error", self._elapsed_ms(t_start),
+                                      request_id=req_id)
             return
 
         # Success — look up method-specific result
@@ -218,7 +225,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 result["number"] = named.get(params[0], params[0])
 
         self._reply(200, {"jsonrpc": "2.0", "id": req_id, "result": result})
-        state.push_call_to_buffer(method, "success", self._elapsed_ms(t_start))
+        state.push_call_to_buffer(method, "success", self._elapsed_ms(t_start),
+                                  request_id=req_id)
 
     @staticmethod
     def _elapsed_ms(t_start: float) -> int:
@@ -300,8 +308,10 @@ class ControlHandler(BaseHTTPRequestHandler):
           GET /scenario  — current snapshot of all provider configs.
           GET /stats     — all-time call counters and per-status breakdown per provider.
           GET /history   — merged, time-sorted call buffer across all providers.
-                           Supports query params: last, from, to, provider, method, status.
-                           Every entry includes a call_order field (1 = first attempted).
+                           Supports query params: last, from, to, provider, method, status,
+                           request_id.
+                           Every entry includes a call_order field (1 = first attempted)
+                           and a request_id field (echoes the JSON-RPC id from the request).
 
         Returns 404 for any unrecognised path.
         """
@@ -330,25 +340,29 @@ class ControlHandler(BaseHTTPRequestHandler):
             #   ?provider=<id>    — filter to a single provider (1, 2, or 3)
             #   ?method=<name>    — filter to a specific RPC method
             #   ?status=<name>    — filter by status (success, error, rate_limit, down)
+            #   ?request_id=<id>  — filter by the JSON-RPC id echoed in the request
             #
             # Each entry in the response includes:
             #   call_order        — 1-based position in the merged timeline (sorted by ts).
             #                       call_order=1 is the provider the router tried FIRST,
             #                       call_order=2 is the second attempt, etc.
+            #   request_id        — the JSON-RPC id from the request body (None for down-mode)
             #
             # Examples:
             #   /history?last=60
             #   /history?from=1774534600&to=1774534700
             #   /history?last=120&provider=2
             #   /history?last=60&status=error
+            #   /history?request_id=42
             qs = parse_qs(urlparse(self.path).query)
 
-            t_from     = float(qs["from"][0])     if "from"     in qs else None
-            t_to       = float(qs["to"][0])       if "to"       in qs else None
-            last_secs  = float(qs["last"][0])      if "last"     in qs else None
-            f_provider = qs["provider"][0]         if "provider" in qs else None
-            f_method   = qs["method"][0]           if "method"   in qs else None
-            f_status   = qs["status"][0]           if "status"   in qs else None
+            t_from      = float(qs["from"][0])      if "from"       in qs else None
+            t_to        = float(qs["to"][0])         if "to"         in qs else None
+            last_secs   = float(qs["last"][0])       if "last"       in qs else None
+            f_provider  = qs["provider"][0]          if "provider"   in qs else None
+            f_method    = qs["method"][0]            if "method"     in qs else None
+            f_status    = qs["status"][0]            if "status"     in qs else None
+            f_request_id = qs["request_id"][0]       if "request_id" in qs else None
 
             if last_secs is not None:
                 t_from = time.time() - last_secs
@@ -358,10 +372,11 @@ class ControlHandler(BaseHTTPRequestHandler):
                 if f_provider and pid != f_provider:
                     continue
                 for entry in s.get_history():
-                    if t_from   and entry["ts"] < t_from:   continue
-                    if t_to     and entry["ts"] > t_to:     continue
-                    if f_method and entry["method"] != f_method: continue
-                    if f_status and entry["status"] != f_status: continue
+                    if t_from        and entry["ts"] < t_from:                      continue
+                    if t_to          and entry["ts"] > t_to:                        continue
+                    if f_method      and entry["method"] != f_method:               continue
+                    if f_status      and entry["status"] != f_status:               continue
+                    if f_request_id  and str(entry.get("request_id")) != f_request_id: continue
                     all_calls.append({"provider": pid, **entry})
 
             all_calls.sort(key=lambda x: x["ts"])
