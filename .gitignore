@@ -1,11 +1,21 @@
 untracked/
 .DS_Store
-__pycache__/
-*.pyc
-*.pyo
 
-# Ignore virtual environment directories
+# Python build/cache artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
 venv/
-# ignore IDE specific files
-workspace.xml
-.idea/
+.venv/
+
+# JetBrains local workspace state (user-specific, noisy in git)
+.idea/workspace.xml
+.idea/**/workspace.xml
+.idea/tasks.xml
+.idea/shelf/
+
+# local-only docs — never push
+docs/new_server_setup.md
+
