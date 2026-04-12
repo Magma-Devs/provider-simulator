@@ -8,13 +8,17 @@ Each provider's behaviour is changed at runtime via POST /scenario.
 
 Supported modes per provider:
   success           — returns {"jsonrpc":"2.0","result":"..."} with optional latency
-  error             — returns {"jsonrpc":"2.0","error":{"code":-32000,"message":"..."}}
+  error             — returns {"jsonrpc":"2.0","error":{"code":…,"message":"…"}}
+                      Configurable via error_code (default -32000),
+                      error_message (default "Internal error"),
+                      and http_status (default 200).
   rate_limit        — returns HTTP 429
   down              — returns HTTP 503 (router treats provider as unavailable)
   error_probability — randomly returns error on X% of requests (0.0–1.0)
 
 Control API:
-  POST /scenario   {"providers": {"1": {"mode": "rate_limit"}, "2": {"mode": "down"}}}
+  POST /scenario   {"providers": {"1": {"mode": "error", "error_code": -32601,
+                     "error_message": "Method not found", "http_status": 200}}}
   POST /reset      {}
   GET  /scenario   → current state of all providers
   GET  /health     → {"status": "ok"}
@@ -53,6 +57,9 @@ class ProviderState:
     mode: str = "success"               # success | error | rate_limit | down
     latency_ms: int = 0
     error_probability: float = 0.0
+    error_code: int = -32000            # JSON-RPC error code when mode="error"
+    error_message: str = "Internal error"  # JSON-RPC error message when mode="error"
+    http_status: int = 200              # HTTP status code for error responses (200 = JSON-RPC body error)
     responses: Dict[str, Any] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # call history — each entry: {ts, method, status, latency_ms}
@@ -62,7 +69,7 @@ class ProviderState:
     calls_by_status: Dict[str, int] = field(default_factory=dict, repr=False)
 
     def snapshot(self) -> dict:
-        """Return a thread-safe copy of the mutable config fields (mode, latency_ms, error_probability).
+        """Return a thread-safe copy of the mutable config fields.
         Used by JSONRPCHandler at the start of every request so the handler works
         on a stable snapshot even if a test updates the state mid-request."""
         with self.lock:
@@ -70,6 +77,9 @@ class ProviderState:
                 "mode":              self.mode,
                 "latency_ms":        self.latency_ms,
                 "error_probability": self.error_probability,
+                "error_code":        self.error_code,
+                "error_message":     self.error_message,
+                "http_status":       self.http_status,
             }
 
     def update(self, cfg: dict) -> None:
@@ -80,6 +90,9 @@ class ProviderState:
             self.mode              = cfg.get("mode",              self.mode)
             self.latency_ms        = cfg.get("latency_ms",        self.latency_ms)
             self.error_probability = cfg.get("error_probability", self.error_probability)
+            self.error_code        = cfg.get("error_code",        self.error_code)
+            self.error_message     = cfg.get("error_message",     self.error_message)
+            self.http_status       = cfg.get("http_status",       self.http_status)
             if "responses" in cfg:
                 self.responses = cfg["responses"]
 
@@ -91,6 +104,9 @@ class ProviderState:
             self.mode              = "success"
             self.latency_ms        = 0
             self.error_probability = 0.0
+            self.error_code        = -32000
+            self.error_message     = "Internal error"
+            self.http_status       = 200
             self.responses         = {}
 
     def clear_history(self) -> None:
@@ -201,10 +217,13 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                                       request_id=req_id)
             return
 
-        # Probabilistic / forced error
+        # Probabilistic / forced error — use configurable code, message, and HTTP status
         if snap["mode"] == "error" or random.random() < snap["error_probability"]:
-            self._reply(200, {"jsonrpc": "2.0", "id": req_id,
-                              "error": {"code": -32000, "message": "Internal error"}})
+            err_code = snap.get("error_code", -32000)
+            err_msg  = snap.get("error_message", "Internal error")
+            http_st  = snap.get("http_status", 200)
+            self._reply(http_st, {"jsonrpc": "2.0", "id": req_id,
+                                  "error": {"code": err_code, "message": err_msg}})
             state.push_call_to_buffer(method, "error", self._elapsed_ms(t_start),
                                       request_id=req_id)
             return
