@@ -1,33 +1,67 @@
-# Simulator chain for smart-router-standalone.
-# Add this file to: values/simulator/values_sim.yml in smart-router-standalone.
+# values_sim.yml used on Victoria server.
+# Copy this file as-is to: ~/smart-router-standalone/values/simulator/values_sim.yml
 #
-# base_domain on this server: victoria.magmadevs.com
-# The Helm chart will automatically create the public route:
-#   https://eth-sim-jsonrpc.victoria.magmadevs.com
-#
-# Provider URLs below use internal Kubernetes cluster DNS — they never change.
+# Important: Helm replaces lists entirely. Keep all required routers in this file.
 
 routers:
-  # ⚠️ Helm replaces lists entirely — this file MUST include ALL routers (base, eth, eth-sim).
-  # Copy the base and eth blocks from values/core/values.yml above this entry.
-  # Use the key  nodes:  (not providers:) — chart 4.0.0 schema.
-
-  - id: "eth-sim"
-    network: "eth1"
+  - id: base
+    network: base
     nodes:
-      - name: "SimProvider1"
+      - name: Lava1
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18545"
-            interface: "jsonrpc"
-            addons: ["archive", "trace", "debug"]
-      - name: "SimProvider2"
+          - url: https://base.lava.build:443/
+            interface: jsonrpc
+            addons: [archive, trace, debug]
+      - name: Lava2
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18546"
-            interface: "jsonrpc"
-            addons: ["archive", "trace", "debug"]
-      - name: "SimProvider3"
+          - url: https://base.lava.build:443/
+            interface: jsonrpc
+            addons: [archive, trace, debug]
+      - name: Lava3
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18547"
-            interface: "jsonrpc"
-            addons: ["archive", "trace", "debug"]
+          - url: https://base.lava.build:443/
+            interface: jsonrpc
+            addons: [archive, trace, debug]
 
+  - id: eth
+    network: eth1
+    nodes:
+      - name: Google1
+        endpoints:
+          - url: https://json-rpc.8zfcse2amst1lajmh299uq4jn.blockchainnodeengine.com?key=AIzaSyDyUtm6b-e-xKDQgVWzlroHdVTytiXEDik
+            interface: jsonrpc
+            addons: [archive, trace, debug]
+      - name: Google2
+        endpoints:
+          - url: https://json-rpc.8zfcse2amst1lajmh299uq4jn.blockchainnodeengine.com?key=AIzaSyDyUtm6b-e-xKDQgVWzlroHdVTytiXEDik
+            interface: jsonrpc
+            addons: [archive, trace, debug]
+      - name: QuickNode1
+        endpoints:
+          - url: https://wispy-distinguished-glitter.quiknode.pro/c6f9247c83ef5fd069dbef2c228ee1229b55e406/
+            interface: jsonrpc
+            addons: [archive, trace, debug]
+      - name: QuickNode2
+        endpoints:
+          - url: https://wispy-distinguished-glitter.quiknode.pro/c6f9247c83ef5fd069dbef2c228ee1229b55e406/
+            interface: jsonrpc
+            addons: [archive, trace, debug]
+
+  - id: eth-sim
+    network: eth1
+    nodes:
+      - name: SimProvider1
+        endpoints:
+          - url: http://provider-simulator.lava-infra.svc.cluster.local:18545
+            interface: jsonrpc
+            addons: [archive, trace, debug]
+      - name: SimProvider2
+        endpoints:
+          - url: http://provider-simulator.lava-infra.svc.cluster.local:18546
+            interface: jsonrpc
+            addons: [archive, trace, debug]
+      - name: SimProvider3
+        endpoints:
+          - url: http://provider-simulator.lava-infra.svc.cluster.local:18547
+            interface: jsonrpc
+            addons: [archive, trace, debug]

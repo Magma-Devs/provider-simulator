@@ -134,14 +134,14 @@ All requests are JSON-RPC 2.0:
 │                                                 │
 │ 3. Return success:                              │
 │    HTTP 200                                     │
-│    {"jsonrpc":"2.0","id":1,"result":"0x1"}    │
+│    {"jsonrpc":"2.0","id":1,"result":"0x1312D00"} │
 └────────────┬────────────────────────────────────┘
              │
              │ HTTP Response
              ↓
 ┌─────────────────────────┐
 │  Router                 │
-│  Result: 0x1            │
+│  Result: 0x1312D00      │
 │  Status: SUCCESS ✓      │
 └─────────────────────────┘
 ```
@@ -263,7 +263,7 @@ All requests are JSON-RPC 2.0:
 │                                                 │
 │ 5. Return:                                      │
 │    HTTP 200                                     │
-│    {"jsonrpc":"2.0","id":1,"result":"0x1"}    │
+│    {"jsonrpc":"2.0","id":1,"result":"0x1312D00"} │
 └────────────┬────────────────────────────────────┘
              │
              │ HTTP Response (arrives at ~500ms)
@@ -459,7 +459,7 @@ Reads state: {"mode": "success"}
     ↓
 Checks all conditions: all pass ✓
     ↓
-Returns: HTTP 200 {"jsonrpc":"2.0","result":"0x1"}
+Returns: HTTP 200 {"jsonrpc":"2.0","result":"0x1312D00"}
 
 ┌──────────────────────────────────────────────────────────────┐
 │ Step 5: Router Returns Success to Test                      │
@@ -467,18 +467,18 @@ Returns: HTTP 200 {"jsonrpc":"2.0","result":"0x1"}
 
 Router: "Got success from provider 2"
     ↓
-Router returns to test: HTTP 200 {"result":"0x1"}
+Router returns to test: HTTP 200 {"result":"0x1312D00"}
 
 ┌──────────────────────────────────────────────────────────────┐
 │ Step 6: Test Verifies Result                                │
 └──────────────────────────────────────────────────────────────┘
 
-Test receives: {"result":"0x1"}
+Test receives: {"result":"0x1312D00"}
     ↓
 Test asserts:
   - Response code is 200 ✓
   - Response has result ✓
-  - Result is "0x1" ✓
+  - Result is "0x1312D00" ✓
     ↓
 Test passes! ✓
 
@@ -492,7 +492,7 @@ ControlHandler receives POST /reset
     ↓
 Resets all providers to healthy state
     ↓
-Returns: {"status": "reset"}
+Returns: {"status": "scenario reset"}
     ↓
 Test complete ✓
 ```
@@ -526,7 +526,7 @@ def test_failover(sim_control, sim_router_url, http_client):
     # HTTP POST to router
     # → Router calls providers via our simulator
     # ← Eventually gets success from provider 3
-    # ← HTTP 200 {"result":"0x1"}
+    # ← HTTP 200 {"result":"0x1312D00"}
     
     # Cycle Step 3: Verify
     assert response.status_code == 200
@@ -536,7 +536,7 @@ def test_failover(sim_control, sim_router_url, http_client):
     sim_control.reset()
     # HTTP POST /reset
     # ← All providers reset to healthy
-    # ← HTTP 200 {"status": "reset"}
+    # ← HTTP 200 {"status": "scenario reset"}
 ```
 
 ### Cycle 2: From Simulator's Perspective
@@ -588,9 +588,9 @@ Timeline: 0ms - 1000ms
        ↓
        ControlHandler.do_POST()
        ↓
-       For each ProviderState: call reset()
+       For each ProviderState: call reset_scenario()
        ↓
-       Returns {"status": "reset"}
+       Returns {"status": "scenario reset"}
 
 1000ms: Test ends
 ```
@@ -666,7 +666,7 @@ Requests to provider 1 now return 503
 
 Test calls: sim_control.reset()
   ↓
-ProviderState.reset()
+ProviderState.reset_scenario()
   ↓
 Transition: down → success
 
@@ -721,7 +721,7 @@ def test_failover():
     
     # Verify: Got response from provider 2
     assert response.status_code == 200
-    assert response.json()["result"] == "0x1"
+    assert response.json()["result"] == "0x1312D00"
     
     # Cleanup
     sim_control.reset()

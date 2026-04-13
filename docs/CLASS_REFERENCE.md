@@ -115,14 +115,17 @@ provider_state.update({"mode": "success", "latency_ms": 500})
 
 ---
 
-#### **3. reset() - Return to Healthy Defaults**
+#### **3. reset_scenario() - Return Scenario Config to Healthy Defaults**
 
 ```python
-def reset(self) -> None:
+def reset_scenario(self) -> None:
     with self.lock:
         self.mode              = "success"
         self.latency_ms        = 0
         self.error_probability = 0.0
+        self.error_code        = -32000
+        self.error_message     = "Internal error"
+        self.http_status       = 200
         self.responses         = {}
 ```
 
@@ -137,7 +140,7 @@ provider_state = ProviderState()
 provider_state.update({"mode": "down", "latency_ms": 1000})
 # State: down, slow
 
-provider_state.reset()
+provider_state.reset_scenario()
 # State: success, fast (back to healthy)
 ```
 
@@ -249,7 +252,7 @@ def do_POST(self):
     # Step 6: Success - return configured response
     with state.lock:
         method_cfg = state.responses.get(method) or state.responses.get("default", {})
-    result = method_cfg.get("result", "0x1")
+    result = method_cfg.get("result", METHOD_DEFAULTS.get(method, "0x1"))
 
     self._reply(200, {"jsonrpc": "2.0", "id": req_id, "result": result})
 ```
@@ -290,7 +293,7 @@ if snap["latency_ms"] > 0:
 length = int(self.headers.get("Content-Length", 0))
 body   = json.loads(self.rfile.read(length)) if length else {}
 req_id = body.get("id", 1)
-method = body.get("method", "default")
+    method = body.get("method", "unknown")
 ```
 - Read the HTTP body
 - Parse the JSON
@@ -333,13 +336,14 @@ if snap["mode"] == "error" or random.random() < snap["error_probability"]:
 ```python
 with state.lock:
     method_cfg = state.responses.get(method) or state.responses.get("default", {})
-result = method_cfg.get("result", "0x1")
+result = method_cfg.get("result", METHOD_DEFAULTS.get(method, "0x1"))
 
 self._reply(200, {"jsonrpc": "2.0", "id": req_id, "result": result})
 ```
 - Look up custom response for this method
 - If not found, use "default" response
-- If neither found, use "0x1"
+- If neither found, use a method-specific default from `METHOD_DEFAULTS`
+- Example: `eth_blockNumber` → `"0x1312D00"`; `eth_getBlockByNumber` → block object
 - Return HTTP 200 with the result
 
 ---
@@ -411,15 +415,15 @@ JSONRPCHandler.do_POST() runs:
 7. Check mode == "error"? NO
 8. Look up responses["eth_blockNumber"] → not found
 9. Use responses["default"] → not found
-10. Use default result: "0x1"
+10. Use `METHOD_DEFAULTS["eth_blockNumber"]` → `"0x1312D00"`
 11. Call _reply(200, {...})
 
 Response:
 HTTP/1.1 200 OK
 Content-Type: application/json
-Content-Length: 51
+Content-Length: 59
 
-{"jsonrpc":"2.0","id":1,"result":"0x1"}
+{"jsonrpc":"2.0","id":1,"result":"0x1312D00"}
 ```
 
 ---
@@ -474,10 +478,23 @@ def do_POST(self):
         self._reply(200, {"status": "ok"})
 
     elif self.path == "/reset":
-        # Reset all providers to healthy
+        # Reset scenario config only
         for state in self.server.provider_states.values():
-            state.reset()
-        self._reply(200, {"status": "reset"})
+            state.reset_scenario()
+        self._reply(200, {"status": "scenario reset"})
+
+    elif self.path == "/history/clear":
+        # Clear history/counters only
+        for state in self.server.provider_states.values():
+            state.clear_history()
+        self._reply(200, {"status": "history cleared"})
+
+    elif self.path == "/reset/all":
+        # Reset scenario config and clear history
+        for state in self.server.provider_states.values():
+            state.reset_scenario()
+            state.clear_history()
+        self._reply(200, {"status": "scenario reset and history cleared"})
 
     else:
         self._reply(404, {"error": "unknown path"})
@@ -511,8 +528,8 @@ state["3"].update({"mode": "success", "latency_ms": 100})
 ```
 
 **Case 2: POST /reset**
-- Calls `reset()` on all provider states
-- Returns to healthy defaults
+- Calls `reset_scenario()` on all provider states
+- Resets scenario config only
 
 **Example:**
 ```python
@@ -520,15 +537,22 @@ state["3"].update({"mode": "success", "latency_ms": 100})
 
 # Runs:
 for state in [state1, state2, state3]:
-    state.reset()
+    state.reset_scenario()
 
 # Returns:
-{"status": "reset"}
+{"status": "scenario reset"}
 ```
+
+**Case 3: POST /history/clear**
+- Calls `clear_history()` on all provider states
+- Wipes history/counters only
+
+**Case 4: POST /reset/all**
+- Resets scenario config and clears history in one call
 
 ---
 
-#### **do_GET() - Read State and Health Check**
+#### **do_GET() - Read State, Health, Stats, and History**
 
 ```python
 def do_GET(self):
@@ -540,6 +564,16 @@ def do_GET(self):
         snapshot = {pid: s.snapshot()
                     for pid, s in self.server.provider_states.items()}
         self._reply(200, {"providers": snapshot})
+        return
+
+    if self.path == "/stats":
+        self._reply(200, {"providers": {pid: s.stats()
+                          for pid, s in self.server.provider_states.items()}})
+        return
+
+    if self.path == "/history" or self.path.startswith("/history?"):
+        # merges history from all providers and supports filters
+        ...
         return
     
     self._reply(404, {"error": "unknown path"})
@@ -570,6 +604,14 @@ def do_GET(self):
   }
 }
 ```
+
+**Case 3: GET /stats**
+- Returns all-time counters per provider
+- Useful to see how many calls each provider handled by status
+
+**Case 4: GET /history**
+- Returns merged, ordered call history across all providers
+- Supports query params like `last`, `provider`, `method`, `status`, and `request_id`
 
 ---
 
@@ -632,14 +674,14 @@ POST /reset HTTP/1.1
 ControlHandler.do_POST() runs:
 1. Parse body
 2. Check path == "/reset"? YES
-3. For all providers, call state.reset()
-4. Call _reply(200, {"status": "reset"})
+3. For all providers, call state.reset_scenario()
+4. Call _reply(200, {"status": "scenario reset"})
 
 Response:
 HTTP/1.1 200 OK
 Content-Type: application/json
 
-{"status": "reset"}
+{"status": "scenario reset"}
 ```
 
 ---

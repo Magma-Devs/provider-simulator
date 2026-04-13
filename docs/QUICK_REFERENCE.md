@@ -41,8 +41,9 @@ Router ─→ Provider 1/2/3 (ports 18545-47) ─→ JSONRPCHandler ─→ Read 
 ### ProviderState
 **Holds state of one provider**
 - `snapshot()` → Get state safely (thread-safe)
-- `update(cfg)` → Change state
-- `reset()` → Back to healthy
+- `update(cfg)` → Change scenario config
+- `reset_scenario()` → Back to healthy scenario config
+- `clear_history()` → Clear history and counters
 
 **Instance variables:**
 - `mode` → "success" | "error" | "rate_limit" | "down"
@@ -77,9 +78,13 @@ Router ─→ Provider 1/2/3 (ports 18545-47) ─→ JSONRPCHandler ─→ Read 
 
 **Endpoints:**
 - `POST /scenario` → Set provider modes
-- `POST /reset` → Reset to healthy
+- `POST /reset` → Reset scenario config to healthy
+- `POST /history/clear` → Clear history/counters only
+- `POST /reset/all` → Reset scenario + clear history
 - `GET /scenario` → Read current state
 - `GET /health` → Health check
+- `GET /stats` → Per-provider counters
+- `GET /history` → Ordered call history with filters
 
 **Body format for /scenario:**
 ```json
@@ -289,12 +294,12 @@ Content-Type: application/json
 {"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}
 ```
 
-**Response (mode="success"):**
+**Response (mode="success") for `eth_blockNumber`:**
 ```http
 HTTP/1.1 200 OK
 Content-Type: application/json
 
-{"jsonrpc":"2.0","id":1,"result":"0x1"}
+{"jsonrpc":"2.0","id":1,"result":"0x1312D00"}
 ```
 
 ---
@@ -373,19 +378,15 @@ def test_scenario():
 
 ## 💾 Key Files to Know
 
-```
-curl https://sim-control.${BASE_DOMAIN}/health
-├─ ProviderState class
-├─ JSONRPCHandler class
-curl -X POST https://sim-control.${BASE_DOMAIN}/scenario \
-├─ main() function
-├─ PROVIDER_PORTS dict {1: 18545, 2: 18546, 3: 18547}
-└─ CONTROL_PORT = 19000
-```
-curl https://sim-control.${BASE_DOMAIN}/scenario
----
+| File | What to look at |
+|------|------------------|
+| `server.py` | `ProviderState`, `JSONRPCHandler`, `ControlHandler`, `main()` |
+| `stubs.py` | `METHOD_DEFAULTS` for JSON-RPC method fallback responses |
+| `constants.py` | Port mappings and shared constants |
+| `scripts/deploy.sh` | Build/import/apply/restart deployment flow |
+| `config/base-domain.env` | `BASE_DOMAIN` used to generate public hostnames |
 
-curl -X POST https://sim-control.${BASE_DOMAIN}/reset
+---
 
 ```bash
 # Test locally

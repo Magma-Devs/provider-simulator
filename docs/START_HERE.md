@@ -1,5 +1,32 @@
 # Provider Simulator - Complete Learning Guide (Index)
 
+## Table of Contents
+1. [Welcome! Start Here](#welcome-start-here-)
+2. [Quick Start (Public Repo)](#quick-start-public-repo)
+3. [Documentation Files](#-documentation-files)
+   - [1. ARCHITECTURE_GUIDE.md](#1-architecture_guidemd---the-big-picture)
+   - [2. CLASS_REFERENCE.md](#2-class_referencemd---deep-dive-into-code)
+   - [3. DATA_FLOWS.md](#3-data_flowsmd---how-requests-travel)
+4. [Recommended Learning Path](#-recommended-learning-path)
+   - [Path 1: I Want to Understand the System](#path-1-i-want-to-understand-the-system-complete-overview)
+   - [Path 2: I Want to Read the Code](#path-2-i-want-to-read-the-code-deep-technical)
+   - [Path 3: I Want to Deploy It](#path-3-i-want-to-deploy-it-operational)
+5. [Quick Navigation](#️-quick-navigation)
+6. [Key Concepts Explained Everywhere](#-key-concepts-explained-everywhere)
+7. [Deep Dives by Topic](#-deep-dives-by-topic)
+8. [Reading Strategies](#-reading-strategies)
+9. [Learning Exercises](#-learning-exercises)
+10. [Frequently Asked Questions](#-frequently-asked-questions)
+11. [Documentation Structure](#-documentation-structure)
+12. [Learning Outcomes](#-learning-outcomes)
+13. [Next Steps](#-next-steps)
+14. [Tips for Effective Learning](#-tips-for-effective-learning)
+15. [When You're Stuck](#-when-youre-stuck)
+16. [Documentation Quality](#-documentation-quality)
+17. [Your Learning Goal](#-your-learning-goal)
+
+---
+
 ## Welcome! Start Here 👋
 
 This project contains **comprehensive documentation** designed to teach you everything about the provider simulator in **friendly manner**.
@@ -7,6 +34,17 @@ This project contains **comprehensive documentation** designed to teach you ever
 **No prior knowledge required** - we explain everything from scratch.
 
 Public simulator URLs are derived from one simulator-owned setting: `BASE_DOMAIN` in `config/base-domain.env`.
+
+## Quick Start (Public Repo)
+
+Use HTTPS clone by default (no deploy key required for read-only pull):
+
+```bash
+git clone https://github.com/Magma-Devs/provider_simulator.git ~/provider-simulator
+cd ~/provider-simulator
+```
+
+For server bootstrap and production deploy flow, start with `docs/new_server_setup.md`.
 
 ---
 
@@ -42,7 +80,7 @@ Public simulator URLs are derived from one simulator-owned setting: `BASE_DOMAIN
   - Instance variables
   - `snapshot()` method
   - `update()` method
-  - `reset()` method
+  - scenario reset method
   - Thread safety explained
 - `JSONRPCHandler` class - serves fake responses
   - `do_POST()` method step-by-step
