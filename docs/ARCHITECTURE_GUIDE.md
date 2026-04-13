@@ -113,7 +113,10 @@ Everything is controllable, fast, and reliable!
 provider-simulator/
 ├── config/
 │   └── base-domain.env         ← Single source of truth for `BASE_DOMAIN`
+│   └── values_sim.yml           ←  Example router values to wire simulator into smart-router
 ├── server.py                     ← Main Python application
+├── stubs.py                      ← Predefined JSON-RPC responses for methods
+├── constants.py                  ← Constants like provider ports
 ├── Dockerfile                    ← How to build the container
 ├── requirements.txt              ← Python dependencies (empty - no deps!)
 ├── k8s/
@@ -122,6 +125,7 @@ provider-simulator/
 │   └── httproute-control.yml    ← K8s HTTPRoute (public exposure)
 ├── scripts/
 │   └── deploy.sh                ← Deployment automation script
+├── tests/                     ← (Optional) Unit tests for the simulator
 └── docs/
     └── ARCHITECTURE_GUIDE.md    ← This file!
 ```
@@ -164,7 +168,9 @@ provider_1_state = ProviderState(
 **Methods:**
 - `snapshot()` - Get a thread-safe copy of the current state
 - `update(cfg)` - Change the state (used by control API)
-- `reset()` - Return to healthy defaults
+- `reset_scenario()` - Return scenario config to healthy defaults
+- `clear_history()` - Clear history and counters only
+- `stats()` / `get_history()` - Read counters and call history snapshots
 
 ---
 
@@ -193,7 +199,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
    c. Check ProviderState for mode="rate_limit"? → Return 429 error
    d. Check error_probability=0.3? → 30% chance return error
    e. Check responses dict for "eth_blockNumber"? → Return custom response
-   f. Default: Return success with "0x1"
+   f. Default: Return method-specific stub from `METHOD_DEFAULTS`
+      (`eth_blockNumber` → `"0x1312D00"`, `eth_getBlockByNumber` → block object)
 
 3. Send response back to router
 ```
@@ -229,9 +236,13 @@ class ControlHandler(BaseHTTPRequestHandler):
 | Method | Path | Purpose | Example |
 |--------|------|---------|---------|
 | POST | `/scenario` | Configure all providers | `{"providers": {"1": {"mode": "down"}, "2": {"mode": "success"}}}` |
-| POST | `/reset` | Reset all to healthy | `{}` |
+| POST | `/reset` | Reset scenario config only | `{}` |
+| POST | `/history/clear` | Clear history/counters only | `{}` |
+| POST | `/reset/all` | Reset scenario config and clear history | `{}` |
 | GET | `/scenario` | Read current state | Returns: `{"providers": {"1": {"mode": "down"}, ...}}` |
 | GET | `/health` | Health check | Returns: `{"status": "ok"}` |
+| GET | `/stats` | Read per-provider counters | Returns call counts by status |
+| GET | `/history` | Read merged ordered call history | Supports filtering by time/provider/method/status/request_id |
 
 **Example flow:**
 ```
@@ -253,7 +264,7 @@ class ControlHandler(BaseHTTPRequestHandler):
 ```python
 def main():
     # 1. Create one ProviderState for each provider
-    states = {1: ProviderState(), 2: ProviderState(), 3: ProviderState()}
+    states = {pid: ProviderState() for pid in PROVIDER_PORTS}
     
     # 2. Start 3 JSONRPCHandlers on ports 18545, 18546, 18547
     servers = []
@@ -294,17 +305,17 @@ def main():
 ```dockerfile
 FROM python:3.12-slim
 WORKDIR /app
-COPY server.py .
+COPY *.py .
 EXPOSE 18545 18546 18547 19000
-CMD ["python", "server.py"]
+CMD ["python", "-u", "server.py"]
 ```
 
 **What it does:**
 - **`FROM python:3.12-slim`** - Start with a minimal Python 3.12 image
 - **`WORKDIR /app`** - Set working directory inside container
-- **`COPY server.py .`** - Copy our Python script into the container
+- **`COPY *.py .`** - Copy `server.py` plus supporting modules like `constants.py` and `stubs.py`
 - **`EXPOSE 18545 18546 18547 19000`** - Document which ports are used
-- **`CMD ["python", "server.py"]`** - Run the simulator when container starts
+- **`CMD ["python", "-u", "server.py"]`** - Run the simulator with unbuffered stdout so logs appear immediately
 
 **Why minimal?**
 - `3.12-slim` is only ~150MB (vs `3.12-full` which is ~900MB)
@@ -439,9 +450,13 @@ docker save provider-simulator:latest | microk8s ctr image import -
 # 3. Apply Kubernetes manifests
 kubectl apply -f k8s/deployment.yml
 kubectl apply -f k8s/service.yml
-kubectl apply -f k8s/httproute-control.yml
+kubectl apply -f <rendered httproute based on BASE_DOMAIN>
 
 # 4. Wait for pod to be ready
+kubectl rollout status deployment/provider-simulator -n lava-infra --timeout=60s
+
+# 5. Restart deployment so the new latest image is actually used
+kubectl rollout restart deployment/provider-simulator -n lava-infra
 kubectl rollout status deployment/provider-simulator -n lava-infra --timeout=60s
 ```
 
@@ -449,8 +464,8 @@ kubectl rollout status deployment/provider-simulator -n lava-infra --timeout=60s
 - Automates the entire deployment process
 - Builds the Docker image
 - Uploads it to MicroK8s (Kubernetes on the same machine)
-- Creates the Deployment, Service, and HTTPRoute
-- Waits for the pod to be healthy
+- Creates the Deployment, Service, and rendered HTTPRoute
+- Waits, restarts the deployment, and waits again so the updated `latest` image is used
 
 **Simple explanation:**
 - One script does everything needed to deploy
@@ -475,7 +490,8 @@ kubectl rollout status deployment/provider-simulator -n lava-infra --timeout=60s
 │                          │
 │  + snapshot()            │
 │  + update(cfg)           │
-│  + reset()               │
+│  + reset_scenario()      │
+│  + clear_history()       │
 └──────────────┬───────────┘
                │
       ┌────────┴────────┐

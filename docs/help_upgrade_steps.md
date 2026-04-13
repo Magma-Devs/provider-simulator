@@ -2,6 +2,10 @@
 
 ---
 
+> **Current recommendation:** for a fresh server, use `docs/new_server_setup.md` first.
+> This document is still useful as a deep-dive explanation of the Helm / Kubernetes
+> pieces, but the shortest current operator path lives in `new_server_setup.md`.
+
 ## Before you start — understanding the landscape
 
 ### What is the smart router?
@@ -248,8 +252,19 @@ Create the directory and file:
 mkdir -p ~/smart-router-standalone/values/simulator
 ```
 
-Then create `values/simulator/values_sim.yml` with this content
-(copy the real `base` and `eth` URLs from `values/core/values.yml`):
+Current repo state is simpler: `provider-simulator/config/values_sim.yml` already contains
+the full router list used on the working server (`base`, `eth`, `eth-sim`).
+
+Copy it as-is:
+
+```bash
+cp ~/provider-simulator/config/values_sim.yml ~/smart-router-standalone/values/simulator/values_sim.yml
+
+# sanity check — should print base, eth, eth-sim
+grep -n '^  - id:' ~/smart-router-standalone/values/simulator/values_sim.yml
+```
+
+Reference structure:
 
 ```yaml
 routers:
@@ -314,6 +329,11 @@ routers:
             addons: ["archive", "trace", "debug"]
 ```
 
+Source of truth:
+```bash
+cat ~/provider-simulator/config/values_sim.yml
+```
+
 ### What is `routers:` + `nodes:`?
 
 These are the YAML key names that chart 4.0.0 expects. The original guide used
@@ -345,7 +365,7 @@ latency scoring, and rate-limit avoidance.
 helm upgrade smart-router \
   "oci://ghcr.io/magma-devs/smart-router-helm-chart/smart-router" \
   --namespace lava-infra \
-  --version 4.0.0 \
+  --version "$HELM_CHART_VERSION" \
   --values values/core/values.yml \
   --values values/simulator/values_sim.yml \
   --wait --timeout 5m
@@ -503,7 +523,15 @@ process eventually crashes.
 
 ### Get the repo onto the server
 
-SSH keys for GitHub are not set up on the server by default. Two options:
+`Magma-Devs/provider_simulator` is now public, so read-only clone/pull does **not** require a deploy key.
+
+Recommended option:
+
+```bash
+git clone https://github.com/Magma-Devs/provider_simulator.git ~/provider-simulator
+```
+
+Alternative options:
 
 **Option A — Copy from your Mac (fastest, one-time):**
 
@@ -523,7 +551,7 @@ extracting it to `/root/`. No temporary file is created anywhere.
 macOS tar warnings about `LIBARCHIVE.xattr.com.apple.provenance` are harmless —
 macOS extended attributes that Linux tar does not understand but safely ignores.
 
-**Option B — GitHub deploy key (permanent, use for future re-deploys):**
+**Option B — GitHub deploy key or personal SSH key (only if you want SSH-based git access):**
 
 A deploy key is an SSH key pair where the public key is registered on a specific
 GitHub repo, granting read access to whoever has the private key.
@@ -588,36 +616,11 @@ cd ~/provider-simulator
 bash scripts/deploy.sh
 ```
 
-### ⚠️ After deploy.sh — always force a rollout restart
+### What `deploy.sh` does now
 
-`deploy.sh` builds a new Docker image tagged `provider-simulator:latest` and imports
-it into MicroK8s. However, **Kubernetes will not replace the running pod automatically**
-unless the image tag changes. Because the tag is always `latest`, Kubernetes sees the
-pod as already running the correct image and does nothing.
+`deploy.sh` already performs the rollout restart for you. No extra manual restart is needed after it finishes.
 
-You must explicitly restart the deployment to force Kubernetes to use the new image:
-
-```bash
-kubectl rollout restart deployment/provider-simulator -n lava-infra
-kubectl rollout status deployment/provider-simulator -n lava-infra --timeout=60s
-```
-
-`kubectl rollout restart` tells Kubernetes to replace the running pod with a new one.
-The new pod will pull (or in this case, use the already-imported) latest image from
-the MicroK8s image store — which now contains your updated code.
-
-`kubectl rollout status` waits until the new pod is `1/1 Running` before returning.
-
-**Why does this happen?**
-
-Kubernetes decides whether to restart a pod based on the image reference in the
-Deployment spec. If the tag is `latest` and `imagePullPolicy` is `IfNotPresent`
-(the default for locally-imported images), Kubernetes assumes the image is already
-correct and never re-checks. Changing the tag (e.g. `v1`, `v2`) would trigger a
-restart automatically, but using `latest` + `IfNotPresent` requires an explicit
-`rollout restart` after every redeploy.
-
-`scripts/deploy.sh` does three things in order:
+`scripts/deploy.sh` does four things in order:
 
 **1. Builds the Docker image:**
 ```
@@ -639,11 +642,16 @@ unless it is imported into MicroK8s. This step is required on every re-deploy if
 ```
 kubectl apply -f k8s/deployment.yml
 kubectl apply -f k8s/service.yml
-kubectl apply -f k8s/httproute-control.yml
+kubectl apply -f <rendered httproute using BASE_DOMAIN>
 ```
 - `deployment.yml` → tells Kubernetes to run 1 replica of the simulator container
 - `service.yml` → creates the Service that makes the DNS name resolve
-- `httproute-control.yml` → exposes the control API at `sim-control.victoria.magmadevs.com`
+- rendered `httproute-control.yml` → exposes the control API at `sim-control.<BASE_DOMAIN>`
+
+**4. Restarts the deployment and waits for readiness:**
+
+`deploy.sh` runs `kubectl rollout restart deployment/provider-simulator -n lava-infra`
+and waits until the new pod is ready.
 
 ---
 
@@ -651,7 +659,7 @@ kubectl apply -f k8s/httproute-control.yml
 
 ```bash
 kubectl get pods -n lava-infra | grep provider-simulator
-curl https://sim-control.victoria.magmadevs.com/health
+curl https://sim-control.<YOUR_DOMAIN>/health
 ```
 
 ### What does `1/1 Running` mean?
@@ -681,7 +689,7 @@ The eth-sim-router pods go `Running` within ~30 seconds of the simulator startin
 ## Step 10 — Final smoke test
 
 ```bash
-curl -s -X POST https://eth-sim-jsonrpc.victoria.magmadevs.com \
+curl -s -X POST https://eth-sim-jsonrpc.<YOUR_DOMAIN> \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 ```
@@ -695,20 +703,20 @@ The full request path:
 ```
 curl
   → Cloudflare (DNS / DDoS protection)
-    → Envoy Gateway (victoria.magmadevs.com:443)
-      → HTTPRoute: eth-sim-jsonrpc.victoria.magmadevs.com → eth-sim-router Service
+    → Envoy Gateway (<YOUR_DOMAIN>:443)
+      → HTTPRoute: eth-sim-jsonrpc.<YOUR_DOMAIN> → eth-sim-router Service
         → eth-sim-router pod (WRS scoring, picks a provider)
           → provider-simulator pod :18545 or :18546 or :18547
-            → returns fake block number "0x1"
+            → returns fake block number "0x1312D00"
 ```
 
 Expected response:
 ```json
-{"jsonrpc":"2.0","id":1,"result":"0x1"}
+{"jsonrpc":"2.0","id":1,"result":"0x1312D00"}
 ```
 
-`0x1` is the number 1 in hexadecimal. The simulator returns this for any request in
-default (success) mode. If you see this response, the entire stack is working end-to-end.
+`0x1312D00` is the current default stubbed result for `eth_blockNumber`. If you see this response,
+the entire stack is working end-to-end.
 
 If you get a `503` or connection error:
 - Check Step 9 — the simulator pod must be `Running`
@@ -732,14 +740,14 @@ kubectl logs -n lava-infra \
   --previous 2>/dev/null | grep -iE "error|fatal|panic|fail|refused|invalid"
 ```
 
-### Root cause — simulator returns wrong type for `eth_getBlockByNumber`
+### Root cause — older simulator returned wrong type for `eth_getBlockByNumber`
 
 On startup the router sends an `eth_getBlockByNumber` RPC call to each provider.
 This is a **pruning verification** — the router checks whether the node is full or
 archive by inspecting the block object. It expects the `result` field to be a
 **JSON object** (a block with fields like `number`, `hash`, `transactions`, etc.).
 
-The original `server.py` returned a bare hex string `"0x1"` as the default result
+An older `server.py` returned a bare hex string `"0x1"` as the default result
 for **every** JSON-RPC method regardless of what was called. The router tried to
 parse `"0x1"` as a block object, failed, and panicked — producing this log line:
 
@@ -747,7 +755,7 @@ parse `"0x1"` as a block object, failed, and panicked — producing this log lin
 "message":"[-] verify failed to parse result"
 ```
 
-### Fix — add `METHOD_DEFAULTS` to `server.py`
+### Fix — use current `server.py` with `METHOD_DEFAULTS`
 
 `server.py` needs per-method default responses so `eth_getBlockByNumber` returns a
 proper block object. The fix adds a `METHOD_DEFAULTS` dict and uses it as the
@@ -764,7 +772,7 @@ result = method_cfg.get("result", METHOD_DEFAULTS.get(method, "0x1"))
 `METHOD_DEFAULTS` contains realistic responses for all methods the router calls
 during startup verification, including the full block object for `eth_getBlockByNumber`.
 
-After editing `server.py` on your Mac, commit and push:
+If you still hit this on another server, make sure it is running the current repo version. After editing `server.py` on your Mac, commit and push:
 ```bash
 cd /Users/victoria/provider-simulator
 git add server.py
