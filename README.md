@@ -3,7 +3,7 @@
 A small HTTP JSON-RPC simulator for smart-router testing.
 
 It runs:
-- **3 simulated providers** on ports `18545`, `18546`, `18547`
+- **3 simulated nodes** on ports `18545`, `18546`, `18547`
 - **1 control API** on port `19000`
 
 Use it to test router behavior under:
