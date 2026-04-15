@@ -1,0 +1,113 @@
+---
+# Experimental deploy playbook — optional, not official.
+# Wraps scripts/deploy_experimental_full.sh with sane defaults.
+# Runs entirely on localhost (the deployment server itself).
+#
+# Prerequisites (one-time per server):
+#   apt-get update && apt-get install -y ansible
+#
+# Usage — defaults (recommended first run):
+#   cd ~/provider-simulator
+#   ansible-playbook -i localhost, ansible/experimental_deploy.yml
+#
+# Usage — dry run only, no changes:
+#   ansible-playbook -i localhost, ansible/experimental_deploy.yml \
+#     -e dry_run=true
+#
+# Usage — full deploy with all flags explicit:
+#   ansible-playbook -i localhost, ansible/experimental_deploy.yml \
+#     -e dry_run=false \
+#     -e sync_base_domain=true \
+#     -e skip_simulator=false \
+#     -e skip_router=false \
+#     -e skip_tls=false \
+#     -e skip_verify=false \
+#     -e smart_router_dir=/root/smart-router-standalone
+#
+# Usage — simulator only (skip router/TLS/verify):
+#   ansible-playbook -i localhost, ansible/experimental_deploy.yml \
+#     -e skip_router=true -e skip_verify=true
+
+- name: Experimental provider-simulator deploy
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    # Path to this repo on the server (auto-detected from playbook location)
+    repo_dir: "{{ playbook_dir | dirname }}"
+
+    # Path to smart-router-standalone on the server
+    smart_router_dir: "/root/smart-router-standalone"
+
+    # Set to true to print actions without executing anything
+    dry_run: false
+
+    # Sync config/base-domain.env from smart-router base_domain if they differ
+    sync_base_domain: true
+
+    # Skip simulator rebuild/redeploy (use if only router config changed)
+    skip_simulator: false
+
+    # Skip values_sim.yml copy + Helm upgrade + TLS refresh
+    skip_router: false
+
+    # Skip TLS certificate refresh after Helm upgrade
+    skip_tls: false
+
+    # Skip curl smoke checks at the end
+    skip_verify: false
+
+  tasks:
+    - name: Verify ansible_playbook is running on correct host
+      ansible.builtin.debug:
+        msg: "Running on: {{ ansible_hostname | default(lookup('pipe', 'hostname')) }}"
+
+    - name: Verify repo directory exists
+      ansible.builtin.stat:
+        path: "{{ repo_dir }}/scripts/deploy_experimental_full.sh"
+      register: script_stat
+      failed_when: not script_stat.stat.exists
+
+    - name: Verify smart-router-standalone directory exists
+      ansible.builtin.stat:
+        path: "{{ smart_router_dir }}"
+      register: router_dir_stat
+      failed_when: not router_dir_stat.stat.isdir
+      when: not skip_router | bool
+
+    - name: Build script arguments
+      ansible.builtin.set_fact:
+        deploy_args: >-
+          {{ '--dry-run' if dry_run | bool else '' }}
+          {{ '--sync-base-domain' if sync_base_domain | bool else '' }}
+          {{ '--skip-simulator' if skip_simulator | bool else '' }}
+          {{ '--skip-router' if skip_router | bool else '' }}
+          {{ '--skip-tls' if skip_tls | bool else '' }}
+          {{ '--skip-verify' if skip_verify | bool else '' }}
+          --smart-router-dir {{ smart_router_dir }}
+
+    - name: Show deploy configuration
+      ansible.builtin.debug:
+        msg:
+          - "repo_dir       : {{ repo_dir }}"
+          - "smart_router   : {{ smart_router_dir }}"
+          - "dry_run        : {{ dry_run }}"
+          - "sync_base_domain: {{ sync_base_domain }}"
+          - "skip_simulator : {{ skip_simulator }}"
+          - "skip_router    : {{ skip_router }}"
+          - "skip_tls       : {{ skip_tls }}"
+          - "skip_verify    : {{ skip_verify }}"
+          - "args           : {{ deploy_args | trim }}"
+
+    - name: Run experimental deploy script
+      ansible.builtin.command:
+        cmd: "bash scripts/deploy_experimental_full.sh {{ deploy_args | trim }}"
+        chdir: "{{ repo_dir }}"
+      register: deploy_output
+      changed_when: not dry_run | bool
+
+    - name: Show deploy output
+      ansible.builtin.debug:
+        msg: "{{ deploy_output.stdout_lines }}"
+

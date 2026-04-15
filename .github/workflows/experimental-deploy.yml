@@ -1,0 +1,128 @@
+name: Experimental Deploy
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+    inputs:
+      execute_full_deploy:
+        description: "Run full deploy (if false, preflight only)"
+        required: true
+        type: boolean
+        default: false
+      smart_router_dir:
+        description: "Path to smart-router-standalone on the runner"
+        required: false
+        type: string
+        default: "/root/smart-router-standalone"
+      sync_base_domain:
+        description: "Auto-sync config/base-domain.env from smart-router base_domain"
+        required: true
+        type: boolean
+        default: true
+      skip_tls:
+        description: "Skip TLS refresh step"
+        required: true
+        type: boolean
+        default: false
+      skip_verify:
+        description: "Skip smoke verification curls"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider-simulator-experimental-deploy
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show runtime context
+        run: |
+          set -euo pipefail
+          echo "runner: $(hostname)"
+          echo "user: $(whoami)"
+          echo "workspace: $GITHUB_WORKSPACE"
+
+      - name: Verify required CLIs
+        run: |
+          set -euo pipefail
+          for c in bash git python3 docker kubectl helm microk8s curl sed; do
+            if ! command -v "$c" >/dev/null 2>&1; then
+              echo "Missing command: $c"
+              exit 1
+            fi
+            echo "found: $c"
+          done
+
+      - name: Verify cluster and router prerequisites
+        env:
+          SMART_ROUTER_DIR_INPUT: ${{ github.event.inputs.smart_router_dir }}
+        run: |
+          set -euo pipefail
+          SMART_ROUTER_DIR="${SMART_ROUTER_DIR_INPUT:-/root/smart-router-standalone}"
+
+          test -d "$SMART_ROUTER_DIR"
+          test -f "$SMART_ROUTER_DIR/values/core/values.yml"
+          test -f "$SMART_ROUTER_DIR/scripts/utils/common.sh"
+          test -f "$SMART_ROUTER_DIR/scripts/install_gateway_api_tls_certificate.sh"
+
+          kubectl version --client
+          kubectl get ns lava-infra >/dev/null
+
+          echo "Smart-router dir OK: $SMART_ROUTER_DIR"
+
+      - name: Dry-run experimental script
+        env:
+          SMART_ROUTER_DIR_INPUT: ${{ github.event.inputs.smart_router_dir }}
+          SYNC_BASE_DOMAIN_INPUT: ${{ github.event.inputs.sync_base_domain }}
+        run: |
+          set -euo pipefail
+          SMART_ROUTER_DIR="${SMART_ROUTER_DIR_INPUT:-/root/smart-router-standalone}"
+          ARGS=(--dry-run --skip-verify --smart-router-dir "$SMART_ROUTER_DIR")
+
+          if [ "${SYNC_BASE_DOMAIN_INPUT:-true}" = "true" ]; then
+            ARGS+=(--sync-base-domain)
+          fi
+
+          bash scripts/deploy_experimental_full.sh "${ARGS[@]}"
+
+  deploy:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.execute_full_deploy == 'true'
+    needs: preflight
+    runs-on: self-hosted
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Execute experimental deploy
+        env:
+          SMART_ROUTER_DIR_INPUT: ${{ github.event.inputs.smart_router_dir }}
+          SYNC_BASE_DOMAIN_INPUT: ${{ github.event.inputs.sync_base_domain }}
+          SKIP_TLS_INPUT: ${{ github.event.inputs.skip_tls }}
+          SKIP_VERIFY_INPUT: ${{ github.event.inputs.skip_verify }}
+        run: |
+          set -euo pipefail
+          SMART_ROUTER_DIR="${SMART_ROUTER_DIR_INPUT:-/root/smart-router-standalone}"
+          ARGS=(--smart-router-dir "$SMART_ROUTER_DIR")
+
+          if [ "${SYNC_BASE_DOMAIN_INPUT:-true}" = "true" ]; then
+            ARGS+=(--sync-base-domain)
+          fi
+          if [ "${SKIP_TLS_INPUT:-false}" = "true" ]; then
+            ARGS+=(--skip-tls)
+          fi
+          if [ "${SKIP_VERIFY_INPUT:-false}" = "true" ]; then
+            ARGS+=(--skip-verify)
+          fi
+
+          bash scripts/deploy_experimental_full.sh "${ARGS[@]}"
+
