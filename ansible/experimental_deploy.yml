@@ -67,13 +67,25 @@
       ansible.builtin.stat:
         path: "{{ repo_dir }}/scripts/deploy_experimental_full.sh"
       register: script_stat
-      failed_when: not script_stat.stat.exists
+
+    - name: Assert deploy script exists
+      ansible.builtin.assert:
+        that:
+          - script_stat.stat.exists | default(false)
+        fail_msg: "Missing script: {{ repo_dir }}/scripts/deploy_experimental_full.sh"
 
     - name: Verify smart-router-standalone directory exists
       ansible.builtin.stat:
         path: "{{ smart_router_dir }}"
       register: router_dir_stat
-      failed_when: not router_dir_stat.stat.isdir
+      when: not skip_router | bool
+
+    - name: Assert smart-router-standalone directory exists
+      ansible.builtin.assert:
+        that:
+          - router_dir_stat.stat.exists | default(false)
+          - router_dir_stat.stat.isdir | default(false)
+        fail_msg: "smart_router_dir not found or not a directory: {{ smart_router_dir }}"
       when: not skip_router | bool
 
     - name: Build script arguments
