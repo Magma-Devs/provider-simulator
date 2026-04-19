@@ -119,7 +119,7 @@ class ProviderState:
             self.calls_by_status   = {}
 
     def push_call_to_buffer(self, method: str, status: str, latency_ms: int,
-                             request_id: object = None) -> None:
+                             request_id: object = None, lava_headers: dict = None) -> None:
         """Push one call record into the in-memory ring-buffer and update all-time counters.
 
         Storage is entirely in RAM — nothing is written to disk or any logging framework.
@@ -128,24 +128,27 @@ class ProviderState:
         are never capped and survive buffer rollovers.
 
         Args:
-            method:     JSON-RPC method name, e.g. "eth_blockNumber". Use "*" for
-                        requests that were rejected before the body was parsed (mode=down).
-            status:     Outcome string — "success" | "error" | "rate_limit" | "down".
-            latency_ms: Simulated delay that was injected before the response, in ms.
-                        0 when no latency was configured or the request was rejected early.
-            request_id: The JSON-RPC ``id`` field from the request body (echoed back in
-                        the response). ``None`` for down-mode rejections where the body
-                        is never parsed.
+            method:       JSON-RPC method name, e.g. "eth_blockNumber". Use "*" for
+                          requests that were rejected before the body was parsed (mode=down).
+            status:       Outcome string — "success" | "error" | "rate_limit" | "down".
+            latency_ms:   Simulated delay that was injected before the response, in ms.
+                          0 when no latency was configured or the request was rejected early.
+            request_id:   The JSON-RPC ``id`` field from the request body (echoed back in
+                          the response). ``None`` for down-mode rejections where the body
+                          is never parsed.
+            lava_headers: Dict of all ``lava-*`` HTTP request headers provided by the router.
+                          ``{}`` if no lava headers were sent.
         """
         now = time.time()
         with self.lock:
             self.history.append({
-                "ts":         now,
-                "time":       datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S.") + f"{int(now % 1 * 1000):03d} UTC",
-                "request_id": request_id,
-                "method":     method,
-                "status":     status,
-                "latency_ms": latency_ms,
+                "ts":            now,
+                "time":          datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S.") + f"{int(now % 1 * 1000):03d} UTC",
+                "request_id":    request_id,
+                "method":        method,
+                "status":        status,
+                "latency_ms":    latency_ms,
+                "lava_headers":  lava_headers or {},
             })
             self.total_calls += 1
             self.calls_by_status[status] = self.calls_by_status.get(status, 0) + 1
@@ -157,7 +160,9 @@ class ProviderState:
         with self.lock:
             return {
                 "total_requests_all_time":    self.total_calls,
+                "total_calls":                self.total_calls,  # alias for convenience
                 "requests_by_status_all_time": dict(self.calls_by_status),
+                "calls_by_status":             dict(self.calls_by_status),  # alias for convenience
                 "history_ring_buffer_entries": len(self.history),  # max = HISTORY_MAX
             }
 
@@ -193,11 +198,17 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         provider_id: str     = self.server.provider_id
         snap = state.snapshot()
 
+        # Capture all lava-* headers from the router
+        lava_headers = {
+            k: v for k, v in self.headers.items()
+            if k.lower().startswith("lava-")
+        }
+
         # Outage — return 503
         if snap["mode"] == "down":
             self.send_response(503)
             self.end_headers()
-            state.push_call_to_buffer("*", "down", 0, request_id=None)
+            state.push_call_to_buffer("*", "down", 0, request_id=None, lava_headers=lava_headers)
             return
 
         # Latency injection
@@ -214,7 +225,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             self._reply(429, {"jsonrpc": "2.0", "id": req_id,
                               "error": {"code": 429, "message": "Too many requests"}})
             state.push_call_to_buffer(method, "rate_limit", self._elapsed_ms(t_start),
-                                      request_id=req_id)
+                                      request_id=req_id, lava_headers=lava_headers)
             return
 
         # Probabilistic / forced error — use configurable code, message, and HTTP status
@@ -225,7 +236,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             self._reply(http_st, {"jsonrpc": "2.0", "id": req_id,
                                   "error": {"code": err_code, "message": err_msg}})
             state.push_call_to_buffer(method, "error", self._elapsed_ms(t_start),
-                                      request_id=req_id)
+                                      request_id=req_id, lava_headers=lava_headers)
             return
 
         # Success — look up method-specific result
@@ -245,7 +256,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
 
         self._reply(200, {"jsonrpc": "2.0", "id": req_id, "result": result})
         state.push_call_to_buffer(method, "success", self._elapsed_ms(t_start),
-                                  request_id=req_id)
+                                  request_id=req_id, lava_headers=lava_headers)
 
     @staticmethod
     def _elapsed_ms(t_start: float) -> int:
@@ -353,19 +364,23 @@ class ControlHandler(BaseHTTPRequestHandler):
 
         elif self.path == "/history" or self.path.startswith("/history?"):
             # Supported query params (all optional, combinable):
-            #   ?from=<unix_ts>   — include only calls at or after this timestamp
-            #   ?to=<unix_ts>     — include only calls at or before this timestamp
-            #   ?last=<seconds>   — shorthand: calls in the last N seconds
-            #   ?provider=<id>    — filter to a single provider (1, 2, or 3)
-            #   ?method=<name>    — filter to a specific RPC method
-            #   ?status=<name>    — filter by status (success, error, rate_limit, down)
-            #   ?request_id=<id>  — filter by the JSON-RPC id echoed in the request
+            #   ?from=<unix_ts>         — include only calls at or after this timestamp
+            #   ?to=<unix_ts>           — include only calls at or before this timestamp
+            #   ?last=<seconds>         — shorthand: calls in the last N seconds
+            #   ?provider=<id>          — filter to a single provider (1, 2, or 3)
+            #   ?method=<name>          — filter to a specific RPC method
+            #   ?status=<name>          — filter by status (success, error, rate_limit, down)
+            #   ?request_id=<id>        — filter by the JSON-RPC id echoed in the request
+            #   ?lava_header_*=<value>  — filter by lava header name (e.g. lava_header_lava_stateful_api=true)
             #
             # Each entry in the response includes:
             #   call_order        — 1-based position in the merged timeline (sorted by ts).
             #                       call_order=1 is the provider the router tried FIRST,
             #                       call_order=2 is the second attempt, etc.
+            #   correlation_group — groups calls by (request_id, method) within 50ms window.
+            #                       calls from same relay have same correlation_group.
             #   request_id        — the JSON-RPC id from the request body (None for down-mode)
+            #   lava_headers      — dict of all lava-* headers sent by the router (empty dict if none)
             #
             # Examples:
             #   /history?last=60
@@ -373,15 +388,24 @@ class ControlHandler(BaseHTTPRequestHandler):
             #   /history?last=120&provider=2
             #   /history?last=60&status=error
             #   /history?request_id=42
+            #   /history?last=60&lava_header_lava_stateful_api=true
             qs = parse_qs(urlparse(self.path).query)
 
-            t_from      = float(qs["from"][0])      if "from"       in qs else None
-            t_to        = float(qs["to"][0])         if "to"         in qs else None
-            last_secs   = float(qs["last"][0])       if "last"       in qs else None
-            f_provider  = qs["provider"][0]          if "provider"   in qs else None
-            f_method    = qs["method"][0]            if "method"     in qs else None
-            f_status    = qs["status"][0]            if "status"     in qs else None
-            f_request_id = qs["request_id"][0]       if "request_id" in qs else None
+            t_from        = float(qs["from"][0])      if "from"       in qs else None
+            t_to          = float(qs["to"][0])         if "to"         in qs else None
+            last_secs     = float(qs["last"][0])       if "last"       in qs else None
+            f_provider    = qs["provider"][0]          if "provider"   in qs else None
+            f_method      = qs["method"][0]            if "method"     in qs else None
+            f_status      = qs["status"][0]            if "status"     in qs else None
+            f_request_id  = qs["request_id"][0]        if "request_id" in qs else None
+            
+            # Extract lava header filters: ?lava_header_lava_stateful_api=true becomes {"lava-stateful-api": "true"}
+            f_lava_headers = {}
+            for param in qs:
+                if param.startswith("lava_header_"):
+                    header_name = param.replace("lava_header_", "").replace("_", "-")
+                    header_value = qs[param][0]
+                    f_lava_headers[header_name] = header_value
 
             if last_secs is not None:
                 t_from = time.time() - last_secs
@@ -396,9 +420,38 @@ class ControlHandler(BaseHTTPRequestHandler):
                     if f_method      and entry["method"] != f_method:               continue
                     if f_status      and entry["status"] != f_status:               continue
                     if f_request_id  and str(entry.get("request_id")) != f_request_id: continue
+                    # Check lava header filters (all must match)
+                    if f_lava_headers:
+                        entry_headers = entry.get("lava_headers", {})
+                        if not all(entry_headers.get(k) == v for k, v in f_lava_headers.items()):
+                            continue
                     all_calls.append({"provider": pid, **entry})
 
             all_calls.sort(key=lambda x: x["ts"])
+            
+            # Assign correlation_group: group calls by (request_id, method) within 50ms window
+            correlation_map = {}  # (request_id, method) → (last_ts, group_id)
+            group_counter = 0
+            
+            for entry in all_calls:
+                key = (entry.get("request_id"), entry["method"])
+                
+                if key in correlation_map:
+                    last_ts, group_id = correlation_map[key]
+                    if entry["ts"] - last_ts < 0.050:  # 50ms window
+                        entry["correlation_group"] = group_id
+                    else:
+                        # New relay started (same request_id+method but >50ms apart)
+                        group_counter += 1
+                        entry["correlation_group"] = group_counter
+                        correlation_map[key] = (entry["ts"], group_counter)
+                else:
+                    # First call with this (request_id, method)
+                    group_counter += 1
+                    entry["correlation_group"] = group_counter
+                    correlation_map[key] = (entry["ts"], group_counter)
+            
+            # Assign call_order within the merged timeline
             for i, entry in enumerate(all_calls, start=1):
                 entry["call_order"] = i
             self._reply(200, {"count": len(all_calls), "history": all_calls})
