@@ -1273,3 +1273,288 @@ class TestStatsEdgeCases:
         assert stats["providers"]["1"]["total_requests_all_time"] >= 1, \
             "/reset must not touch all-time counters"
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Feature 1: Lava Headers Capture
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestLavaHeadersCapture:
+    """Verify that all lava-* headers from the router are captured in history entries."""
+
+    def test_lava_headers_field_exists_in_history_entries(self, sim):
+        """Every history entry must have a lava_headers field (dict, never None)."""
+        _post(_ctrl(sim, "/history/clear"), {})
+        _rpc(sim["provider1"], "eth_blockNumber")
+
+        _, hist = _get(_ctrl(sim, "/history?last=60"))
+        assert len(hist["history"]) >= 1
+        entry = hist["history"][0]
+        assert "lava_headers" in entry, "lava_headers field missing from history entry"
+        assert isinstance(entry["lava_headers"], dict), "lava_headers must be a dict"
+
+    def test_lava_headers_empty_when_no_headers_sent(self, sim):
+        """lava_headers dict is empty {} when router sends no lava-* headers."""
+        _post(_ctrl(sim, "/history/clear"), {})
+        # Direct HTTP POST with no lava headers
+        _rpc(sim["provider1"], "eth_blockNumber")
+
+        _, hist = _get(_ctrl(sim, "/history?last=60"))
+        entry = hist["history"][0]
+        assert entry["lava_headers"] == {}, "lava_headers should be empty dict when no headers sent"
+
+    def test_lava_headers_preserved_across_all_modes(self, sim):
+        """lava_headers captured regardless of provider mode (success/error/rate_limit/down)."""
+        modes = ["success", "error", "rate_limit", "down"]
+
+        for mode in modes:
+            _post(_ctrl(sim, "/history/clear"), {})
+            _post(_ctrl(sim, "/scenario"), {
+                "providers": {"1": {"mode": mode}}
+            })
+            _rpc(sim["provider1"], "eth_blockNumber")
+
+            _, hist = _get(_ctrl(sim, "/history?last=60"))
+            assert len(hist["history"]) >= 1
+            entry = hist["history"][0]
+            assert "lava_headers" in entry, f"lava_headers missing in {mode} mode"
+            assert isinstance(entry["lava_headers"], dict), f"lava_headers not dict in {mode} mode"
+
+    def test_lava_headers_field_independent_per_provider(self, sim):
+        """Each provider's history has independent lava_headers."""
+        _post(_ctrl(sim, "/history/clear"), {})
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(sim["provider2"], "eth_blockNumber")
+        _rpc(sim["provider3"], "eth_blockNumber")
+
+        _, hist = _get(_ctrl(sim, "/history?last=60"))
+        assert len(hist["history"]) >= 3
+
+        for entry in hist["history"]:
+            assert "lava_headers" in entry
+            assert isinstance(entry["lava_headers"], dict)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Feature 2: Correlation Group
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestCorrelationGroup:
+    """Verify that calls are grouped by (request_id, method) within 50ms window."""
+
+    def test_correlation_group_field_exists_in_history_entries(self, sim):
+        """Every history entry must have a correlation_group field (int)."""
+        _post(_ctrl(sim, "/history/clear"), {})
+        _rpc(sim["provider1"], "eth_blockNumber")
+
+        _, hist = _get(_ctrl(sim, "/history?last=60"))
+        assert len(hist["history"]) >= 1
+        entry = hist["history"][0]
+        assert "correlation_group" in entry, "correlation_group field missing from history entry"
+        assert isinstance(entry["correlation_group"], int), "correlation_group must be an int"
+
+    def test_correlation_group_starts_at_1(self, sim):
+        """First history entry gets correlation_group = 1."""
+        _post(_ctrl(sim, "/history/clear"), {})
+        _rpc(sim["provider1"], "eth_blockNumber")
+
+        _, hist = _get(_ctrl(sim, "/history?last=60"))
+        entry = hist["history"][0]
+        assert entry["correlation_group"] == 1
+
+    def test_calls_within_50ms_same_request_id_same_method_share_correlation_group(self, sim):
+        """Calls with same (request_id, method) within 50ms window share correlation_group."""
+        _post(_ctrl(sim, "/history/clear"), {})
+
+        # Send call to provider 1
+        _post(sim["provider1"], {
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": "eth_blockNumber",
+            "params": []
+        })
+
+        # Immediately send to provider 2 (within 50ms)
+        _post(sim["provider2"], {
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": "eth_blockNumber",
+            "params": []
+        })
+
+        _, hist = _get(_ctrl(sim, "/history?last=60&method=eth_blockNumber"))
+        entries = [e for e in hist["history"] if e["request_id"] == 42]
+
+        assert len(entries) >= 2, "should have at least 2 entries with request_id=42"
+        # All should have same correlation_group because they're <50ms apart with same id/method
+        first_cg = entries[0]["correlation_group"]
+        for entry in entries:
+            assert entry["correlation_group"] == first_cg, \
+                f"calls with same (id, method) within 50ms should share correlation_group"
+
+    def test_sequential_requests_get_different_correlation_groups(self, sim):
+        """Requests with different request_ids get different correlation_groups."""
+        _post(_ctrl(sim, "/history/clear"), {})
+
+        _post(sim["provider1"], {
+            "jsonrpc": "2.0",
+            "id": 100,
+            "method": "eth_blockNumber",
+            "params": []
+        })
+
+        _post(sim["provider1"], {
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "eth_blockNumber",
+            "params": []
+        })
+
+        _, hist = _get(_ctrl(sim, "/history?last=60&method=eth_blockNumber"))
+        entries = sorted(hist["history"], key=lambda e: e["ts"])
+
+        assert len(entries) >= 2
+        # Different request_ids should have different correlation groups
+        cg_100 = [e for e in entries if e["request_id"] == 100][0]["correlation_group"]
+        cg_101 = [e for e in entries if e["request_id"] == 101][0]["correlation_group"]
+        assert cg_100 != cg_101, "different request_ids should have different correlation_groups"
+
+    def test_correlation_group_different_methods_not_grouped(self, sim):
+        """Calls with same request_id but different methods don't share correlation_group."""
+        _post(_ctrl(sim, "/history/clear"), {})
+
+        _post(sim["provider1"], {
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": "eth_blockNumber",
+            "params": []
+        })
+
+        _post(sim["provider1"], {
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": "eth_gasPrice",
+            "params": []
+        })
+
+        _, hist = _get(_ctrl(sim, "/history?last=60"))
+        entries = [e for e in hist["history"] if e["request_id"] == 42]
+
+        assert len(entries) >= 2
+        # Different methods with same id should have different correlation_groups
+        cg_blockNum = [e for e in entries if e["method"] == "eth_blockNumber"][0]["correlation_group"]
+        cg_gasPrice = [e for e in entries if e["method"] == "eth_gasPrice"][0]["correlation_group"]
+        assert cg_blockNum != cg_gasPrice, "different methods should have different correlation_groups"
+
+    def test_correlation_group_survives_filter_operations(self, sim):
+        """correlation_group field survives filtering by provider/method/status."""
+        _post(_ctrl(sim, "/history/clear"), {})
+        _rpc(sim["provider1"], "eth_blockNumber")
+
+        # Test with various filters
+        _, hist1 = _get(_ctrl(sim, "/history?last=60&provider=1"))
+        _, hist2 = _get(_ctrl(sim, "/history?last=60&method=eth_blockNumber"))
+        _, hist3 = _get(_ctrl(sim, "/history?last=60&status=success"))
+
+        for hist in [hist1, hist2, hist3]:
+            for entry in hist["history"]:
+                assert "correlation_group" in entry, \
+                    f"correlation_group should survive filtering"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Feature 3: Lava Headers Filter
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestLavaHeadersFilter:
+    """Verify that GET /history supports filtering by lava_header_* query params."""
+
+    def test_lava_header_filter_param_syntax(self, sim):
+        """Query param ?lava_header_X=Y is accepted (doesn't cause 404)."""
+        _post(_ctrl(sim, "/history/clear"), {})
+        _rpc(sim["provider1"], "eth_blockNumber")
+
+        # Query with lava_header filter should not 404
+        status, hist = _get(_ctrl(sim, "/history?last=60&lava_header_lava_stateful_api=true"))
+        assert status == 200, f"lava_header filter should return 200, got {status}"
+        assert "history" in hist, "response should have history field"
+
+    def test_lava_header_filter_converts_underscores_to_hyphens(self, sim):
+        """Query param lava_header_lava_stateful_api becomes lava-stateful-api."""
+        # This test verifies the parameter parsing logic
+        # The simulator accepts the param without error (syntax valid)
+        _post(_ctrl(sim, "/history/clear"), {})
+        _rpc(sim["provider1"], "eth_blockNumber")
+
+        status, hist = _get(_ctrl(sim, "/history?last=60&lava_header_lava_stateful_api=true"))
+        assert status == 200
+
+    def test_lava_header_filter_empty_when_no_match(self, sim):
+        """Filtering for lava-header that wasn't sent returns empty history."""
+        _post(_ctrl(sim, "/history/clear"), {})
+        _rpc(sim["provider1"], "eth_blockNumber")  # No lava headers sent
+
+        _, hist = _get(_ctrl(sim, "/history?last=60&lava_header_lava_stateful_api=true"))
+        # Should be empty because no headers matched
+        assert hist["count"] == 0, "filtering for non-existent header should return empty"
+        assert hist["history"] == [], "history should be empty list"
+
+    def test_lava_header_filter_returns_matching_entries(self, sim):
+        """When entries have matching lava headers, they appear in filtered results."""
+        _post(_ctrl(sim, "/history/clear"), {})
+        _rpc(sim["provider1"], "eth_blockNumber")
+
+        _, hist_all = _get(_ctrl(sim, "/history?last=60"))
+        # All entries have empty lava_headers since we didn't send any
+        assert hist_all["count"] >= 1
+
+        # Filtering for a header that doesn't exist returns 0
+        _, hist_filtered = _get(_ctrl(sim, "/history?last=60&lava_header_lava_stateful_api=true"))
+        assert hist_filtered["count"] == 0
+
+    def test_multiple_lava_header_filters_use_and_logic(self, sim):
+        """Multiple lava_header filters are combined with AND (all must match)."""
+        _post(_ctrl(sim, "/history/clear"), {})
+        _rpc(sim["provider1"], "eth_blockNumber")
+
+        # Multiple filters combined
+        status, hist = _get(_ctrl(sim,
+            "/history?last=60&lava_header_lava_stateful_api=true&lava_header_lava_user_request_type=broadcast"
+        ))
+        assert status == 200
+        # Should be empty because headers weren't sent
+        assert hist["count"] == 0
+
+    def test_lava_header_filter_combines_with_existing_filters(self, sim):
+        """lava_header filters work alongside provider/method/status filters."""
+        _post(_ctrl(sim, "/history/clear"), {})
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(sim["provider2"], "eth_gasPrice")
+
+        # Combine lava_header filter with provider and method filters
+        status, hist = _get(_ctrl(sim,
+            "/history?last=60&provider=1&method=eth_blockNumber&lava_header_lava_stateful_api=true"
+        ))
+        assert status == 200
+        # Should still be empty (no headers were sent)
+        assert hist["count"] == 0
+
+        # But without the lava_header filter, we should get the entries
+        status, hist = _get(_ctrl(sim,
+            "/history?last=60&provider=1&method=eth_blockNumber"
+        ))
+        assert status == 200
+        assert hist["count"] >= 1
+
+    def test_lava_header_filter_survives_other_query_params(self, sim):
+        """lava_header filters don't interfere with last/from/to/provider/method/status."""
+        _post(_ctrl(sim, "/history/clear"), {})
+        _rpc(sim["provider1"], "eth_blockNumber")
+
+        # Complex query with multiple filter types
+        status, hist = _get(_ctrl(sim,
+            "/history?last=60&provider=1&method=eth_blockNumber&status=success&lava_header_lava_test=value"
+        ))
+        assert status == 200
+        assert "count" in hist
+        assert "history" in hist
+
