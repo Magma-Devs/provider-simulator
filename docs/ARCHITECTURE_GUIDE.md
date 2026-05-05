@@ -852,6 +852,55 @@ Scenario: Test wants to verify failover behavior
 
 ---
 
+## Implementation Details
+
+The high-level walkthrough above covers the main flow. This section documents specific behaviors that are easy to miss but matter when extending or debugging the simulator.
+
+### `eth_getBlockByNumber` — block-number rewriting
+
+Most stubs in `stubs.py` are static (e.g. `eth_blockNumber` always returns `"0x1312D00"`). But `eth_getBlockByNumber` is special: `JSONRPCHandler.do_POST` (server.py:249-255) rewrites `result["number"]` from `params[0]` of the request before returning. Named blocks map to fixed hex values:
+
+| Named block in request | `result["number"]` returned |
+|---|---|
+| `latest` | `0x1312D00` |
+| `earliest` | `0x0` |
+| `pending` | `0x1312D01` |
+| `safe` | `0x1312D00` |
+| `finalized` | `0x1312CFF` |
+| any hex (e.g. `0x42`) | echoed back unchanged |
+
+The smart router's pruning verification compares the requested block number with the block object's `number` field. Without the rewrite, every `eth_getBlockByNumber` call would return `0x1312D00` regardless of input and the router would reject the response.
+
+### `lava_header_*` — dynamic filter on `/history`
+
+The `/history` endpoint accepts a dynamic-prefix filter: any query parameter beginning with `lava_header_` is interpreted as a captured-header filter. Underscores in the parameter name become hyphens when matching the actual header. Examples:
+
+- `?lava_header_lava_stateful_api=true` → filter where the captured header `lava-stateful-api` equals `true`.
+- `?lava_header_lava_consumer_ip=10.0.0.1&lava_header_lava_session=42` → both must match (AND).
+
+Headers are captured at request time inside `JSONRPCHandler.do_POST`: every inbound header whose name starts with `lava-` (case-insensitive) is recorded in the history entry. Each `/history` entry exposes the full captured dict under `"lava_headers"`.
+
+### `responses` lookup order in the success path
+
+When `mode="success"`, the handler picks the result for a given method using this exact chain (server.py:243-244):
+
+1. `state.responses[method]["result"]` — explicit per-method override
+2. `state.responses["default"]["result"]` — explicit catch-all override
+3. `METHOD_DEFAULTS[method]` — the static stub from `stubs.py`
+4. `"0x1"` — final fallback for methods not in `METHOD_DEFAULTS`
+
+This means setting `state.responses = {"default": {"result": "0xABC"}}` makes every method return `0xABC` unless an individual method has its own entry — useful for "all methods return X" test setups without enumerating each one.
+
+### Per-handler `provider_id`
+
+`main()` (server.py:504) attaches a `provider_id` attribute to each JSON-RPC server: `srv.provider_id = pid`. Inside `JSONRPCHandler.do_POST` it's read as `self.server.provider_id`. This is how a single handler class can be reused across the three provider servers — the running handler instance always knows which provider it is when it pushes into history.
+
+### Top-level Python modules only
+
+`Dockerfile` line 3 reads `COPY *.py .` — only `*.py` files at the repo root are copied into the container. Any new runtime module **must live at the top level** (not inside `lib/` or `simulator/` subpackages). This is intentional (the simulator stays flat and dependency-free) but can surprise contributors who reflexively organize new code into subdirectories.
+
+---
+
 ## Summary
 
 ### The Big Picture (Elevator Pitch)

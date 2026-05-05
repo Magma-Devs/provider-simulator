@@ -22,11 +22,10 @@ It has two parts:
 - Step 2 — deploy simulator pod
 - Step 3 — verify simulator pod is healthy
 - Step 4 — copy `values_sim.yml` into `smart-router-standalone`
-- Step 5 — verify chart version
-- Step 6 — run `helm upgrade` with simulator values
-- Step 7 — smoke test public simulator route
+- Step 5 — install/upgrade smart router (auto-layers simulator values)
+- Step 6 — smoke test public simulator route
 
-If this server also needs **clock injection / score reset via debug domain**, continue to **Appendix A** after step 7.
+If this server also needs **clock injection / score reset via debug domain**, continue to **Appendix A** after step 6.
 
 ---
 
@@ -141,34 +140,20 @@ routers:
 
 ---
 
-## 5. Verify chart version
+## 5. Install / upgrade smart router (auto-layers simulator values)
 
-```bash
-grep -i helm_chart_version ~/smart-router-standalone/scripts/utils/common.sh
-```
-
-Expected: `export HELM_CHART_VERSION="4.0.0"` — update if it shows `3.1.0`.
-
----
-
-## 6. Helm upgrade — point smart router at simulator
+`scripts/install_smart_router.sh` auto-detects `values/simulator/values_sim.yml` (placed in step 4) and merges it into the Helm upgrade — no manual `--values` flag needed. It also reads the chart version from `scripts/utils/common.sh`, so the separate version check is no longer required.
 
 ```bash
 cd ~/smart-router-standalone
-source scripts/utils/common.sh
-echo "$HELM_REGISTRY_TOKEN" | helm registry login ghcr.io \
-  --username "$HELM_REGISTRY_USERNAME" --password-stdin
-
-helm upgrade smart-router \
-  "oci://ghcr.io/magma-devs/smart-router-helm-chart/smart-router" \
-  --namespace lava-infra \
-  --version "$HELM_CHART_VERSION" \
-  --values values/core/values.yml \
-  --values values/simulator/values_sim.yml \
-  --wait --timeout 5m
-
+bash scripts/install_smart_router.sh
 bash scripts/install_gateway_api_tls_certificate.sh
 ```
+
+What the install script does:
+- Authenticates to GHCR using `HELM_REGISTRY_TOKEN` from `scripts/utils/common.sh`.
+- Runs `helm upgrade --install smart-router` with `values/core/values.yml` **plus** `values/simulator/values_sim.yml` (auto-merged when the file exists — see `install_smart_router.sh` lines 244-254).
+- Then `install_gateway_api_tls_certificate.sh` refreshes the TLS cert so `sim-control.<YOUR_DOMAIN>` is covered.
 
 Verify (use the domain from step 0):
 
@@ -177,9 +162,13 @@ curl -s https://sim-control.<YOUR_DOMAIN>/health
 # Expected: {"status": "ok"}
 ```
 
+> **Truly-fresh server?** If smart-router and the observability stack are not yet installed at all, run `bash scripts/install_wizard.sh` instead. It installs the full stack (observability, Loki, gateway, TLS, smart-router) and picks up `values_sim.yml` via the same auto-detect mechanism — as long as step 4 is done first.
+>
+> **Want to confirm chart version manually?** `grep -i helm_chart_version scripts/utils/common.sh` — expected `4.1.0` (the schema with `routers:` / `nodes:` was introduced in `4.0.0` and is still current).
+
 ---
 
-## 7. Smoke test
+## 6. Smoke test
 
 ```bash
 curl -s -X POST https://eth-sim-jsonrpc.<YOUR_DOMAIN> \

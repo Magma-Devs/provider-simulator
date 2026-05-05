@@ -4,8 +4,8 @@
 **Deployment:** `provider-simulator`  
 **Ports:** providers `:18545 / :18546 / :18547` · control `:19000`
 
-> Examples below use Victoria's domain. Replace `victoria.magmadevs.com` with the
-> server's `BASE_DOMAIN` (set in `config/base-domain.env`).
+> **Examples below are from Victoria's setup** — server IP `64.176.170.39`, SSH user `victoria`, domain `victoria.magmadevs.com`.
+> Each teammate has their own server. Replace these with your own server's IP, SSH user, and `BASE_DOMAIN` (set in `config/base-domain.env`) when running any of the commands below.
 
 ---
 
