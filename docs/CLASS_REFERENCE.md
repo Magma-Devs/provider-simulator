@@ -30,19 +30,31 @@ class ProviderState:
     mode: str = "success"
     latency_ms: int = 0
     error_probability: float = 0.0
+    error_code: int = -32000
+    error_message: str = "Internal error"
+    http_status: int = 200
     responses: Dict[str, Any] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    history: deque = field(default_factory=lambda: deque(maxlen=HISTORY_MAX), repr=False)
+    total_calls: int = 0
+    calls_by_status: Dict[str, int] = field(default_factory=dict, repr=False)
 ```
 
 ### Instance Variables Explained
 
 | Variable | Type | Default | Purpose |
 |----------|------|---------|---------|
-| `mode` | str | "success" | What this provider does: "success", "error", "rate_limit", "down" |
-| `latency_ms` | int | 0 | How many milliseconds to delay responses |
-| `error_probability` | float | 0.0 | Chance of error (0.0 = never, 1.0 = always) |
-| `responses` | dict | {} | Custom responses for specific methods |
-| `lock` | Lock | new Lock() | Thread-safety mechanism |
+| `mode` | str | `"success"` | Provider behaviour: `"success"`, `"error"`, `"rate_limit"`, `"down"` |
+| `latency_ms` | int | `0` | Milliseconds to sleep before responding |
+| `error_probability` | float | `0.0` | Probability of error when `mode="success"` (0.0 = never, 1.0 = always) |
+| `error_code` | int | `-32000` | JSON-RPC error code when `mode="error"` or `error_probability` fires |
+| `error_message` | str | `"Internal error"` | JSON-RPC error message paired with `error_code` |
+| `http_status` | int | `200` | HTTP status of error responses (200 = JSON-RPC body error; 400/500 = HTTP-level) |
+| `responses` | dict | `{}` | Per-method custom result overrides (`{method_name: {result: ...}}`) |
+| `lock` | Lock | new Lock() | Field-level lock used by every accessor method |
+| `history` | deque | `deque(maxlen=HISTORY_MAX)` | Per-provider ring buffer of recent calls; oldest is dropped at 200 entries |
+| `total_calls` | int | `0` | All-time call count; never reset by ring rollover, only by `clear_history()` |
+| `calls_by_status` | dict | `{}` | All-time per-status counters (`success`/`error`/`rate_limit`/`down`) |
 
 ### Methods
 
@@ -55,13 +67,16 @@ def snapshot(self) -> dict:
             "mode":              self.mode,
             "latency_ms":        self.latency_ms,
             "error_probability": self.error_probability,
+            "error_code":        self.error_code,
+            "error_message":     self.error_message,
+            "http_status":       self.http_status,
         }
 ```
 
 **What it does:**
-- Returns a **copy** of the current state
-- Uses the lock to ensure the copy is consistent
-- Doesn't include `responses` (only exposed via control API separately)
+- Returns a **copy** of the six mutable scenario-config fields
+- Uses the lock so the copy is internally consistent even if a writer is running concurrently
+- Does NOT include `responses` (returned only via `state.responses` under the lock when the success path actually needs it) or `history`/counters (those have dedicated accessors `get_history()`/`stats()`)
 
 **Why this is needed:**
 - Without the lock, if thread A is updating `mode` while thread B is reading it, thread B might get a corrupted state
@@ -75,7 +90,8 @@ provider_state.latency_ms = 100
 
 snap = provider_state.snapshot()
 print(snap)
-# Output: {"mode": "rate_limit", "latency_ms": 100, "error_probability": 0.0}
+# Output: {"mode": "rate_limit", "latency_ms": 100, "error_probability": 0.0,
+#          "error_code": -32000, "error_message": "Internal error", "http_status": 200}
 ```
 
 ---
@@ -88,6 +104,9 @@ def update(self, cfg: dict) -> None:
         self.mode              = cfg.get("mode",              self.mode)
         self.latency_ms        = cfg.get("latency_ms",        self.latency_ms)
         self.error_probability = cfg.get("error_probability", self.error_probability)
+        self.error_code        = cfg.get("error_code",        self.error_code)
+        self.error_message     = cfg.get("error_message",     self.error_message)
+        self.http_status       = cfg.get("http_status",       self.http_status)
         if "responses" in cfg:
             self.responses = cfg["responses"]
 ```
@@ -147,6 +166,103 @@ provider_state.reset_scenario()
 **Used by:** 
 - ControlHandler when test sends `/reset` request
 - The reset_simulator fixture in pytest (runs after each test)
+
+---
+
+#### **4. clear_history() - Wipe Call Log and Counters**
+
+```python
+def clear_history(self) -> None:
+    with self.lock:
+        self.history.clear()
+        self.total_calls       = 0
+        self.calls_by_status   = {}
+```
+
+**What it does:**
+- Drops every entry from the in-memory ring-buffer
+- Resets the all-time `total_calls` and `calls_by_status` counters to zero
+- Does NOT touch scenario config — mode, latency, responses, etc. all stay as they were
+
+**Why this matters:**
+`/history/clear` is load-bearing for tests that need a clean call log on a still-configured provider — e.g. set `mode="rate_limit"`, clear history, send a request, confirm it was rate-limited without prior background traffic. Pairing it with the inverse `reset_scenario()` (which keeps history) is what makes the three reset routes meaningfully different: `/reset` (scenario only), `/history/clear` (history only), `/reset/all` (both).
+
+**Used by:**
+- ControlHandler when test sends `POST /history/clear` or `POST /reset/all`
+
+---
+
+#### **5. push_call_to_buffer() - Record a Completed Call**
+
+```python
+def push_call_to_buffer(self, method: str, status: str, latency_ms: int,
+                        request_id: object = None, lava_headers: dict = None) -> None:
+    now = time.time()
+    with self.lock:
+        self.history.append({
+            "ts":           now,
+            "time":         <UTC-formatted "YYYY-MM-DD HH:MM:SS.mmm UTC">,
+            "request_id":   request_id,
+            "method":       method,
+            "status":       status,
+            "latency_ms":   latency_ms,
+            "lava_headers": lava_headers or {},
+        })
+        self.total_calls += 1
+        self.calls_by_status[status] = self.calls_by_status.get(status, 0) + 1
+```
+
+**What it does:**
+- Appends one entry to the per-provider ring buffer (capped at `HISTORY_MAX = 200`; oldest is dropped on overflow)
+- Increments the all-time `total_calls` counter (never reset by ring rollover)
+- Bumps the per-status counter in `calls_by_status`
+
+**Called by:** `JSONRPCHandler.do_POST` on **every** branch — success, error, rate_limit, and down — so history is the source of truth for what actually happened.
+
+**Special values:**
+- `method="*"` is used for `mode="down"` calls, where the body is never parsed. Filter with `?method=*` to find rejected requests.
+- `request_id=None` for those same down-mode calls (no body → no `id` field to echo).
+- `lava_headers` is the dict of all `lava-*` request headers captured by the handler.
+
+---
+
+#### **6. stats() - All-Time Counters**
+
+```python
+def stats(self) -> dict:
+    with self.lock:
+        return {
+            "total_requests_all_time":     self.total_calls,
+            "total_calls":                 self.total_calls,
+            "requests_by_status_all_time": dict(self.calls_by_status),
+            "calls_by_status":             dict(self.calls_by_status),
+            "history_ring_buffer_entries": len(self.history),
+        }
+```
+
+**What it does:**
+- Returns a thread-safe snapshot of the all-time counters for this provider
+- Counters survive ring-buffer rollover — only `clear_history()` resets them
+- Includes both `total_requests_all_time` / `total_calls` and `requests_by_status_all_time` / `calls_by_status` as aliases (legacy name plus shorter alias for convenience)
+- `history_ring_buffer_entries` is the current buffer occupancy, capped at `HISTORY_MAX`
+
+**Used by:** `ControlHandler.do_GET` to build the `GET /stats` response.
+
+---
+
+#### **7. get_history() - Snapshot of the Ring Buffer**
+
+```python
+def get_history(self) -> list:
+    with self.lock:
+        return list(self.history)
+```
+
+**What it does:**
+- Returns a list copy of the current ring-buffer contents (oldest → newest order)
+- Mutations to the returned list do not affect the live buffer
+
+**Used by:** `ControlHandler.do_GET` to build the `GET /history` response. After collecting one list per provider, the handler merges them, sorts by `ts`, and assigns derived `correlation_group` / `call_order` fields before returning.
 
 ---
 
@@ -229,7 +345,7 @@ def do_POST(self):
     length = int(self.headers.get("Content-Length", 0))
     body   = json.loads(self.rfile.read(length)) if length else {}
     req_id = body.get("id", 1)
-    method = body.get("method", "default")
+    method = body.get("method", "unknown")
 
     # Step 4: Check for rate limiting
     if snap["mode"] == "rate_limit":
@@ -242,10 +358,10 @@ def do_POST(self):
 
     # Step 5: Check for probabilistic errors
     if snap["mode"] == "error" or random.random() < snap["error_probability"]:
-        self._reply(200, {
+        self._reply(snap["http_status"], {
             "jsonrpc": "2.0",
             "id": req_id,
-            "error": {"code": -32000, "message": "Internal error"}
+            "error": {"code": snap["error_code"], "message": snap["error_message"]}
         })
         return
 
@@ -266,7 +382,7 @@ snap = state.snapshot()
 ```
 - Gets the ProviderState object for this provider
 - Takes a thread-safe snapshot of the state
-- `snap` is now a dict like: `{"mode": "down", "latency_ms": 0, "error_probability": 0.0}`
+- `snap` is now a dict with all six scenario-config fields: `{"mode": "down", "latency_ms": 0, "error_probability": 0.0, "error_code": -32000, "error_message": "Internal error", "http_status": 200}`
 
 **Step 2: Check if Provider is Down**
 ```python
@@ -356,13 +472,14 @@ def _reply(self, status: int, data: dict):
     self.send_response(status)
     self.send_header("Content-Type", "application/json")
     self.send_header("Content-Length", str(len(body)))
+    self.send_header("Cache-Control", "no-store")
     self.end_headers()
     self.wfile.write(body)
 ```
 
 **What it does:**
 - Converts the response data to JSON
-- Sends HTTP headers (status, content-type, content-length)
+- Sends HTTP headers (status, content-type, content-length, `Cache-Control: no-store` so routers/caches do not retain simulated responses)
 - Sends the body
 
 **Example:**
@@ -611,7 +728,7 @@ def do_GET(self):
 
 **Case 4: GET /history**
 - Returns merged, ordered call history across all providers
-- Supports query params like `last`, `provider`, `method`, `status`, and `request_id`
+- Supports query params: `last`, `from`, `to`, `provider`, `method`, `status`, `request_id`, and the dynamic-prefix `lava_header_<name>=<value>` (underscores in `<name>` become hyphens — e.g. `?lava_header_lava_stateful_api=true` matches header `lava-stateful-api: true`; multiple `lava_header_*` filters AND together)
 
 ---
 
@@ -920,7 +1037,8 @@ Content-Type: application/json
 def do_POST(self):
     state: ProviderState = self.server.state  # Provider 1's state
     snap = state.snapshot()
-    # snap = {"mode": "rate_limit", "latency_ms": 0, "error_probability": 0.0}
+    # snap = {"mode": "rate_limit", "latency_ms": 0, "error_probability": 0.0,
+    #         "error_code": -32000, "error_message": "Internal error", "http_status": 200}
     
     if snap["mode"] == "down":  # ✗ False
         ...
@@ -932,7 +1050,7 @@ def do_POST(self):
     body = json.loads(self.rfile.read(length))
     # body = {"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []}
     req_id = body.get("id", 1)  # req_id = 1
-    method = body.get("method", "default")  # method = "eth_blockNumber"
+    method = body.get("method", "unknown")  # method = "eth_blockNumber"
     
     if snap["mode"] == "rate_limit":  # ✓ TRUE!
         self._reply(429, {

@@ -18,7 +18,7 @@ Use it to test router behavior under:
 
 ### Run locally
 
-No external Python dependencies are required.
+Requires Python 3.12 (stdlib only — no external dependencies).
 
 ```bash
 python -u server.py
@@ -40,12 +40,23 @@ curl -s -X POST http://localhost:18545 \
   -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 ```
 
+Run the test suite (boots all four servers in-process on isolated test ports `28545-28547`/`29000`):
+
+```bash
+pytest tests/test_simulator.py -v
+```
+
 ### Deploy to server
 
-On the deployment server:
+Prerequisites on the deployment server: `docker`, `microk8s` (with `ctr`), `kubectl`.
 
 ```bash
 cd ~/provider-simulator
+
+# First time only — set this server's domain (must match base_domain in
+# smart-router-standalone/values/core/values.yml).
+vi config/base-domain.env
+
 bash scripts/deploy.sh
 ```
 
@@ -60,21 +71,24 @@ For a fresh server or full router wiring, use the setup guide below.
 - **Architecture guide:** [`docs/ARCHITECTURE_GUIDE.md`](docs/ARCHITECTURE_GUIDE.md)
 - **Code/class walkthrough:** [`docs/CLASS_REFERENCE.md`](docs/CLASS_REFERENCE.md)
 - **Data flow explanations:** [`docs/DATA_FLOWS.md`](docs/DATA_FLOWS.md)
-- **Docs index / learning path:** [`docs/START_HERE.md`](docs/README.md)
+- **Docs index / learning path:** [`docs/START_HERE.md`](docs/START_HERE.md)
 
 ## Public URLs
 
 Public URLs are derived from `BASE_DOMAIN` in `config/base-domain.env`.
 
 Typical endpoints:
-- `https://sim-control.<BASE_DOMAIN>`
-- `https://eth-sim-jsonrpc.<BASE_DOMAIN>`
+- `https://sim-control.<BASE_DOMAIN>` — created by `scripts/deploy.sh` (HTTPRoute in this repo)
+- `https://eth-sim-jsonrpc.<BASE_DOMAIN>` — created by the smart-router Helm chart once `values_sim.yml` is wired in (see step 5 of [`docs/new_server_setup.md`](docs/new_server_setup.md))
 
 ## Repo layout
 
 - `server.py` — simulator + control API
 - `stubs.py` — default JSON-RPC method responses
 - `constants.py` — shared ports/constants
+- `requirements.txt` — empty (stdlib only)
+- `Dockerfile` — image used by `scripts/deploy.sh`
+- `tests/` — pytest suite (`pytest tests/test_simulator.py -v`)
 - `k8s/` — Kubernetes manifests
 - `scripts/deploy.sh` — build/import/apply/restart deploy flow
 - `config/values_sim.yml` — router values used to wire simulator into smart-router
