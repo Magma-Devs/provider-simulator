@@ -85,6 +85,7 @@ curl -s "$SIM_CONTROL_URL/history?last=30" | python3 -m json.tool
 | `method=<name>` | string | Filter to a specific RPC method name |
 | `status=<name>` | `success`\|`error`\|`rate_limit`\|`down` | Filter by outcome |
 | `request_id=<id>` | int | Filter by the JSON-RPC `id` field echoed in the request |
+| `lava_header_<name>=<value>` | string | Filter by a captured Lava header. Underscores in `<name>` become hyphens — e.g. `lava_header_lava_stateful_api=true` matches header `lava-stateful-api: true`. Multiple `lava_header_*` filters AND together. |
 
 ---
 

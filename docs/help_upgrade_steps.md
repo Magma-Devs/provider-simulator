@@ -90,7 +90,7 @@ NOT contain the router source code — just the configuration for deploying it v
 ## ⚠️ Schema changed in chart 4.0.0 — read before touching any values file
 
 The original implementation guide was written when the chart was version `3.1.0`.
-The server now runs `4.0.0`. The YAML key names changed between versions.
+The server now runs `4.1.0` — the YAML schema (top-level key names) changed between `3.1.0` and `4.0.0` and is unchanged in `4.1.0`. The schema warning below applies whenever you are on `4.x`.
 
 Using the old keys produces **no error** — Helm silently stores them and ignores them.
 This is the most confusing failure mode: everything looks like it worked, but no new
@@ -148,7 +148,7 @@ statements — shell variable definitions that subsequent commands will need.
 If you opened the file, you would see something like:
 ```bash
 export NAMESPACE="lava-infra"
-export HELM_CHART_VERSION="4.0.0"
+export HELM_CHART_VERSION="4.1.0"
 export HELM_REGISTRY_USERNAME="some-github-user"
 export HELM_REGISTRY_TOKEN="ghp_xxxxxxxxxxxxxxxxxxxx"
 ```
@@ -186,11 +186,11 @@ grep -i helm_chart_version scripts/utils/common.sh
 `grep` searches a file for lines matching a pattern. `-i` means case-insensitive.
 Expected output:
 ```
-export HELM_CHART_VERSION="4.0.0"
+export HELM_CHART_VERSION="4.1.0"
 ```
 
-If it says `3.1.0`, the upgrade will apply the wrong chart version. Update the file
-to `4.0.0` before continuing.
+If it says `3.1.0` or an earlier `4.x` (e.g. `4.0.0`), bring the file up to the
+current version (`4.1.0`) before continuing.
 
 ---
 
@@ -361,6 +361,8 @@ latency scoring, and rate-limit avoidance.
 
 ## Step 5 — Run the Helm upgrade
 
+> **Shortcut for fresh installs:** `bash scripts/install_smart_router.sh` (lines 244-254) auto-detects `values/simulator/values_sim.yml` and merges it into the upgrade — no manual `--values` flags needed. The manual command below still works and is kept as a deep-dive walkthrough; for the operator path, follow `docs/new_server_setup.md` step 5 instead.
+
 ```bash
 helm upgrade smart-router \
   "oci://ghcr.io/magma-devs/smart-router-helm-chart/smart-router" \
@@ -384,9 +386,9 @@ helm upgrade smart-router \
 → The Kubernetes namespace where the release lives. All smart router pods, services,
   and routes are in this namespace.
 
-`--version 4.0.0`
-→ Use exactly this chart version. Pinning prevents accidentally pulling a newer
-  version with schema changes you are not ready for.
+`--version 4.1.0`
+→ Use exactly this chart version (current as of this writing). Pinning prevents
+  accidentally pulling a newer version with schema changes you are not ready for.
 
 `--values values/core/values.yml`
 → The base configuration (domain, gateway, dashboard, resource limits).
@@ -411,7 +413,7 @@ helm upgrade smart-router \
 
 Expected output:
 ```
-Pulled: ghcr.io/magma-devs/smart-router-helm-chart/smart-router:4.0.0
+Pulled: ghcr.io/magma-devs/smart-router-helm-chart/smart-router:4.1.0
 Release "smart-router" has been upgraded. Happy Helming!
 STATUS: deployed
 REVISION: 3   ← increments on every upgrade; exact number does not matter
