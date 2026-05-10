@@ -254,7 +254,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 result = dict(result)
                 result["number"] = named.get(params[0], params[0])
 
-        self._reply(200, {"jsonrpc": "2.0", "id": req_id, "result": result})
+        self._reply(snap.get("http_status", 200), {"jsonrpc": "2.0", "id": req_id, "result": result})
         state.push_call_to_buffer(method, "success", self._elapsed_ms(t_start),
                                   request_id=req_id, lava_headers=lava_headers)
 

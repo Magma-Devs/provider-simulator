@@ -1558,3 +1558,35 @@ class TestLavaHeadersFilter:
         assert "count" in hist
         assert "history" in hist
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# http_status applies in success mode (Task 1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestHttpStatusInSuccessMode:
+    """The http_status field used to be honored only when mode='error'.
+    After Task 1, it applies in success mode too — provider returns the
+    custom HTTP status code with a valid JSON-RPC success body."""
+
+    def test_success_mode_with_custom_http_status(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "success", "http_status": 502}}})
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 502, f"expected HTTP 502, got {status}"
+        assert "result" in body, f"expected JSON-RPC success body, got {body}"
+        assert "error" not in body
+
+    def test_success_mode_default_http_status_is_200(self, sim):
+        # Regression: default http_status=200 must continue to apply in success mode
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "success"}}})
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200
+        assert "result" in body
+
+    def test_error_mode_still_honors_http_status(self, sim):
+        # Regression: existing behaviour (http_status in error mode) still works
+        _post(_ctrl(sim, "/scenario"),
+              {"providers": {"1": {"mode": "error", "http_status": 500, "error_code": -32603}}})
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 500
+        assert body["error"]["code"] == -32603
+
