@@ -135,25 +135,30 @@ routers:
 ```
 > Source of truth: `provider-simulator/config/values_sim.yml`
 
-> ⚠️ Use `routers:` (not `chains:`) and `nodes:` (not `providers:`) — chart 4.0.0 schema.
+> ⚠️ Use `routers:` (not `chains:`) and `nodes:` (not `providers:`) — current chart 5.x schema.
 > Using old keys produces no error — Helm silently ignores them and nothing gets created.
 
 ---
 
-## 5. Install / upgrade smart router (auto-layers simulator values)
+## 5. Install / upgrade smart router (use `INTERNAL=1` to layer simulator values)
 
-`scripts/install_smart_router.sh` auto-detects `values/simulator/values_sim.yml` (placed in step 4) and merges it into the Helm upgrade — no manual `--values` flag needed. It also reads the chart version from `scripts/utils/common.sh`, so the separate version check is no longer required.
+For a fresh server that needs simulator traffic, run the install via `make` with `INTERNAL=1`:
 
 ```bash
 cd ~/smart-router-standalone
-bash scripts/install_smart_router.sh
+make install_smart_router INTERNAL=1
 bash scripts/install_gateway_api_tls_certificate.sh
 ```
 
-What the install script does:
+The Makefile target dispatches to `scripts/install_smart_router.sh --internal` (see `Makefile` lines 66-68 + 139-140). `INTERNAL=1` is the dev/test path — without it, the script uses customer-facing values and **does not** layer `values_sim.yml`, so the `eth-sim` router never gets created.
+
+What `INTERNAL=1` does:
+- Picks **`values/core/values_internal.yml`** as the base values file (not the customer-facing `values/core/values.yml`).
+- Layers `values/simulator/values_sim.yml` on top *if* it exists (placed in step 4).
+- Reads the chart version from `scripts/utils/common.sh` (`HELM_CHART_VERSION`).
 - Authenticates to GHCR using `HELM_REGISTRY_TOKEN` from `scripts/utils/common.sh`.
-- Runs `helm upgrade --install smart-router` with `values/core/values.yml` **plus** `values/simulator/values_sim.yml` (auto-merged when the file exists — see `install_smart_router.sh` lines 244-254).
-- Then `install_gateway_api_tls_certificate.sh` refreshes the TLS cert so `sim-control.<YOUR_DOMAIN>` is covered.
+
+Then `install_gateway_api_tls_certificate.sh` refreshes the TLS cert so `sim-control.<YOUR_DOMAIN>` is covered.
 
 Verify (use the domain from step 0):
 
@@ -162,9 +167,11 @@ curl -s https://sim-control.<YOUR_DOMAIN>/health
 # Expected: {"status": "ok"}
 ```
 
-> **Truly-fresh server?** If smart-router and the observability stack are not yet installed at all, run `bash scripts/install_wizard.sh` instead. It installs the full stack (observability, Loki, gateway, TLS, smart-router) and picks up `values_sim.yml` via the same auto-detect mechanism — as long as step 4 is done first.
->
-> **Want to confirm chart version manually?** `grep -i helm_chart_version scripts/utils/common.sh` — expected `4.1.0` (the schema with `routers:` / `nodes:` was introduced in `4.0.0` and is still current).
+> **Why opt-in instead of auto-detect?** Helm replaces list values wholesale — when `values_sim.yml` is layered, its `routers:` list completely replaces the one in the base values file. That's safe in internal mode (`values_internal.yml` is a dev-only fixture and `values_sim.yml` is a superset). On a customer install you almost certainly don't want simulator routers in the cluster, so the merge is opt-in. See `install_smart_router.sh` around lines 265-272.
+
+> **Truly-fresh server?** If smart-router and the observability stack are not yet installed at all, run `make wizard` first to lay down the full stack (observability, Loki, gateway, TLS, smart-router from customer values). Then re-run `make install_smart_router INTERNAL=1` to switch to internal-mode + values_sim.yml.
+
+> **Want to confirm chart version manually?** `grep -i helm_chart_version scripts/utils/common.sh` — expected `5.0.2` (or whichever 5.x is the current published release). The `routers:` / `nodes:` schema is the long-standing format used by 5.x.
 
 ---
 
