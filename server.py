@@ -40,7 +40,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse, parse_qs
 
@@ -231,6 +231,20 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         body   = json.loads(self.rfile.read(length)) if length else {}
         req_id = body.get("id", 1)
         method = body.get("method", "unknown")
+
+        # Hang — accept request, sleep "forever" so the router hits its timeout.
+        # 30s is long enough for any reasonable client read timeout to fire;
+        # finite so the thread eventually exits and we don't leak threads if
+        # the client disconnects without timing out.
+        if snap["mode"] == "hang":
+            state.push_call_to_buffer(method, "hang", 0,
+                                      request_id=req_id, lava_headers=lava_headers)
+            time.sleep(30)
+            try:
+                self.connection.close()
+            except Exception:
+                pass
+            return
 
         # Rate limit — return HTTP 429
         if snap["mode"] == "rate_limit":
@@ -554,7 +568,10 @@ def main():
 
     servers = []
     for pid, port in PROVIDER_PORTS.items():
-        srv = HTTPServer(("0.0.0.0", port), JSONRPCHandler)
+        # ThreadingHTTPServer so a slow/hanging request on one provider doesn't
+        # block its own subsequent requests or the other providers' threads.
+        srv = ThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
+        srv.daemon_threads = True
         srv.state       = states[pid]
         srv.provider_id = pid          # available as self.server.provider_id in handler
         servers.append(srv)
