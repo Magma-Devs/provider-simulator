@@ -1590,3 +1590,77 @@ class TestHttpStatusInSuccessMode:
         assert status == 500
         assert body["error"]["code"] == -32603
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# corruption_mode (Task 2): malformed / wrong-shape JSON
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestCorruptionMode:
+    """corruption_mode is an orthogonal field: it composes with mode='success'
+    and mode='error' to alter the response body shape. Values:
+      - "truncated"       — chop the last 10 chars of the JSON string
+      - "missing_field"   — omit one top-level field (configured by missing_field)
+      - "invalid_json"    — return obviously-not-JSON ('}{ {{')
+      - "empty_response"  — return an empty body
+    """
+
+    def test_truncated_corrupts_json(self, sim):
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"mode": "success", "corruption_mode": "truncated"}}
+        })
+        # Use raw urllib because _rpc parses JSON which would fail on truncated
+        req = urllib.request.Request(
+            sim["provider1"], data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}',
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            raw = resp.read().decode()
+        # Truncation: last 10 chars chopped — at least we know it doesn't parse
+        try:
+            json.loads(raw)
+            assert False, f"expected truncation; got valid JSON: {raw}"
+        except json.JSONDecodeError:
+            pass  # expected
+
+    def test_missing_field_omits_specified_top_level_field(self, sim):
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"mode": "success", "corruption_mode": "missing_field",
+                                 "missing_field": "result"}}
+        })
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200
+        assert "result" not in body, f"expected 'result' missing, got {body}"
+        assert "jsonrpc" in body  # untouched
+        assert "id" in body
+
+    def test_invalid_json_returns_garbage(self, sim):
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"mode": "success", "corruption_mode": "invalid_json"}}
+        })
+        req = urllib.request.Request(
+            sim["provider1"], data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}',
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            raw = resp.read().decode()
+        try:
+            json.loads(raw)
+            assert False, f"expected invalid JSON; got valid: {raw}"
+        except json.JSONDecodeError:
+            pass
+
+    def test_empty_response_returns_no_body(self, sim):
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"mode": "success", "corruption_mode": "empty_response"}}
+        })
+        req = urllib.request.Request(
+            sim["provider1"], data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}',
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            raw = resp.read().decode()
+        assert raw == "", f"expected empty body, got {raw!r}"
+
+    def test_default_corruption_mode_is_none(self, sim):
+        # Regression: default behaviour unchanged when corruption_mode is unset
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "success"}}})
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200
+        assert "result" in body
