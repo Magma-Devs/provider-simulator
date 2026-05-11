@@ -52,7 +52,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from http.server import HTTPServer
+from http.server import HTTPServer, ThreadingHTTPServer
 
 import pytest
 
@@ -121,7 +121,10 @@ def sim():
 
     servers = []
     for pid, port in _PROVIDER_PORTS.items():
-        srv             = HTTPServer(("127.0.0.1", port), JSONRPCHandler)
+        # ThreadingHTTPServer so slow/hanging requests don't serialize each
+        # provider's handler queue (matters for hang mode tests).
+        srv             = ThreadingHTTPServer(("127.0.0.1", port), JSONRPCHandler)
+        srv.daemon_threads = True
         srv.state       = states[pid]
         srv.provider_id = pid
         servers.append(srv)
@@ -1558,3 +1561,202 @@ class TestLavaHeadersFilter:
         assert "count" in hist
         assert "history" in hist
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# http_status applies in success mode (custom HTTP code with valid body)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestHttpStatusInSuccessMode:
+    """The http_status field used to be honored only when mode='error'.
+    Now it applies in success mode too — provider returns the custom HTTP
+    status code with a valid JSON-RPC success body."""
+
+    def test_success_mode_with_custom_http_status(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "success", "http_status": 502}}})
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 502, f"expected HTTP 502, got {status}"
+        assert "result" in body, f"expected JSON-RPC success body, got {body}"
+        assert "error" not in body
+
+    def test_success_mode_default_http_status_is_200(self, sim):
+        # Regression: default http_status=200 must continue to apply in success mode
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "success"}}})
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200
+        assert "result" in body
+
+    def test_error_mode_still_honors_http_status(self, sim):
+        # Regression: existing behaviour (http_status in error mode) still works
+        _post(_ctrl(sim, "/scenario"),
+              {"providers": {"1": {"mode": "error", "http_status": 500, "error_code": -32603}}})
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 500
+        assert body["error"]["code"] == -32603
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# corruption_mode: malformed / wrong-shape JSON responses
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestCorruptionMode:
+    """corruption_mode is an orthogonal field: it composes with mode='success'
+    and mode='error' to alter the response body shape. Values:
+      - "truncated"       — chop the last 10 chars of the JSON string
+      - "missing_field"   — omit one top-level field (configured by missing_field)
+      - "invalid_json"    — return obviously-not-JSON ('}{ {{')
+      - "empty_response"  — return an empty body
+    """
+
+    def test_truncated_corrupts_json(self, sim):
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"mode": "success", "corruption_mode": "truncated"}}
+        })
+        # Use raw urllib because _rpc parses JSON which would fail on truncated
+        req = urllib.request.Request(
+            sim["provider1"], data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}',
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            raw = resp.read().decode()
+        # Truncation: last 10 chars chopped — at least we know it doesn't parse
+        try:
+            json.loads(raw)
+            assert False, f"expected truncation; got valid JSON: {raw}"
+        except json.JSONDecodeError:
+            pass  # expected
+
+    def test_missing_field_omits_specified_top_level_field(self, sim):
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"mode": "success", "corruption_mode": "missing_field",
+                                 "missing_field": "result"}}
+        })
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200
+        assert "result" not in body, f"expected 'result' missing, got {body}"
+        assert "jsonrpc" in body  # untouched
+        assert "id" in body
+
+    def test_invalid_json_returns_garbage(self, sim):
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"mode": "success", "corruption_mode": "invalid_json"}}
+        })
+        req = urllib.request.Request(
+            sim["provider1"], data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}',
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            raw = resp.read().decode()
+        try:
+            json.loads(raw)
+            assert False, f"expected invalid JSON; got valid: {raw}"
+        except json.JSONDecodeError:
+            pass
+
+    def test_empty_response_returns_no_body(self, sim):
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"mode": "success", "corruption_mode": "empty_response"}}
+        })
+        req = urllib.request.Request(
+            sim["provider1"], data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}',
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            raw = resp.read().decode()
+        assert raw == "", f"expected empty body, got {raw!r}"
+
+    def test_default_corruption_mode_is_none(self, sim):
+        # Regression: default behaviour unchanged when corruption_mode is unset
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "success"}}})
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200
+        assert "result" in body
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# blocks_behind: per-provider stale block heights for sync-freshness / CV tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestBlocksBehind:
+    """blocks_behind shifts the provider's reported eth_blockNumber by N blocks
+    relative to the global stub (METHOD_DEFAULTS['eth_blockNumber'] = '0x1312D00').
+    Positive = behind; negative = ahead. Affects eth_blockNumber and
+    eth_getBlockByNumber('latest', ...). Composes with mode='success'."""
+
+    HEAD = int("0x1312D00", 16)  # 20,000,000 — the simulator's default eth_blockNumber
+
+    def test_blocks_behind_shifts_eth_blockNumber(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "success", "blocks_behind": 100}}})
+        _, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert int(body["result"], 16) == self.HEAD - 100
+
+    def test_blocks_ahead_via_negative_value(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "success", "blocks_behind": -50}}})
+        _, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert int(body["result"], 16) == self.HEAD + 50
+
+    def test_default_blocks_behind_is_zero(self, sim):
+        # Regression: default behaviour returns the canonical head
+        _, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert body["result"] == "0x1312D00"
+
+    def test_eth_get_block_by_number_latest_respects_blocks_behind(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "success", "blocks_behind": 25}}})
+        _, body = _rpc(sim["provider1"], "eth_getBlockByNumber", ["latest", False])
+        assert int(body["result"]["number"], 16) == self.HEAD - 25
+
+    def test_per_provider_disagreement(self, sim):
+        # Cross-validation enabler: each provider can report a different head
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {"mode": "success", "blocks_behind": 0},
+                "2": {"mode": "success", "blocks_behind": 5},
+                "3": {"mode": "success", "blocks_behind": 100},
+            }
+        })
+        _, b1 = _rpc(sim["provider1"], "eth_blockNumber")
+        _, b2 = _rpc(sim["provider2"], "eth_blockNumber")
+        _, b3 = _rpc(sim["provider3"], "eth_blockNumber")
+        assert int(b1["result"], 16) == self.HEAD
+        assert int(b2["result"], 16) == self.HEAD - 5
+        assert int(b3["result"], 16) == self.HEAD - 100
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# hang mode: accept request, never respond (forces router timeout)
+# ─────────────────────────────────────────────────────────────────────────────
+
+import socket as _socket  # for timeout exception type
+
+class TestHangMode:
+    """mode='hang' accepts the TCP connection and the request body but never
+    sends a response. The router's per-attempt timeout fires; from the client
+    side it looks like a request that exceeds the read timeout."""
+
+    def test_hang_blocks_until_client_timeout(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "hang"}}})
+        # Client sets a small read timeout — should hit it because server hangs
+        req = urllib.request.Request(
+            sim["provider1"], data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}',
+            headers={"Content-Type": "application/json"})
+        t0 = time.monotonic()
+        try:
+            urllib.request.urlopen(req, timeout=1.0)  # 1 second client timeout
+            assert False, "expected timeout, server responded"
+        except (urllib.error.URLError, _socket.timeout, TimeoutError):
+            elapsed = time.monotonic() - t0
+            assert elapsed >= 0.9, f"expected ~1s timeout, elapsed {elapsed:.2f}s"
+            assert elapsed < 3.0, f"timeout took longer than client config: {elapsed:.2f}s"
+
+    def test_hang_records_in_history(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "hang"}}})
+        req = urllib.request.Request(
+            sim["provider1"], data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}',
+            headers={"Content-Type": "application/json"})
+        try:
+            urllib.request.urlopen(req, timeout=0.5)
+        except (urllib.error.URLError, _socket.timeout, TimeoutError):
+            pass
+        # Allow time for the server to record the call in history
+        time.sleep(0.2)
+        _, history = _get(_ctrl(sim, "/history?provider=1"))
+        # We expect at least one entry recording the hang attempt
+        entries = history.get("history", [])
+        statuses = {e["status"] for e in entries}
+        assert "hang" in statuses or "down" in statuses, f"expected 'hang' status in history, got {statuses}"

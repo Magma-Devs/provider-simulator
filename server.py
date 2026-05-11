@@ -40,8 +40,8 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Dict
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from typing import Any, Dict, Optional
 from urllib.parse import urlparse, parse_qs
 
 from stubs import METHOD_DEFAULTS
@@ -61,6 +61,9 @@ class ProviderState:
     error_message: str = "Internal error"  # JSON-RPC error message when mode="error"
     http_status: int = 200              # HTTP status code for error responses (200 = JSON-RPC body error)
     responses: Dict[str, Any] = field(default_factory=dict)
+    corruption_mode: Optional[str] = None     # one of: None, "truncated", "missing_field", "invalid_json", "empty_response"
+    missing_field: Optional[str] = None       # which top-level field to omit when corruption_mode="missing_field"
+    blocks_behind: int = 0    # 0 = current head; positive = behind; negative = ahead
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # call history — each entry: {ts, method, status, latency_ms}
     history: deque = field(default_factory=lambda: deque(maxlen=HISTORY_MAX), repr=False)
@@ -80,6 +83,9 @@ class ProviderState:
                 "error_code":        self.error_code,
                 "error_message":     self.error_message,
                 "http_status":       self.http_status,
+                "corruption_mode":   self.corruption_mode,
+                "missing_field":     self.missing_field,
+                "blocks_behind":     self.blocks_behind,
             }
 
     def update(self, cfg: dict) -> None:
@@ -93,6 +99,9 @@ class ProviderState:
             self.error_code        = cfg.get("error_code",        self.error_code)
             self.error_message     = cfg.get("error_message",     self.error_message)
             self.http_status       = cfg.get("http_status",       self.http_status)
+            self.corruption_mode   = cfg.get("corruption_mode",   self.corruption_mode)
+            self.missing_field     = cfg.get("missing_field",     self.missing_field)
+            self.blocks_behind     = cfg.get("blocks_behind",     self.blocks_behind)
             if "responses" in cfg:
                 self.responses = cfg["responses"]
 
@@ -108,6 +117,9 @@ class ProviderState:
             self.error_message     = "Internal error"
             self.http_status       = 200
             self.responses         = {}
+            self.corruption_mode   = None
+            self.missing_field     = None
+            self.blocks_behind     = 0
 
     def clear_history(self) -> None:
         """Wipe the in-memory call buffer and reset all-time counters to zero.
@@ -220,10 +232,26 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         req_id = body.get("id", 1)
         method = body.get("method", "unknown")
 
+        # Hang — accept request, sleep "forever" so the router hits its timeout.
+        # 30s is long enough for any reasonable client read timeout to fire;
+        # finite so the thread eventually exits and we don't leak threads if
+        # the client disconnects without timing out.
+        if snap["mode"] == "hang":
+            state.push_call_to_buffer(method, "hang", 0,
+                                      request_id=req_id, lava_headers=lava_headers)
+            time.sleep(30)
+            try:
+                self.connection.close()
+            except Exception:
+                pass
+            return
+
         # Rate limit — return HTTP 429
         if snap["mode"] == "rate_limit":
             self._reply(429, {"jsonrpc": "2.0", "id": req_id,
-                              "error": {"code": 429, "message": "Too many requests"}})
+                              "error": {"code": 429, "message": "Too many requests"}},
+                        corruption_mode=snap.get("corruption_mode"),
+                        missing_field=snap.get("missing_field"))
             state.push_call_to_buffer(method, "rate_limit", self._elapsed_ms(t_start),
                                       request_id=req_id, lava_headers=lava_headers)
             return
@@ -234,7 +262,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             err_msg  = snap.get("error_message", "Internal error")
             http_st  = snap.get("http_status", 200)
             self._reply(http_st, {"jsonrpc": "2.0", "id": req_id,
-                                  "error": {"code": err_code, "message": err_msg}})
+                                  "error": {"code": err_code, "message": err_msg}},
+                        corruption_mode=snap.get("corruption_mode"),
+                        missing_field=snap.get("missing_field"))
             state.push_call_to_buffer(method, "error", self._elapsed_ms(t_start),
                                       request_id=req_id, lava_headers=lava_headers)
             return
@@ -244,17 +274,40 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             method_cfg = state.responses.get(method) or state.responses.get("default", {})
         result = method_cfg.get("result", METHOD_DEFAULTS.get(method, "0x1"))
 
+        blocks_behind = snap.get("blocks_behind", 0)
+
+        # Format an int as an upper-case hex string ("0x" + uppercase digits) so
+        # the simulator's output matches the legacy hardcoded values (e.g. "0x1312D00")
+        # and existing tests that assert exact-string equality keep passing.
+        def _hex_upper(n: int) -> str:
+            return "0x" + format(n, "X")
+
+        # eth_blockNumber: shift head by blocks_behind unless overridden via responses
+        if method == "eth_blockNumber" and method not in state.responses and blocks_behind != 0:
+            head = int(METHOD_DEFAULTS["eth_blockNumber"], 16)
+            result = _hex_upper(head - blocks_behind)
+
         # eth_getBlockByNumber: echo the requested block number so the router's
         # pruning verification sees the correct block number in the response.
+        # Named tags ("latest"/"safe"/"pending"/"finalized") shift by blocks_behind.
         if method == "eth_getBlockByNumber" and isinstance(result, dict):
             params = body.get("params", [])
             if params:
-                named = {"latest": "0x1312D00", "earliest": "0x0", "pending": "0x1312D01",
-                         "safe": "0x1312D00",   "finalized": "0x1312CFF"}
+                head = int("0x1312D00", 16)
+                effective_latest = _hex_upper(head - blocks_behind)
+                named = {
+                    "latest":    effective_latest,
+                    "earliest":  "0x0",
+                    "pending":   _hex_upper(head - blocks_behind + 1),
+                    "safe":      effective_latest,
+                    "finalized": _hex_upper(head - blocks_behind - 1),
+                }
                 result = dict(result)
                 result["number"] = named.get(params[0], params[0])
 
-        self._reply(200, {"jsonrpc": "2.0", "id": req_id, "result": result})
+        self._reply(snap.get("http_status", 200), {"jsonrpc": "2.0", "id": req_id, "result": result},
+                    corruption_mode=snap.get("corruption_mode"),
+                    missing_field=snap.get("missing_field"))
         state.push_call_to_buffer(method, "success", self._elapsed_ms(t_start),
                                   request_id=req_id, lava_headers=lava_headers)
 
@@ -263,14 +316,30 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         """Return the integer milliseconds elapsed since t_start (from time.monotonic())."""
         return int((time.monotonic() - t_start) * 1000)
 
-    def _reply(self, status: int, data: dict):
-        """Serialise data as JSON and write a complete HTTP response with correct headers.
+    def _reply(self, status: int, data: dict,
+               corruption_mode: Optional[str] = None,
+               missing_field: Optional[str] = None):
+        """Serialise data as JSON and write a complete HTTP response.
+        If corruption_mode is set, alter the body before/after serialization."""
+        # Apply structural corruption (modify the dict before serialization)
+        if corruption_mode == "missing_field" and missing_field:
+            data = {k: v for k, v in data.items() if k != missing_field}
+        elif corruption_mode == "empty_response":
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return  # no body
 
-        Args:
-            status: HTTP status code (e.g. 200, 429, 503).
-            data:   Response payload — will be JSON-encoded and sent as the body.
-        """
         body = json.dumps(data).encode()
+
+        # Apply byte-level corruption (after serialization)
+        if corruption_mode == "truncated" and len(body) > 10:
+            body = body[:-10]
+        elif corruption_mode == "invalid_json":
+            body = b"}{ {{ not valid json"
+
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -499,7 +568,10 @@ def main():
 
     servers = []
     for pid, port in PROVIDER_PORTS.items():
-        srv = HTTPServer(("0.0.0.0", port), JSONRPCHandler)
+        # ThreadingHTTPServer so a slow/hanging request on one provider doesn't
+        # block its own subsequent requests or the other providers' threads.
+        srv = ThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
+        srv.daemon_threads = True
         srv.state       = states[pid]
         srv.provider_id = pid          # available as self.server.provider_id in handler
         servers.append(srv)
