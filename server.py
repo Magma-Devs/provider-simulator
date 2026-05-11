@@ -41,7 +41,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from urllib.parse import urlparse, parse_qs
 
 from stubs import METHOD_DEFAULTS
@@ -61,6 +61,8 @@ class ProviderState:
     error_message: str = "Internal error"  # JSON-RPC error message when mode="error"
     http_status: int = 200              # HTTP status code for error responses (200 = JSON-RPC body error)
     responses: Dict[str, Any] = field(default_factory=dict)
+    corruption_mode: Optional[str] = None     # one of: None, "truncated", "missing_field", "invalid_json", "empty_response"
+    missing_field: Optional[str] = None       # which top-level field to omit when corruption_mode="missing_field"
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # call history — each entry: {ts, method, status, latency_ms}
     history: deque = field(default_factory=lambda: deque(maxlen=HISTORY_MAX), repr=False)
@@ -80,6 +82,8 @@ class ProviderState:
                 "error_code":        self.error_code,
                 "error_message":     self.error_message,
                 "http_status":       self.http_status,
+                "corruption_mode":   self.corruption_mode,
+                "missing_field":     self.missing_field,
             }
 
     def update(self, cfg: dict) -> None:
@@ -93,6 +97,8 @@ class ProviderState:
             self.error_code        = cfg.get("error_code",        self.error_code)
             self.error_message     = cfg.get("error_message",     self.error_message)
             self.http_status       = cfg.get("http_status",       self.http_status)
+            self.corruption_mode   = cfg.get("corruption_mode",   self.corruption_mode)
+            self.missing_field     = cfg.get("missing_field",     self.missing_field)
             if "responses" in cfg:
                 self.responses = cfg["responses"]
 
@@ -108,6 +114,8 @@ class ProviderState:
             self.error_message     = "Internal error"
             self.http_status       = 200
             self.responses         = {}
+            self.corruption_mode   = None
+            self.missing_field     = None
 
     def clear_history(self) -> None:
         """Wipe the in-memory call buffer and reset all-time counters to zero.
@@ -223,7 +231,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # Rate limit — return HTTP 429
         if snap["mode"] == "rate_limit":
             self._reply(429, {"jsonrpc": "2.0", "id": req_id,
-                              "error": {"code": 429, "message": "Too many requests"}})
+                              "error": {"code": 429, "message": "Too many requests"}},
+                        corruption_mode=snap.get("corruption_mode"),
+                        missing_field=snap.get("missing_field"))
             state.push_call_to_buffer(method, "rate_limit", self._elapsed_ms(t_start),
                                       request_id=req_id, lava_headers=lava_headers)
             return
@@ -234,7 +244,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             err_msg  = snap.get("error_message", "Internal error")
             http_st  = snap.get("http_status", 200)
             self._reply(http_st, {"jsonrpc": "2.0", "id": req_id,
-                                  "error": {"code": err_code, "message": err_msg}})
+                                  "error": {"code": err_code, "message": err_msg}},
+                        corruption_mode=snap.get("corruption_mode"),
+                        missing_field=snap.get("missing_field"))
             state.push_call_to_buffer(method, "error", self._elapsed_ms(t_start),
                                       request_id=req_id, lava_headers=lava_headers)
             return
@@ -254,7 +266,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 result = dict(result)
                 result["number"] = named.get(params[0], params[0])
 
-        self._reply(snap.get("http_status", 200), {"jsonrpc": "2.0", "id": req_id, "result": result})
+        self._reply(snap.get("http_status", 200), {"jsonrpc": "2.0", "id": req_id, "result": result},
+                    corruption_mode=snap.get("corruption_mode"),
+                    missing_field=snap.get("missing_field"))
         state.push_call_to_buffer(method, "success", self._elapsed_ms(t_start),
                                   request_id=req_id, lava_headers=lava_headers)
 
@@ -263,14 +277,30 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         """Return the integer milliseconds elapsed since t_start (from time.monotonic())."""
         return int((time.monotonic() - t_start) * 1000)
 
-    def _reply(self, status: int, data: dict):
-        """Serialise data as JSON and write a complete HTTP response with correct headers.
+    def _reply(self, status: int, data: dict,
+               corruption_mode: Optional[str] = None,
+               missing_field: Optional[str] = None):
+        """Serialise data as JSON and write a complete HTTP response.
+        If corruption_mode is set, alter the body before/after serialization."""
+        # Apply structural corruption (modify the dict before serialization)
+        if corruption_mode == "missing_field" and missing_field:
+            data = {k: v for k, v in data.items() if k != missing_field}
+        elif corruption_mode == "empty_response":
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return  # no body
 
-        Args:
-            status: HTTP status code (e.g. 200, 429, 503).
-            data:   Response payload — will be JSON-encoded and sent as the body.
-        """
         body = json.dumps(data).encode()
+
+        # Apply byte-level corruption (after serialization)
+        if corruption_mode == "truncated" and len(body) > 10:
+            body = body[:-10]
+        elif corruption_mode == "invalid_json":
+            body = b"}{ {{ not valid json"
+
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
