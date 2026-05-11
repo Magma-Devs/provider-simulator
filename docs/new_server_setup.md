@@ -135,7 +135,7 @@ routers:
 ```
 > Source of truth: `provider-simulator/config/values_sim.yml`
 
-> ⚠️ Use `routers:` (not `chains:`) and `nodes:` (not `providers:`) — chart 4.0.0 schema.
+> ⚠️ Use `routers:` (not `chains:`) and `nodes:` (not `providers:`) — current chart 5.x schema.
 > Using old keys produces no error — Helm silently ignores them and nothing gets created.
 
 ---
@@ -152,7 +152,7 @@ bash scripts/install_gateway_api_tls_certificate.sh
 
 What the install script does:
 - Authenticates to GHCR using `HELM_REGISTRY_TOKEN` from `scripts/utils/common.sh`.
-- Runs `helm upgrade --install smart-router` with `values/core/values.yml` **plus** `values/simulator/values_sim.yml` (auto-merged when the file exists — see `install_smart_router.sh` lines 244-254).
+- Runs `helm upgrade --install smart-router` with `values/core/values.yml` **plus** `values/simulator/values_sim.yml` (auto-merged when the file exists and `INTERNAL_MODE=true` — see `install_smart_router.sh` around lines 269-270).
 - Then `install_gateway_api_tls_certificate.sh` refreshes the TLS cert so `sim-control.<YOUR_DOMAIN>` is covered.
 
 Verify (use the domain from step 0):
@@ -164,7 +164,7 @@ curl -s https://sim-control.<YOUR_DOMAIN>/health
 
 > **Truly-fresh server?** If smart-router and the observability stack are not yet installed at all, run `bash scripts/install_wizard.sh` instead. It installs the full stack (observability, Loki, gateway, TLS, smart-router) and picks up `values_sim.yml` via the same auto-detect mechanism — as long as step 4 is done first.
 >
-> **Want to confirm chart version manually?** `grep -i helm_chart_version scripts/utils/common.sh` — expected `4.1.0` (the schema with `routers:` / `nodes:` was introduced in `4.0.0` and is still current).
+> **Want to confirm chart version manually?** `grep -i helm_chart_version scripts/utils/common.sh` — expected `5.0.2` (or whichever 5.x is the current published release). The `routers:` / `nodes:` schema is the long-standing format used by 5.x.
 
 ---
 
