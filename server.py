@@ -64,6 +64,7 @@ class ProviderState:
     corruption_mode: Optional[str] = None     # one of: None, "truncated", "missing_field", "invalid_json", "empty_response"
     missing_field: Optional[str] = None       # which top-level field to omit when corruption_mode="missing_field"
     blocks_behind: int = 0    # 0 = current head; positive = behind; negative = ahead
+    drop_at: str = "before_headers"   # one of: "before_headers", "after_headers", "mid_body"; only applies when mode="drop_connection"
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # call history — each entry: {ts, method, status, latency_ms}
     history: deque = field(default_factory=lambda: deque(maxlen=HISTORY_MAX), repr=False)
@@ -86,6 +87,7 @@ class ProviderState:
                 "corruption_mode":   self.corruption_mode,
                 "missing_field":     self.missing_field,
                 "blocks_behind":     self.blocks_behind,
+                "drop_at":           self.drop_at,
             }
 
     def update(self, cfg: dict) -> None:
@@ -102,6 +104,7 @@ class ProviderState:
             self.corruption_mode   = cfg.get("corruption_mode",   self.corruption_mode)
             self.missing_field     = cfg.get("missing_field",     self.missing_field)
             self.blocks_behind     = cfg.get("blocks_behind",     self.blocks_behind)
+            self.drop_at           = cfg.get("drop_at",           self.drop_at)
             if "responses" in cfg:
                 self.responses = cfg["responses"]
 
@@ -120,6 +123,7 @@ class ProviderState:
             self.corruption_mode   = None
             self.missing_field     = None
             self.blocks_behind     = 0
+            self.drop_at           = "before_headers"
 
     def clear_history(self) -> None:
         """Wipe the in-memory call buffer and reset all-time counters to zero.
@@ -240,6 +244,33 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             state.push_call_to_buffer(method, "hang", 0,
                                       request_id=req_id, lava_headers=lava_headers)
             time.sleep(30)
+            try:
+                self.connection.close()
+            except Exception:
+                pass
+            return
+
+        # Drop connection — close the socket at one of three points
+        if snap["mode"] == "drop_connection":
+            drop_at = snap.get("drop_at", "before_headers")
+            state.push_call_to_buffer(method, "drop_connection", self._elapsed_ms(t_start),
+                                      request_id=req_id, lava_headers=lava_headers)
+            try:
+                if drop_at == "after_headers":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", "100")  # promise body we won't send
+                    self.end_headers()
+                elif drop_at == "mid_body":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", "100")  # promise body
+                    self.end_headers()
+                    self.wfile.write(b'{"jsonrpc":"2.0",')  # ~half a body
+                    self.wfile.flush()
+                # before_headers (default) — fall through, no headers sent
+            except Exception:
+                pass  # client may have already disconnected, ignore
             try:
                 self.connection.close()
             except Exception:
