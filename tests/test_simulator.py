@@ -1560,13 +1560,13 @@ class TestLavaHeadersFilter:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# http_status applies in success mode (Task 1)
+# http_status applies in success mode (custom HTTP code with valid body)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestHttpStatusInSuccessMode:
     """The http_status field used to be honored only when mode='error'.
-    After Task 1, it applies in success mode too — provider returns the
-    custom HTTP status code with a valid JSON-RPC success body."""
+    Now it applies in success mode too — provider returns the custom HTTP
+    status code with a valid JSON-RPC success body."""
 
     def test_success_mode_with_custom_http_status(self, sim):
         _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "success", "http_status": 502}}})
@@ -1592,7 +1592,7 @@ class TestHttpStatusInSuccessMode:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# corruption_mode (Task 2): malformed / wrong-shape JSON
+# corruption_mode: malformed / wrong-shape JSON responses
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestCorruptionMode:
@@ -1664,3 +1664,52 @@ class TestCorruptionMode:
         status, body = _rpc(sim["provider1"], "eth_blockNumber")
         assert status == 200
         assert "result" in body
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# blocks_behind: per-provider stale block heights for sync-freshness / CV tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestBlocksBehind:
+    """blocks_behind shifts the provider's reported eth_blockNumber by N blocks
+    relative to the global stub (METHOD_DEFAULTS['eth_blockNumber'] = '0x1312D00').
+    Positive = behind; negative = ahead. Affects eth_blockNumber and
+    eth_getBlockByNumber('latest', ...). Composes with mode='success'."""
+
+    HEAD = int("0x1312D00", 16)  # 20,000,000 — the simulator's default eth_blockNumber
+
+    def test_blocks_behind_shifts_eth_blockNumber(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "success", "blocks_behind": 100}}})
+        _, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert int(body["result"], 16) == self.HEAD - 100
+
+    def test_blocks_ahead_via_negative_value(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "success", "blocks_behind": -50}}})
+        _, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert int(body["result"], 16) == self.HEAD + 50
+
+    def test_default_blocks_behind_is_zero(self, sim):
+        # Regression: default behaviour returns the canonical head
+        _, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert body["result"] == "0x1312D00"
+
+    def test_eth_get_block_by_number_latest_respects_blocks_behind(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "success", "blocks_behind": 25}}})
+        _, body = _rpc(sim["provider1"], "eth_getBlockByNumber", ["latest", False])
+        assert int(body["result"]["number"], 16) == self.HEAD - 25
+
+    def test_per_provider_disagreement(self, sim):
+        # Cross-validation enabler: each provider can report a different head
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {"mode": "success", "blocks_behind": 0},
+                "2": {"mode": "success", "blocks_behind": 5},
+                "3": {"mode": "success", "blocks_behind": 100},
+            }
+        })
+        _, b1 = _rpc(sim["provider1"], "eth_blockNumber")
+        _, b2 = _rpc(sim["provider2"], "eth_blockNumber")
+        _, b3 = _rpc(sim["provider3"], "eth_blockNumber")
+        assert int(b1["result"], 16) == self.HEAD
+        assert int(b2["result"], 16) == self.HEAD - 5
+        assert int(b3["result"], 16) == self.HEAD - 100
