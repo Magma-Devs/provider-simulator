@@ -1760,3 +1760,78 @@ class TestHangMode:
         entries = history.get("history", [])
         statuses = {e["status"] for e in entries}
         assert "hang" in statuses or "down" in statuses, f"expected 'hang' status in history, got {statuses}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# drop_connection mode: TCP close at configurable point (transport failures)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestDropConnection:
+    """mode='drop_connection' closes the TCP connection at one of three points:
+      - before_headers: connect, read body, close — no HTTP response at all
+      - after_headers:  connect, read body, send headers, close before body
+      - mid_body:       connect, read body, send headers, send half body, close
+
+    From the client's perspective these manifest as different errors —
+    RemoteDisconnected, IncompleteRead, BadStatusLine, etc. — which is what
+    the router's transport-error classification needs to distinguish."""
+
+    def _send_and_capture_error(self, url: str) -> str:
+        """Send a JSON-RPC request and return the exception class name (or 'OK')."""
+        req = urllib.request.Request(
+            url, data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}',
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                resp.read()
+                return "OK"
+        except Exception as exc:
+            return type(exc).__name__
+
+    def test_drop_before_headers_no_response(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {
+            "1": {"mode": "drop_connection", "drop_at": "before_headers"}
+        }})
+        result = self._send_and_capture_error(sim["provider1"])
+        assert result != "OK", "expected error from connection drop, got valid response"
+        # Common manifestations: RemoteDisconnected, BadStatusLine, URLError, ConnectionResetError
+        assert any(name in result for name in ("RemoteDisconnected", "BadStatusLine", "URLError",
+                                                 "ConnectionResetError", "IncompleteRead")), \
+            f"unexpected error class for before_headers drop: {result}"
+
+    def test_drop_after_headers_incomplete_read(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {
+            "1": {"mode": "drop_connection", "drop_at": "after_headers"}
+        }})
+        result = self._send_and_capture_error(sim["provider1"])
+        assert result != "OK", "expected error from connection drop, got valid response"
+        # Should manifest as IncompleteRead or similar (we sent headers + 0 bytes of body)
+        assert any(name in result for name in ("IncompleteRead", "RemoteDisconnected",
+                                                 "ChunkedEncodingError", "URLError",
+                                                 "ConnectionResetError", "BadStatusLine")), \
+            f"unexpected error class for after_headers drop: {result}"
+
+    def test_drop_mid_body_truncated(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {
+            "1": {"mode": "drop_connection", "drop_at": "mid_body"}
+        }})
+        result = self._send_and_capture_error(sim["provider1"])
+        assert result != "OK", "expected error from connection drop, got valid response"
+
+    def test_drop_default_at_is_before_headers(self, sim):
+        # When drop_at is unset, default to before_headers (most disruptive)
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "drop_connection"}}})
+        result = self._send_and_capture_error(sim["provider1"])
+        assert result != "OK"
+
+    def test_drop_records_in_history(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {
+            "1": {"mode": "drop_connection", "drop_at": "before_headers"}
+        }})
+        self._send_and_capture_error(sim["provider1"])
+        time.sleep(0.1)  # let the server flush history
+        _, history = _get(_ctrl(sim, "/history?provider=1"))
+        entries = history.get("history", [])
+        statuses = {e["status"] for e in entries}
+        assert "drop_connection" in statuses or "drop" in statuses, \
+            f"expected drop in history, got {statuses}"
