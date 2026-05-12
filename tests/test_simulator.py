@@ -58,6 +58,7 @@ import pytest
 
 from constants import HISTORY_MAX
 from server import ControlHandler, JSONRPCHandler, ProviderState
+from stubs import ERROR_STUBS
 
 # ── Test ports (different from production 18545-18547 / 19000) ────────────────
 
@@ -283,6 +284,138 @@ class TestProviderModes:
     def test_eth_get_block_by_number_latest(self, sim):
         _, body = _rpc(sim["provider1"], "eth_getBlockByNumber", ["latest", False])
         assert body["result"]["number"] == "0x1312D00"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-method error override path — two flavours
+#
+# Primary: responses[method] = {"error_stub": "<name>"} — the simulator
+#   resolves the name against its local ERROR_STUBS catalogue and emits the
+#   envelope. Single source of truth, same ownership pattern as METHOD_DEFAULTS.
+#
+# Escape hatch: responses[method] = {"error": <inner_envelope>} — for ad-hoc
+#   error shapes that don't earn a permanent catalogue entry.
+#
+# Both flow through the same emission code in server.py; only the resolution
+# of `err` differs.
+#
+# Backward-compat invariant: when method_cfg has neither "error_stub" nor
+# "error" (i.e. the existing {"result": ...} pattern), the new code is a no-op.
+# test_existing_result_override_still_works locks that in.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestErrorStubs:
+
+    @pytest.mark.parametrize("stub_name", list(ERROR_STUBS.keys()))
+    def test_each_stub_emits_matching_envelope(self, sim, stub_name):
+        """Each ERROR_STUBS entry round-trips through the wire unchanged.
+
+        Drives the primary path: client sends just the name, simulator
+        resolves to the envelope. Asserts the response body's error block
+        matches the catalogue entry on code, message, and (when present) data.
+        """
+        stub = ERROR_STUBS[stub_name]
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"responses": {"eth_call": {"error_stub": stub_name}}}}
+        })
+        status, body = _rpc(sim["provider1"], "eth_call")
+        assert status == 200
+        assert "error" in body, f"{stub_name}: expected error envelope, got {body!r}"
+        assert "result" not in body
+        assert body["error"]["code"] == stub["code"]
+        assert body["error"]["message"] == stub["message"]
+        if "data" in stub:
+            assert body["error"]["data"] == stub["data"]
+
+    def test_per_method_scoping_other_methods_unaffected(self, sim):
+        """An error on eth_call leaves eth_blockNumber on its success path.
+
+        This is the scoping guarantee that distinguishes the new branch from
+        mode="error" — mode="error" errors for *every* method on the provider;
+        the per-method override errors only for the named method.
+        """
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"responses": {"eth_call": {"error_stub": "revert"}}}}
+        })
+        _, err_body = _rpc(sim["provider1"], "eth_call")
+        assert "error" in err_body
+
+        _, ok_body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert "result" in ok_body
+        assert "error" not in ok_body
+
+    def test_default_key_emits_error_for_unmatched_methods(self, sim):
+        """The "default" fallback key also honours error_stub.
+
+        Same precedence as the success path: state.responses.get(method) wins
+        when present, otherwise state.responses.get("default", {}) is used.
+        """
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"responses": {"default": {"error_stub": "oog"}}}}
+        })
+        _, body = _rpc(sim["provider1"], "eth_unknownMethod")
+        assert "error" in body
+        assert body["error"]["message"] == "out of gas"
+
+    def test_existing_result_override_still_works(self, sim):
+        """Backward-compat lock: {"result": ...} responses remain unchanged.
+
+        Duplicate of test_custom_response_per_method by design — this one
+        sits next to the new error branch so any future change to the
+        branch logic has an in-place regression check.
+        """
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"responses": {"eth_blockNumber": {"result": "0xDEAD"}}}}
+        })
+        _, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert body["result"] == "0xDEAD"
+        assert "error" not in body
+
+    def test_per_method_http_status_override(self, sim):
+        """method_cfg["http_status"] is honoured when the error branch fires.
+
+        Lets a single method emit, for example, HTTP 200 with a JSON-RPC error
+        body (the common chain-domain case) while another method on the same
+        provider can succeed with a different status if needed.
+        """
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"responses": {
+                "eth_call": {"error_stub": "revert", "http_status": 200}
+            }}}
+        })
+        status, body = _rpc(sim["provider1"], "eth_call")
+        assert status == 200
+        assert body["error"]["message"] == "execution reverted"
+
+    def test_history_records_error_status(self, sim):
+        """The per-method error path records status='error' in /history.
+
+        Aligns with the existing mode="error" path so downstream consumers
+        (RoutingTrace.retry_chain, assertion helpers) treat both error
+        sources identically.
+        """
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"responses": {"eth_call": {"error_stub": "revert"}}}}
+        })
+        _rpc(sim["provider1"], "eth_call")
+        _, body = _get(_ctrl(sim, "/history"))
+        entries = [e for e in body["history"] if e["method"] == "eth_call"]
+        assert len(entries) == 1
+        assert entries[0]["status"] == "error"
+
+    def test_raw_error_envelope_escape_hatch(self, sim):
+        """The {"error": <envelope>} path emits ad-hoc shapes not in the catalogue.
+
+        Useful for one-off tests that need a specific malformed envelope
+        without polluting ERROR_STUBS with an entry that exists for one test.
+        """
+        ad_hoc = {"code": -32099, "message": "synthetic test error",
+                  "data": {"trace_id": "abc-123"}}
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"responses": {"eth_call": {"error": ad_hoc}}}}
+        })
+        _, body = _rpc(sim["provider1"], "eth_call")
+        assert body["error"] == ad_hoc
 
 
 # ─────────────────────────────────────────────────────────────────────────────
