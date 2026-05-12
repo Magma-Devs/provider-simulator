@@ -214,3 +214,112 @@ METHOD_DEFAULTS: Dict[str, Any] = {
     "debug_getRawTransaction":  "0x",
 }
 
+
+# ── Chain-domain error stubs ──────────────────────────────────────────────────
+#
+# ERROR_STUBS is a flat catalogue of JSON-RPC *inner* error objects (the value
+# that sits under the "error" key in the JSON-RPC envelope). The envelope
+# {"jsonrpc": "2.0", "id": <id>, "error": <stub>} is built by server.py at
+# emission time.
+#
+# Why flat (name → object) rather than nested by method:
+#     The same error shape ("oog", "nonce_too_low") can be triggered by
+#     multiple methods (eth_call AND eth_estimateGas can both return oog).
+#     A flat keying-by-condition avoids duplicating identical envelopes
+#     under every method that can emit them.
+#
+# Messages are aligned to substrings the smart-router classifier recognises
+# (see smart-router/protocol/common/error_classifier.go) so a test that
+# emits one of these stubs gets a deterministic, named classification on
+# the router side.
+#
+# Usage via the per-method override path (server.py reads this branch):
+#     POST /scenario {"providers": {"1": {"mode": "success",
+#                                          "responses": {"eth_call":
+#                                              {"error": ERROR_STUBS["revert"]}}}}}
+#
+# In tests/automation, prefer sim_control.set_error_stub(...) which wraps
+# the same payload with IDE-friendly autocompletion on the stub name.
+#
+# Adding a new stub:
+#     1. Append an entry below.
+#     2. Confirm the message contains a substring the classifier matches —
+#        otherwise the router will see UNKNOWN_ERROR.
+#     3. Mirror the entry in smart_router_automation/tests/simulator/sim_control.py
+#        (client-side copy + Literal type alias) so callers get autocomplete.
+
+ERROR_STUBS: Dict[str, Dict[str, Any]] = {
+    # Contract revert. Code 3 follows EIP-1474 for "execution error". The
+    # data field is ABI-encoded Error(string)("reverted") — minimal valid
+    # revert reason bytes. The classifier matches on the message substring
+    # "execution reverted"; the data field is for tests that want to verify
+    # the revert reason propagates through the router unchanged.
+    "revert": {
+        "code":    3,
+        "message": "execution reverted",
+        "data":    "0x08c379a0"
+                   "0000000000000000000000000000000000000000000000000000000000000020"
+                   "0000000000000000000000000000000000000000000000000000000000000008"
+                   "7265766572746564000000000000000000000000000000000000000000000000",
+    },
+
+    # Out-of-gas during execution. Classifier matches "out of gas".
+    # (Geth's pre-execution variant is "gas required exceeds allowance" —
+    # that's a separate condition and isn't currently classifier-matched.)
+    "oog": {
+        "code":    -32000,
+        "message": "out of gas",
+    },
+
+    # Mempool nonce rejections. Geth + Erigon emit the exact phrasing
+    # "nonce too low" / "nonce too high"; Nethermind uses the "is too" variant.
+    "nonce_too_low": {
+        "code":    -32000,
+        "message": "nonce too low",
+    },
+    "nonce_too_high": {
+        "code":    -32000,
+        "message": "nonce too high",
+    },
+
+    # Mempool capacity exhausted. Geth phrasing — Nethermind uses
+    # "TxPool is full" with different casing; the classifier lowers before
+    # matching so this works for both.
+    "mempool_full": {
+        "code":    -32000,
+        "message": "txpool is full",
+    },
+
+    # State pruned. Geth's classic "missing trie node" — Erigon and Reth
+    # also surface this phrase when an archive node serves a historical
+    # query for a block whose state was pruned.
+    "pruned_state": {
+        "code":    -32000,
+        "message": "missing trie node",
+    },
+
+    # Block not yet mined or never existed. Classifier matches
+    # "block not found" and the regex `block #?\w+ not found`.
+    "future_block": {
+        "code":    -32000,
+        "message": "block not found",
+    },
+
+    # Tx already accepted into mempool. Geth + Erigon emit "already known"
+    # verbatim. Treated as success by some clients; the router classifies
+    # this as a retryable node-side condition.
+    "already_known": {
+        "code":    -32000,
+        "message": "already known",
+    },
+
+    # Insufficient balance for tx value + gas. Geth and Erigon both emit
+    # the substring "insufficient funds"; Nethermind uses "insufficient
+    # sender balance" (separate matcher). This stub uses the Geth phrasing
+    # since it's the most common in production traces.
+    "insufficient_funds": {
+        "code":    -32000,
+        "message": "insufficient funds for gas * price + value",
+    },
+}
+
