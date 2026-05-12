@@ -213,7 +213,9 @@ After the fix is merged, switch back to `develop` for normal deploys.
 
 ## Appendix A — Debug server (dedicated setup)
 
-This is the one-time setup needed on a new server so debug endpoints are reachable via domain.
+This is the one-time setup needed on a new server so the **eth-sim-router**'s debug endpoints (`/debug/time`, `/debug/time-warp`, `/debug/reset-scores`) are reachable via the public domain. Without this setup the debug HTTP server runs internally on the pod's port `9999`, but no Kubernetes `Service` or `HTTPRoute` exposes it — so external clients (the simulator test suite) get `HTTP 404` when calling `https://debug.<base-domain>/debug/*`.
+
+The `Service` and `HTTPRoute` below specifically target `app.lavanet.io/router: eth-sim` because each router pod (`eth-router`, `eth-sim-router`, `base-router`) runs its own debug HTTP server with its own QoS optimizer state. Simulator tests need the `eth-sim-router` pod's state reset, not any other. If you also need to expose the debug endpoint of another router (e.g. `eth-router` for non-simulator tests), create a parallel `Service`/`HTTPRoute` pair with a distinct name, hostname, and selector — see "Exposing other routers' debug endpoints" at the end of A.4.
 
 ### A.1 Enable debug flags in `values/core/values.yml`
 
@@ -251,8 +253,8 @@ echo "$BASE_DOMAIN"
 If both objects already exist, skip the create blocks below:
 
 ```bash
-kubectl get service eth-router-debug -n lava-infra
-kubectl get httproute eth-router-debug-httproute -n lava-infra
+kubectl get service eth-sim-router-debug -n lava-infra
+kubectl get httproute eth-sim-router-debug-httproute -n lava-infra
 ```
 
 Create Service:
@@ -262,11 +264,11 @@ cat <<'EOF' | kubectl apply -f -
 apiVersion: v1
 kind: Service
 metadata:
-  name: eth-router-debug
+  name: eth-sim-router-debug
   namespace: lava-infra
 spec:
   selector:
-    app.lavanet.io/router: eth
+    app.lavanet.io/router: eth-sim
   ports:
     - port: 9999
       targetPort: 9999
@@ -280,7 +282,7 @@ cat <<EOF | kubectl apply -f -
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: eth-router-debug-httproute
+  name: eth-sim-router-debug-httproute
   namespace: lava-infra
 spec:
   parentRefs:
@@ -294,7 +296,7 @@ spec:
             type: PathPrefix
             value: /debug/
       backendRefs:
-        - name: eth-router-debug
+        - name: eth-sim-router-debug
           port: 9999
 EOF
 ```
@@ -309,13 +311,15 @@ bash scripts/install_gateway_api_tls_certificate.sh
 ### A.4 Verify debug server is reachable
 
 ```bash
-kubectl get service eth-router-debug -n lava-infra
-kubectl get httproute eth-router-debug-httproute -n lava-infra
+kubectl get service eth-sim-router-debug -n lava-infra
+kubectl get httproute eth-sim-router-debug-httproute -n lava-infra
 
-ETH_POD=$(kubectl get pods -n lava-infra -l app.lavanet.io/router=eth -o jsonpath='{.items[0].metadata.name}')
-kubectl logs -n lava-infra "$ETH_POD" | grep "Debug HTTP server started"
+ETH_SIM_POD=$(kubectl get pods -n lava-infra -l app.lavanet.io/router=eth-sim -o jsonpath='{.items[0].metadata.name}')
+kubectl logs -n lava-infra "$ETH_SIM_POD" | grep "Debug HTTP server started"
 
 curl -s "https://debug.${BASE_DOMAIN}/debug/time" | python3 -m json.tool
+curl -s -X POST "https://debug.${BASE_DOMAIN}/debug/reset-scores" | python3 -m json.tool
+# expect: {"reset": true, "chains_reset": 1}
 ```
 
 Clock shift / reset examples:
@@ -329,6 +333,20 @@ curl -s -X POST "https://debug.${BASE_DOMAIN}/debug/time-warp" \
   -H "Content-Type: application/json" \
   -d '{"offset_seconds": 0}'
 ```
+
+### Exposing other routers' debug endpoints
+
+If you also need `eth-router` or `base-router` debug endpoints exposed, repeat A.3 with **distinct names, selectors, and hostnames**:
+
+| Target router | Service name | HTTPRoute name | Selector value | Suggested hostname |
+|---|---|---|---|---|
+| `eth-sim-router` *(this doc)* | `eth-sim-router-debug` | `eth-sim-router-debug-httproute` | `eth-sim` | `debug.${BASE_DOMAIN}` |
+| `eth-router` | `eth-router-debug` | `eth-router-debug-httproute` | `eth` | `debug-eth.${BASE_DOMAIN}` |
+| `base-router` | `base-router-debug` | `base-router-debug-httproute` | `base` | `debug-base.${BASE_DOMAIN}` |
+
+Each router pod runs an **independent** debug HTTP server — `/debug/reset-scores` against one pod's debug endpoint does NOT reset another pod's optimizer state. Pick the hostname that matches which router's state you intend to reset.
+
+After adding a new hostname, re-run `bash ~/smart-router-standalone/scripts/install_gateway_api_tls_certificate.sh` so the gateway TLS cert covers it.
 
 ---
 
@@ -374,15 +392,15 @@ cd ~/smart-router-standalone && bash scripts/install_gateway_api_tls_certificate
 Check that debug route objects exist:
 
 ```bash
-kubectl get service eth-router-debug -n lava-infra
-kubectl get httproute eth-router-debug-httproute -n lava-infra
+kubectl get service eth-sim-router-debug -n lava-infra
+kubectl get httproute eth-sim-router-debug-httproute -n lava-infra
 ```
 
 Check debug server started in router pod:
 
 ```bash
-ETH_POD=$(kubectl get pods -n lava-infra -l app.lavanet.io/router=eth -o jsonpath='{.items[0].metadata.name}')
-kubectl logs -n lava-infra "$ETH_POD" | grep "Debug HTTP server started"
+ETH_SIM_POD=$(kubectl get pods -n lava-infra -l app.lavanet.io/router=eth-sim -o jsonpath='{.items[0].metadata.name}')
+kubectl logs -n lava-infra "$ETH_SIM_POD" | grep "Debug HTTP server started"
 ```
 
 If route exists but TLS fails, re-run certificate install:
