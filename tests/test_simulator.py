@@ -1738,6 +1738,9 @@ class TestCorruptionMode:
       - "missing_field"   — omit one top-level field (configured by missing_field)
       - "invalid_json"    — return obviously-not-JSON ('}{ {{')
       - "empty_response"  — return an empty body
+      - "wrong_type"      — swap the type of a target field (default "result";
+                            configurable via the missing_field slot — reused
+                            for "which field to corrupt")
     """
 
     def test_truncated_corrupts_json(self, sim):
@@ -1800,6 +1803,61 @@ class TestCorruptionMode:
         status, body = _rpc(sim["provider1"], "eth_blockNumber")
         assert status == 200
         assert "result" in body
+
+    def test_wrong_type_default_target_is_result_string_to_int(self, sim):
+        # eth_blockNumber returns result as a hex string (e.g. "0x1234"); wrong_type
+        # should flip it to an int. Default target field is "result".
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"mode": "success", "corruption_mode": "wrong_type"}}
+        })
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200
+        assert "result" in body, f"result field should remain present, got {body}"
+        assert isinstance(body["result"], int), (
+            f"expected int (wrong type for eth_blockNumber result), "
+            f"got {type(body['result']).__name__}: {body['result']!r}"
+        )
+
+    def test_wrong_type_targets_custom_field_via_missing_field_slot(self, sim):
+        # missing_field slot is reused as the "which field to corrupt" target.
+        # Here we corrupt the "id" field, which is normally an int — should
+        # flip to a string.
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "mode": "success",
+                    "corruption_mode": "wrong_type",
+                    "missing_field": "id",
+                }
+            }
+        })
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200
+        assert "id" in body
+        assert isinstance(body["id"], str), (
+            f"expected str (wrong type for id), got "
+            f"{type(body['id']).__name__}: {body['id']!r}"
+        )
+
+    def test_wrong_type_missing_target_field_is_noop(self, sim):
+        # If the configured target field isn't present on the response, the
+        # response shape is left alone (no crash, no other fields touched).
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "mode": "success",
+                    "corruption_mode": "wrong_type",
+                    "missing_field": "no_such_field",
+                }
+            }
+        })
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200
+        assert "result" in body
+        assert isinstance(body["result"], str), (
+            f"expected unchanged str result when target field absent, "
+            f"got {type(body['result']).__name__}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

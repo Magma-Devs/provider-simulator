@@ -61,8 +61,8 @@ class ProviderState:
     error_message: str = "Internal error"  # JSON-RPC error message when mode="error"
     http_status: int = 200              # HTTP status code for error responses (200 = JSON-RPC body error)
     responses: Dict[str, Any] = field(default_factory=dict)
-    corruption_mode: Optional[str] = None     # one of: None, "truncated", "missing_field", "invalid_json", "empty_response"
-    missing_field: Optional[str] = None       # which top-level field to omit when corruption_mode="missing_field"
+    corruption_mode: Optional[str] = None     # one of: None, "truncated", "missing_field", "invalid_json", "empty_response", "wrong_type"
+    missing_field: Optional[str] = None       # field-name slot — which top-level field to target when corruption_mode is "missing_field" (omit it) or "wrong_type" (swap its type). Defaults to "result" for wrong_type when unset.
     blocks_behind: int = 0    # 0 = current head; positive = behind; negative = ahead
     drop_at: str = "before_headers"   # one of: "before_headers", "after_headers", "mid_body"; only applies when mode="drop_connection"
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -397,6 +397,25 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             return  # no body
+        elif corruption_mode == "wrong_type":
+            # Swap the type of a target field so a caller that expects e.g. a
+            # hex-string sees an int (or vice versa). Target field comes from
+            # the missing_field slot (reused for "which field to corrupt");
+            # default to "result" since that's the JSON-RPC success-shape
+            # carrier and the most common test target.
+            target_field = missing_field or "result"
+            if target_field in data:
+                current = data[target_field]
+                if isinstance(current, bool):
+                    # Order matters: bool is a subclass of int — check first.
+                    data[target_field] = 1 if current else 0
+                elif isinstance(current, str):
+                    data[target_field] = 12345
+                elif isinstance(current, (int, float)):
+                    data[target_field] = "wrong_type_value"
+                else:
+                    # dict / list / None — fall through to a string sentinel.
+                    data[target_field] = "wrong_type_value"
 
         body = json.dumps(data).encode()
 
