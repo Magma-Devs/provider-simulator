@@ -44,6 +44,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse, parse_qs
 
+import handlers_btc
 import handlers_eth
 from constants import HISTORY_MAX, PROVIDER_PORTS, CONTROL_PORT
 
@@ -308,13 +309,16 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         #
         # Fault branches above (down / hang / drop / rate-limit / forced or
         # probabilistic error) are chain-agnostic and stay here. Only the
-        # method-lookup + result-shape logic is chain-specific. Today everything
-        # routes to handlers_eth.handle; once chain_family is wired (MAG-1716
-        # Step 6), dispatch on snap["chain_family"] selects handlers_btc/etc.
+        # method-lookup + result-shape logic is chain-specific — we pick the
+        # handler module based on snap["chain_family"]. Default "eth" preserves
+        # backward-compat for every payload that doesn't set chain_family.
         #
         # The handler returns the status + response envelope; this layer is
         # responsible for I/O (corruption hooks, history accounting).
-        status, response_body = handlers_eth.handle(state, body, snap, lava_headers)
+        if snap.get("chain_family") == "btc":
+            status, response_body = handlers_btc.handle(state, body, snap, lava_headers)
+        else:
+            status, response_body = handlers_eth.handle(state, body, snap, lava_headers)
         emit_status = "error" if "error" in response_body else "success"
         self._reply(status, response_body,
                     corruption_mode=snap.get("corruption_mode"),
