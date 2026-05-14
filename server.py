@@ -36,17 +36,62 @@ Control API:
 import datetime
 import json
 import random
+import re
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
 
 import handlers_btc
 import handlers_eth
-from constants import HISTORY_MAX, PROVIDER_PORTS, CONTROL_PORT
+import handlers_rest
+from constants import HISTORY_MAX, PROVIDER_PORTS, CONTROL_PORT, REST_PORTS
+from stubs_rest import REST_METHOD_DEFAULTS
+
+
+# ── Wire-payload normalisation ────────────────────────────────────────────────
+
+def _normalise_responses(raw: Any) -> Dict[Any, Any]:
+    """Normalise a ``responses`` wire payload into a dict the handlers can use.
+
+    JSON-RPC tests send ``responses`` as a JSON object keyed by method name:
+
+        {"eth_blockNumber": {"result": "0xff"}}
+
+    REST tests (MAG-1777) cannot use JSON objects because their keys are
+    ``(verb, path_template)`` tuples — JSON has no tuple type and no
+    non-string object keys. The wire payload for REST is a list of
+    ``[[verb, template], cfg]`` pairs:
+
+        [[["GET", "/cosmos/.../blocks/latest"], {"status": 503, "body": {...}}]]
+
+    This helper accepts either shape and re-tuples REST keys. Mixed payloads
+    (both string-keyed JSON-RPC entries and list-keyed REST entries in the
+    same provider) are NOT supported intentionally — a provider has one
+    chain_family at a time.
+    """
+    if isinstance(raw, list):
+        out: Dict[Any, Any] = {}
+        for entry in raw:
+            # Each entry must be a 2-element [key, cfg] pair. Key is the
+            # 2-element [verb, template] list (re-tupled here).
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                continue
+            key, cfg = entry
+            if isinstance(key, (list, tuple)) and len(key) == 2:
+                out[(key[0], key[1])] = cfg
+            else:
+                # Fallback: stringify so a malformed payload doesn't crash
+                # state.update — the handler will simply miss the override.
+                out[str(key)] = cfg
+        return out
+    if isinstance(raw, dict):
+        return raw
+    # Unknown shape — clear responses rather than crash.
+    return {}
 
 
 # ── Provider state ────────────────────────────────────────────────────────────
@@ -110,7 +155,7 @@ class ProviderState:
             self.drop_at           = cfg.get("drop_at",           self.drop_at)
             self.chain_family      = cfg.get("chain_family",      self.chain_family)
             if "responses" in cfg:
-                self.responses = cfg["responses"]
+                self.responses = _normalise_responses(cfg["responses"])
 
     def reset_scenario(self) -> None:
         """Reset only the scenario config fields back to startup defaults (mode, latency, responses).
@@ -529,6 +574,396 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         pass
 
 
+# ── REST handler (MAG-1777) ───────────────────────────────────────────────────
+#
+# Peer to JSONRPCHandler. Same ProviderState, same fault primitives (via
+# _apply_fault), different verb-routing surface: GET / POST / PUT / DELETE
+# instead of POST-only. Each verb method shares the same do_* skeleton:
+#
+#   1. Capture lava-* request headers.
+#   2. Build (verb, path) + parsed query + body (if Content-Length > 0).
+#   3. Resolve a request_id — prefer X-Request-Id from the router, else fall
+#      back to a sim-side monotonically increasing counter so /history's
+#      correlation_group still has a stable key per call.
+#   4. Run _apply_fault (snap snapshot is taken inside the helper's caller).
+#   5. On no fault, match (verb, path) against the compiled route table.
+#      404 if no match.
+#   6. Dispatch to handlers_rest.handle for the success-path body.
+#   7. Record history with method=f"{verb} {template}" so /history filters
+#      stay grep-friendly.
+
+
+# Module-level sim-side request-id counter. Used when the router doesn't send
+# X-Request-Id (e.g. test code calling the simulator directly). Atomic
+# increment via a lock so two parallel threads see distinct ids.
+_REST_REQUEST_ID_COUNTER = 0
+_REST_REQUEST_ID_LOCK = threading.Lock()
+
+
+def _next_sim_request_id() -> int:
+    """Return the next sim-side monotonically increasing request id (thread-safe)."""
+    global _REST_REQUEST_ID_COUNTER
+    with _REST_REQUEST_ID_LOCK:
+        _REST_REQUEST_ID_COUNTER += 1
+        return _REST_REQUEST_ID_COUNTER
+
+
+def _compile_route(template: str) -> "re.Pattern[str]":
+    """Compile a path template like ``/cosmos/.../blocks/{height}`` into a regex.
+
+    Each ``{var}`` placeholder becomes a named capture group ``(?P<var>[^/]+)``
+    so the matcher can peel path params off without a second parse pass. The
+    regex is anchored at both ends — partial matches don't count.
+
+    Why hand-rolled and not a third-party router: stdlib-only constraint
+    (Q2-A from the MAG-1777 design). 25 LOC of compiled regex covers every
+    Cosmos REST path shape we need; no need for a Werkzeug-style mini-framework.
+    """
+    pattern = re.sub(r"\{([^}/]+)\}", lambda m: rf"(?P<{m.group(1)}>[^/]+)", template)
+    return re.compile(rf"^{pattern}$")
+
+
+def _build_rest_routes() -> List[Tuple[str, "re.Pattern[str]", str]]:
+    """Compile every (verb, path_template) key in REST_METHOD_DEFAULTS into a
+    matchable route table.
+
+    Returns a list of ``(verb_uppercase, compiled_regex, template_str)`` tuples.
+    Module-level so the compile cost is paid once at import time, not per request.
+    """
+    routes: List[Tuple[str, "re.Pattern[str]", str]] = []
+    for (verb, template), _stub in REST_METHOD_DEFAULTS.items():
+        routes.append((verb.upper(), _compile_route(template), template))
+    return routes
+
+
+# Compiled once at module import. Re-compile by reloading the module if the
+# stub table changes (only happens in development, not at runtime).
+_REST_ROUTES: List[Tuple[str, "re.Pattern[str]", str]] = _build_rest_routes()
+
+
+class RestHandler(BaseHTTPRequestHandler):
+    """REST surface for the provider simulator (MAG-1777).
+
+    Shares ``ProviderState`` with ``JSONRPCHandler`` so a /scenario update
+    targeting one provider is visible to both handlers regardless of which
+    port the test hits. Verb-routing is the structurally new piece:
+    BaseHTTPRequestHandler dispatches do_GET / do_POST / etc., and each
+    method funnels into a common _handle pipeline that runs fault checks
+    and matches the URL against the compiled route table.
+    """
+
+    # ── Verb dispatch ─────────────────────────────────────────────────────────
+
+    def do_GET(self):      self._handle("GET")
+    def do_POST(self):     self._handle("POST")
+    def do_PUT(self):      self._handle("PUT")
+    def do_DELETE(self):   self._handle("DELETE")
+
+    def do_HEAD(self):
+        """HEAD = GET without the body. Build the GET response, then strip the body.
+
+        The wfile suppression is achieved by overwriting ``_reply`` for this
+        single request via the ``_head_mode`` instance flag — keeps the rest
+        of the pipeline unchanged.
+        """
+        self._head_mode = True
+        try:
+            self._handle("GET")
+        finally:
+            self._head_mode = False
+
+    def do_OPTIONS(self):
+        """OPTIONS returns the set of verbs registered for this path.
+
+        Per RFC 7231, the response carries an ``Allow`` header listing the
+        verbs the server accepts for the request URI. If the URI matches no
+        registered template the response is 404.
+        """
+        path = urlparse(self.path).path
+        allowed: List[str] = []
+        for verb, regex, _template in _REST_ROUTES:
+            if regex.match(path):
+                if verb not in allowed:
+                    allowed.append(verb)
+        if not allowed:
+            self._reply(404, {"code": "not_found", "method": "OPTIONS", "path": path})
+            return
+        # HEAD is implied by GET; OPTIONS itself is always allowed.
+        if "GET" in allowed and "HEAD" not in allowed:
+            allowed.append("HEAD")
+        allowed.append("OPTIONS")
+        self.send_response(204)
+        self.send_header("Allow", ", ".join(allowed))
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    # ── Shared pipeline ───────────────────────────────────────────────────────
+
+    def _handle(self, verb: str) -> None:
+        """Run one REST request end-to-end.
+
+        Fault evaluation → (404 if no route match) → handlers_rest.handle
+        → wire-reply via _reply. History accounting is delegated to
+        _apply_fault for fault branches, and emitted inline for the success
+        branch. The method label stored in history is ``f"{verb} {template}"``
+        (or ``f"{verb} {path}"`` when no template matched) so /history's
+        existing ?method= filter keeps working without code changes on the
+        control API side.
+        """
+        t_start = time.monotonic()
+        state: ProviderState = self.server.state
+        snap = state.snapshot()
+
+        # Lava-* request headers — used for /history filtering and threaded
+        # through to handlers_rest so a future test can assert on header
+        # propagation.
+        lava_headers = {
+            k: v for k, v in self.headers.items()
+            if k.lower().startswith("lava-")
+        }
+
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query = parse_qs(parsed.query)
+
+        # X-Request-Id wins; fall back to sim-side sequence number so every
+        # call still gets a stable correlation_group in /history.
+        req_id: Any = self.headers.get("X-Request-Id") or _next_sim_request_id()
+
+        # Latency injection — same as JSON-RPC, applied between down/parse.
+        # We can't pre-check down here because _apply_fault wants the method
+        # label; we evaluate down separately to mirror JSONRPCHandler's order.
+        # In practice REST has no body-parse barrier so down/latency/post-
+        # parse-fault simplify into a single _apply_fault call with method=
+        # f"{verb} {path}" pre-route, refined to template after routing.
+        if snap["mode"] == "down":
+            fault = _apply_fault(state, snap, "*", None, lava_headers, t_start)
+            self._emit_rest_fault(fault)
+            return
+
+        if snap["latency_ms"] > 0:
+            time.sleep(snap["latency_ms"] / 1000.0)
+
+        # Read body for verbs that may carry one. GET/HEAD/DELETE typically
+        # don't, but the HTTP spec doesn't forbid it — be permissive.
+        body: Any = None
+        length = int(self.headers.get("Content-Length", 0))
+        if length > 0:
+            try:
+                body = json.loads(self.rfile.read(length))
+            except json.JSONDecodeError:
+                # Malformed body — leave as None so handlers_rest can decide
+                # whether to 400. Don't crash the dispatcher.
+                body = None
+
+        # Route match before fault evaluation (other than down/latency above)
+        # so the method label in history records the matched template, not the
+        # raw path with placeholders unsubstituted.
+        match_result = self._match_route(verb, path)
+        if match_result is None:
+            method_label = f"{verb} {path}"
+            fault = _apply_fault(state, snap, method_label, req_id,
+                                 lava_headers, t_start)
+            if fault is not None:
+                self._emit_rest_fault(fault)
+                return
+            # Genuine 404 — record so /history shows the miss.
+            self._reply(404, {"code": "not_found", "method": verb, "path": path})
+            state.push_call_to_buffer(method_label, "not_found",
+                                      _elapsed_ms(t_start),
+                                      request_id=req_id, lava_headers=lava_headers)
+            return
+
+        template, path_params = match_result
+        method_label = f"{verb} {template}"
+
+        fault = _apply_fault(state, snap, method_label, req_id,
+                             lava_headers, t_start)
+        if fault is not None:
+            self._emit_rest_fault(fault)
+            return
+
+        # Success path — chain-specific dispatch (REST handler).
+        status, response_body = handlers_rest.handle(
+            state, verb, template, path_params, query, body, snap, lava_headers
+        )
+        emit_status = "error" if (isinstance(response_body, dict) and "error" in response_body) else "success"
+        self._reply(status, response_body,
+                    corruption_mode=snap.get("corruption_mode"),
+                    missing_field=snap.get("missing_field"))
+        state.push_call_to_buffer(method_label, emit_status, _elapsed_ms(t_start),
+                                  request_id=req_id, lava_headers=lava_headers)
+
+    # ── Routing ───────────────────────────────────────────────────────────────
+
+    def _match_route(self, verb: str, path: str
+                     ) -> Optional[Tuple[str, Dict[str, str]]]:
+        """Match ``(verb, path)`` against ``_REST_ROUTES``.
+
+        Returns ``(template_str, path_params)`` on first match, else None.
+        Path params come straight from the regex's named groups. The match
+        is exact (compiled with ``^...$``) so trailing slashes and extra
+        segments don't accidentally pass.
+        """
+        for route_verb, regex, template in _REST_ROUTES:
+            if route_verb != verb:
+                continue
+            m = regex.match(path)
+            if m is not None:
+                return template, m.groupdict()
+        return None
+
+    # ── Wire emission ─────────────────────────────────────────────────────────
+
+    def _emit_rest_fault(self, fault: Optional[Dict[str, Any]]) -> None:
+        """Translate a fault dict from ``_apply_fault`` into a REST wire reply.
+
+        REST bodies are bare JSON objects (no JSON-RPC envelope), so rate_limit
+        and error compose a small ``{"code": ..., "message": ...}`` body
+        instead of the ``{"jsonrpc": "2.0", "id": ..., "error": ...}`` shape.
+        Wire-level kinds (``down`` / ``hang`` / ``drop``) are identical to the
+        JSON-RPC equivalents — fault kind, not chain, drives the wire action.
+        """
+        if fault is None:
+            return
+
+        kind = fault["kind"]
+
+        if kind == "down":
+            self.send_response(503)
+            self.end_headers()
+            return
+
+        if kind == "hang":
+            time.sleep(30)
+            try:
+                self.connection.close()
+            except Exception:
+                pass
+            return
+
+        if kind == "drop":
+            drop_at = fault.get("drop_at", "before_headers")
+            try:
+                if drop_at == "after_headers":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", "100")
+                    self.end_headers()
+                elif drop_at == "mid_body":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", "100")
+                    self.end_headers()
+                    self.wfile.write(b'{"block":')
+                    self.wfile.flush()
+                # before_headers — fall through, no headers sent.
+            except Exception:
+                pass
+            try:
+                self.connection.close()
+            except Exception:
+                pass
+            return
+
+        # rate_limit / error — REST shape: {"code": ..., "message": ...}.
+        # No id echo, no envelope. Caller-configured corruption hooks still
+        # apply because the body is a plain JSON object the corruption layer
+        # already knows how to mutate.
+        snap = self.server.state.snapshot()
+        body = {"code": fault["error_code"], "message": fault["error_message"]}
+        self._reply(fault["status"], body,
+                    corruption_mode=snap.get("corruption_mode"),
+                    missing_field=snap.get("missing_field"))
+
+    def _reply(self, status: int, data: Any,
+               corruption_mode: Optional[str] = None,
+               missing_field: Optional[str] = None) -> None:
+        """Serialise ``data`` as JSON and write a complete HTTP response.
+
+        Mirrors JSONRPCHandler._reply: applies corruption_mode hooks (empty
+        body / missing field / wrong type) before serialisation and
+        byte-level corruption (truncated / invalid_json) after. The only
+        REST-specific tweak is that ``missing_field`` can be a dotted path
+        (``"block.header.height"``) — the helper walks the path and removes
+        the leaf when the surrounding dicts exist.
+
+        HEAD requests use the same code path but skip the body write — the
+        caller sets ``self._head_mode = True`` for the duration of the
+        request.
+        """
+        if not isinstance(data, dict):
+            # REST occasionally returns non-dict (lists, scalars). Wrap so the
+            # corruption hooks below have somewhere consistent to operate on.
+            body_data: Any = data
+            structural_only = False
+        else:
+            body_data = data
+            structural_only = True
+
+        # Structural corruption (dict mutations) — only meaningful when body is dict.
+        if structural_only:
+            if corruption_mode == "missing_field" and missing_field:
+                body_data = _remove_dotted_path(body_data, missing_field)
+            elif corruption_mode == "empty_response":
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", "0")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                return
+            elif corruption_mode == "wrong_type":
+                target = missing_field or next(iter(body_data.keys()), None)
+                if target and target in body_data:
+                    current = body_data[target]
+                    if isinstance(current, bool):
+                        body_data[target] = 1 if current else 0
+                    elif isinstance(current, str):
+                        body_data[target] = 12345
+                    elif isinstance(current, (int, float)):
+                        body_data[target] = "wrong_type_value"
+                    else:
+                        body_data[target] = "wrong_type_value"
+
+        raw = json.dumps(body_data).encode()
+
+        # Byte-level corruption.
+        if corruption_mode == "truncated" and len(raw) > 10:
+            raw = raw[:-10]
+        elif corruption_mode == "invalid_json":
+            raw = b"}{ {{ not valid json"
+
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if not getattr(self, "_head_mode", False):
+            self.wfile.write(raw)
+
+    def log_message(self, *_):
+        """Suppress the default per-request stdout logging from BaseHTTPRequestHandler."""
+        pass
+
+
+def _remove_dotted_path(data: Dict[str, Any], path: str) -> Dict[str, Any]:
+    """Return ``data`` with the dotted-path key removed.
+
+    ``path`` is a dot-separated string of object keys. Nested dicts are
+    cloned along the descent so the caller's original dict isn't mutated.
+    Missing intermediate keys cause the helper to return ``data`` unchanged.
+    """
+    if not path:
+        return data
+    segments = path.split(".")
+    if len(segments) == 1:
+        return {k: v for k, v in data.items() if k != segments[0]}
+    head, rest = segments[0], ".".join(segments[1:])
+    if not isinstance(data.get(head), dict):
+        return data
+    return {**data, head: _remove_dotted_path(data[head], rest)}
+
+
 # ── Control API handler ───────────────────────────────────────────────────────
 
 class ControlHandler(BaseHTTPRequestHandler):
@@ -732,12 +1167,18 @@ class ControlHandler(BaseHTTPRequestHandler):
 def main():
     """Start all simulator servers and block until interrupted.
 
-    Spins up four HTTPServer instances in daemon threads:
+    Spins up seven HTTPServer instances in daemon threads:
       - Three JSONRPCHandler servers (ports 18545 / 18546 / 18547), one per provider.
+      - Three RestHandler servers (ports 18551 / 18552 / 18553), one per provider,
+        sharing the same ProviderState objects as the JSON-RPC servers (MAG-1777).
       - One ControlHandler server (port 19000) for scenario config and history queries.
 
-    All four servers share the same dict of ProviderState objects so control API
-    changes are immediately visible to the JSON-RPC handlers.
+    All seven servers share the same dict of ProviderState objects so control API
+    changes are immediately visible across both the JSON-RPC and REST handlers.
+    Mixed-chain scenarios (a /scenario payload setting chain_family="eth" on
+    provider 1 and chain_family="rest" on provider 2) work because each
+    provider has its own ProviderState; the JSON-RPC server ignores REST
+    config fields and vice versa.
 
     Blocks on thread.join() and shuts all servers down cleanly on KeyboardInterrupt.
     """
@@ -753,13 +1194,27 @@ def main():
         srv.provider_id = pid          # available as self.server.provider_id in handler
         servers.append(srv)
 
+    # REST servers (MAG-1777). Share the same ProviderState objects keyed by
+    # the same provider id ("1" / "2" / "3"), so a /scenario update on
+    # provider 1 changes how both the JSON-RPC port (18545) and the REST
+    # port (18551) reply. Each server gets its own RestHandler instance
+    # because BaseHTTPRequestHandler is per-request.
+    for pid, port in REST_PORTS.items():
+        rest_srv = ThreadingHTTPServer(("0.0.0.0", port), RestHandler)
+        rest_srv.daemon_threads = True
+        rest_srv.state       = states[pid]
+        rest_srv.provider_id = pid
+        servers.append(rest_srv)
+
     ctrl = HTTPServer(("0.0.0.0", CONTROL_PORT), ControlHandler)
     ctrl.provider_states = states
     servers.append(ctrl)
 
     print("Provider simulator started")
     for pid, port in PROVIDER_PORTS.items():
-        print(f"  provider {pid} → :{port}")
+        print(f"  provider {pid} (jsonrpc) → :{port}")
+    for pid, port in REST_PORTS.items():
+        print(f"  provider {pid} (rest)    → :{port}")
     print(f"  control API  → :{CONTROL_PORT}")
     print(f"  GET /stats   → call counts per provider")
     print(f"  GET /history → ordered call log (who was tried first)")
