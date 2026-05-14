@@ -46,7 +46,7 @@ from urllib.parse import urlparse, parse_qs
 
 import handlers_btc
 import handlers_eth
-from constants import HISTORY_MAX, PROVIDER_PORTS, CONTROL_PORT
+from constants import HISTORY_MAX, PROVIDER_PORTS, CONTROL_PORT, GRPC_PROVIDER_PORTS
 
 
 # ── Provider state ────────────────────────────────────────────────────────────
@@ -66,7 +66,7 @@ class ProviderState:
     missing_field: Optional[str] = None       # field-name slot — which top-level field to target when corruption_mode is "missing_field" (omit it) or "wrong_type" (swap its type). Defaults to "result" for wrong_type when unset.
     blocks_behind: int = 0    # 0 = current head; positive = behind; negative = ahead
     drop_at: str = "before_headers"   # one of: "before_headers", "after_headers", "mid_body"; only applies when mode="drop_connection"
-    chain_family: str = "eth"   # one of: "eth", "btc"; selects which chain-specific handler module dispatches the success-branch response. Default "eth" preserves backward-compat — pre-MAG-1716 /scenario payloads (and the existing 155 ETH tests) keep working without touching the new field.
+    chain_family: str = "eth"   # one of: "eth", "btc", "grpc"; selects which chain-specific handler module dispatches the success-branch response. Default "eth" preserves backward-compat — pre-MAG-1716 /scenario payloads (and the existing 155 ETH tests) keep working without touching the new field. "grpc" routes the success path through handlers_grpc on a separate port (18548/18549/18550); the JSON-RPC dispatcher in JSONRPCHandler.do_POST never sees a "grpc" snap because gRPC providers don't listen on JSON-RPC ports.
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # call history — each entry: {ts, method, status, latency_ms}
     history: deque = field(default_factory=lambda: deque(maxlen=HISTORY_MAX), repr=False)
@@ -589,12 +589,14 @@ class ControlHandler(BaseHTTPRequestHandler):
 def main():
     """Start all simulator servers and block until interrupted.
 
-    Spins up four HTTPServer instances in daemon threads:
-      - Three JSONRPCHandler servers (ports 18545 / 18546 / 18547), one per provider.
+    Spins up:
+      - Three JSONRPCHandler servers (ports 18545 / 18546 / 18547) — ETH/BTC chains.
       - One ControlHandler server (port 19000) for scenario config and history queries.
+      - Three gRPC servers (ports 18548 / 18549 / 18550) — Cosmos chain (MAG-1780),
+        sharing the per-provider ProviderState with the matching JSON-RPC port.
 
-    All four servers share the same dict of ProviderState objects so control API
-    changes are immediately visible to the JSON-RPC handlers.
+    All servers share the same dict of ProviderState objects so control API
+    changes are immediately visible to every transport handler.
 
     Blocks on thread.join() and shuts all servers down cleanly on KeyboardInterrupt.
     """
@@ -617,11 +619,31 @@ def main():
     print("Provider simulator started")
     for pid, port in PROVIDER_PORTS.items():
         print(f"  provider {pid} → :{port}")
+    for pid, port in GRPC_PROVIDER_PORTS.items():
+        print(f"  grpc {pid}     → :{port}")
     print(f"  control API  → :{CONTROL_PORT}")
     print(f"  GET /stats   → call counts per provider")
     print(f"  GET /history → ordered call log (who was tried first)")
 
     threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in servers]
+
+    # gRPC servers (MAG-1780). Each runs its own asyncio loop on a daemon
+    # thread, sharing the same ProviderState instance with the matching
+    # JSON-RPC port so /scenario applies to both transports at once.
+    # Import locally so a missing grpcio dep doesn't break the JSON-RPC-only
+    # path (e.g. in tests that don't install gRPC extras).
+    try:
+        import grpc_server  # local import keeps gRPC dep optional
+        for pid, port in GRPC_PROVIDER_PORTS.items():
+            threads.append(threading.Thread(
+                target=grpc_server.run_grpc_in_thread,
+                args=(port, states[pid]),
+                daemon=True,
+                name=f"grpc-provider-{pid}",
+            ))
+    except ImportError as exc:
+        print(f"  gRPC servers DISABLED — grpcio import failed: {exc}")
+
     for t in threads:
         t.start()
 
