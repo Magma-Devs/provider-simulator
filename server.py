@@ -41,7 +41,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
 
 import handlers_btc
@@ -195,6 +195,130 @@ class ProviderState:
             return list(self.history)
 
 
+# ── Fault-injection helper (chain-agnostic) ───────────────────────────────────
+#
+# Extracted from JSONRPCHandler.do_POST (MAG-1777). Both the JSON-RPC handler
+# and the REST handler call this with their parsed-request context. The helper
+# evaluates the same 5 fault primitives in the same order, records the outcome
+# in history, and returns a structured dict the caller turns into a wire
+# response in its chain's native shape (JSON-RPC envelope vs REST JSON object).
+#
+# Why a dict and not Optional[Tuple[int, dict]]: down / hang / drop_connection
+# need wire-level actions (no body / sleep+close / partial-write+close) that a
+# raw (status, body) tuple can't express. The dict's "kind" field tells the
+# caller which wire action to perform; rate_limit and error carry status +
+# error_code + error_message so the caller composes a chain-appropriate body.
+# History accounting lives in the helper so callers don't duplicate it.
+
+
+def _apply_fault(
+    state: "ProviderState",
+    snap: Dict[str, Any],
+    method: str,
+    req_id: Any,
+    lava_headers: Dict[str, str],
+    t_start: float,
+) -> Optional[Dict[str, Any]]:
+    """Evaluate post-parse fault primitives and emit history.
+
+    Args:
+        state:        The live ProviderState (used to push history records).
+        snap:         ProviderState.snapshot() taken at request start; the
+                      evaluation uses the snapshot so a mid-request /scenario
+                      update can't change the outcome of an in-flight request.
+        method:       Resolved method name. For JSON-RPC this is the body
+                      "method" field; for REST it's "<VERB> <path_template>"
+                      (built by the caller). Used only for history accounting,
+                      not for fault decisions.
+        req_id:       JSON-RPC id (or X-Request-Id / sim sequence number for
+                      REST). Echoed back in the response by the caller when
+                      relevant; None for down-mode rejections where no body
+                      is parsed.
+        lava_headers: Captured lava-* request headers; stored on the history
+                      entry for later /history filtering.
+        t_start:      time.monotonic() value at request entry, used to compute
+                      latency on fault outcomes that count time-to-emit.
+
+    Returns:
+        None when no fault triggered — caller proceeds to chain-specific
+        success-path handlers (handlers_eth / handlers_btc / handlers_rest).
+        Otherwise a dict describing the fault:
+
+          {"kind": "down"}
+            Caller MUST emit 503 with no body. History already recorded with
+            method="*" (down is pre-body-parse, so no method is known).
+
+          {"kind": "hang"}
+            Caller MUST sleep 30s then close the connection. History recorded
+            with status="hang", latency_ms=0.
+
+          {"kind": "drop", "drop_at": str}
+            Caller MUST perform the partial-write dance per drop_at
+            ("before_headers" / "after_headers" / "mid_body") and close.
+            History recorded.
+
+          {"kind": "rate_limit", "status": 429, "error_code": 429,
+           "error_message": "Too many requests"}
+            Caller composes a chain-appropriate body and sends it. History
+            recorded.
+
+          {"kind": "error", "status": int, "error_code": int,
+           "error_message": str}
+            Caller composes a chain-appropriate error body. History recorded.
+    """
+    # 1. Outage — fires before any body parse. method is "*" because we never
+    #    look at the request body in down mode.
+    if snap["mode"] == "down":
+        state.push_call_to_buffer("*", "down", 0,
+                                  request_id=None, lava_headers=lava_headers)
+        return {"kind": "down"}
+
+    # 2. Hang — accept request, sleep "forever". 30s is long enough for any
+    #    reasonable client read timeout to fire; finite so the thread eventually
+    #    exits and we don't leak threads if the client disconnects.
+    if snap["mode"] == "hang":
+        state.push_call_to_buffer(method, "hang", 0,
+                                  request_id=req_id, lava_headers=lava_headers)
+        return {"kind": "hang"}
+
+    # 3. Drop connection — close socket at one of three points.
+    if snap["mode"] == "drop_connection":
+        drop_at = snap.get("drop_at", "before_headers")
+        state.push_call_to_buffer(method, "drop_connection",
+                                  _elapsed_ms(t_start),
+                                  request_id=req_id, lava_headers=lava_headers)
+        return {"kind": "drop", "drop_at": drop_at}
+
+    # 4. Rate limit — HTTP 429.
+    if snap["mode"] == "rate_limit":
+        state.push_call_to_buffer(method, "rate_limit", _elapsed_ms(t_start),
+                                  request_id=req_id, lava_headers=lava_headers)
+        return {
+            "kind": "rate_limit",
+            "status": 429,
+            "error_code": 429,
+            "error_message": "Too many requests",
+        }
+
+    # 5. Probabilistic / forced error — configurable code, message, HTTP status.
+    if snap["mode"] == "error" or random.random() < snap["error_probability"]:
+        state.push_call_to_buffer(method, "error", _elapsed_ms(t_start),
+                                  request_id=req_id, lava_headers=lava_headers)
+        return {
+            "kind": "error",
+            "status": snap.get("http_status", 200),
+            "error_code": snap.get("error_code", -32000),
+            "error_message": snap.get("error_message", "Internal error"),
+        }
+
+    return None
+
+
+def _elapsed_ms(t_start: float) -> int:
+    """Return the integer milliseconds elapsed since t_start (time.monotonic())."""
+    return int((time.monotonic() - t_start) * 1000)
+
+
 # ── JSON-RPC handler ──────────────────────────────────────────────────────────
 
 class JSONRPCHandler(BaseHTTPRequestHandler):
@@ -203,20 +327,22 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         """Handle every incoming JSON-RPC POST request for one simulated provider.
 
         Decision flow (evaluated in order, first match wins):
-          1. mode == "down"          → 503, no body parsed.
+          1. mode == "down"          → 503, no body parsed (via _apply_fault).
           2. latency_ms > 0          → sleep before continuing.
-          3. mode == "rate_limit"    → 429 JSON-RPC error.
-          4. mode == "error" or
-             random() < error_prob   → 200 JSON-RPC error body.
-          5. custom response defined → return configured result.
-          6. default stub            → return METHOD_DEFAULTS value.
+          3. mode == "hang"          → sleep 30s, close (via _apply_fault).
+          4. mode == "drop_connection" → partial write + close (via _apply_fault).
+          5. mode == "rate_limit"    → 429 JSON-RPC error (via _apply_fault).
+          6. mode == "error" or
+             random() < error_prob   → JSON-RPC error body (via _apply_fault).
+          7. custom response defined → return configured result.
+          8. default stub            → return METHOD_DEFAULTS value.
 
-        Every branch calls push_call_to_buffer() so the outcome is always recorded
-        in the in-memory ring-buffer regardless of which path was taken.
+        Every branch (via _apply_fault or in-line success path) calls
+        push_call_to_buffer so the outcome is always recorded in the in-memory
+        ring-buffer regardless of which path was taken.
         """
         t_start = time.monotonic()
         state: ProviderState = self.server.state
-        provider_id: str     = self.server.provider_id
         snap = state.snapshot()
 
         # Capture all lava-* headers from the router
@@ -225,14 +351,18 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             if k.lower().startswith("lava-")
         }
 
-        # Outage — return 503
+        # Pre-parse fault check: down mode doesn't read the body.
+        # We evaluate this before body-parse via a two-step _apply_fault call
+        # (down first with method="*"/req_id=None, then the post-parse faults
+        # with the parsed method/req_id).
         if snap["mode"] == "down":
-            self.send_response(503)
-            self.end_headers()
-            state.push_call_to_buffer("*", "down", 0, request_id=None, lava_headers=lava_headers)
+            fault = _apply_fault(state, snap, "*", None, lava_headers, t_start)
+            self._emit_jsonrpc_fault(fault, req_id=None,
+                                     corruption_mode=snap.get("corruption_mode"),
+                                     missing_field=snap.get("missing_field"))
             return
 
-        # Latency injection
+        # Latency injection — applies before any post-parse fault evaluation.
         if snap["latency_ms"] > 0:
             time.sleep(snap["latency_ms"] / 1000.0)
 
@@ -241,13 +371,63 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         req_id = body.get("id", 1)
         method = body.get("method", "unknown")
 
-        # Hang — accept request, sleep "forever" so the router hits its timeout.
-        # 30s is long enough for any reasonable client read timeout to fire;
-        # finite so the thread eventually exits and we don't leak threads if
-        # the client disconnects without timing out.
-        if snap["mode"] == "hang":
-            state.push_call_to_buffer(method, "hang", 0,
-                                      request_id=req_id, lava_headers=lava_headers)
+        # Post-parse fault evaluation. _apply_fault records history internally.
+        fault = _apply_fault(state, snap, method, req_id, lava_headers, t_start)
+        if fault is not None:
+            self._emit_jsonrpc_fault(fault, req_id=req_id,
+                                     corruption_mode=snap.get("corruption_mode"),
+                                     missing_field=snap.get("missing_field"))
+            return
+
+        # Success — delegate the chain-specific success path to a handler module.
+        #
+        # Fault branches above (down / hang / drop / rate-limit / forced or
+        # probabilistic error) are chain-agnostic and stay in _apply_fault.
+        # Only the method-lookup + result-shape logic is chain-specific — we
+        # pick the handler module based on snap["chain_family"]. Default "eth"
+        # preserves backward-compat for every payload that doesn't set
+        # chain_family.
+        #
+        # The handler returns the status + response envelope; this layer is
+        # responsible for I/O (corruption hooks, history accounting).
+        if snap.get("chain_family") == "btc":
+            status, response_body = handlers_btc.handle(state, body, snap, lava_headers)
+        else:
+            status, response_body = handlers_eth.handle(state, body, snap, lava_headers)
+        emit_status = "error" if "error" in response_body else "success"
+        self._reply(status, response_body,
+                    corruption_mode=snap.get("corruption_mode"),
+                    missing_field=snap.get("missing_field"))
+        state.push_call_to_buffer(method, emit_status, _elapsed_ms(t_start),
+                                  request_id=req_id, lava_headers=lava_headers)
+
+    def _emit_jsonrpc_fault(self, fault: Dict[str, Any], req_id: Any,
+                             corruption_mode: Optional[str] = None,
+                             missing_field: Optional[str] = None) -> None:
+        """Translate a fault dict from ``_apply_fault`` into a JSON-RPC wire reply.
+
+        Each fault "kind" maps to a specific wire action:
+
+        - ``down`` — emit HTTP 503 with no body. Mirrors the router-treats-as-
+          unavailable semantic.
+        - ``hang`` — sleep 30s, then close the socket. The 30s upper bound is
+          long enough for any reasonable client read timeout while still being
+          finite so we don't leak threads when the client disconnects.
+        - ``drop`` — close the socket at one of three points (before_headers /
+          after_headers / mid_body). Exceptions during the partial write are
+          swallowed because the client may have already disconnected.
+        - ``rate_limit`` — HTTP 429 with a JSON-RPC error envelope.
+        - ``error`` — caller-configured HTTP status with a JSON-RPC error
+          envelope. The id field is echoed from the request body when known.
+        """
+        kind = fault["kind"]
+
+        if kind == "down":
+            self.send_response(503)
+            self.end_headers()
+            return
+
+        if kind == "hang":
             time.sleep(30)
             try:
                 self.connection.close()
@@ -255,11 +435,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 pass
             return
 
-        # Drop connection — close the socket at one of three points
-        if snap["mode"] == "drop_connection":
-            drop_at = snap.get("drop_at", "before_headers")
-            state.push_call_to_buffer(method, "drop_connection", self._elapsed_ms(t_start),
-                                      request_id=req_id, lava_headers=lava_headers)
+        if kind == "drop":
+            drop_at = fault.get("drop_at", "before_headers")
             try:
                 if drop_at == "after_headers":
                     self.send_response(200)
@@ -282,54 +459,20 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 pass
             return
 
-        # Rate limit — return HTTP 429
-        if snap["mode"] == "rate_limit":
-            self._reply(429, {"jsonrpc": "2.0", "id": req_id,
-                              "error": {"code": 429, "message": "Too many requests"}},
-                        corruption_mode=snap.get("corruption_mode"),
-                        missing_field=snap.get("missing_field"))
-            state.push_call_to_buffer(method, "rate_limit", self._elapsed_ms(t_start),
-                                      request_id=req_id, lava_headers=lava_headers)
-            return
-
-        # Probabilistic / forced error — use configurable code, message, and HTTP status
-        if snap["mode"] == "error" or random.random() < snap["error_probability"]:
-            err_code = snap.get("error_code", -32000)
-            err_msg  = snap.get("error_message", "Internal error")
-            http_st  = snap.get("http_status", 200)
-            self._reply(http_st, {"jsonrpc": "2.0", "id": req_id,
-                                  "error": {"code": err_code, "message": err_msg}},
-                        corruption_mode=snap.get("corruption_mode"),
-                        missing_field=snap.get("missing_field"))
-            state.push_call_to_buffer(method, "error", self._elapsed_ms(t_start),
-                                      request_id=req_id, lava_headers=lava_headers)
-            return
-
-        # Success — delegate the chain-specific success path to a handler module.
-        #
-        # Fault branches above (down / hang / drop / rate-limit / forced or
-        # probabilistic error) are chain-agnostic and stay here. Only the
-        # method-lookup + result-shape logic is chain-specific — we pick the
-        # handler module based on snap["chain_family"]. Default "eth" preserves
-        # backward-compat for every payload that doesn't set chain_family.
-        #
-        # The handler returns the status + response envelope; this layer is
-        # responsible for I/O (corruption hooks, history accounting).
-        if snap.get("chain_family") == "btc":
-            status, response_body = handlers_btc.handle(state, body, snap, lava_headers)
-        else:
-            status, response_body = handlers_eth.handle(state, body, snap, lava_headers)
-        emit_status = "error" if "error" in response_body else "success"
-        self._reply(status, response_body,
-                    corruption_mode=snap.get("corruption_mode"),
-                    missing_field=snap.get("missing_field"))
-        state.push_call_to_buffer(method, emit_status, self._elapsed_ms(t_start),
-                                  request_id=req_id, lava_headers=lava_headers)
+        # rate_limit / error — JSON-RPC error envelope.
+        self._reply(
+            fault["status"],
+            {"jsonrpc": "2.0", "id": req_id,
+             "error": {"code": fault["error_code"],
+                       "message": fault["error_message"]}},
+            corruption_mode=corruption_mode,
+            missing_field=missing_field,
+        )
 
     @staticmethod
     def _elapsed_ms(t_start: float) -> int:
         """Return the integer milliseconds elapsed since t_start (from time.monotonic())."""
-        return int((time.monotonic() - t_start) * 1000)
+        return _elapsed_ms(t_start)
 
     def _reply(self, status: int, data: dict,
                corruption_mode: Optional[str] = None,
