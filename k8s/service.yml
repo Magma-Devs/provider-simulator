@@ -26,4 +26,21 @@ spec:
       port: 19000
       targetPort: 19000
       protocol: TCP
-
+    # gRPC provider ports (MAG-1780). HTTP/2 by virtue of gRPC; the named
+    # ports here are used by GRPCRoute backendRefs as well as direct
+    # in-cluster Service access. REST sim (MAG-1777) reserves 18551-18553.
+    - name: grpc-sim-1
+      port: 18548
+      targetPort: 18548
+      protocol: TCP
+      appProtocol: kubernetes.io/h2c
+    - name: grpc-sim-2
+      port: 18549
+      targetPort: 18549
+      protocol: TCP
+      appProtocol: kubernetes.io/h2c
+    - name: grpc-sim-3
+      port: 18550
+      targetPort: 18550
+      protocol: TCP
+      appProtocol: kubernetes.io/h2c
