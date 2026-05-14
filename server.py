@@ -65,6 +65,7 @@ class ProviderState:
     missing_field: Optional[str] = None       # field-name slot — which top-level field to target when corruption_mode is "missing_field" (omit it) or "wrong_type" (swap its type). Defaults to "result" for wrong_type when unset.
     blocks_behind: int = 0    # 0 = current head; positive = behind; negative = ahead
     drop_at: str = "before_headers"   # one of: "before_headers", "after_headers", "mid_body"; only applies when mode="drop_connection"
+    chain_family: str = "eth"   # one of: "eth", "btc"; selects which chain-specific handler module dispatches the success-branch response. Default "eth" preserves backward-compat — pre-MAG-1716 /scenario payloads (and the existing 155 ETH tests) keep working without touching the new field.
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # call history — each entry: {ts, method, status, latency_ms}
     history: deque = field(default_factory=lambda: deque(maxlen=HISTORY_MAX), repr=False)
@@ -88,6 +89,7 @@ class ProviderState:
                 "missing_field":     self.missing_field,
                 "blocks_behind":     self.blocks_behind,
                 "drop_at":           self.drop_at,
+                "chain_family":      self.chain_family,
             }
 
     def update(self, cfg: dict) -> None:
@@ -105,6 +107,7 @@ class ProviderState:
             self.missing_field     = cfg.get("missing_field",     self.missing_field)
             self.blocks_behind     = cfg.get("blocks_behind",     self.blocks_behind)
             self.drop_at           = cfg.get("drop_at",           self.drop_at)
+            self.chain_family      = cfg.get("chain_family",      self.chain_family)
             if "responses" in cfg:
                 self.responses = cfg["responses"]
 
@@ -124,6 +127,7 @@ class ProviderState:
             self.missing_field     = None
             self.blocks_behind     = 0
             self.drop_at           = "before_headers"
+            self.chain_family      = "eth"
 
     def clear_history(self) -> None:
         """Wipe the in-memory call buffer and reset all-time counters to zero.
