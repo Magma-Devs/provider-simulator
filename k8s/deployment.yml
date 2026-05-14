@@ -36,6 +36,16 @@ spec:
             - name: control
               containerPort: 19000
               protocol: TCP
+            # gRPC provider ports (MAG-1780)
+            - name: grpc-sim-1
+              containerPort: 18548
+              protocol: TCP
+            - name: grpc-sim-2
+              containerPort: 18549
+              protocol: TCP
+            - name: grpc-sim-3
+              containerPort: 18550
+              protocol: TCP
           resources:
             requests:
               cpu: "100m"
