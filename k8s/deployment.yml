@@ -33,6 +33,18 @@ spec:
             - name: provider-3
               containerPort: 18547
               protocol: TCP
+            # REST sim listeners (MAG-1777) — peer to provider-1/2/3, one per
+            # simulated provider, sharing ProviderState so a /scenario update
+            # is visible from both the JSON-RPC and REST ports.
+            - name: rest-sim-1
+              containerPort: 18551
+              protocol: TCP
+            - name: rest-sim-2
+              containerPort: 18552
+              protocol: TCP
+            - name: rest-sim-3
+              containerPort: 18553
+              protocol: TCP
             - name: control
               containerPort: 19000
               protocol: TCP
