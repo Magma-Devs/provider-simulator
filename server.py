@@ -44,7 +44,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse, parse_qs
 
-from stubs import ERROR_STUBS, METHOD_DEFAULTS
+import handlers_eth
 from constants import HISTORY_MAX, PROVIDER_PORTS, CONTROL_PORT
 
 
@@ -300,81 +300,22 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                                       request_id=req_id, lava_headers=lava_headers)
             return
 
-        # Success — look up method-specific result
-        with state.lock:
-            method_cfg = state.responses.get(method) or state.responses.get("default", {})
-
-        # Per-method error override (Phase 1.4 chain-domain errors).
+        # Success — delegate the chain-specific success path to a handler module.
         #
-        # Two ways for a test to inject an error on one method while leaving
-        # other methods on their success path:
+        # Fault branches above (down / hang / drop / rate-limit / forced or
+        # probabilistic error) are chain-agnostic and stay here. Only the
+        # method-lookup + result-shape logic is chain-specific. Today everything
+        # routes to handlers_eth.handle; once chain_family is wired (MAG-1716
+        # Step 6), dispatch on snap["chain_family"] selects handlers_btc/etc.
         #
-        #   1. Named catalogue (primary, mirrors how METHOD_DEFAULTS works):
-        #          responses[method] = {"error_stub": "revert"}
-        #      The simulator resolves the name against its local ERROR_STUBS
-        #      dict — single source of truth for envelope content.
-        #
-        #   2. Raw envelope (escape-hatch for ad-hoc shapes that don't earn
-        #      a permanent catalogue entry):
-        #          responses[method] = {"error": {"code": -32099, "message": "..."}}
-        #
-        # Unknown stub name raises KeyError — the test gets a loud failure
-        # rather than a silent fallback (typo visibility).
-        #
-        # Backward-compat: this branch is a no-op for the existing pattern
-        # responses[method] = {"result": ...} — neither "error_stub" nor "error"
-        # is present, so we fall through to the success path unchanged.
-        err = None
-        if "error_stub" in method_cfg:
-            err = ERROR_STUBS[method_cfg["error_stub"]]
-        elif "error" in method_cfg:
-            err = method_cfg["error"]
-        if err is not None:
-            http_st = method_cfg.get("http_status", 200)
-            self._reply(http_st, {"jsonrpc": "2.0", "id": req_id, "error": err},
-                        corruption_mode=snap.get("corruption_mode"),
-                        missing_field=snap.get("missing_field"))
-            state.push_call_to_buffer(method, "error", self._elapsed_ms(t_start),
-                                      request_id=req_id, lava_headers=lava_headers)
-            return
-
-        result = method_cfg.get("result", METHOD_DEFAULTS.get(method, "0x1"))
-
-        blocks_behind = snap.get("blocks_behind", 0)
-
-        # Format an int as an upper-case hex string ("0x" + uppercase digits) so
-        # the simulator's output matches the legacy hardcoded values (e.g. "0x1312D00")
-        # and existing tests that assert exact-string equality keep passing.
-        def _hex_upper(n: int) -> str:
-            return "0x" + format(n, "X")
-
-        # eth_blockNumber: shift head by blocks_behind unless overridden via responses
-        if method == "eth_blockNumber" and method not in state.responses and blocks_behind != 0:
-            head = int(METHOD_DEFAULTS["eth_blockNumber"], 16)
-            result = _hex_upper(head - blocks_behind)
-
-        # eth_getBlockByNumber: echo the requested block number so the router's
-        # pruning verification sees the correct block number in the response.
-        # Named tags ("latest"/"safe"/"pending"/"finalized") shift by blocks_behind.
-        if method == "eth_getBlockByNumber" and isinstance(result, dict):
-            params = body.get("params", [])
-            if params:
-                head = int("0x1312D00", 16)
-                effective_latest = _hex_upper(head - blocks_behind)
-                named = {
-                    "latest":    effective_latest,
-                    "earliest":  "0x0",
-                    "pending":   _hex_upper(head - blocks_behind + 1),
-                    "safe":      effective_latest,
-                    "finalized": _hex_upper(head - blocks_behind - 1),
-                }
-                result = dict(result)
-                result["number"] = named.get(params[0], params[0])
-
-        self._reply(snap.get("http_status", 200), {"jsonrpc": "2.0", "id": req_id, "result": result},
+        # The handler returns the status + response envelope; this layer is
+        # responsible for I/O (corruption hooks, history accounting).
+        status, response_body = handlers_eth.handle(state, body, snap, lava_headers)
+        emit_status = "error" if "error" in response_body else "success"
+        self._reply(status, response_body,
                     corruption_mode=snap.get("corruption_mode"),
                     missing_field=snap.get("missing_field"))
-        state.push_call_to_buffer(method, "success", self._elapsed_ms(t_start),
+        state.push_call_to_buffer(method, emit_status, self._elapsed_ms(t_start),
                                   request_id=req_id, lava_headers=lava_headers)
 
     @staticmethod
