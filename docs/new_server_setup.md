@@ -18,14 +18,15 @@ It has two parts:
 ### Fresh-server happy path
 
 - Step 0 — find this server's base domain
-- Step 1 — clone `provider-simulator`
-- Step 2 — deploy simulator pod
-- Step 3 — verify simulator pod is healthy
-- Step 4 — copy `values_sim.yml` into `smart-router-standalone`
-- Step 5 — install/upgrade smart router (auto-layers simulator values)
-- Step 6 — smoke test public simulator route
+- Prerequisites — tools the deploy server needs (`curl`, `grpcurl`)
+- Step 2 — clone `provider-simulator`
+- Step 3 — deploy simulator pod
+- Step 4 — verify simulator pod is healthy
+- Step 5 — copy `values_sim.yml` into `smart-router-standalone`
+- Step 6 — install/upgrade smart router (auto-layers simulator values)
+- Step 7 — smoke test public simulator route
 
-If this server also needs **clock injection / score reset via debug domain**, continue to **Appendix A** after step 6.
+If this server also needs **clock injection / score reset via debug domain**, continue to **Appendix A** after step 7.
 
 ---
 
@@ -38,11 +39,52 @@ grep base_domain ~/smart-router-standalone/values/core/values.yml
 # → base_domain: "victoria.magmadevs.com"
 ```
 
-You'll need this value in steps 2 and 6. Keep it in mind or note it down.
+You'll need this value in steps 3 and 7. Keep it in mind or note it down.
 
 ---
 
-## 1. Repository access (public repo)
+## Prerequisites — tools the deploy server needs
+
+These tools are used by `scripts/deploy.sh` and the smoke / verification steps that follow. Install them once per server before running Step 3.
+
+### `curl` (required)
+
+Used by Step 6 and Step 7 to hit `sim-control` and the simulator's HTTP-RPC surface.
+
+```bash
+which curl >/dev/null 2>&1 || sudo apt-get update && sudo apt-get install -y curl
+```
+
+### `grpcurl` (required for gRPC simulator surface, MAG-1780+)
+
+Used to test the gRPC simulator endpoints added by MAG-1780. Two install paths — pick whichever fits the server.
+
+**Via Go** (server already has Go installed for smart-router builds):
+
+```bash
+go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
+export PATH="$PATH:$(go env GOPATH)/bin"
+```
+
+**Via release binary** (no Go required):
+
+```bash
+curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz | sudo tar xz -C /usr/local/bin grpcurl
+```
+
+Verify:
+
+```bash
+grpcurl --version
+```
+
+### `docker` + `microk8s` (assumed already present on the magma deploy server)
+
+If this is a fresh server and these aren't there yet, run the global server bootstrap first (out of scope for this guide).
+
+---
+
+## 2. Repository access (public repo)
 
 `Magma-Devs/provider_simulator` is now public, so **deploy keys are not required for read-only clone/pull**.
 
@@ -62,7 +104,7 @@ cd ~/provider-simulator
 
 ---
 
-## 2. Set domain, deploy
+## 3. Set domain, deploy
 
 **Set the base domain before deploying** — `scripts/deploy.sh` reads this file to build hostnames.
 Replace the value with the domain you found in step 0:
@@ -83,7 +125,7 @@ bash scripts/deploy.sh
 
 ---
 
-## 3. Verify pod is running
+## 4. Verify pod is running
 
 ```bash
 kubectl get pods -n lava-infra -l app=provider-simulator
@@ -93,11 +135,11 @@ Expected: `1/1 Running`
 
 > During rollout you may briefly see two pods — one `Terminating` (old) and one `Running` (new). This is normal. Wait a few seconds and recheck.
 
-> ⚠️ Do NOT test the `sim-control` URL yet — the TLS cert won't cover it until step 6.
+> ⚠️ Do NOT test the `sim-control` URL yet — the TLS cert won't cover it until step 7.
 
 ---
 
-## 4. Create `values/simulator/values_sim.yml`
+## 5. Create `values/simulator/values_sim.yml`
 
 This file lives in `smart-router-standalone` — **not** in this repo.
 
@@ -140,7 +182,7 @@ routers:
 
 ---
 
-## 5. Install / upgrade smart router (use `INTERNAL=1` to layer simulator values)
+## 6. Install / upgrade smart router (use `INTERNAL=1` to layer simulator values)
 
 For a fresh server that needs simulator traffic, run the install via `make` with `INTERNAL=1`:
 
@@ -154,7 +196,7 @@ The Makefile target dispatches to `scripts/install_smart_router.sh --internal` (
 
 What `INTERNAL=1` does:
 - Picks **`values/core/values_internal.yml`** as the base values file (not the customer-facing `values/core/values.yml`).
-- Layers `values/simulator/values_sim.yml` on top *if* it exists (placed in step 4).
+- Layers `values/simulator/values_sim.yml` on top *if* it exists (placed in step 5).
 - Reads the chart version from `scripts/utils/common.sh` (`HELM_CHART_VERSION`).
 - Authenticates to GHCR using `HELM_REGISTRY_TOKEN` from `scripts/utils/common.sh`.
 
@@ -175,7 +217,7 @@ curl -s https://sim-control.<YOUR_DOMAIN>/health
 
 ---
 
-## 6. Smoke test
+## 7. Smoke test
 
 ```bash
 curl -s -X POST https://eth-sim-jsonrpc.<YOUR_DOMAIN> \
@@ -360,7 +402,7 @@ The `eth-sim-router` pods recover automatically within ~30 seconds.
 
 ---
 
-### 522 on sim-control after step 6
+### 522 on sim-control after step 7
 
 TLS cert may not cover `sim-control` subdomain yet. Re-run:
 ```bash
