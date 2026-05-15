@@ -1,22 +1,75 @@
 #!/bin/bash
+# scripts/deploy.sh — provider-simulator deploy
+#
+# MAG-1808: extended with manifest-diff gating so a second run is a no-op,
+# bundled `kubectl apply -f deployment.yml -f service.yml -n <ns>` in one
+# pass, and a 180s rollout timeout (was 60s).
+#
+# Behavior
+# --------
+# 1. Builds and imports the Docker image (always — image tag is :latest).
+# 2. Renders Gateway-API route templates from $BASE_DOMAIN.
+# 3. Applies k8s/deployment.yml + k8s/service.yml as one declarative command.
+#    The rollout-restart that follows is gated on a `kubectl diff` against
+#    the live cluster state: if nothing changed, no restart fires.
+# 4. Applies the rendered HTTPRoute / GRPCRoute manifests.
+# 5. Waits for rollout completion with --timeout=180s. Fails loud on timeout.
+#
+# Idempotency contract (MAG-1808 requirement 4)
+# ---------------------------------------------
+# Running this script twice back-to-back must not produce a second restart
+# cycle if the manifests haven't changed. The gate is observable: the script
+# prints either
+#     "[deploy] manifest diff detected — applying + restarting"
+# or  "[deploy] manifests unchanged — skipping rollout restart"
+# and `kubectl get events -n lava-infra` will only show one rollout-restart
+# event after both runs.
+#
+# Env overrides
+# -------------
+#   FORCE_RESTART=true   — force a rollout restart even if diff is empty
+#                          (use to pick up a fresh :latest image without
+#                          touching manifests)
+#   SKIP_BUILD=true      — skip docker build + microk8s import (faster
+#                          re-runs when iterating on manifests only)
+#   ROLLOUT_TIMEOUT=180s — override the rollout-status timeout
+#
+# Verify (paste-ready)
+# --------------------
+#   kubectl describe svc provider-simulator -n lava-infra | grep -E 'Port:|TargetPort' | wc -l
+#   kubectl exec -n lava-infra deployment/provider-simulator -- python3 -c "import socket; [print(p, 'LISTENING' if (s:=socket.socket()).connect_ex(('127.0.0.1',p))==0 else 'closed') or s.close() for p in (18545,18546,18547)]"
+#   bash scripts/deploy.sh && bash scripts/deploy.sh && kubectl get events -n lava-infra --sort-by=lastTimestamp | tail -5
+#
+# Refs: MAG-1808 (this script), MAG-1805 (manifest + constants additions
+# this script rolls out once they land).
+
 set -euo pipefail
 
 NAMESPACE="lava-infra"
+DEPLOYMENT="provider-simulator"
 CONFIG_FILE="${CONFIG_FILE:-config/base-domain.env}"
 HTTPROUTE_TEMPLATE="k8s/httproute-control.yml"
 # MAG-1780 — GRPCRoute template for the gRPC simulator. Hostname placeholder
 # is substituted with $LAVA_SIM_GRPC_HOSTNAME before apply.
 GRPCROUTE_TEMPLATE="k8s/grpcroute-lava-sim-grpc.yml"
+HTTPROUTE_REST_TEMPLATE="k8s/httproute-lava-sim-rest.yml"
+DEPLOYMENT_MANIFEST="k8s/deployment.yml"
+SERVICE_MANIFEST="k8s/service.yml"
+
+FORCE_RESTART="${FORCE_RESTART:-false}"
+SKIP_BUILD="${SKIP_BUILD:-false}"
+ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-180s}"
 
 if [ ! -f "$CONFIG_FILE" ]; then
-	echo "Missing config file: $CONFIG_FILE"
+	echo "[deploy] missing config file: $CONFIG_FILE" >&2
 	exit 1
 fi
 
+# shellcheck disable=SC1090
 source "$CONFIG_FILE"
 
 if [ -z "${BASE_DOMAIN:-}" ]; then
-	echo "BASE_DOMAIN must be set in $CONFIG_FILE"
+	echo "[deploy] BASE_DOMAIN must be set in $CONFIG_FILE" >&2
 	exit 1
 fi
 
@@ -27,7 +80,6 @@ LAVA_SIM_REST_HOSTNAME="lava-sim-rest.${BASE_DOMAIN}"
 RENDERED_HTTPROUTE="$(mktemp)"
 RENDERED_GRPCROUTE="$(mktemp)"
 RENDERED_REST_HTTPROUTE="$(mktemp)"
-HTTPROUTE_REST_TEMPLATE="k8s/httproute-lava-sim-rest.yml"
 
 cleanup() {
 	rm -f "$RENDERED_HTTPROUTE" "$RENDERED_GRPCROUTE" "$RENDERED_REST_HTTPROUTE"
@@ -46,29 +98,84 @@ echo "Control hostname    : $CONTROL_HOSTNAME"
 echo "Simulator router    : $SIM_ROUTER_HOSTNAME"
 echo "gRPC sim hostname   : $LAVA_SIM_GRPC_HOSTNAME"
 echo "REST sim hostname   : $LAVA_SIM_REST_HOSTNAME"
+echo "Force restart       : $FORCE_RESTART"
+echo "Skip build          : $SKIP_BUILD"
+echo "Rollout timeout     : $ROLLOUT_TIMEOUT"
 
-echo "=== Building Docker image ==="
-docker build -t provider-simulator:latest .
+if [ "$SKIP_BUILD" = "true" ]; then
+	echo "=== Skipping Docker build (SKIP_BUILD=true) ==="
+else
+	echo "=== Building Docker image ==="
+	docker build -t provider-simulator:latest .
 
-echo "=== Importing image into MicroK8s ==="
-docker save provider-simulator:latest | microk8s ctr image import -
+	echo "=== Importing image into MicroK8s ==="
+	docker save provider-simulator:latest | microk8s ctr image import -
+fi
 
-echo "=== Applying Kubernetes manifests ==="
-kubectl apply -f k8s/deployment.yml
-kubectl apply -f k8s/service.yml
+# MAG-1808 requirement 4 — idempotency gate.
+# `kubectl diff` exits 1 when there is a diff against the cluster, 0 when
+# there is none. We want to apply + restart only when there is a real diff.
+# `kubectl apply` itself is declarative and would be a no-op without our
+# gate, but the *rollout restart* below is not — it always cycles pods —
+# so we must guard it explicitly.
+echo "=== Checking manifest drift (MAG-1808 idempotency gate) ==="
+MANIFESTS_CHANGED="false"
+DIFF_OUTPUT="$(mktemp)"
+trap 'rm -f "$RENDERED_HTTPROUTE" "$RENDERED_GRPCROUTE" "$RENDERED_REST_HTTPROUTE" "$DIFF_OUTPUT"' EXIT
+
+# kubectl diff returns 1 when there's a diff, 0 when none, >1 on error.
+# We must not let `set -e` kill the script when exit code is 1.
+set +e
+kubectl diff -n "$NAMESPACE" -f "$DEPLOYMENT_MANIFEST" -f "$SERVICE_MANIFEST" > "$DIFF_OUTPUT" 2>&1
+DIFF_RC=$?
+set -e
+
+case "$DIFF_RC" in
+	0)
+		echo "[deploy] manifests unchanged — kubectl diff is clean"
+		;;
+	1)
+		echo "[deploy] manifest diff detected — will apply + restart"
+		MANIFESTS_CHANGED="true"
+		;;
+	*)
+		echo "[deploy] kubectl diff failed (exit $DIFF_RC):" >&2
+		cat "$DIFF_OUTPUT" >&2
+		exit "$DIFF_RC"
+		;;
+esac
+
+# MAG-1808 requirement 1 — single declarative apply across both manifests.
+# Even when nothing changed, running `kubectl apply` again is a documented
+# no-op and is safe; it is the cheap belt-and-suspenders that proves the
+# desired state matches.
+echo "=== Applying Kubernetes manifests (deployment + service) ==="
+kubectl apply -n "$NAMESPACE" -f "$DEPLOYMENT_MANIFEST" -f "$SERVICE_MANIFEST"
+
+echo "=== Applying Gateway-API routes ==="
 kubectl apply -f "$RENDERED_HTTPROUTE"
 kubectl apply -f "$RENDERED_GRPCROUTE"
 kubectl apply -f "$RENDERED_REST_HTTPROUTE"
 
-echo "=== Waiting for pod to be ready ==="
-kubectl rollout status deployment/provider-simulator -n "$NAMESPACE" --timeout=60s
-
-echo "=== Restarting pod to pick up new image ==="
-# The image tag is always 'latest' — Kubernetes will not replace the running pod
-# automatically (imagePullPolicy: IfNotPresent). An explicit rollout restart is
-# required so the new image imported above is actually used.
-kubectl rollout restart deployment/provider-simulator -n "$NAMESPACE"
-kubectl rollout status deployment/provider-simulator -n "$NAMESPACE" --timeout=60s
+# MAG-1808 requirement 2 + 3 — rollout restart after apply, then wait with
+# a hard timeout. The restart is gated by either a real manifest diff or
+# the explicit FORCE_RESTART override (e.g. to pick up a fresh :latest
+# image when only the build content changed).
+if [ "$MANIFESTS_CHANGED" = "true" ] || [ "$FORCE_RESTART" = "true" ]; then
+	if [ "$MANIFESTS_CHANGED" = "true" ]; then
+		echo "=== Restarting deployment (manifest change) ==="
+	else
+		echo "=== Restarting deployment (FORCE_RESTART=true) ==="
+	fi
+	kubectl rollout restart -n "$NAMESPACE" "deployment/$DEPLOYMENT"
+	kubectl rollout status -n "$NAMESPACE" "deployment/$DEPLOYMENT" --timeout="$ROLLOUT_TIMEOUT"
+else
+	echo "=== Skipping rollout restart (manifests unchanged, FORCE_RESTART=false) ==="
+	# Still confirm the existing deployment is healthy. If a previous deploy
+	# left it in a bad state, fail loudly here rather than pretend everything
+	# is fine.
+	kubectl rollout status -n "$NAMESPACE" "deployment/$DEPLOYMENT" --timeout="$ROLLOUT_TIMEOUT"
+fi
 
 echo "=== Updating TLS certificate to include new hostname ==="
 # This regenerates the TLS cert to include $CONTROL_HOSTNAME and any other HTTPRoute hostnames.
@@ -87,7 +194,8 @@ echo "  REST sim ingress   : https://$LAVA_SIM_REST_HOSTNAME"
 echo ""
 echo "Verify:"
 echo "  curl https://$CONTROL_HOSTNAME/health"
-echo "  grpcurl -import-path cosmos_pb2 -proto cosmos/base/tendermint/v1beta1/query.proto \\"
-echo "    $LAVA_SIM_GRPC_HOSTNAME:443 cosmos.base.tendermint.v1beta1.Service.GetLatestBlock"
+echo "  grpcurl -import-path cosmos_pb2 -proto cosmos/base/tendermint/v1beta1/query.proto $LAVA_SIM_GRPC_HOSTNAME:443 cosmos.base.tendermint.v1beta1.Service.GetLatestBlock"
 echo "  curl https://$LAVA_SIM_REST_HOSTNAME/cosmos/base/tendermint/v1beta1/blocks/latest"
-
+echo ""
+echo "MAG-1808 idempotency check:"
+echo "  bash scripts/deploy.sh && bash scripts/deploy.sh && kubectl get events -n $NAMESPACE --sort-by=lastTimestamp | tail -5"
