@@ -2,4 +2,5 @@
 # gRPC support (MAG-1780) needs the wire-format implementation and protobuf
 # runtime — both are C-extension packages and not part of stdlib.
 grpcio>=1.62,<2.0
+grpcio-reflection>=1.62,<2.0
 protobuf>=5.27,<7

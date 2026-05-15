@@ -24,12 +24,13 @@ import logging
 from typing import TYPE_CHECKING
 
 import grpc
+from grpc_reflection.v1alpha import reflection
 
 # Touch the package to splice cosmos_pb2/ onto sys.path so the generated
 # stub absolute imports work.
 import cosmos_pb2  # noqa: F401
 
-from cosmos.base.tendermint.v1beta1 import query_pb2_grpc
+from cosmos.base.tendermint.v1beta1 import query_pb2, query_pb2_grpc
 
 from handlers_grpc import CosmosBaseTendermintServicer
 
@@ -52,6 +53,15 @@ async def serve_grpc(port: int, state: "ProviderState") -> None:
     query_pb2_grpc.add_ServiceServicer_to_server(
         CosmosBaseTendermintServicer(state), server
     )
+    # Register the gRPC server-reflection API so tools like ``grpcurl`` can
+    # discover services without being handed a -proto/-import-path bundle.
+    # The simulator is a dev/test fixture, so the convenience outweighs the
+    # negligible attack surface of exposing service descriptors.
+    service_names = (
+        query_pb2.DESCRIPTOR.services_by_name["Service"].full_name,
+        reflection.SERVICE_NAME,
+    )
+    reflection.enable_server_reflection(service_names, server)
     bind = f"[::]:{port}"
     server.add_insecure_port(bind)
     _log.info("grpc provider bound on %s", bind)
