@@ -11,6 +11,20 @@ PROVIDER_PORTS = {"1": 18545, "2": 18546, "3": 18547}
 # Control API (scenario config, reset, stats, history)
 CONTROL_PORT = 19000
 
+# gRPC provider servers (MAG-1780). One per simulated provider, sharing the
+# same ProviderState dict the JSON-RPC servers use — a /scenario call with
+# chain_family="grpc" reconfigures the matching gRPC servicer just like an
+# eth/btc payload reconfigures the JSON-RPC handler. REST sim (MAG-1777)
+# takes 18551 / 18552 / 18553 so the gRPC range stays compact below it.
+GRPC_PROVIDER_PORTS = {"1": 18548, "2": 18549, "3": 18550}
+
+# REST provider servers (MAG-1777). One per simulated provider, sharing the
+# same ProviderState dict the JSON-RPC servers use — a /scenario call with
+# chain_family="rest" reconfigures the matching REST handler just like an
+# eth/btc payload reconfigures the JSON-RPC handler. Pinned to 18551-18553
+# leaving 18548-18550 reserved for MAG-1780's gRPC sims.
+REST_PORTS = {"1": 18551, "2": 18552, "3": 18553}
+
 
 # ── Provider history — call-log ring-buffer ───────────────────────────────────
 # Each provider keeps the last N calls in memory.
