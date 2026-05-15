@@ -1,0 +1,34 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: lava-sim-rest-httproute
+  namespace: lava-infra
+spec:
+  parentRefs:
+    - name: sr-gateway
+      namespace: lava-infra
+  hostnames:
+    - "__LAVA_SIM_REST_HOSTNAME__"
+  rules:
+    # Single rule with three backendRefs at equal weight. The Gateway-API
+    # implementation picks one backend per request — that's the same shape
+    # the smart router consumes for JSON-RPC. Tests that want to address a
+    # specific REST provider directly hit the in-cluster service port
+    # (rest-sim-1 / rest-sim-2 / rest-sim-3) instead.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: provider-simulator
+          namespace: lava-infra
+          port: 18551
+          weight: 1
+        - name: provider-simulator
+          namespace: lava-infra
+          port: 18552
+          weight: 1
+        - name: provider-simulator
+          namespace: lava-infra
+          port: 18553
+          weight: 1

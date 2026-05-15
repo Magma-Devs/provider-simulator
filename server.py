@@ -36,17 +36,62 @@ Control API:
 import datetime
 import json
 import random
+import re
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
 
 import handlers_btc
 import handlers_eth
-from constants import HISTORY_MAX, PROVIDER_PORTS, CONTROL_PORT, GRPC_PROVIDER_PORTS
+import handlers_rest
+from constants import HISTORY_MAX, PROVIDER_PORTS, CONTROL_PORT, GRPC_PROVIDER_PORTS, REST_PORTS
+from stubs_rest import REST_METHOD_DEFAULTS
+
+
+# ── Wire-payload normalisation ────────────────────────────────────────────────
+
+def _normalise_responses(raw: Any) -> Dict[Any, Any]:
+    """Normalise a ``responses`` wire payload into a dict the handlers can use.
+
+    JSON-RPC tests send ``responses`` as a JSON object keyed by method name:
+
+        {"eth_blockNumber": {"result": "0xff"}}
+
+    REST tests (MAG-1777) cannot use JSON objects because their keys are
+    ``(verb, path_template)`` tuples — JSON has no tuple type and no
+    non-string object keys. The wire payload for REST is a list of
+    ``[[verb, template], cfg]`` pairs:
+
+        [[["GET", "/cosmos/.../blocks/latest"], {"status": 503, "body": {...}}]]
+
+    This helper accepts either shape and re-tuples REST keys. Mixed payloads
+    (both string-keyed JSON-RPC entries and list-keyed REST entries in the
+    same provider) are NOT supported intentionally — a provider has one
+    chain_family at a time.
+    """
+    if isinstance(raw, list):
+        out: Dict[Any, Any] = {}
+        for entry in raw:
+            # Each entry must be a 2-element [key, cfg] pair. Key is the
+            # 2-element [verb, template] list (re-tupled here).
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                continue
+            key, cfg = entry
+            if isinstance(key, (list, tuple)) and len(key) == 2:
+                out[(key[0], key[1])] = cfg
+            else:
+                # Fallback: stringify so a malformed payload doesn't crash
+                # state.update — the handler will simply miss the override.
+                out[str(key)] = cfg
+        return out
+    if isinstance(raw, dict):
+        return raw
+    # Unknown shape — clear responses rather than crash.
+    return {}
 
 
 # ── Provider state ────────────────────────────────────────────────────────────
@@ -66,7 +111,18 @@ class ProviderState:
     missing_field: Optional[str] = None       # field-name slot — which top-level field to target when corruption_mode is "missing_field" (omit it) or "wrong_type" (swap its type). Defaults to "result" for wrong_type when unset.
     blocks_behind: int = 0    # 0 = current head; positive = behind; negative = ahead
     drop_at: str = "before_headers"   # one of: "before_headers", "after_headers", "mid_body"; only applies when mode="drop_connection"
-    chain_family: str = "eth"   # one of: "eth", "btc", "grpc"; selects which chain-specific handler module dispatches the success-branch response. Default "eth" preserves backward-compat — pre-MAG-1716 /scenario payloads (and the existing 155 ETH tests) keep working without touching the new field. "grpc" routes the success path through handlers_grpc on a separate port (18548/18549/18550); the JSON-RPC dispatcher in JSONRPCHandler.do_POST never sees a "grpc" snap because gRPC providers don't listen on JSON-RPC ports.
+    chain_family: str = "eth"   # one of: "eth", "btc", "grpc", "rest"; selects which chain-specific handler module dispatches the success-branch response. Default "eth" preserves backward-compat — pre-MAG-1716 /scenario payloads (and the existing 155 ETH tests) keep working without touching the new field. "grpc" routes the success path through handlers_grpc on a separate port (18548/18549/18550); the JSON-RPC dispatcher in JSONRPCHandler.do_POST never sees a "grpc" snap because gRPC providers don't listen on JSON-RPC ports. "rest" routes the success path through handlers_rest on a separate port (18551/18552/18553) for REST-style providers (MAG-1777).
+    # MAG-1791: provider-stale-on-getLogs primitive — head-fresh but logs-indexing-lagged.
+    # Models the real production failure mode where providers update eth_blockNumber
+    # immediately but index logs in a separate pipeline that can fall behind seconds-to-minutes.
+    # None = unaffected (today's behaviour). Set an int = "this provider has only indexed logs
+    # up through block <N>"; eth_getLogs queries that touch a higher range return either an
+    # empty array (logs_lag_mode="empty") or only logs with blockNumber <= N (mode="partial").
+    # eth_blockNumber is unaffected: it keeps reporting current head — that's the whole point
+    # of this primitive (head-fresh + logs-lagged is the divergence we want to expose).
+    logs_indexed_up_to: Optional[int] = None
+    # logs_lag_mode: one of "empty" / "partial". Only consulted when logs_indexed_up_to is set.
+    logs_lag_mode: str = "empty"
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # call history — each entry: {ts, method, status, latency_ms}
     history: deque = field(default_factory=lambda: deque(maxlen=HISTORY_MAX), repr=False)
@@ -91,6 +147,8 @@ class ProviderState:
                 "blocks_behind":     self.blocks_behind,
                 "drop_at":           self.drop_at,
                 "chain_family":      self.chain_family,
+                "logs_indexed_up_to": self.logs_indexed_up_to,
+                "logs_lag_mode":      self.logs_lag_mode,
             }
 
     def update(self, cfg: dict) -> None:
@@ -109,8 +167,13 @@ class ProviderState:
             self.blocks_behind     = cfg.get("blocks_behind",     self.blocks_behind)
             self.drop_at           = cfg.get("drop_at",           self.drop_at)
             self.chain_family      = cfg.get("chain_family",      self.chain_family)
+            # MAG-1791: backward-compat — missing keys keep current value, so
+            # /scenario payloads that don't carry logs_indexed_up_to / logs_lag_mode
+            # leave existing provider state untouched (defaults to None / "empty").
+            self.logs_indexed_up_to = cfg.get("logs_indexed_up_to", self.logs_indexed_up_to)
+            self.logs_lag_mode      = cfg.get("logs_lag_mode",      self.logs_lag_mode)
             if "responses" in cfg:
-                self.responses = cfg["responses"]
+                self.responses = _normalise_responses(cfg["responses"])
 
     def reset_scenario(self) -> None:
         """Reset only the scenario config fields back to startup defaults (mode, latency, responses).
@@ -129,6 +192,10 @@ class ProviderState:
             self.blocks_behind     = 0
             self.drop_at           = "before_headers"
             self.chain_family      = "eth"
+            # MAG-1791: reset clears the eth_getLogs stale-indexing primitive
+            # so a /reset between tests restores full logs availability.
+            self.logs_indexed_up_to = None
+            self.logs_lag_mode      = "empty"
 
     def clear_history(self) -> None:
         """Wipe the in-memory call buffer and reset all-time counters to zero.
@@ -195,6 +262,130 @@ class ProviderState:
             return list(self.history)
 
 
+# ── Fault-injection helper (chain-agnostic) ───────────────────────────────────
+#
+# Extracted from JSONRPCHandler.do_POST (MAG-1777). Both the JSON-RPC handler
+# and the REST handler call this with their parsed-request context. The helper
+# evaluates the same 5 fault primitives in the same order, records the outcome
+# in history, and returns a structured dict the caller turns into a wire
+# response in its chain's native shape (JSON-RPC envelope vs REST JSON object).
+#
+# Why a dict and not Optional[Tuple[int, dict]]: down / hang / drop_connection
+# need wire-level actions (no body / sleep+close / partial-write+close) that a
+# raw (status, body) tuple can't express. The dict's "kind" field tells the
+# caller which wire action to perform; rate_limit and error carry status +
+# error_code + error_message so the caller composes a chain-appropriate body.
+# History accounting lives in the helper so callers don't duplicate it.
+
+
+def _apply_fault(
+    state: "ProviderState",
+    snap: Dict[str, Any],
+    method: str,
+    req_id: Any,
+    lava_headers: Dict[str, str],
+    t_start: float,
+) -> Optional[Dict[str, Any]]:
+    """Evaluate post-parse fault primitives and emit history.
+
+    Args:
+        state:        The live ProviderState (used to push history records).
+        snap:         ProviderState.snapshot() taken at request start; the
+                      evaluation uses the snapshot so a mid-request /scenario
+                      update can't change the outcome of an in-flight request.
+        method:       Resolved method name. For JSON-RPC this is the body
+                      "method" field; for REST it's "<VERB> <path_template>"
+                      (built by the caller). Used only for history accounting,
+                      not for fault decisions.
+        req_id:       JSON-RPC id (or X-Request-Id / sim sequence number for
+                      REST). Echoed back in the response by the caller when
+                      relevant; None for down-mode rejections where no body
+                      is parsed.
+        lava_headers: Captured lava-* request headers; stored on the history
+                      entry for later /history filtering.
+        t_start:      time.monotonic() value at request entry, used to compute
+                      latency on fault outcomes that count time-to-emit.
+
+    Returns:
+        None when no fault triggered — caller proceeds to chain-specific
+        success-path handlers (handlers_eth / handlers_btc / handlers_rest).
+        Otherwise a dict describing the fault:
+
+          {"kind": "down"}
+            Caller MUST emit 503 with no body. History already recorded with
+            method="*" (down is pre-body-parse, so no method is known).
+
+          {"kind": "hang"}
+            Caller MUST sleep 30s then close the connection. History recorded
+            with status="hang", latency_ms=0.
+
+          {"kind": "drop", "drop_at": str}
+            Caller MUST perform the partial-write dance per drop_at
+            ("before_headers" / "after_headers" / "mid_body") and close.
+            History recorded.
+
+          {"kind": "rate_limit", "status": 429, "error_code": 429,
+           "error_message": "Too many requests"}
+            Caller composes a chain-appropriate body and sends it. History
+            recorded.
+
+          {"kind": "error", "status": int, "error_code": int,
+           "error_message": str}
+            Caller composes a chain-appropriate error body. History recorded.
+    """
+    # 1. Outage — fires before any body parse. method is "*" because we never
+    #    look at the request body in down mode.
+    if snap["mode"] == "down":
+        state.push_call_to_buffer("*", "down", 0,
+                                  request_id=None, lava_headers=lava_headers)
+        return {"kind": "down"}
+
+    # 2. Hang — accept request, sleep "forever". 30s is long enough for any
+    #    reasonable client read timeout to fire; finite so the thread eventually
+    #    exits and we don't leak threads if the client disconnects.
+    if snap["mode"] == "hang":
+        state.push_call_to_buffer(method, "hang", 0,
+                                  request_id=req_id, lava_headers=lava_headers)
+        return {"kind": "hang"}
+
+    # 3. Drop connection — close socket at one of three points.
+    if snap["mode"] == "drop_connection":
+        drop_at = snap.get("drop_at", "before_headers")
+        state.push_call_to_buffer(method, "drop_connection",
+                                  _elapsed_ms(t_start),
+                                  request_id=req_id, lava_headers=lava_headers)
+        return {"kind": "drop", "drop_at": drop_at}
+
+    # 4. Rate limit — HTTP 429.
+    if snap["mode"] == "rate_limit":
+        state.push_call_to_buffer(method, "rate_limit", _elapsed_ms(t_start),
+                                  request_id=req_id, lava_headers=lava_headers)
+        return {
+            "kind": "rate_limit",
+            "status": 429,
+            "error_code": 429,
+            "error_message": "Too many requests",
+        }
+
+    # 5. Probabilistic / forced error — configurable code, message, HTTP status.
+    if snap["mode"] == "error" or random.random() < snap["error_probability"]:
+        state.push_call_to_buffer(method, "error", _elapsed_ms(t_start),
+                                  request_id=req_id, lava_headers=lava_headers)
+        return {
+            "kind": "error",
+            "status": snap.get("http_status", 200),
+            "error_code": snap.get("error_code", -32000),
+            "error_message": snap.get("error_message", "Internal error"),
+        }
+
+    return None
+
+
+def _elapsed_ms(t_start: float) -> int:
+    """Return the integer milliseconds elapsed since t_start (time.monotonic())."""
+    return int((time.monotonic() - t_start) * 1000)
+
+
 # ── JSON-RPC handler ──────────────────────────────────────────────────────────
 
 class JSONRPCHandler(BaseHTTPRequestHandler):
@@ -203,20 +394,22 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         """Handle every incoming JSON-RPC POST request for one simulated provider.
 
         Decision flow (evaluated in order, first match wins):
-          1. mode == "down"          → 503, no body parsed.
+          1. mode == "down"          → 503, no body parsed (via _apply_fault).
           2. latency_ms > 0          → sleep before continuing.
-          3. mode == "rate_limit"    → 429 JSON-RPC error.
-          4. mode == "error" or
-             random() < error_prob   → 200 JSON-RPC error body.
-          5. custom response defined → return configured result.
-          6. default stub            → return METHOD_DEFAULTS value.
+          3. mode == "hang"          → sleep 30s, close (via _apply_fault).
+          4. mode == "drop_connection" → partial write + close (via _apply_fault).
+          5. mode == "rate_limit"    → 429 JSON-RPC error (via _apply_fault).
+          6. mode == "error" or
+             random() < error_prob   → JSON-RPC error body (via _apply_fault).
+          7. custom response defined → return configured result.
+          8. default stub            → return METHOD_DEFAULTS value.
 
-        Every branch calls push_call_to_buffer() so the outcome is always recorded
-        in the in-memory ring-buffer regardless of which path was taken.
+        Every branch (via _apply_fault or in-line success path) calls
+        push_call_to_buffer so the outcome is always recorded in the in-memory
+        ring-buffer regardless of which path was taken.
         """
         t_start = time.monotonic()
         state: ProviderState = self.server.state
-        provider_id: str     = self.server.provider_id
         snap = state.snapshot()
 
         # Capture all lava-* headers from the router
@@ -225,14 +418,18 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             if k.lower().startswith("lava-")
         }
 
-        # Outage — return 503
+        # Pre-parse fault check: down mode doesn't read the body.
+        # We evaluate this before body-parse via a two-step _apply_fault call
+        # (down first with method="*"/req_id=None, then the post-parse faults
+        # with the parsed method/req_id).
         if snap["mode"] == "down":
-            self.send_response(503)
-            self.end_headers()
-            state.push_call_to_buffer("*", "down", 0, request_id=None, lava_headers=lava_headers)
+            fault = _apply_fault(state, snap, "*", None, lava_headers, t_start)
+            self._emit_jsonrpc_fault(fault, req_id=None,
+                                     corruption_mode=snap.get("corruption_mode"),
+                                     missing_field=snap.get("missing_field"))
             return
 
-        # Latency injection
+        # Latency injection — applies before any post-parse fault evaluation.
         if snap["latency_ms"] > 0:
             time.sleep(snap["latency_ms"] / 1000.0)
 
@@ -241,13 +438,63 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         req_id = body.get("id", 1)
         method = body.get("method", "unknown")
 
-        # Hang — accept request, sleep "forever" so the router hits its timeout.
-        # 30s is long enough for any reasonable client read timeout to fire;
-        # finite so the thread eventually exits and we don't leak threads if
-        # the client disconnects without timing out.
-        if snap["mode"] == "hang":
-            state.push_call_to_buffer(method, "hang", 0,
-                                      request_id=req_id, lava_headers=lava_headers)
+        # Post-parse fault evaluation. _apply_fault records history internally.
+        fault = _apply_fault(state, snap, method, req_id, lava_headers, t_start)
+        if fault is not None:
+            self._emit_jsonrpc_fault(fault, req_id=req_id,
+                                     corruption_mode=snap.get("corruption_mode"),
+                                     missing_field=snap.get("missing_field"))
+            return
+
+        # Success — delegate the chain-specific success path to a handler module.
+        #
+        # Fault branches above (down / hang / drop / rate-limit / forced or
+        # probabilistic error) are chain-agnostic and stay in _apply_fault.
+        # Only the method-lookup + result-shape logic is chain-specific — we
+        # pick the handler module based on snap["chain_family"]. Default "eth"
+        # preserves backward-compat for every payload that doesn't set
+        # chain_family.
+        #
+        # The handler returns the status + response envelope; this layer is
+        # responsible for I/O (corruption hooks, history accounting).
+        if snap.get("chain_family") == "btc":
+            status, response_body = handlers_btc.handle(state, body, snap, lava_headers)
+        else:
+            status, response_body = handlers_eth.handle(state, body, snap, lava_headers)
+        emit_status = "error" if "error" in response_body else "success"
+        self._reply(status, response_body,
+                    corruption_mode=snap.get("corruption_mode"),
+                    missing_field=snap.get("missing_field"))
+        state.push_call_to_buffer(method, emit_status, _elapsed_ms(t_start),
+                                  request_id=req_id, lava_headers=lava_headers)
+
+    def _emit_jsonrpc_fault(self, fault: Dict[str, Any], req_id: Any,
+                             corruption_mode: Optional[str] = None,
+                             missing_field: Optional[str] = None) -> None:
+        """Translate a fault dict from ``_apply_fault`` into a JSON-RPC wire reply.
+
+        Each fault "kind" maps to a specific wire action:
+
+        - ``down`` — emit HTTP 503 with no body. Mirrors the router-treats-as-
+          unavailable semantic.
+        - ``hang`` — sleep 30s, then close the socket. The 30s upper bound is
+          long enough for any reasonable client read timeout while still being
+          finite so we don't leak threads when the client disconnects.
+        - ``drop`` — close the socket at one of three points (before_headers /
+          after_headers / mid_body). Exceptions during the partial write are
+          swallowed because the client may have already disconnected.
+        - ``rate_limit`` — HTTP 429 with a JSON-RPC error envelope.
+        - ``error`` — caller-configured HTTP status with a JSON-RPC error
+          envelope. The id field is echoed from the request body when known.
+        """
+        kind = fault["kind"]
+
+        if kind == "down":
+            self.send_response(503)
+            self.end_headers()
+            return
+
+        if kind == "hang":
             time.sleep(30)
             try:
                 self.connection.close()
@@ -255,11 +502,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 pass
             return
 
-        # Drop connection — close the socket at one of three points
-        if snap["mode"] == "drop_connection":
-            drop_at = snap.get("drop_at", "before_headers")
-            state.push_call_to_buffer(method, "drop_connection", self._elapsed_ms(t_start),
-                                      request_id=req_id, lava_headers=lava_headers)
+        if kind == "drop":
+            drop_at = fault.get("drop_at", "before_headers")
             try:
                 if drop_at == "after_headers":
                     self.send_response(200)
@@ -282,54 +526,20 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                 pass
             return
 
-        # Rate limit — return HTTP 429
-        if snap["mode"] == "rate_limit":
-            self._reply(429, {"jsonrpc": "2.0", "id": req_id,
-                              "error": {"code": 429, "message": "Too many requests"}},
-                        corruption_mode=snap.get("corruption_mode"),
-                        missing_field=snap.get("missing_field"))
-            state.push_call_to_buffer(method, "rate_limit", self._elapsed_ms(t_start),
-                                      request_id=req_id, lava_headers=lava_headers)
-            return
-
-        # Probabilistic / forced error — use configurable code, message, and HTTP status
-        if snap["mode"] == "error" or random.random() < snap["error_probability"]:
-            err_code = snap.get("error_code", -32000)
-            err_msg  = snap.get("error_message", "Internal error")
-            http_st  = snap.get("http_status", 200)
-            self._reply(http_st, {"jsonrpc": "2.0", "id": req_id,
-                                  "error": {"code": err_code, "message": err_msg}},
-                        corruption_mode=snap.get("corruption_mode"),
-                        missing_field=snap.get("missing_field"))
-            state.push_call_to_buffer(method, "error", self._elapsed_ms(t_start),
-                                      request_id=req_id, lava_headers=lava_headers)
-            return
-
-        # Success — delegate the chain-specific success path to a handler module.
-        #
-        # Fault branches above (down / hang / drop / rate-limit / forced or
-        # probabilistic error) are chain-agnostic and stay here. Only the
-        # method-lookup + result-shape logic is chain-specific — we pick the
-        # handler module based on snap["chain_family"]. Default "eth" preserves
-        # backward-compat for every payload that doesn't set chain_family.
-        #
-        # The handler returns the status + response envelope; this layer is
-        # responsible for I/O (corruption hooks, history accounting).
-        if snap.get("chain_family") == "btc":
-            status, response_body = handlers_btc.handle(state, body, snap, lava_headers)
-        else:
-            status, response_body = handlers_eth.handle(state, body, snap, lava_headers)
-        emit_status = "error" if "error" in response_body else "success"
-        self._reply(status, response_body,
-                    corruption_mode=snap.get("corruption_mode"),
-                    missing_field=snap.get("missing_field"))
-        state.push_call_to_buffer(method, emit_status, self._elapsed_ms(t_start),
-                                  request_id=req_id, lava_headers=lava_headers)
+        # rate_limit / error — JSON-RPC error envelope.
+        self._reply(
+            fault["status"],
+            {"jsonrpc": "2.0", "id": req_id,
+             "error": {"code": fault["error_code"],
+                       "message": fault["error_message"]}},
+            corruption_mode=corruption_mode,
+            missing_field=missing_field,
+        )
 
     @staticmethod
     def _elapsed_ms(t_start: float) -> int:
         """Return the integer milliseconds elapsed since t_start (from time.monotonic())."""
-        return int((time.monotonic() - t_start) * 1000)
+        return _elapsed_ms(t_start)
 
     def _reply(self, status: int, data: dict,
                corruption_mode: Optional[str] = None,
@@ -384,6 +594,396 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         """Suppress the default per-request stdout logging from BaseHTTPRequestHandler."""
         pass
+
+
+# ── REST handler (MAG-1777) ───────────────────────────────────────────────────
+#
+# Peer to JSONRPCHandler. Same ProviderState, same fault primitives (via
+# _apply_fault), different verb-routing surface: GET / POST / PUT / DELETE
+# instead of POST-only. Each verb method shares the same do_* skeleton:
+#
+#   1. Capture lava-* request headers.
+#   2. Build (verb, path) + parsed query + body (if Content-Length > 0).
+#   3. Resolve a request_id — prefer X-Request-Id from the router, else fall
+#      back to a sim-side monotonically increasing counter so /history's
+#      correlation_group still has a stable key per call.
+#   4. Run _apply_fault (snap snapshot is taken inside the helper's caller).
+#   5. On no fault, match (verb, path) against the compiled route table.
+#      404 if no match.
+#   6. Dispatch to handlers_rest.handle for the success-path body.
+#   7. Record history with method=f"{verb} {template}" so /history filters
+#      stay grep-friendly.
+
+
+# Module-level sim-side request-id counter. Used when the router doesn't send
+# X-Request-Id (e.g. test code calling the simulator directly). Atomic
+# increment via a lock so two parallel threads see distinct ids.
+_REST_REQUEST_ID_COUNTER = 0
+_REST_REQUEST_ID_LOCK = threading.Lock()
+
+
+def _next_sim_request_id() -> int:
+    """Return the next sim-side monotonically increasing request id (thread-safe)."""
+    global _REST_REQUEST_ID_COUNTER
+    with _REST_REQUEST_ID_LOCK:
+        _REST_REQUEST_ID_COUNTER += 1
+        return _REST_REQUEST_ID_COUNTER
+
+
+def _compile_route(template: str) -> "re.Pattern[str]":
+    """Compile a path template like ``/cosmos/.../blocks/{height}`` into a regex.
+
+    Each ``{var}`` placeholder becomes a named capture group ``(?P<var>[^/]+)``
+    so the matcher can peel path params off without a second parse pass. The
+    regex is anchored at both ends — partial matches don't count.
+
+    Why hand-rolled and not a third-party router: stdlib-only constraint
+    (Q2-A from the MAG-1777 design). 25 LOC of compiled regex covers every
+    Cosmos REST path shape we need; no need for a Werkzeug-style mini-framework.
+    """
+    pattern = re.sub(r"\{([^}/]+)\}", lambda m: rf"(?P<{m.group(1)}>[^/]+)", template)
+    return re.compile(rf"^{pattern}$")
+
+
+def _build_rest_routes() -> List[Tuple[str, "re.Pattern[str]", str]]:
+    """Compile every (verb, path_template) key in REST_METHOD_DEFAULTS into a
+    matchable route table.
+
+    Returns a list of ``(verb_uppercase, compiled_regex, template_str)`` tuples.
+    Module-level so the compile cost is paid once at import time, not per request.
+    """
+    routes: List[Tuple[str, "re.Pattern[str]", str]] = []
+    for (verb, template), _stub in REST_METHOD_DEFAULTS.items():
+        routes.append((verb.upper(), _compile_route(template), template))
+    return routes
+
+
+# Compiled once at module import. Re-compile by reloading the module if the
+# stub table changes (only happens in development, not at runtime).
+_REST_ROUTES: List[Tuple[str, "re.Pattern[str]", str]] = _build_rest_routes()
+
+
+class RestHandler(BaseHTTPRequestHandler):
+    """REST surface for the provider simulator (MAG-1777).
+
+    Shares ``ProviderState`` with ``JSONRPCHandler`` so a /scenario update
+    targeting one provider is visible to both handlers regardless of which
+    port the test hits. Verb-routing is the structurally new piece:
+    BaseHTTPRequestHandler dispatches do_GET / do_POST / etc., and each
+    method funnels into a common _handle pipeline that runs fault checks
+    and matches the URL against the compiled route table.
+    """
+
+    # ── Verb dispatch ─────────────────────────────────────────────────────────
+
+    def do_GET(self):      self._handle("GET")
+    def do_POST(self):     self._handle("POST")
+    def do_PUT(self):      self._handle("PUT")
+    def do_DELETE(self):   self._handle("DELETE")
+
+    def do_HEAD(self):
+        """HEAD = GET without the body. Build the GET response, then strip the body.
+
+        The wfile suppression is achieved by overwriting ``_reply`` for this
+        single request via the ``_head_mode`` instance flag — keeps the rest
+        of the pipeline unchanged.
+        """
+        self._head_mode = True
+        try:
+            self._handle("GET")
+        finally:
+            self._head_mode = False
+
+    def do_OPTIONS(self):
+        """OPTIONS returns the set of verbs registered for this path.
+
+        Per RFC 7231, the response carries an ``Allow`` header listing the
+        verbs the server accepts for the request URI. If the URI matches no
+        registered template the response is 404.
+        """
+        path = urlparse(self.path).path
+        allowed: List[str] = []
+        for verb, regex, _template in _REST_ROUTES:
+            if regex.match(path):
+                if verb not in allowed:
+                    allowed.append(verb)
+        if not allowed:
+            self._reply(404, {"code": "not_found", "method": "OPTIONS", "path": path})
+            return
+        # HEAD is implied by GET; OPTIONS itself is always allowed.
+        if "GET" in allowed and "HEAD" not in allowed:
+            allowed.append("HEAD")
+        allowed.append("OPTIONS")
+        self.send_response(204)
+        self.send_header("Allow", ", ".join(allowed))
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    # ── Shared pipeline ───────────────────────────────────────────────────────
+
+    def _handle(self, verb: str) -> None:
+        """Run one REST request end-to-end.
+
+        Fault evaluation → (404 if no route match) → handlers_rest.handle
+        → wire-reply via _reply. History accounting is delegated to
+        _apply_fault for fault branches, and emitted inline for the success
+        branch. The method label stored in history is ``f"{verb} {template}"``
+        (or ``f"{verb} {path}"`` when no template matched) so /history's
+        existing ?method= filter keeps working without code changes on the
+        control API side.
+        """
+        t_start = time.monotonic()
+        state: ProviderState = self.server.state
+        snap = state.snapshot()
+
+        # Lava-* request headers — used for /history filtering and threaded
+        # through to handlers_rest so a future test can assert on header
+        # propagation.
+        lava_headers = {
+            k: v for k, v in self.headers.items()
+            if k.lower().startswith("lava-")
+        }
+
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query = parse_qs(parsed.query)
+
+        # X-Request-Id wins; fall back to sim-side sequence number so every
+        # call still gets a stable correlation_group in /history.
+        req_id: Any = self.headers.get("X-Request-Id") or _next_sim_request_id()
+
+        # Latency injection — same as JSON-RPC, applied between down/parse.
+        # We can't pre-check down here because _apply_fault wants the method
+        # label; we evaluate down separately to mirror JSONRPCHandler's order.
+        # In practice REST has no body-parse barrier so down/latency/post-
+        # parse-fault simplify into a single _apply_fault call with method=
+        # f"{verb} {path}" pre-route, refined to template after routing.
+        if snap["mode"] == "down":
+            fault = _apply_fault(state, snap, "*", None, lava_headers, t_start)
+            self._emit_rest_fault(fault)
+            return
+
+        if snap["latency_ms"] > 0:
+            time.sleep(snap["latency_ms"] / 1000.0)
+
+        # Read body for verbs that may carry one. GET/HEAD/DELETE typically
+        # don't, but the HTTP spec doesn't forbid it — be permissive.
+        body: Any = None
+        length = int(self.headers.get("Content-Length", 0))
+        if length > 0:
+            try:
+                body = json.loads(self.rfile.read(length))
+            except json.JSONDecodeError:
+                # Malformed body — leave as None so handlers_rest can decide
+                # whether to 400. Don't crash the dispatcher.
+                body = None
+
+        # Route match before fault evaluation (other than down/latency above)
+        # so the method label in history records the matched template, not the
+        # raw path with placeholders unsubstituted.
+        match_result = self._match_route(verb, path)
+        if match_result is None:
+            method_label = f"{verb} {path}"
+            fault = _apply_fault(state, snap, method_label, req_id,
+                                 lava_headers, t_start)
+            if fault is not None:
+                self._emit_rest_fault(fault)
+                return
+            # Genuine 404 — record so /history shows the miss.
+            self._reply(404, {"code": "not_found", "method": verb, "path": path})
+            state.push_call_to_buffer(method_label, "not_found",
+                                      _elapsed_ms(t_start),
+                                      request_id=req_id, lava_headers=lava_headers)
+            return
+
+        template, path_params = match_result
+        method_label = f"{verb} {template}"
+
+        fault = _apply_fault(state, snap, method_label, req_id,
+                             lava_headers, t_start)
+        if fault is not None:
+            self._emit_rest_fault(fault)
+            return
+
+        # Success path — chain-specific dispatch (REST handler).
+        status, response_body = handlers_rest.handle(
+            state, verb, template, path_params, query, body, snap, lava_headers
+        )
+        emit_status = "error" if (isinstance(response_body, dict) and "error" in response_body) else "success"
+        self._reply(status, response_body,
+                    corruption_mode=snap.get("corruption_mode"),
+                    missing_field=snap.get("missing_field"))
+        state.push_call_to_buffer(method_label, emit_status, _elapsed_ms(t_start),
+                                  request_id=req_id, lava_headers=lava_headers)
+
+    # ── Routing ───────────────────────────────────────────────────────────────
+
+    def _match_route(self, verb: str, path: str
+                     ) -> Optional[Tuple[str, Dict[str, str]]]:
+        """Match ``(verb, path)`` against ``_REST_ROUTES``.
+
+        Returns ``(template_str, path_params)`` on first match, else None.
+        Path params come straight from the regex's named groups. The match
+        is exact (compiled with ``^...$``) so trailing slashes and extra
+        segments don't accidentally pass.
+        """
+        for route_verb, regex, template in _REST_ROUTES:
+            if route_verb != verb:
+                continue
+            m = regex.match(path)
+            if m is not None:
+                return template, m.groupdict()
+        return None
+
+    # ── Wire emission ─────────────────────────────────────────────────────────
+
+    def _emit_rest_fault(self, fault: Optional[Dict[str, Any]]) -> None:
+        """Translate a fault dict from ``_apply_fault`` into a REST wire reply.
+
+        REST bodies are bare JSON objects (no JSON-RPC envelope), so rate_limit
+        and error compose a small ``{"code": ..., "message": ...}`` body
+        instead of the ``{"jsonrpc": "2.0", "id": ..., "error": ...}`` shape.
+        Wire-level kinds (``down`` / ``hang`` / ``drop``) are identical to the
+        JSON-RPC equivalents — fault kind, not chain, drives the wire action.
+        """
+        if fault is None:
+            return
+
+        kind = fault["kind"]
+
+        if kind == "down":
+            self.send_response(503)
+            self.end_headers()
+            return
+
+        if kind == "hang":
+            time.sleep(30)
+            try:
+                self.connection.close()
+            except Exception:
+                pass
+            return
+
+        if kind == "drop":
+            drop_at = fault.get("drop_at", "before_headers")
+            try:
+                if drop_at == "after_headers":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", "100")
+                    self.end_headers()
+                elif drop_at == "mid_body":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", "100")
+                    self.end_headers()
+                    self.wfile.write(b'{"block":')
+                    self.wfile.flush()
+                # before_headers — fall through, no headers sent.
+            except Exception:
+                pass
+            try:
+                self.connection.close()
+            except Exception:
+                pass
+            return
+
+        # rate_limit / error — REST shape: {"code": ..., "message": ...}.
+        # No id echo, no envelope. Caller-configured corruption hooks still
+        # apply because the body is a plain JSON object the corruption layer
+        # already knows how to mutate.
+        snap = self.server.state.snapshot()
+        body = {"code": fault["error_code"], "message": fault["error_message"]}
+        self._reply(fault["status"], body,
+                    corruption_mode=snap.get("corruption_mode"),
+                    missing_field=snap.get("missing_field"))
+
+    def _reply(self, status: int, data: Any,
+               corruption_mode: Optional[str] = None,
+               missing_field: Optional[str] = None) -> None:
+        """Serialise ``data`` as JSON and write a complete HTTP response.
+
+        Mirrors JSONRPCHandler._reply: applies corruption_mode hooks (empty
+        body / missing field / wrong type) before serialisation and
+        byte-level corruption (truncated / invalid_json) after. The only
+        REST-specific tweak is that ``missing_field`` can be a dotted path
+        (``"block.header.height"``) — the helper walks the path and removes
+        the leaf when the surrounding dicts exist.
+
+        HEAD requests use the same code path but skip the body write — the
+        caller sets ``self._head_mode = True`` for the duration of the
+        request.
+        """
+        if not isinstance(data, dict):
+            # REST occasionally returns non-dict (lists, scalars). Wrap so the
+            # corruption hooks below have somewhere consistent to operate on.
+            body_data: Any = data
+            structural_only = False
+        else:
+            body_data = data
+            structural_only = True
+
+        # Structural corruption (dict mutations) — only meaningful when body is dict.
+        if structural_only:
+            if corruption_mode == "missing_field" and missing_field:
+                body_data = _remove_dotted_path(body_data, missing_field)
+            elif corruption_mode == "empty_response":
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", "0")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                return
+            elif corruption_mode == "wrong_type":
+                target = missing_field or next(iter(body_data.keys()), None)
+                if target and target in body_data:
+                    current = body_data[target]
+                    if isinstance(current, bool):
+                        body_data[target] = 1 if current else 0
+                    elif isinstance(current, str):
+                        body_data[target] = 12345
+                    elif isinstance(current, (int, float)):
+                        body_data[target] = "wrong_type_value"
+                    else:
+                        body_data[target] = "wrong_type_value"
+
+        raw = json.dumps(body_data).encode()
+
+        # Byte-level corruption.
+        if corruption_mode == "truncated" and len(raw) > 10:
+            raw = raw[:-10]
+        elif corruption_mode == "invalid_json":
+            raw = b"}{ {{ not valid json"
+
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if not getattr(self, "_head_mode", False):
+            self.wfile.write(raw)
+
+    def log_message(self, *_):
+        """Suppress the default per-request stdout logging from BaseHTTPRequestHandler."""
+        pass
+
+
+def _remove_dotted_path(data: Dict[str, Any], path: str) -> Dict[str, Any]:
+    """Return ``data`` with the dotted-path key removed.
+
+    ``path`` is a dot-separated string of object keys. Nested dicts are
+    cloned along the descent so the caller's original dict isn't mutated.
+    Missing intermediate keys cause the helper to return ``data`` unchanged.
+    """
+    if not path:
+        return data
+    segments = path.split(".")
+    if len(segments) == 1:
+        return {k: v for k, v in data.items() if k != segments[0]}
+    head, rest = segments[0], ".".join(segments[1:])
+    if not isinstance(data.get(head), dict):
+        return data
+    return {**data, head: _remove_dotted_path(data[head], rest)}
 
 
 # ── Control API handler ───────────────────────────────────────────────────────
@@ -589,14 +1189,20 @@ class ControlHandler(BaseHTTPRequestHandler):
 def main():
     """Start all simulator servers and block until interrupted.
 
-    Spins up:
+    Spins up ten HTTPServer/gRPC instances in daemon threads:
       - Three JSONRPCHandler servers (ports 18545 / 18546 / 18547) — ETH/BTC chains.
+      - Three RestHandler servers (ports 18551 / 18552 / 18553), one per provider,
+        sharing the same ProviderState objects as the JSON-RPC servers (MAG-1777).
       - One ControlHandler server (port 19000) for scenario config and history queries.
       - Three gRPC servers (ports 18548 / 18549 / 18550) — Cosmos chain (MAG-1780),
         sharing the per-provider ProviderState with the matching JSON-RPC port.
 
     All servers share the same dict of ProviderState objects so control API
     changes are immediately visible to every transport handler.
+    Mixed-chain scenarios (a /scenario payload setting chain_family="eth" on
+    provider 1 and chain_family="rest" on provider 2) work because each
+    provider has its own ProviderState; the JSON-RPC server ignores REST
+    config fields and vice versa.
 
     Blocks on thread.join() and shuts all servers down cleanly on KeyboardInterrupt.
     """
@@ -612,15 +1218,29 @@ def main():
         srv.provider_id = pid          # available as self.server.provider_id in handler
         servers.append(srv)
 
+    # REST servers (MAG-1777). Share the same ProviderState objects keyed by
+    # the same provider id ("1" / "2" / "3"), so a /scenario update on
+    # provider 1 changes how both the JSON-RPC port (18545) and the REST
+    # port (18551) reply. Each server gets its own RestHandler instance
+    # because BaseHTTPRequestHandler is per-request.
+    for pid, port in REST_PORTS.items():
+        rest_srv = ThreadingHTTPServer(("0.0.0.0", port), RestHandler)
+        rest_srv.daemon_threads = True
+        rest_srv.state       = states[pid]
+        rest_srv.provider_id = pid
+        servers.append(rest_srv)
+
     ctrl = HTTPServer(("0.0.0.0", CONTROL_PORT), ControlHandler)
     ctrl.provider_states = states
     servers.append(ctrl)
 
     print("Provider simulator started")
     for pid, port in PROVIDER_PORTS.items():
-        print(f"  provider {pid} → :{port}")
+        print(f"  provider {pid} (jsonrpc) → :{port}")
     for pid, port in GRPC_PROVIDER_PORTS.items():
-        print(f"  grpc {pid}     → :{port}")
+        print(f"  provider {pid} (grpc)    → :{port}")
+    for pid, port in REST_PORTS.items():
+        print(f"  provider {pid} (rest)    → :{port}")
     print(f"  control API  → :{CONTROL_PORT}")
     print(f"  GET /stats   → call counts per provider")
     print(f"  GET /history → ordered call log (who was tried first)")
