@@ -67,6 +67,17 @@ class ProviderState:
     blocks_behind: int = 0    # 0 = current head; positive = behind; negative = ahead
     drop_at: str = "before_headers"   # one of: "before_headers", "after_headers", "mid_body"; only applies when mode="drop_connection"
     chain_family: str = "eth"   # one of: "eth", "btc"; selects which chain-specific handler module dispatches the success-branch response. Default "eth" preserves backward-compat — pre-MAG-1716 /scenario payloads (and the existing 155 ETH tests) keep working without touching the new field.
+    # MAG-1791: provider-stale-on-getLogs primitive — head-fresh but logs-indexing-lagged.
+    # Models the real production failure mode where providers update eth_blockNumber
+    # immediately but index logs in a separate pipeline that can fall behind seconds-to-minutes.
+    # None = unaffected (today's behaviour). Set an int = "this provider has only indexed logs
+    # up through block <N>"; eth_getLogs queries that touch a higher range return either an
+    # empty array (logs_lag_mode="empty") or only logs with blockNumber <= N (mode="partial").
+    # eth_blockNumber is unaffected: it keeps reporting current head — that's the whole point
+    # of this primitive (head-fresh + logs-lagged is the divergence we want to expose).
+    logs_indexed_up_to: Optional[int] = None
+    # logs_lag_mode: one of "empty" / "partial". Only consulted when logs_indexed_up_to is set.
+    logs_lag_mode: str = "empty"
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # call history — each entry: {ts, method, status, latency_ms}
     history: deque = field(default_factory=lambda: deque(maxlen=HISTORY_MAX), repr=False)
@@ -91,6 +102,8 @@ class ProviderState:
                 "blocks_behind":     self.blocks_behind,
                 "drop_at":           self.drop_at,
                 "chain_family":      self.chain_family,
+                "logs_indexed_up_to": self.logs_indexed_up_to,
+                "logs_lag_mode":      self.logs_lag_mode,
             }
 
     def update(self, cfg: dict) -> None:
@@ -109,6 +122,11 @@ class ProviderState:
             self.blocks_behind     = cfg.get("blocks_behind",     self.blocks_behind)
             self.drop_at           = cfg.get("drop_at",           self.drop_at)
             self.chain_family      = cfg.get("chain_family",      self.chain_family)
+            # MAG-1791: backward-compat — missing keys keep current value, so
+            # /scenario payloads that don't carry logs_indexed_up_to / logs_lag_mode
+            # leave existing provider state untouched (defaults to None / "empty").
+            self.logs_indexed_up_to = cfg.get("logs_indexed_up_to", self.logs_indexed_up_to)
+            self.logs_lag_mode      = cfg.get("logs_lag_mode",      self.logs_lag_mode)
             if "responses" in cfg:
                 self.responses = cfg["responses"]
 
@@ -129,6 +147,10 @@ class ProviderState:
             self.blocks_behind     = 0
             self.drop_at           = "before_headers"
             self.chain_family      = "eth"
+            # MAG-1791: reset clears the eth_getLogs stale-indexing primitive
+            # so a /reset between tests restores full logs availability.
+            self.logs_indexed_up_to = None
+            self.logs_lag_mode      = "empty"
 
     def clear_history(self) -> None:
         """Wipe the in-memory call buffer and reset all-time counters to zero.
