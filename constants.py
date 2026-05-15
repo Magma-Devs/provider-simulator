@@ -33,3 +33,21 @@ ETH_BLOCK_HASH = "0xaaaa" + "a" * 60  # fake block hash — 32 bytes, distinct f
 ETH_TX_HASH    = "0xbbbb" + "b" * 60  # fake tx hash    — 32 bytes, distinct from block hash
 ETH_BLOOM      = "0x" + "0" * 512     # empty logs bloom filter — 256 bytes
 
+
+# ── Bitcoin — chain identity (MAG-1716) ───────────────────────────────────────
+# Block height chosen as a realistic post-2024 mainnet number. Tests that
+# assert exact equality on the default getblockcount response can pin against
+# this value.
+BTC_LATEST_BLOCK = 850_000            # decimal int; bitcoind returns block heights as JSON numbers, not hex
+BTC_CHAIN        = "main"             # one of bitcoind's chain names: "main" | "test" | "signet" | "regtest"
+
+
+# ── Bitcoin — stub primitives ─────────────────────────────────────────────────
+# bitcoind serialises block hashes and tx ids as 64-char lower-hex strings
+# (no "0x" prefix, the chain identifier "00..." prefix is part of the value).
+# We synthesise them deterministically from BTC_LATEST_BLOCK so tests can pin
+# exact equality without lifting real blockchain data.
+
+BTC_BLOCK_HASH = f"{BTC_LATEST_BLOCK:064x}"       # 64 lower-hex chars, no 0x prefix
+BTC_TX_HASH    = "ab" * 32                         # 64 hex chars, distinct from block hash
+
