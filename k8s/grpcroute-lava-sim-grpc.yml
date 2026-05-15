@@ -1,0 +1,45 @@
+# GRPCRoute for the gRPC simulator providers (MAG-1780).
+#
+# Why GRPCRoute and not HTTPRoute
+# --------------------------------
+# gRPC is HTTP/2-only and uses content-type "application/grpc" + trailers.
+# The Gateway API exposes a separate GRPCRoute kind for it; HTTPRoute would
+# work technically but doesn't preserve the gRPC header/trailer semantics
+# that the smart-router and lava client SDKs rely on (status codes carried
+# in the grpc-status trailer, deadline propagation via grpc-timeout header).
+#
+# Hostname is placeholder-substituted at deploy time by scripts/deploy.sh
+# from $LAVA_SIM_GRPC_HOSTNAME (typically lava-sim-grpc.<BASE_DOMAIN>).
+# The deploy script renders this template into a tempfile and applies it.
+#
+# Backend strategy
+# ----------------
+# Three named-port backendRefs (grpc-sim-1/2/3) route to the same Pod's
+# three gRPC listeners. The Gateway picks one per request via standard
+# weighted load-balancing — weight=1 each means uniform distribution,
+# matching the smart-router's expectation of three independent providers.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GRPCRoute
+metadata:
+  name: lava-sim-grpc-grpcroute
+  namespace: lava-infra
+spec:
+  parentRefs:
+    - name: sr-gateway
+      namespace: lava-infra
+  hostnames:
+    - "__LAVA_SIM_GRPC_HOSTNAME__"
+  rules:
+    - backendRefs:
+        - name: provider-simulator
+          namespace: lava-infra
+          port: 18548
+          weight: 1
+        - name: provider-simulator
+          namespace: lava-infra
+          port: 18549
+          weight: 1
+        - name: provider-simulator
+          namespace: lava-infra
+          port: 18550
+          weight: 1
