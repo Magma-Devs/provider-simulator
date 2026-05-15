@@ -22,11 +22,12 @@ It has two parts:
 - Step 2 — clone `provider-simulator`
 - Step 3 — deploy simulator pod
 - Step 4 — verify simulator pod is healthy
-- Step 5 — copy `values_sim.yml` into `smart-router-standalone`
-- Step 6 — install/upgrade smart router (auto-layers simulator values)
-- Step 7 — smoke test public simulator route
+- Step 5 — verify all simulator surfaces are up
+- Step 6 — copy `values_sim.yml` into `smart-router-standalone`
+- Step 7 — install/upgrade smart router (auto-layers simulator values)
+- Step 8 — smoke test public simulator route
 
-If this server also needs **clock injection / score reset via debug domain**, continue to **Appendix A** after step 7.
+If this server also needs **clock injection / score reset via debug domain**, continue to **Appendix A** after step 8.
 
 ---
 
@@ -49,7 +50,7 @@ These tools are used by `scripts/deploy.sh` and the smoke / verification steps t
 
 ### `curl` (required)
 
-Used by Step 6 and Step 7 to hit `sim-control` and the simulator's HTTP-RPC surface.
+Used by Step 7 and Step 8 to hit `sim-control` and the simulator's HTTP-RPC surface.
 
 ```bash
 which curl >/dev/null 2>&1 || sudo apt-get update && sudo apt-get install -y curl
@@ -135,11 +136,81 @@ Expected: `1/1 Running`
 
 > During rollout you may briefly see two pods — one `Terminating` (old) and one `Running` (new). This is normal. Wait a few seconds and recheck.
 
-> ⚠️ Do NOT test the `sim-control` URL yet — the TLS cert won't cover it until step 7.
+> ⚠️ Do NOT test the `sim-control` URL yet — the TLS cert won't cover it until step 8.
 
 ---
 
-## 5. Create `values/simulator/values_sim.yml`
+## 5. Verify all simulator surfaces are up
+
+The simulator runs **7 listeners** in a single pod. Pod `Running` only tells you the process started — not that every listener bound its port. Confirm each surface:
+
+### 7 Service ports are exposed
+
+```bash
+kubectl describe svc provider-simulator -n lava-infra | grep -E 'Port:|TargetPort'
+```
+
+Expected output — 7 entries:
+
+- `provider-1` → 18545
+- `provider-2` → 18546
+- `provider-3` → 18547
+- `control` → 19000
+- `grpc-sim-1` → 18548
+- `grpc-sim-2` → 18549
+- `grpc-sim-3` → 18550
+
+Missing entries → manifest wasn't applied; re-run the deploy step.
+
+### JSON-RPC providers respond (ports 18545 / 18546 / 18547)
+
+From the pod:
+
+```bash
+for port in 18545 18546 18547; do kubectl exec -n lava-infra deployment/provider-simulator -- sh -c "wget -qO- --post-data='{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}' --header=Content-Type:application/json http://localhost:$port" | grep -q '"result":' && echo "port $port: OK" || echo "port $port: FAIL"; done
+```
+
+Expected: three `OK` lines.
+
+### Control API responds (port 19000)
+
+```bash
+kubectl exec -n lava-infra deployment/provider-simulator -- wget -qO- http://localhost:19000/health
+```
+
+Expected: `{"status": "ok"}`.
+
+### gRPC providers respond (ports 18548 / 18549 / 18550)
+
+Requires `grpcurl` from the Prerequisites section. From the deploy server:
+
+```bash
+for port in 18548 18549 18550; do kubectl port-forward -n lava-infra deployment/provider-simulator $port:$port >/dev/null 2>&1 & PF=$!; sleep 1; grpcurl -plaintext localhost:$port list 2>/dev/null | grep -q "cosmos.base.tendermint" && echo "port $port: OK" || echo "port $port: FAIL"; kill $PF 2>/dev/null; wait $PF 2>/dev/null; done
+```
+
+Expected: three `OK` lines.
+
+Then sanity-test one real gRPC call:
+
+```bash
+kubectl port-forward -n lava-infra deployment/provider-simulator 18548:18548 >/dev/null 2>&1 & PF=$!; sleep 1; grpcurl -plaintext -d '{}' localhost:18548 cosmos.base.tendermint.v1beta1.Service/GetLatestBlock; kill $PF 2>/dev/null
+```
+
+Expected: a JSON `block` object with `header.height` matching the simulator's current block.
+
+### If any surface fails
+
+Check pod logs for startup errors:
+
+```bash
+kubectl logs -n lava-infra deployment/provider-simulator | tail -100
+```
+
+Look for tracebacks at boot, port-bind errors, or missing-module errors. If logs are clean but a port isn't responding, the corresponding listener didn't start — re-run the deploy step.
+
+---
+
+## 6. Create `values/simulator/values_sim.yml`
 
 This file lives in `smart-router-standalone` — **not** in this repo.
 
@@ -182,7 +253,7 @@ routers:
 
 ---
 
-## 6. Install / upgrade smart router (use `INTERNAL=1` to layer simulator values)
+## 7. Install / upgrade smart router (use `INTERNAL=1` to layer simulator values)
 
 For a fresh server that needs simulator traffic, run the install via `make` with `INTERNAL=1`:
 
@@ -196,7 +267,7 @@ The Makefile target dispatches to `scripts/install_smart_router.sh --internal` (
 
 What `INTERNAL=1` does:
 - Picks **`values/core/values_internal.yml`** as the base values file (not the customer-facing `values/core/values.yml`).
-- Layers `values/simulator/values_sim.yml` on top *if* it exists (placed in step 5).
+- Layers `values/simulator/values_sim.yml` on top *if* it exists (placed in step 6).
 - Reads the chart version from `scripts/utils/common.sh` (`HELM_CHART_VERSION`).
 - Authenticates to GHCR using `HELM_REGISTRY_TOKEN` from `scripts/utils/common.sh`.
 
@@ -217,7 +288,7 @@ curl -s https://sim-control.<YOUR_DOMAIN>/health
 
 ---
 
-## 7. Smoke test
+## 8. Smoke test
 
 ```bash
 curl -s -X POST https://eth-sim-jsonrpc.<YOUR_DOMAIN> \
@@ -402,7 +473,7 @@ The `eth-sim-router` pods recover automatically within ~30 seconds.
 
 ---
 
-### 522 on sim-control after step 7
+### 522 on sim-control after step 8
 
 TLS cert may not cover `sim-control` subdomain yet. Re-run:
 ```bash
