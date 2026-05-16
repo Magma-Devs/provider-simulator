@@ -48,7 +48,8 @@ from urllib.parse import urlparse, parse_qs
 import handlers_btc
 import handlers_eth
 import handlers_rest
-from constants import HISTORY_MAX, PROVIDER_PORTS, CONTROL_PORT, GRPC_PROVIDER_PORTS, REST_PORTS
+import handlers_ws
+from constants import HISTORY_MAX, PROVIDER_PORTS, CONTROL_PORT, GRPC_PROVIDER_PORTS, REST_PORTS, WS_PORTS
 from stubs_rest import REST_METHOD_DEFAULTS
 
 
@@ -111,7 +112,7 @@ class ProviderState:
     missing_field: Optional[str] = None       # field-name slot — which top-level field to target when corruption_mode is "missing_field" (omit it) or "wrong_type" (swap its type). Defaults to "result" for wrong_type when unset.
     blocks_behind: int = 0    # 0 = current head; positive = behind; negative = ahead
     drop_at: str = "before_headers"   # one of: "before_headers", "after_headers", "mid_body"; only applies when mode="drop_connection"
-    chain_family: str = "eth"   # one of: "eth", "btc", "grpc", "rest"; selects which chain-specific handler module dispatches the success-branch response. Default "eth" preserves backward-compat — pre-MAG-1716 /scenario payloads (and the existing 155 ETH tests) keep working without touching the new field. "grpc" routes the success path through handlers_grpc on a separate port (18548/18549/18550); the JSON-RPC dispatcher in JSONRPCHandler.do_POST never sees a "grpc" snap because gRPC providers don't listen on JSON-RPC ports. "rest" routes the success path through handlers_rest on a separate port (18551/18552/18553) for REST-style providers (MAG-1777).
+    chain_family: str = "eth"   # one of: "eth", "btc", "grpc", "rest", "ws"; selects which chain-specific handler module dispatches the success-branch response. Default "eth" preserves backward-compat — pre-MAG-1716 /scenario payloads (and the existing ETH tests) keep working without touching the new field. "grpc" routes the success path through handlers_grpc on a separate port (18548/18549/18550); the JSON-RPC dispatcher in JSONRPCHandler.do_POST never sees a "grpc" snap because gRPC providers don't listen on JSON-RPC ports. "rest" routes the success path through handlers_rest on a separate port (18551/18552/18553) for REST-style providers (MAG-1777). "ws" routes traffic through handlers_ws on ports 18557/18558/18559 for WebSocket-style providers with subscription lifecycle (MAG-1801) — the handler delegates non-subscription methods back to handlers_eth.handle / handlers_btc.handle so request/response semantics are identical to HTTP JSON-RPC; subscription frames are wrapped in chain-specific envelopes from stubs_ws.
     # MAG-1791: provider-stale-on-getLogs primitive — head-fresh but logs-indexing-lagged.
     # Models the real production failure mode where providers update eth_blockNumber
     # immediately but index logs in a separate pipeline that can fall behind seconds-to-minutes.
@@ -622,6 +623,72 @@ _REST_REQUEST_ID_COUNTER = 0
 _REST_REQUEST_ID_LOCK = threading.Lock()
 
 
+# ── WebSocket subscription registry (MAG-1801) ────────────────────────────────
+#
+# Module-level because subscriptions are per-CONNECTION runtime state, not
+# per-provider configuration. ProviderState stays for /scenario-driven config;
+# subscriptions live here, indexed by sub_id (32-hex-char string handed back
+# to the client when it eth_subscribes). /ws/emit on the control server does a
+# (sub_id) → SubscriptionHandle lookup and puts a wire-encoded event frame on
+# the matching connection's out_queue. /reset does NOT touch this registry —
+# resetting scenario config should not tear down live connections.
+
+import queue
+
+
+@dataclass
+class SubscriptionHandle:
+    """One active WS subscription. Created on eth_subscribe / subscribe /
+    accountSubscribe / logsSubscribe, removed on the matching unsubscribe or
+    on connection close.
+    """
+    sub_id: str               # 32-hex string handed back to the client
+    provider_id: str          # "1" | "2" | "3"
+    method: str               # e.g. "newHeads", "logs", "accountSubscribe"
+    chain: str                # "eth" | "tendermint" | "solana"
+    envelope: str             # one of stubs_ws SUBSCRIBE_METHODS envelope names
+    out_queue: "queue.Queue[bytes]"  # frames the writer thread will sendall()
+    closed: threading.Event   # set when the reader thread exits
+
+
+_WS_SUBSCRIPTIONS: Dict[str, SubscriptionHandle] = {}
+_WS_SUBSCRIPTIONS_LOCK = threading.Lock()
+
+
+def _register_ws_subscription(handle: SubscriptionHandle) -> None:
+    """Store a fresh subscription handle. Idempotent on sub_id."""
+    with _WS_SUBSCRIPTIONS_LOCK:
+        _WS_SUBSCRIPTIONS[handle.sub_id] = handle
+
+
+def _unregister_ws_subscription(sub_id: str) -> Optional[SubscriptionHandle]:
+    """Pop and return the handle for sub_id, or None if missing."""
+    with _WS_SUBSCRIPTIONS_LOCK:
+        return _WS_SUBSCRIPTIONS.pop(sub_id, None)
+
+
+def _lookup_ws_subscription(sub_id: str) -> Optional[SubscriptionHandle]:
+    """Return the live handle for sub_id without removing it."""
+    with _WS_SUBSCRIPTIONS_LOCK:
+        return _WS_SUBSCRIPTIONS.get(sub_id)
+
+
+def _all_ws_subscriptions() -> list:
+    """Return a snapshot of every active subscription as a list of dicts.
+    Used by GET /ws/subscriptions."""
+    with _WS_SUBSCRIPTIONS_LOCK:
+        return [
+            {
+                "subscription_id": h.sub_id,
+                "provider": h.provider_id,
+                "method": h.method,
+                "chain": h.chain,
+                "queue_depth": h.out_queue.qsize(),
+            }
+            for h in _WS_SUBSCRIPTIONS.values()
+        ]
+
+
 def _next_sim_request_id() -> int:
     """Return the next sim-side monotonically increasing request id (thread-safe)."""
     global _REST_REQUEST_ID_COUNTER
@@ -1030,6 +1097,41 @@ class ControlHandler(BaseHTTPRequestHandler):
                 state.clear_history()
             self._reply(200, {"status": "scenario reset and history cleared"})
 
+        elif self.path == "/ws/emit":
+            sub_id = body.get("subscription_id")
+            event = body.get("event")
+            if not sub_id:
+                self._reply(400, {"error": "missing field: subscription_id"})
+                return
+            if event is None:
+                event = {}
+
+            handle = _lookup_ws_subscription(sub_id)
+            if handle is None or handle.closed.is_set():
+                self._reply(404, {"error": "unknown subscription"})
+                return
+
+            import stubs_ws
+            wrapped = stubs_ws.build_event_frame(handle.envelope, sub_id, event)
+            import handlers_ws as _hws
+            frame_bytes = _hws._text_frame(wrapped)
+
+            try:
+                handle.out_queue.put_nowait(frame_bytes)
+            except queue.Full:
+                self._reply(503, {"error": "queue full"})
+                return
+
+            # Record the push in history so /history reflects pushed events.
+            state = self.server.provider_states.get(handle.provider_id)
+            if state is not None:
+                state.push_call_to_buffer(
+                    f"{handle.envelope} push", "success", 0,
+                    request_id=sub_id, lava_headers={},
+                )
+
+            self._reply(200, {"status": "emitted", "subscription_id": sub_id})
+
         else:
             self._reply(404, {"error": "unknown path"})
 
@@ -1159,6 +1261,9 @@ class ControlHandler(BaseHTTPRequestHandler):
                 entry["call_order"] = i
             self._reply(200, {"count": len(all_calls), "history": all_calls})
 
+        elif self.path == "/ws/subscriptions":
+            self._reply(200, {"subscriptions": _all_ws_subscriptions()})
+
         else:
             self._reply(404, {"error": "unknown path"})
 
@@ -1230,6 +1335,18 @@ def main():
         rest_srv.provider_id = pid
         servers.append(rest_srv)
 
+    # WS servers (MAG-1801). Share the same ProviderState objects keyed by
+    # the same provider id ("1" / "2" / "3"), so a /scenario update on
+    # provider 1 changes how all four transports (JSON-RPC, REST, gRPC,
+    # WS) reply. Each server gets its own WsHandler instance because
+    # BaseHTTPRequestHandler is per-request.
+    for pid, port in WS_PORTS.items():
+        ws_srv = ThreadingHTTPServer(("0.0.0.0", port), handlers_ws.WsHandler)
+        ws_srv.daemon_threads = True
+        ws_srv.state       = states[pid]
+        ws_srv.provider_id = pid
+        servers.append(ws_srv)
+
     ctrl = HTTPServer(("0.0.0.0", CONTROL_PORT), ControlHandler)
     ctrl.provider_states = states
     servers.append(ctrl)
@@ -1241,6 +1358,8 @@ def main():
         print(f"  provider {pid} (grpc)    → :{port}")
     for pid, port in REST_PORTS.items():
         print(f"  provider {pid} (rest)    → :{port}")
+    for pid, port in WS_PORTS.items():
+        print(f"  provider {pid} (ws)      → :{port}")
     print(f"  control API  → :{CONTROL_PORT}")
     print(f"  GET /stats   → call counts per provider")
     print(f"  GET /history → ordered call log (who was tried first)")
@@ -1275,6 +1394,7 @@ def main():
             s.shutdown()
 
 
-if __name__ == "__main__":
-    main()
+# Entry point lives in run.py — see the docstring there. server.py is a
+# library module; running it directly would duplicate module-level state
+# (e.g. _WS_SUBSCRIPTIONS) across __main__ and a second `server` import.
 
