@@ -170,7 +170,8 @@ def parse_frame(recv) -> Frame:
         # else: keep reading continuation frames
 
 
-def build_handshake_response(client_key: str) -> bytes:
+def build_handshake_response(client_key: str,
+                              extra_headers: "dict[str, str] | None" = None) -> bytes:
     """Build the full HTTP 101 response bytes for a successful WS upgrade.
 
     Caller is responsible for writing this to the socket via sendall(). After
@@ -178,16 +179,24 @@ def build_handshake_response(client_key: str) -> bytes:
     is framed per RFC 6455.
 
     Args:
-        client_key: The Sec-WebSocket-Key request header value.
+        client_key:    The Sec-WebSocket-Key request header value.
+        extra_headers: Optional name→value mapping appended to the response
+                       after the three mandatory upgrade headers. Used by the
+                       WS handler to attach Lava-Provider-Address so MAG-1749
+                       smoke tests can assert which simulated provider
+                       answered.
 
     Returns:
         Bytes ready for sendall(). Includes the terminating CRLF CRLF.
     """
     accept = compute_accept(client_key)
-    return (
-        b"HTTP/1.1 101 Switching Protocols\r\n"
-        b"Upgrade: websocket\r\n"
-        b"Connection: Upgrade\r\n"
-        b"Sec-WebSocket-Accept: " + accept.encode("ascii") + b"\r\n"
-        b"\r\n"
-    )
+    header_lines = [
+        b"HTTP/1.1 101 Switching Protocols",
+        b"Upgrade: websocket",
+        b"Connection: Upgrade",
+        b"Sec-WebSocket-Accept: " + accept.encode("ascii"),
+    ]
+    if extra_headers:
+        for name, value in extra_headers.items():
+            header_lines.append(f"{name}: {value}".encode("ascii"))
+    return b"\r\n".join(header_lines) + b"\r\n\r\n"

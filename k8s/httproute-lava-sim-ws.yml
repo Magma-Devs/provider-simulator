@@ -4,9 +4,20 @@
 # --------------------------------
 # WebSocket uses HTTP/1.1 Upgrade to switch protocols. The Gateway API
 # HTTPRoute kind carries the Upgrade header transparently when the underlying
-# gateway controller supports it (Cilium Gateway in this cluster, verified
-# against the existing REST HTTPRoute). gRPC's HTTP/2-only model would force
-# us to use GRPCRoute, which doesn't model the Upgrade dance.
+# gateway controller supports it (Cilium Gateway in this cluster, confirmed
+# by a live wss:// handshake through the deployed gateway: client receives
+# HTTP/1.1 101 Switching Protocols with the correct Sec-WebSocket-Accept,
+# and a subsequent eth_subscribe/eth_unsubscribe round-trip completes).
+# gRPC's HTTP/2-only model would force us to use GRPCRoute, which doesn't
+# model the Upgrade dance.
+#
+# HTTP/2 caveat: Cloudflare fronts this route and will speak HTTP/2 to
+# clients by default. The simulator's WsHandler only accepts the upgrade
+# over HTTP/1.1 (see handlers_ws.py — Sec-WebSocket-Version=13 + Upgrade
+# headers are HTTP/1.1-shaped), so HTTP/2-default clients (recent curl,
+# some Go libs) get 400 "bad WS upgrade request" unless they force
+# --http1.1. Browsers and the Python `websockets` library default to
+# HTTP/1.1 and work as-is.
 #
 # Hostname is placeholder-substituted at deploy time by scripts/deploy.sh
 # from $LAVA_SIM_WS_HOSTNAME (typically lava-sim-ws.<BASE_DOMAIN>).
