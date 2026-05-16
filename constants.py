@@ -25,6 +25,13 @@ GRPC_PROVIDER_PORTS = {"1": 18548, "2": 18549, "3": 18550}
 # leaving 18548-18550 reserved for MAG-1780's gRPC sims.
 REST_PORTS = {"1": 18551, "2": 18552, "3": 18553}
 
+# WebSocket provider servers (MAG-1801). One per simulated provider, sharing
+# the same ProviderState dict that backs the JSON-RPC / REST / gRPC handlers.
+# A /scenario call with chain_family="ws" reconfigures the matching WS handler
+# (latency, fault primitives, corruption). Pinned to 18557-18559 so the gap
+# 18554-18556 stays reserved for whatever transport lands next.
+WS_PORTS = {"1": 18557, "2": 18558, "3": 18559}
+
 # ── Provider history — call-log ring-buffer ───────────────────────────────────
 # Each provider keeps the last N calls in memory.
 # When full, the oldest entry is dropped to make room for the newest.

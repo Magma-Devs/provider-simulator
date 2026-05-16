@@ -4,7 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-An HTTP JSON-RPC simulator used to test smart-router behavior. Pure stdlib Python (no dependencies in `requirements.txt`). Runs four `HTTPServer` instances in daemon threads from a single process: three simulated JSON-RPC providers (ports `18545`/`18546`/`18547`) and one control API (port `19000`).
+A multi-transport JSON-RPC / BTC RPC / REST / gRPC / WebSocket simulator used to test smart-router behavior. Top-level Python — no subpackages — with two C-extension deps (`grpcio`, `protobuf`) required only for the gRPC transport. Runs many `HTTPServer` instances plus three asyncio gRPC servers in daemon threads from a single process, all sharing one in-memory state map:
+
+- JSON-RPC providers on `18545`/`18546`/`18547` (chain_family="eth" or "btc"; selects between handlers_eth and handlers_btc).
+- gRPC providers on `18548`/`18549`/`18550` (chain_family="grpc"; cosmos-tendermint servicer in handlers_grpc).
+- REST providers on `18551`/`18552`/`18553` (chain_family="rest"; handlers_rest).
+- WebSocket providers on `18557`/`18558`/`18559` (chain_family="ws"; handlers_ws — supports subscribe/unsubscribe lifecycle plus request/response over a single frame; delegates non-subscription methods back to handlers_eth/handlers_btc).
+- Control API on `19000` (scenario config, reset, history, /ws/emit, /ws/subscriptions).
 
 ## Common commands
 
@@ -33,6 +39,7 @@ The whole simulator is intentionally one process sharing one in-memory state map
 - **`ProviderState`** — owns a `threading.Lock`. All field reads/writes go through `snapshot()` / `update()` / `reset_scenario()` / `clear_history()` / `push_call_to_buffer()` so handlers always operate on a stable snapshot even if a request mutates state mid-flight. The lock is also why `field(default_factory=...)` is used for `lock` and `history` (they must not be shared across instances).
 - **`JSONRPCHandler.do_POST`** — fixed decision order: `down` (503, body never parsed) → `latency_ms` sleep → `rate_limit` (429) → forced/probabilistic `error` → custom per-method `responses` → `METHOD_DEFAULTS` from `stubs.py`. Every branch ends with `push_call_to_buffer()`, so history is the source of truth for what happened.
 - **`ControlHandler`** — four POST routes (`/scenario`, `/reset`, `/history/clear`, `/reset/all`) and four GET routes (`/health`, `/scenario`, `/stats`, `/history`). The reset/clear split is load-bearing: `/reset` zeros scenario config but keeps history; `/history/clear` does the inverse; `/reset/all` does both. Tests rely on this distinction.
+- **`WsHandler` (handlers_ws.py)** — RFC 6455 transport on ports 18557/18558/18559. Each connection runs a reader thread (parses frames, dispatches subscribe/unsubscribe/non-subscription JSON-RPC) and a writer thread (drains an outbound queue → `sendall`). A module-level `_WS_SUBSCRIPTIONS` registry maps `sub_id → SubscriptionHandle`; `POST /ws/emit` on the control server pushes wrapped event frames into the right connection's queue.
 - **`/history`** — merges all three providers' ring buffers, sorts by `ts`, then assigns two derived fields per entry: `correlation_group` (groups calls sharing `(request_id, method)` within a 50ms window — i.e. one router relay) and `call_order` (1-based position in the merged timeline). Filters: `from`/`to`/`last`/`provider`/`method`/`status`/`request_id`/`lava_header_*` (the last is a dynamic prefix — `?lava_header_lava_stateful_api=true` matches the `lava-stateful-api` header).
 - **`HISTORY_MAX = 200`** in `constants.py` is the per-provider ring-buffer cap. All-time counters in `ProviderState.stats()` are separate and never reset by the ring rollover; only `clear_history()` resets them.
 - **`stubs.py`** — `METHOD_DEFAULTS` provides default JSON-RPC results. `eth_getBlockByNumber` is special: `JSONRPCHandler.do_POST` rewrites `result["number"]` from `params[0]` (with `latest`/`earliest`/`pending`/`safe`/`finalized` mapped to fixed hex blocks) so the router's pruning verification sees a matching block number.
