@@ -1395,5 +1395,18 @@ def main():
 
 
 if __name__ == "__main__":
+    # When server.py is run as a script, Python loads it as the "__main__"
+    # module. Any later `from server import ...` (e.g. inside handlers_ws
+    # for the lazy WS-subscription registry helpers) would re-load server.py
+    # as a SECOND module named "server", duplicating every module-level
+    # piece of state including _WS_SUBSCRIPTIONS. The WS handler would
+    # register subscriptions into server._WS_SUBSCRIPTIONS while the
+    # ControlHandler (running in __main__) would look them up in
+    # __main__._WS_SUBSCRIPTIONS — different dicts, never matching.
+    # Aliasing the module name here makes both paths resolve to the same
+    # module instance so module-level state is shared. The fix has no
+    # effect in tests (which import `server` first and never run __main__).
+    import sys
+    sys.modules["server"] = sys.modules["__main__"]
     main()
 
