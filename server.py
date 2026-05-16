@@ -73,6 +73,18 @@ def _normalise_responses(raw: Any) -> Dict[Any, Any]:
     (both string-keyed JSON-RPC entries and list-keyed REST entries in the
     same provider) are NOT supported intentionally — a provider has one
     chain_family at a time.
+
+    MAG-1821 — validation pass for per-method override entries (JSON-RPC):
+
+      A per-method entry may carry ``mode`` ∈ {success, down, hang,
+      drop_connection, rate_limit}. ``mode == "error"`` is rejected here so
+      the /scenario POST returns 400 with a clear message — error semantics
+      are already covered by the per-method ``error_stub`` / ``error`` keys
+      (resolved inside handlers_eth.handle), and mixing them at the snap
+      layer would silently shadow the catalogue path.
+
+      Other unknown keys are forwarded as-is so the helpers can evolve the
+      override shape without re-versioning the wire payload.
     """
     if isinstance(raw, list):
         out: Dict[Any, Any] = {}
@@ -90,9 +102,74 @@ def _normalise_responses(raw: Any) -> Dict[Any, Any]:
                 out[str(key)] = cfg
         return out
     if isinstance(raw, dict):
+        # MAG-1821 — reject per-method mode="error" overrides at /scenario
+        # time. Use the per-method error_stub / error keys (handlers_eth)
+        # for chain-domain errors instead.
+        for method_name, cfg in raw.items():
+            if isinstance(cfg, dict) and cfg.get("mode") == "error":
+                raise ValueError(
+                    f"per-method mode=\"error\" is not supported "
+                    f"(method={method_name!r}); use responses[{method_name!r}] = "
+                    f"{{'error_stub': '<name>'}} or {{'error': {{...}}}} instead"
+                )
         return raw
     # Unknown shape — clear responses rather than crash.
     return {}
+
+
+# ── Per-method config resolution (MAG-1821) ───────────────────────────────────
+
+# Fault-decision keys that a per-method override may shadow on the snap.
+# Kept narrow on purpose: only the keys that _apply_fault (and the latency
+# pre-step in do_POST) actually consult. Adding a key here is a deliberate
+# choice — silently mirroring every snap field would let unrelated config
+# (chain_family, blocks_behind, …) leak into the per-method path.
+_METHOD_OVERRIDE_KEYS = (
+    "mode",
+    "latency_ms",
+    "error_probability",
+    "error_code",
+    "error_message",
+    "http_status",
+    "drop_at",
+)
+
+
+def _resolve_method_config(
+    method: str,
+    snap: Dict[str, Any],
+    responses: Dict[Any, Any],
+) -> Dict[Any, Any]:
+    """Return a snap-shaped dict merged with the per-method override (if any).
+
+    Resolution rules (MAG-1821):
+
+      - For each key in ``_METHOD_OVERRIDE_KEYS``, prefer
+        ``responses[method][key]`` when present, otherwise fall back to
+        ``snap[key]``. This is the per-key fallback contract — a partial
+        per-method entry inherits provider-wide fault keys it doesn't
+        override (e.g. setting only ``{"mode": "down"}`` for a method
+        keeps the provider-wide ``latency_ms`` in effect).
+      - All other snap keys are passed through unchanged so the caller
+        (history accounting, success-path handlers reading
+        ``corruption_mode`` / ``blocks_behind`` / etc.) sees a single
+        merged dict.
+      - ``method == "*"`` (pre-body-parse down branch) and an empty /
+        non-dict ``responses[method]`` short-circuit to the raw snap.
+      - Unknown keys inside ``responses[method]`` are silently ignored —
+        forward-compatibility so adding a new override knob doesn't break
+        older snap shapes.
+    """
+    if method == "*" or not responses:
+        return snap
+    method_cfg = responses.get(method)
+    if not isinstance(method_cfg, dict):
+        return snap
+    merged = dict(snap)
+    for key in _METHOD_OVERRIDE_KEYS:
+        if key in method_cfg:
+            merged[key] = method_cfg[key]
+    return merged
 
 
 # ── Provider state ────────────────────────────────────────────────────────────
@@ -419,10 +496,11 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             if k.lower().startswith("lava-")
         }
 
-        # Pre-parse fault check: down mode doesn't read the body.
-        # We evaluate this before body-parse via a two-step _apply_fault call
-        # (down first with method="*"/req_id=None, then the post-parse faults
-        # with the parsed method/req_id).
+        # Pre-parse fault check: provider-wide down mode doesn't read the body.
+        # Down is the only pre-body-parse fault — there is no per-method
+        # variant at this layer because the method label isn't known yet
+        # (body unparsed). A per-method down lives behind the merged-config
+        # path below and applies on the post-parse branch.
         if snap["mode"] == "down":
             fault = _apply_fault(state, snap, "*", None, lava_headers, t_start)
             self._emit_jsonrpc_fault(fault, req_id=None,
@@ -430,17 +508,27 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
                                      missing_field=snap.get("missing_field"))
             return
 
-        # Latency injection — applies before any post-parse fault evaluation.
-        if snap["latency_ms"] > 0:
-            time.sleep(snap["latency_ms"] / 1000.0)
-
+        # Parse the request body before latency/fault evaluation so the
+        # method label is available for per-method override resolution
+        # (MAG-1821). Parsing first is safe: it's a small in-memory JSON
+        # load that doesn't depend on any provider config.
         length = int(self.headers.get("Content-Length", 0))
         body   = json.loads(self.rfile.read(length)) if length else {}
         req_id = body.get("id", 1)
         method = body.get("method", "unknown")
 
+        # Merge per-method overrides into the snap (MAG-1821). When no
+        # override applies, ``method_snap is snap`` and behaviour matches
+        # pre-MAG-1821 exactly. Order matches the provider-wide path:
+        # latency FIRST, then fault — so a per-method ``latency_ms`` is
+        # paid even on a per-method rate_limit / drop response.
+        method_snap = _resolve_method_config(method, snap, state.responses)
+
+        if method_snap["latency_ms"] > 0:
+            time.sleep(method_snap["latency_ms"] / 1000.0)
+
         # Post-parse fault evaluation. _apply_fault records history internally.
-        fault = _apply_fault(state, snap, method, req_id, lava_headers, t_start)
+        fault = _apply_fault(state, method_snap, method, req_id, lava_headers, t_start)
         if fault is not None:
             self._emit_jsonrpc_fault(fault, req_id=req_id,
                                      corruption_mode=snap.get("corruption_mode"),
@@ -1075,10 +1163,17 @@ class ControlHandler(BaseHTTPRequestHandler):
         body   = json.loads(self.rfile.read(length)) if length else {}
 
         if self.path == "/scenario":
-            for pid, cfg in body.get("providers", {}).items():
-                state = self.server.provider_states.get(str(pid))
-                if state:
-                    state.update(cfg)
+            # MAG-1821 — validation errors raised inside state.update (via
+            # _normalise_responses) come back as ValueError. Surface them
+            # as 400 so the test sees a clear message instead of a 500.
+            try:
+                for pid, cfg in body.get("providers", {}).items():
+                    state = self.server.provider_states.get(str(pid))
+                    if state:
+                        state.update(cfg)
+            except ValueError as exc:
+                self._reply(400, {"error": str(exc)})
+                return
             self._reply(200, {"status": "ok"})
 
         elif self.path == "/reset":
