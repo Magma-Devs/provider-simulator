@@ -59,3 +59,18 @@ spec:
       targetPort: 18550
       protocol: TCP
       appProtocol: kubernetes.io/h2c
+    # WS sim service ports (MAG-1801). Mirror the deployment's ws-sim-1/2/3
+    # named ports. The HTTPRoute (k8s/httproute-lava-sim-ws.yml) references
+    # them so the gateway can resolve them by port number.
+    - name: ws-sim-1
+      port: 18557
+      targetPort: 18557
+      protocol: TCP
+    - name: ws-sim-2
+      port: 18558
+      targetPort: 18558
+      protocol: TCP
+    - name: ws-sim-3
+      port: 18559
+      targetPort: 18559
+      protocol: TCP

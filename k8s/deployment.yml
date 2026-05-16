@@ -58,6 +58,18 @@ spec:
             - name: grpc-sim-3
               containerPort: 18550
               protocol: TCP
+            # WS provider listeners (MAG-1801) — peer to provider-1/2/3,
+            # one per simulated provider, sharing ProviderState so a
+            # /scenario update is visible from every transport.
+            - name: ws-sim-1
+              containerPort: 18557
+              protocol: TCP
+            - name: ws-sim-2
+              containerPort: 18558
+              protocol: TCP
+            - name: ws-sim-3
+              containerPort: 18559
+              protocol: TCP
           resources:
             requests:
               cpu: "100m"
