@@ -4,6 +4,8 @@ constants.py — All project-wide constants, grouped by logical area.
 Import from here instead of defining magic values inline.
 """
 
+import os
+
 # ── Server — network / ports ──────────────────────────────────────────────────
 # JSON-RPC provider servers (one per simulated provider)
 PROVIDER_PORTS = {"1": 18545, "2": 18546, "3": 18547}
@@ -36,7 +38,19 @@ WS_PORTS = {"1": 18557, "2": 18558, "3": 18559}
 # Each provider keeps the last N calls in memory.
 # When full, the oldest entry is dropped to make room for the newest.
 # Affects /history responses. Does NOT affect /stats (all-time counters).
-HISTORY_MAX = 200
+#
+# Default raised to 2000 (MAG-1822) so long simulator scenarios — sustained
+# retry storms, soak tests, cross-validation sweeps — don't silently roll the
+# oldest entries off the buffer before a test can assert on them. The previous
+# 200 cap left ~67 calls per provider headroom, which a single eth_blockNumber
+# burst could exhaust. Override via env at pod startup:
+#
+#   SIM_HISTORY_MAX=500 python -u server.py     # smaller for memory-constrained dev pods
+#   SIM_HISTORY_MAX=5000 python -u server.py    # larger for very long soak tests
+#
+# Memory is bounded — each entry is a small dict (~250 bytes); 2000 × 3
+# providers ≈ 1.5 MB resident, well within the simulator's footprint budget.
+HISTORY_MAX = int(os.getenv("SIM_HISTORY_MAX", "2000"))
 
 
 # ── Ethereum — chain identity ─────────────────────────────────────────────────
