@@ -45,6 +45,18 @@ spec:
             - name: rest-sim-3
               containerPort: 18553
               protocol: TCP
+            # Tendermint-RPC sim listeners (MAG-1841) — peer to provider-1/2/3,
+            # one per simulated provider, sharing ProviderState so a /scenario
+            # update is visible from JSON-RPC, REST, gRPC, and Tendermint ports.
+            - name: tm-sim-1
+              containerPort: 18554
+              protocol: TCP
+            - name: tm-sim-2
+              containerPort: 18555
+              protocol: TCP
+            - name: tm-sim-3
+              containerPort: 18556
+              protocol: TCP
             - name: control
               containerPort: 19000
               protocol: TCP

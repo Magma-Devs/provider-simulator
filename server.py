@@ -48,8 +48,17 @@ from urllib.parse import urlparse, parse_qs
 import handlers_btc
 import handlers_eth
 import handlers_rest
+import handlers_tendermintrpc
 import handlers_ws
-from constants import HISTORY_MAX, PROVIDER_PORTS, CONTROL_PORT, GRPC_PROVIDER_PORTS, REST_PORTS, WS_PORTS
+from constants import (
+    CONTROL_PORT,
+    GRPC_PROVIDER_PORTS,
+    HISTORY_MAX,
+    PROVIDER_PORTS,
+    REST_PORTS,
+    TM_PORTS,
+    WS_PORTS,
+)
 from stubs_rest import REST_METHOD_DEFAULTS
 
 
@@ -112,7 +121,7 @@ class ProviderState:
     missing_field: Optional[str] = None       # field-name slot — which top-level field to target when corruption_mode is "missing_field" (omit it) or "wrong_type" (swap its type). Defaults to "result" for wrong_type when unset.
     blocks_behind: int = 0    # 0 = current head; positive = behind; negative = ahead
     drop_at: str = "before_headers"   # one of: "before_headers", "after_headers", "mid_body"; only applies when mode="drop_connection"
-    chain_family: str = "eth"   # one of: "eth", "btc", "grpc", "rest", "ws"; selects which chain-specific handler module dispatches the success-branch response. Default "eth" preserves backward-compat — pre-MAG-1716 /scenario payloads (and the existing ETH tests) keep working without touching the new field. "grpc" routes the success path through handlers_grpc on a separate port (18548/18549/18550); the JSON-RPC dispatcher in JSONRPCHandler.do_POST never sees a "grpc" snap because gRPC providers don't listen on JSON-RPC ports. "rest" routes the success path through handlers_rest on a separate port (18551/18552/18553) for REST-style providers (MAG-1777). "ws" routes traffic through handlers_ws on ports 18557/18558/18559 for WebSocket-style providers with subscription lifecycle (MAG-1801) — the handler delegates non-subscription methods back to handlers_eth.handle / handlers_btc.handle so request/response semantics are identical to HTTP JSON-RPC; subscription frames are wrapped in chain-specific envelopes from stubs_ws.
+    chain_family: str = "eth"   # one of: "eth", "btc", "grpc", "rest", "tendermintrpc", "ws"; selects which chain-specific handler module dispatches the success-branch response. Default "eth" preserves backward-compat. "grpc" → handlers_grpc on ports 18548-50. "rest" → handlers_rest on ports 18551-53 (MAG-1777). "tendermintrpc" → handlers_tendermintrpc on ports 18554-56 (MAG-1841). "ws" → handlers_ws on ports 18557-59 (MAG-1801) for WebSocket-style providers with subscription lifecycle — the handler delegates non-subscription methods back to handlers_eth.handle / handlers_btc.handle so request/response semantics are identical to HTTP JSON-RPC; subscription frames are wrapped in chain-specific envelopes from stubs_ws.
     # MAG-1791: provider-stale-on-getLogs primitive — head-fresh but logs-indexing-lagged.
     # Models the real production failure mode where providers update eth_blockNumber
     # immediately but index logs in a separate pipeline that can fall behind seconds-to-minutes.
@@ -1053,6 +1062,362 @@ def _remove_dotted_path(data: Dict[str, Any], path: str) -> Dict[str, Any]:
     return {**data, head: _remove_dotted_path(data[head], rest)}
 
 
+# ── Tendermint-RPC handler ────────────────────────────────────────────────────
+#
+# Peer to JSONRPCHandler / RestHandler. Same ProviderState, same fault
+# primitives (via _apply_fault), Tendermint-specific wire shapes:
+#
+#   * GET  /<method>?<param=value>...        — URI form (CometBFT-native)
+#   * POST /                                  — JSON-RPC body form
+#   * GET  /ws / GET /websocket               — WS upgrade (out of scope —
+#                                               the smart-router proxies these
+#                                               to the upstream; sim doesn't
+#                                               implement subscribe yet)
+#
+# Both GET and POST return a JSON-RPC envelope:
+#
+#     {"jsonrpc":"2.0","id":N,"result":{...}}     # success
+#     {"jsonrpc":"2.0","id":N,"error":{...}}      # error
+#
+# The envelope wrapping happens in this handler (after handlers_tendermintrpc
+# returns the bare result body) so the chain-domain module stays focused on
+# response content rather than transport.
+
+
+# Module-level Tendermint request-id counter for GET requests (the URI form
+# has no body / no native id; CometBFT historically uses -1). Atomic via lock.
+_TM_REQUEST_ID_COUNTER = 0
+_TM_REQUEST_ID_LOCK = threading.Lock()
+
+
+def _next_tm_request_id() -> int:
+    """Return the next sim-side monotonically increasing TM request id (thread-safe)."""
+    global _TM_REQUEST_ID_COUNTER
+    with _TM_REQUEST_ID_LOCK:
+        _TM_REQUEST_ID_COUNTER += 1
+        return _TM_REQUEST_ID_COUNTER
+
+
+class TendermintHandler(BaseHTTPRequestHandler):
+    """Tendermint-RPC (CometBFT) surface for the provider simulator (MAG-1841).
+
+    Shares ``ProviderState`` with the other handlers so a /scenario update
+    targeting one provider is visible to all transports regardless of which
+    port the test hits. Both GET and POST funnel into a common ``_handle``
+    pipeline that:
+
+    1. Snapshots state, captures lava-* headers, extracts (method, params, id).
+    2. Applies fault primitives via ``_apply_fault`` (down / hang / drop /
+       rate_limit / error).
+    3. On success, dispatches to ``handlers_tendermintrpc.handle()``.
+    4. Wraps the result in a JSON-RPC envelope.
+    5. Writes the wire reply through ``_reply`` with corruption hooks.
+
+    History accounting mirrors the JSON-RPC handler: success / error / rate_limit
+    are recorded post-fault; down is recorded pre-body-parse with method="*".
+    """
+
+    # ── Verb dispatch ─────────────────────────────────────────────────────────
+
+    def do_GET(self) -> None:
+        self._handle("GET")
+
+    def do_POST(self) -> None:
+        self._handle("POST")
+
+    # ── Shared pipeline ───────────────────────────────────────────────────────
+
+    def _handle(self, verb: str) -> None:
+        """Run one Tendermint-RPC request end-to-end.
+
+        Fault evaluation → method/params extraction → handlers_tendermintrpc.handle
+        → JSON-RPC envelope wrap → wire-reply via _reply. History accounting
+        is delegated to _apply_fault for fault branches and emitted inline
+        for the success branch.
+        """
+        t_start = time.monotonic()
+        state: ProviderState = self.server.state
+        snap = state.snapshot()
+
+        # Lava-* request headers — used for /history filtering, threaded
+        # through to handlers_tendermintrpc for symmetry with other handlers.
+        lava_headers = {
+            k: v for k, v in self.headers.items() if k.lower().startswith("lava-")
+        }
+
+        # 1. Outage gate — return 503 with no body. ``method`` not yet known.
+        if snap["mode"] == "down":
+            fault = _apply_fault(state, snap, "*", None, lava_headers, t_start)
+            self._emit_tm_fault(fault, request_id=None)
+            return
+
+        # 2. Optional latency injection — same shape as JSON-RPC.
+        if snap["latency_ms"] > 0:
+            time.sleep(snap["latency_ms"] / 1000.0)
+
+        # 3. Parse the wire — method + params + request_id depend on the verb.
+        try:
+            method, params, request_id = self._extract_method_params(verb)
+        except _TmParseError as exc:
+            # Malformed request — JSON-RPC -32700 (parse error). Compose a
+            # bare envelope inline; this path is rare so it doesn't justify
+            # threading through _apply_fault.
+            err_body = {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32700, "message": f"Parse error: {exc}"},
+            }
+            self._reply(400, err_body)
+            state.push_call_to_buffer(
+                "*",
+                "parse_error",
+                _elapsed_ms(t_start),
+                request_id=None,
+                lava_headers=lava_headers,
+            )
+            return
+
+        method_label = method  # For history filtering — matches JSON-RPC convention.
+
+        # 4. Post-parse fault primitives — hang / drop / rate_limit / error.
+        fault = _apply_fault(state, snap, method_label, request_id, lava_headers, t_start)
+        if fault is not None:
+            self._emit_tm_fault(fault, request_id=request_id)
+            return
+
+        # 5. Success path — chain-specific dispatch.
+        normalized = handlers_tendermintrpc._normalize_tm_params(verb, params)
+        http_status, result_body = handlers_tendermintrpc.handle(
+            state, method, normalized, snap, lava_headers
+        )
+
+        # 6. Wrap in JSON-RPC envelope. If the handler returned an error dict
+        #    (unknown method, per-method override with "error" key), the
+        #    envelope carries ``error`` rather than ``result``.
+        if isinstance(result_body, dict) and "error" in result_body:
+            envelope = {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": result_body["error"],
+            }
+            history_status = "error"
+        else:
+            envelope = {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": result_body,
+            }
+            history_status = "success"
+
+        self._reply(
+            http_status,
+            envelope,
+            corruption_mode=snap.get("corruption_mode"),
+            missing_field=snap.get("missing_field"),
+        )
+        state.push_call_to_buffer(
+            method_label,
+            history_status,
+            _elapsed_ms(t_start),
+            request_id=request_id,
+            lava_headers=lava_headers,
+        )
+
+    # ── Wire parsing ──────────────────────────────────────────────────────────
+
+    def _extract_method_params(self, verb: str) -> Tuple[str, Any, Any]:
+        """Pull ``(method, raw_params, request_id)`` from the wire.
+
+        GET shape:
+            URI ``/<method>?<param=value>...``. ``method`` is the path
+            basename; ``raw_params`` is ``parse_qs`` output (Dict[str, List[str]]).
+            ``request_id`` is the sim-side counter (CometBFT historically
+            uses -1 for GET responses; we use a positive counter so /history
+            correlation_group stays stable).
+
+        POST shape:
+            JSON-RPC body ``{"jsonrpc":"2.0","id":N,"method":"...","params":{...}}``.
+            ``method`` from the body; ``raw_params`` from ``params`` (dict
+            for named params, list for positional — Tendermint uses named).
+            ``request_id`` from the body's ``id`` field.
+
+        Raises:
+            _TmParseError: malformed POST body or missing method.
+        """
+        if verb == "GET":
+            parsed = urlparse(self.path)
+            path = parsed.path.strip("/")
+            # Strip query suffix (path already has it removed by urlparse).
+            # Path is the method name; nested paths (e.g. /debug/foo) get rejected
+            # downstream by the handler's unknown-method branch.
+            method = path
+            if not method:
+                raise _TmParseError("GET URI has no method (empty path)")
+            raw_params = parse_qs(parsed.query)
+            request_id = _next_tm_request_id()
+            return method, raw_params, request_id
+
+        # POST
+        length = int(self.headers.get("Content-Length", 0))
+        if length <= 0:
+            raise _TmParseError("POST body is empty")
+        try:
+            body = json.loads(self.rfile.read(length))
+        except json.JSONDecodeError as exc:
+            raise _TmParseError(f"POST body not valid JSON: {exc}") from exc
+        if not isinstance(body, dict):
+            raise _TmParseError(f"POST body not a JSON object: {type(body).__name__}")
+        method = body.get("method")
+        if not isinstance(method, str) or not method:
+            raise _TmParseError("POST body missing 'method' field")
+        raw_params = body.get("params")
+        request_id = body.get("id")
+        return method, raw_params, request_id
+
+    # ── Wire emission ─────────────────────────────────────────────────────────
+
+    def _emit_tm_fault(self, fault: Optional[Dict[str, Any]], request_id: Any) -> None:
+        """Translate a fault dict from ``_apply_fault`` into a Tendermint wire reply.
+
+        Tendermint wraps rate_limit and error in a JSON-RPC envelope
+        (``{"jsonrpc":"2.0","id":...,"error":{"code":...,"message":...}}``).
+        Wire-level kinds (``down`` / ``hang`` / ``drop``) are identical to
+        the JSON-RPC equivalents — fault kind, not chain, drives the wire
+        action.
+        """
+        if fault is None:
+            return
+
+        kind = fault["kind"]
+
+        if kind == "down":
+            self.send_response(503)
+            self.end_headers()
+            return
+
+        if kind == "hang":
+            time.sleep(30)
+            try:
+                self.connection.close()
+            except Exception:
+                pass
+            return
+
+        if kind == "drop":
+            drop_at = fault.get("drop_at", "before_headers")
+            try:
+                if drop_at == "after_headers":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", "100")
+                    self.end_headers()
+                elif drop_at == "mid_body":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", "100")
+                    self.end_headers()
+                    self.wfile.write(b'{"jsonrpc":"2.0",')
+                    self.wfile.flush()
+                # before_headers — fall through, no headers sent.
+            except Exception:
+                pass
+            try:
+                self.connection.close()
+            except Exception:
+                pass
+            return
+
+        # rate_limit / error — Tendermint wire is a JSON-RPC envelope.
+        snap = self.server.state.snapshot()
+        envelope = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {
+                "code": fault["error_code"],
+                "message": fault["error_message"],
+            },
+        }
+        self._reply(
+            fault["status"],
+            envelope,
+            corruption_mode=snap.get("corruption_mode"),
+            missing_field=snap.get("missing_field"),
+        )
+
+    def _reply(
+        self,
+        status: int,
+        data: Any,
+        corruption_mode: Optional[str] = None,
+        missing_field: Optional[str] = None,
+    ) -> None:
+        """Serialise ``data`` as JSON and write a complete HTTP response.
+
+        Mirrors RestHandler._reply: applies corruption_mode hooks (empty
+        body / missing field / wrong type) before serialisation and
+        byte-level corruption (truncated / invalid_json) after. ``missing_field``
+        accepts dotted paths (``"result.sync_info.latest_block_height"``)
+        so tests can target nested envelope fields without rewriting the
+        helper.
+        """
+        if not isinstance(data, dict):
+            body_data: Any = data
+            structural_only = False
+        else:
+            body_data = data
+            structural_only = True
+
+        if structural_only:
+            if corruption_mode == "missing_field" and missing_field:
+                body_data = _remove_dotted_path(body_data, missing_field)
+            elif corruption_mode == "empty_response":
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", "0")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                return
+            elif corruption_mode == "wrong_type":
+                target = missing_field or next(iter(body_data.keys()), None)
+                if target and target in body_data:
+                    current = body_data[target]
+                    if isinstance(current, bool):
+                        body_data[target] = 1 if current else 0
+                    elif isinstance(current, str):
+                        body_data[target] = 12345
+                    elif isinstance(current, (int, float)):
+                        body_data[target] = "wrong_type_value"
+                    else:
+                        body_data[target] = "wrong_type_value"
+
+        raw = json.dumps(body_data).encode()
+
+        if corruption_mode == "truncated" and len(raw) > 10:
+            raw = raw[:-10]
+        elif corruption_mode == "invalid_json":
+            raw = b"}{ {{ not valid json"
+
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, *_):
+        """Suppress the default per-request stdout logging from BaseHTTPRequestHandler."""
+        pass
+
+
+class _TmParseError(ValueError):
+    """Raised by TendermintHandler when the wire shape is malformed.
+
+    Caught inside ``_handle`` so the dispatcher emits a JSON-RPC parse-error
+    envelope instead of letting the exception bubble up to the HTTP server
+    (which would emit a 500 with no body).
+    """
+
+
 # ── Control API handler ───────────────────────────────────────────────────────
 
 class ControlHandler(BaseHTTPRequestHandler):
@@ -1335,9 +1700,20 @@ def main():
         rest_srv.provider_id = pid
         servers.append(rest_srv)
 
+    # Tendermint-RPC servers (MAG-1841). Same pattern as REST — shared
+    # ProviderState, distinct ports. A /scenario update on provider 1
+    # changes how the JSON-RPC (18545), REST (18551), Tendermint (18554),
+    # and WS (18557) ports all reply for that provider.
+    for pid, port in TM_PORTS.items():
+        tm_srv = ThreadingHTTPServer(("0.0.0.0", port), TendermintHandler)
+        tm_srv.daemon_threads = True
+        tm_srv.state       = states[pid]
+        tm_srv.provider_id = pid
+        servers.append(tm_srv)
+
     # WS servers (MAG-1801). Share the same ProviderState objects keyed by
     # the same provider id ("1" / "2" / "3"), so a /scenario update on
-    # provider 1 changes how all four transports (JSON-RPC, REST, gRPC,
+    # provider 1 changes how all five transports (JSON-RPC, REST, gRPC, TM,
     # WS) reply. Each server gets its own WsHandler instance because
     # BaseHTTPRequestHandler is per-request.
     for pid, port in WS_PORTS.items():
@@ -1353,13 +1729,15 @@ def main():
 
     print("Provider simulator started")
     for pid, port in PROVIDER_PORTS.items():
-        print(f"  provider {pid} (jsonrpc) → :{port}")
+        print(f"  provider {pid} (jsonrpc)       → :{port}")
     for pid, port in GRPC_PROVIDER_PORTS.items():
-        print(f"  provider {pid} (grpc)    → :{port}")
+        print(f"  provider {pid} (grpc)          → :{port}")
     for pid, port in REST_PORTS.items():
-        print(f"  provider {pid} (rest)    → :{port}")
+        print(f"  provider {pid} (rest)          → :{port}")
+    for pid, port in TM_PORTS.items():
+        print(f"  provider {pid} (tendermintrpc) → :{port}")
     for pid, port in WS_PORTS.items():
-        print(f"  provider {pid} (ws)      → :{port}")
+        print(f"  provider {pid} (ws)            → :{port}")
     print(f"  control API  → :{CONTROL_PORT}")
     print(f"  GET /stats   → call counts per provider")
     print(f"  GET /history → ordered call log (who was tried first)")

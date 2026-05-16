@@ -25,11 +25,18 @@ GRPC_PROVIDER_PORTS = {"1": 18548, "2": 18549, "3": 18550}
 # leaving 18548-18550 reserved for MAG-1780's gRPC sims.
 REST_PORTS = {"1": 18551, "2": 18552, "3": 18553}
 
+# Tendermint-RPC (CometBFT) provider servers (MAG-1841). One per simulated
+# provider, sharing the same ProviderState dict the other handlers use — a
+# /scenario call with chain_family="tendermintrpc" reconfigures the matching
+# TendermintHandler. Pinned to 18554-18556 leaving the earlier ranges intact
+# (ETH 18545-7, gRPC 18548-50, REST 18551-3).
+TM_PORTS = {"1": 18554, "2": 18555, "3": 18556}
+
 # WebSocket provider servers (MAG-1801). One per simulated provider, sharing
-# the same ProviderState dict that backs the JSON-RPC / REST / gRPC handlers.
-# A /scenario call with chain_family="ws" reconfigures the matching WS handler
-# (latency, fault primitives, corruption). Pinned to 18557-18559 so the gap
-# 18554-18556 stays reserved for whatever transport lands next.
+# the same ProviderState dict that backs the JSON-RPC / REST / gRPC / TM
+# handlers. A /scenario call with chain_family="ws" reconfigures the matching
+# WS handler (latency, fault primitives, corruption). Pinned to 18557-18559
+# above the MAG-1841 TM range so port allocations stay contiguous.
 WS_PORTS = {"1": 18557, "2": 18558, "3": 18559}
 
 # ── Provider history — call-log ring-buffer ───────────────────────────────────
@@ -70,4 +77,22 @@ BTC_CHAIN        = "main"             # one of bitcoind's chain names: "main" | 
 
 BTC_BLOCK_HASH = f"{BTC_LATEST_BLOCK:064x}"       # 64 lower-hex chars, no 0x prefix
 BTC_TX_HASH    = "ab" * 32                         # 64 hex chars, distinct from block hash
+
+
+# ── Tendermint RPC — chain identity + stub primitives (MAG-1841) ──────────────
+# The sim returns ``lava-sim-tm`` as its network id so a router with the
+# strict chain-id verification on rejects the sim (which is what
+# ``skip_verifications: chain-id`` in values_sim.yml is for). Keeping the
+# network name distinct from ``lava-mainnet-1`` prevents accidental cross-talk
+# in tests that compare sim vs live envelopes.
+TM_NETWORK_ID    = "lava-sim-tm"
+TM_LATEST_HEIGHT = 5_000_000           # decimal int; Tendermint serialises heights as string-ints
+
+# CometBFT serialises hashes as upper-hex 64-char strings (no 0x prefix).
+# Synthesised from the latest-height so tests can pin exact equality without
+# pulling real chain bytes.
+TM_BLOCK_HASH    = f"{TM_LATEST_HEIGHT:064X}"
+TM_APP_HASH      = "AB" * 32                          # 64-char hex, distinct from block hash
+TM_VALIDATOR_ADDR = "C" * 40                          # 40-char hex, validator addr shape
+TM_PROPOSER_ADDR = "D" * 40                           # 40-char hex, proposer addr shape
 
