@@ -50,18 +50,28 @@ routers:
   - id: eth-sim
     network: eth1
     nodes:
+      # Pairs http + wss under one provider; interface stays "jsonrpc" — the
+      # smart-router binary picks transport from URL scheme. Matches the live
+      # eth router's Google/QuickNode shape exactly (https://... + wss://...
+      # under one node with interface: jsonrpc on both).
       - name: SimProvider1
         endpoints:
           - url: http://provider-simulator.lava-infra.svc.cluster.local:18545
             interface: jsonrpc
             addons: [archive, trace, debug]
+          - url: ws://provider-simulator.lava-infra.svc.cluster.local:18557/ws
+            interface: jsonrpc
       - name: SimProvider2
         endpoints:
           - url: http://provider-simulator.lava-infra.svc.cluster.local:18546
             interface: jsonrpc
             addons: [archive, trace, debug]
+          - url: ws://provider-simulator.lava-infra.svc.cluster.local:18558/ws
+            interface: jsonrpc
       - name: SimProvider3
         endpoints:
           - url: http://provider-simulator.lava-infra.svc.cluster.local:18547
             interface: jsonrpc
             addons: [archive, trace, debug]
+          - url: ws://provider-simulator.lava-infra.svc.cluster.local:18559/ws
+            interface: jsonrpc

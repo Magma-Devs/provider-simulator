@@ -77,12 +77,15 @@ CONTROL_HOSTNAME="sim-control.${BASE_DOMAIN}"
 SIM_ROUTER_HOSTNAME="eth-sim-jsonrpc.${BASE_DOMAIN}"
 LAVA_SIM_GRPC_HOSTNAME="lava-sim-grpc.${BASE_DOMAIN}"
 LAVA_SIM_REST_HOSTNAME="lava-sim-rest.${BASE_DOMAIN}"
+LAVA_SIM_WS_HOSTNAME="lava-sim-ws.${BASE_DOMAIN}"
 RENDERED_HTTPROUTE="$(mktemp)"
 RENDERED_GRPCROUTE="$(mktemp)"
 RENDERED_REST_HTTPROUTE="$(mktemp)"
+RENDERED_WS_HTTPROUTE="$(mktemp)"
+HTTPROUTE_WS_TEMPLATE="k8s/httproute-lava-sim-ws.yml"
 
 cleanup() {
-	rm -f "$RENDERED_HTTPROUTE" "$RENDERED_GRPCROUTE" "$RENDERED_REST_HTTPROUTE"
+	rm -f "$RENDERED_HTTPROUTE" "$RENDERED_GRPCROUTE" "$RENDERED_REST_HTTPROUTE" "$RENDERED_WS_HTTPROUTE"
 }
 
 trap cleanup EXIT
@@ -90,6 +93,7 @@ trap cleanup EXIT
 sed "s|__CONTROL_HOSTNAME__|$CONTROL_HOSTNAME|g" "$HTTPROUTE_TEMPLATE" > "$RENDERED_HTTPROUTE"
 sed "s|__LAVA_SIM_GRPC_HOSTNAME__|$LAVA_SIM_GRPC_HOSTNAME|g" "$GRPCROUTE_TEMPLATE" > "$RENDERED_GRPCROUTE"
 sed "s|__LAVA_SIM_REST_HOSTNAME__|$LAVA_SIM_REST_HOSTNAME|g" "$HTTPROUTE_REST_TEMPLATE" > "$RENDERED_REST_HTTPROUTE"
+sed "s|__LAVA_SIM_WS_HOSTNAME__|$LAVA_SIM_WS_HOSTNAME|g" "$HTTPROUTE_WS_TEMPLATE" > "$RENDERED_WS_HTTPROUTE"
 
 echo "=== Deployment configuration ==="
 echo "Config file         : $CONFIG_FILE"
@@ -98,6 +102,7 @@ echo "Control hostname    : $CONTROL_HOSTNAME"
 echo "Simulator router    : $SIM_ROUTER_HOSTNAME"
 echo "gRPC sim hostname   : $LAVA_SIM_GRPC_HOSTNAME"
 echo "REST sim hostname   : $LAVA_SIM_REST_HOSTNAME"
+echo "WS sim hostname     : $LAVA_SIM_WS_HOSTNAME"
 echo "Force restart       : $FORCE_RESTART"
 echo "Skip build          : $SKIP_BUILD"
 echo "Rollout timeout     : $ROLLOUT_TIMEOUT"
@@ -121,7 +126,7 @@ fi
 echo "=== Checking manifest drift (MAG-1808 idempotency gate) ==="
 MANIFESTS_CHANGED="false"
 DIFF_OUTPUT="$(mktemp)"
-trap 'rm -f "$RENDERED_HTTPROUTE" "$RENDERED_GRPCROUTE" "$RENDERED_REST_HTTPROUTE" "$DIFF_OUTPUT"' EXIT
+trap 'rm -f "$RENDERED_HTTPROUTE" "$RENDERED_GRPCROUTE" "$RENDERED_REST_HTTPROUTE" "$RENDERED_WS_HTTPROUTE" "$DIFF_OUTPUT"' EXIT
 
 # kubectl diff returns 1 when there's a diff, 0 when none, >1 on error.
 # We must not let `set -e` kill the script when exit code is 1.
@@ -156,6 +161,7 @@ echo "=== Applying Gateway-API routes ==="
 kubectl apply -f "$RENDERED_HTTPROUTE"
 kubectl apply -f "$RENDERED_GRPCROUTE"
 kubectl apply -f "$RENDERED_REST_HTTPROUTE"
+kubectl apply -f "$RENDERED_WS_HTTPROUTE"
 
 # MAG-1808 requirement 2 + 3 — rollout restart after apply, then wait with
 # a hard timeout. The restart is gated by either a real manifest diff or
@@ -178,7 +184,8 @@ else
 fi
 
 echo "=== Updating TLS certificate to include new hostname ==="
-# This regenerates the TLS cert to include $CONTROL_HOSTNAME and any other HTTPRoute hostnames.
+# This regenerates the TLS cert to include $CONTROL_HOSTNAME, $LAVA_SIM_REST_HOSTNAME,
+# $LAVA_SIM_GRPC_HOSTNAME, $LAVA_SIM_WS_HOSTNAME, and any other HTTPRoute hostnames.
 # Run the existing TLS certificate script from smart-router-standalone if available:
 #   cd /path/to/smart-router-standalone && bash scripts/install_gateway_api_tls_certificate.sh
 
@@ -187,15 +194,18 @@ echo "Provider simulator deployed."
 echo "  JSON-RPC providers : ClusterDNS provider-simulator.lava-infra.svc.cluster.local:18545/18546/18547"
 echo "  gRPC providers     : ClusterDNS provider-simulator.lava-infra.svc.cluster.local:18548/18549/18550"
 echo "  REST sim providers : ClusterDNS provider-simulator.lava-infra.svc.cluster.local:18551/18552/18553"
+echo "  WS sim providers   : ClusterDNS provider-simulator.lava-infra.svc.cluster.local:18557/18558/18559"
 echo "  Control API        : https://$CONTROL_HOSTNAME"
 echo "  Simulator router   : https://$SIM_ROUTER_HOSTNAME"
 echo "  gRPC sim ingress   : $LAVA_SIM_GRPC_HOSTNAME:443"
 echo "  REST sim ingress   : https://$LAVA_SIM_REST_HOSTNAME"
+echo "  WS sim ingress     : wss://$LAVA_SIM_WS_HOSTNAME/ws"
 echo ""
 echo "Verify:"
 echo "  curl https://$CONTROL_HOSTNAME/health"
 echo "  grpcurl -import-path cosmos_pb2 -proto cosmos/base/tendermint/v1beta1/query.proto $LAVA_SIM_GRPC_HOSTNAME:443 cosmos.base.tendermint.v1beta1.Service.GetLatestBlock"
 echo "  curl https://$LAVA_SIM_REST_HOSTNAME/cosmos/base/tendermint/v1beta1/blocks/latest"
+echo "  websocat wss://$LAVA_SIM_WS_HOSTNAME/ws    # then paste {\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"id\":1}"
 echo ""
 echo "MAG-1808 idempotency check:"
 echo "  bash scripts/deploy.sh && bash scripts/deploy.sh && kubectl get events -n $NAMESPACE --sort-by=lastTimestamp | tail -5"
