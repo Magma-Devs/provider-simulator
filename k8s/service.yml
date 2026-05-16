@@ -37,6 +37,21 @@ spec:
       port: 18553
       targetPort: 18553
       protocol: TCP
+    # Tendermint-RPC sim service ports (MAG-1841) — mirror the deployment's
+    # tm-sim-1/2/3 named ports. The HTTPRoute that fronts the lava-sim-tm
+    # router references these names so the gateway resolves them by name.
+    - name: tm-sim-1
+      port: 18554
+      targetPort: 18554
+      protocol: TCP
+    - name: tm-sim-2
+      port: 18555
+      targetPort: 18555
+      protocol: TCP
+    - name: tm-sim-3
+      port: 18556
+      targetPort: 18556
+      protocol: TCP
     - name: control
       port: 19000
       targetPort: 19000
