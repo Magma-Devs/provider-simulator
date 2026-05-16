@@ -16,7 +16,7 @@ A multi-transport JSON-RPC / BTC RPC / REST / gRPC / WebSocket simulator used to
 
 ```bash
 # Run locally (no deps to install)
-python -u server.py
+python -u run.py
 
 # Run the test suite — boots all four servers in-process on test ports 28545-28547 / 29000
 pytest tests/test_simulator.py -v

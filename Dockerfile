@@ -8,4 +8,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY *.py ./
 COPY cosmos_pb2/ ./cosmos_pb2/
 EXPOSE 18545 18546 18547 19000 18548 18549 18550
-CMD ["python", "-u", "server.py"]
+CMD ["python", "-u", "run.py"]

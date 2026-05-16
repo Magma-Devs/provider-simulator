@@ -44,7 +44,7 @@ Requires Python 3.12. gRPC support needs `grpcio` / `grpcio-reflection` / `proto
 
 ```bash
 pip install -r requirements.txt
-python -u server.py
+python -u run.py
 ```
 
 Quick checks:
