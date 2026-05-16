@@ -24,11 +24,14 @@ Coverage
 Architectural facts verified by these tests
 -------------------------------------------
   1. HISTORY_MAX cap
-       HISTORY_MAX = 200 per provider × 3 providers = 600 total ring-buffer entries.
-       In the deployed environment the router's background calls (scoring/pruning)
-       fill the buffer continuously, so it is always at 600.
+       HISTORY_MAX defaults to 2000 entries per provider (MAG-1822, was 200);
+       override at pod startup via SIM_HISTORY_MAX. With 3 providers that's
+       6000 ring-buffer slots, all in memory. In the deployed environment the
+       router's background calls (scoring/pruning) fill the buffer continuously.
        In unit tests there is no background traffic — history starts at 0 and
-       only grows with calls the tests explicitly make.
+       only grows with calls the tests explicitly make. The four ring-buffer-
+       rollover tests pin themselves to MAX_FOR_OVERFLOW_TEST=200 (via the
+       _shrink_provider_history helper) so they don't fire ~2000 calls each.
 
   2. Method filter is the correct isolation tool (deployed env)
        The router's background calls are exclusively eth_blockNumber and
@@ -52,11 +55,12 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from http.server import HTTPServer, ThreadingHTTPServer
 
 import pytest
 
-from constants import HISTORY_MAX
+from constants import HISTORY_MAX  # noqa: F401  (kept for module docstring reference; tests use MAX_FOR_OVERFLOW_TEST)
 from server import ControlHandler, JSONRPCHandler, ProviderState
 from stubs import ERROR_STUBS
 
@@ -64,6 +68,31 @@ from stubs import ERROR_STUBS
 
 _PROVIDER_PORTS = {"1": 28545, "2": 28546, "3": 28547}
 _CONTROL_PORT   = 29000
+
+# ── Overflow-test cap (MAG-1822) ──────────────────────────────────────────────
+# The 4 ring-buffer-rollover tests in this file send HISTORY_MAX (+a few) calls
+# to verify the deque caps at maxlen. After MAG-1822 raised HISTORY_MAX from
+# 200 → 2000, those loops would fire ~2005 calls each and turn the unit suite
+# slow without buying any extra correctness — the cap behaviour is identical
+# at any maxlen. We pin those tests to 200 by swapping the running provider's
+# `history` deque for a freshly-built one with maxlen=200 before pushing.
+# This is a local override scoped to the four overflow tests; every other test
+# keeps using the production-sized 2000-entry buffer.
+MAX_FOR_OVERFLOW_TEST = 200
+
+
+def _shrink_provider_history(state: ProviderState, maxlen: int = MAX_FOR_OVERFLOW_TEST) -> None:
+    """Replace a provider's in-memory history deque with a smaller one.
+
+    `deque.maxlen` is immutable after construction, so we build a new deque
+    (locking the state so a concurrent push doesn't drop the new buffer on the
+    floor) and assign it back. Counters are reset to keep the test's
+    pre-condition (empty buffer, zero all-time count) crisp.
+    """
+    with state.lock:
+        state.history = deque(maxlen=maxlen)
+        state.total_calls = 0
+        state.calls_by_status = {}
 
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
@@ -145,6 +174,11 @@ def sim():
         "provider1": f"http://127.0.0.1:{_PROVIDER_PORTS['1']}",
         "provider2": f"http://127.0.0.1:{_PROVIDER_PORTS['2']}",
         "provider3": f"http://127.0.0.1:{_PROVIDER_PORTS['3']}",
+        # Direct handle on the in-memory ProviderState objects backing the
+        # running test servers. Used by the MAG-1822 overflow tests to swap
+        # the history deque for a smaller one without restarting the suite.
+        # Most tests should NOT touch this — go through the control API.
+        "states":    states,
     }
 
     for s in servers:
@@ -632,25 +666,27 @@ class TestResetAll:
             )
 
     def test_history_max_cap_per_provider(self, sim):
-        """Architectural fact 1 — HISTORY_MAX = 200 per provider.
+        """Architectural fact 1 — each provider's history is bounded by a maxlen cap.
 
-        Each provider's ring-buffer holds at most HISTORY_MAX entries.
-        In the deployed environment the buffer is always full (200 × 3 = 600)
-        because the router's background calls fill it continuously.
-        In unit tests we verify the cap by making HISTORY_MAX + 5 calls to one
-        provider and confirming the buffer never exceeds HISTORY_MAX.
+        Each provider's ring-buffer holds at most HISTORY_MAX entries. The deployed
+        default is 2000 (MAG-1822, raised from the original 200) and is overridable
+        via SIM_HISTORY_MAX. The cap behaviour itself is the same at any maxlen,
+        so we pin this test to MAX_FOR_OVERFLOW_TEST=200 to keep it fast — see the
+        helper comment for why we shrink in-place.
         """
-        for _ in range(HISTORY_MAX + 5):
+        _shrink_provider_history(sim["states"]["1"])
+
+        for _ in range(MAX_FOR_OVERFLOW_TEST + 5):
             _rpc(sim["provider1"], "eth_blockNumber")
 
         _, stats = _get(_ctrl(sim, "/stats"))
         ring_entries = stats["providers"]["1"]["history_ring_buffer_entries"]
         total_calls  = stats["providers"]["1"]["total_requests_all_time"]
 
-        assert ring_entries == HISTORY_MAX, \
-            f"ring buffer should be capped at {HISTORY_MAX}, got {ring_entries}"
-        assert total_calls == HISTORY_MAX + 5, \
-            f"all-time counter must count every call — expected {HISTORY_MAX + 5}, got {total_calls}"
+        assert ring_entries == MAX_FOR_OVERFLOW_TEST, \
+            f"ring buffer should be capped at {MAX_FOR_OVERFLOW_TEST}, got {ring_entries}"
+        assert total_calls == MAX_FOR_OVERFLOW_TEST + 5, \
+            f"all-time counter must count every call — expected {MAX_FOR_OVERFLOW_TEST + 5}, got {total_calls}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1164,9 +1200,15 @@ class TestScenarioEdgeCases:
 class TestRingBufferRollover:
 
     def test_oldest_entry_is_dropped_when_buffer_full(self, sim):
-        """When the ring buffer is full, the oldest entry is replaced by the newest."""
+        """When the ring buffer is full, the oldest entry is replaced by the newest.
+
+        Pinned to MAX_FOR_OVERFLOW_TEST (MAG-1822) — the production HISTORY_MAX
+        default is now 2000, but the rollover behaviour is identical at any maxlen.
+        """
+        _shrink_provider_history(sim["states"]["1"])
+
         # fill the buffer exactly
-        for i in range(HISTORY_MAX):
+        for i in range(MAX_FOR_OVERFLOW_TEST):
             _rpc(sim["provider1"], "eth_blockNumber")
 
         # record the oldest ts currently in the buffer
@@ -1177,29 +1219,41 @@ class TestRingBufferRollover:
         _rpc(sim["provider1"], "eth_blockNumber")
         _, hist_after = _get(_ctrl(sim, "/history?provider=1"))
 
-        assert hist_after["count"] == HISTORY_MAX, \
-            f"ring buffer should stay at HISTORY_MAX after overflow, got {hist_after['count']}"
+        assert hist_after["count"] == MAX_FOR_OVERFLOW_TEST, \
+            f"ring buffer should stay at MAX_FOR_OVERFLOW_TEST after overflow, got {hist_after['count']}"
         assert hist_after["history"][0]["ts"] > oldest_ts, \
             "oldest entry should have been dropped after overflow"
 
     def test_all_time_counter_survives_rollover(self, sim):
-        """total_requests_all_time must keep counting past HISTORY_MAX."""
+        """total_requests_all_time must keep counting past the ring buffer cap.
+
+        Pinned to MAX_FOR_OVERFLOW_TEST (MAG-1822) — what we're verifying is the
+        invariant "ring caps, all-time counter does not", which holds at every maxlen.
+        """
+        _shrink_provider_history(sim["states"]["1"])
+
         extra = 10
-        for _ in range(HISTORY_MAX + extra):
+        for _ in range(MAX_FOR_OVERFLOW_TEST + extra):
             _rpc(sim["provider1"], "eth_blockNumber")
 
         _, stats = _get(_ctrl(sim, "/stats"))
         total = stats["providers"]["1"]["total_requests_all_time"]
         ring  = stats["providers"]["1"]["history_ring_buffer_entries"]
 
-        assert total == HISTORY_MAX + extra, \
-            f"all-time counter should be {HISTORY_MAX + extra}, got {total}"
-        assert ring == HISTORY_MAX, \
-            f"ring buffer should be capped at {HISTORY_MAX}, got {ring}"
+        assert total == MAX_FOR_OVERFLOW_TEST + extra, \
+            f"all-time counter should be {MAX_FOR_OVERFLOW_TEST + extra}, got {total}"
+        assert ring == MAX_FOR_OVERFLOW_TEST, \
+            f"ring buffer should be capped at {MAX_FOR_OVERFLOW_TEST}, got {ring}"
 
     def test_newest_entry_always_survives_rollover(self, sim):
-        """The most recently pushed entry must always be present after rollover."""
-        for _ in range(HISTORY_MAX + 5):
+        """The most recently pushed entry must always be present after rollover.
+
+        Pinned to MAX_FOR_OVERFLOW_TEST (MAG-1822). The rollover semantics are
+        deque's, not ours — verifying them at 200 is enough.
+        """
+        _shrink_provider_history(sim["states"]["1"])
+
+        for _ in range(MAX_FOR_OVERFLOW_TEST + 5):
             _rpc(sim["provider1"], "eth_blockNumber")
 
         # push a unique method as the very last call
@@ -1208,6 +1262,135 @@ class TestRingBufferRollover:
         _, hist = _get(_ctrl(sim, "/history?provider=1&method=eth_gasPrice"))
         assert hist["count"] == 1, \
             "the most recent entry must always survive in the ring buffer"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAG-1822 — HISTORY_MAX is env-driven (SIM_HISTORY_MAX)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# constants.HISTORY_MAX is read once at module import via
+# int(os.getenv("SIM_HISTORY_MAX", "2000")). Reloading `constants` after a
+# monkeypatch is the cleanest way to assert both the default and the override
+# without restarting pytest. Reload affects the constants module object only —
+# the running test simulator was built around the original HISTORY_MAX import
+# and is not disturbed because we restore env state in the finally clause.
+
+import importlib  # noqa: E402  (placed near tests it serves to keep blast radius local)
+
+
+class TestHistoryMaxEnvConfig:
+
+    def _reload_constants(self):
+        import constants
+        importlib.reload(constants)
+        return constants
+
+    def test_history_max_defaults_to_2000_when_env_unset(self, monkeypatch):
+        """No SIM_HISTORY_MAX in env → HISTORY_MAX falls back to 2000 (MAG-1822 default)."""
+        monkeypatch.delenv("SIM_HISTORY_MAX", raising=False)
+        constants = self._reload_constants()
+        try:
+            assert constants.HISTORY_MAX == 2000, \
+                f"expected default 2000, got {constants.HISTORY_MAX}"
+        finally:
+            # Restore the constants module to whatever state the rest of the
+            # suite expects (default again, since monkeypatch will undo the env
+            # change at teardown — but reload is permanent until we reload).
+            self._reload_constants()
+
+    def test_history_max_honors_sim_history_max_env(self, monkeypatch):
+        """SIM_HISTORY_MAX=N must be picked up at module import time."""
+        monkeypatch.setenv("SIM_HISTORY_MAX", "777")
+        constants = self._reload_constants()
+        try:
+            assert constants.HISTORY_MAX == 777, \
+                f"expected SIM_HISTORY_MAX=777 to win, got {constants.HISTORY_MAX}"
+        finally:
+            # monkeypatch.undo runs in teardown; reload once more so the
+            # constants module reflects the post-undo env (default 2000).
+            monkeypatch.delenv("SIM_HISTORY_MAX", raising=False)
+            self._reload_constants()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAG-1822 — /history?max=N tail-slice filter
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestHistoryMaxQueryParam:
+
+    def test_max_zero_returns_empty_list(self, sim):
+        """?max=0 returns an empty history (documented edge case, not 400)."""
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(sim["provider1"], "eth_blockNumber")
+        status, body = _get(_ctrl(sim, "/history?max=0"))
+        assert status == 200
+        assert body["count"] == 0
+        assert body["history"] == []
+
+    def test_max_negative_returns_400(self, sim):
+        """?max=-1 is a client error — caller must fix the request."""
+        status, body = _get(_ctrl(sim, "/history?max=-1"))
+        assert status == 400
+        assert body["error"] == "invalid_max"
+
+    def test_max_non_integer_returns_400(self, sim):
+        """?max=abc is malformed input — refuse with a clear error message."""
+        status, body = _get(_ctrl(sim, "/history?max=abc"))
+        assert status == 400
+        assert body["error"] == "invalid_max"
+
+    def test_max_returns_at_most_n_entries(self, sim):
+        """?max=N caps the response at N entries."""
+        for _ in range(20):
+            _rpc(sim["provider1"], "eth_blockNumber")
+        status, body = _get(_ctrl(sim, "/history?max=5"))
+        assert status == 200
+        assert body["count"] == 5
+        assert len(body["history"]) == 5
+
+    def test_max_returns_the_most_recent_entries(self, sim):
+        """?max=N returns the TAIL — the most recent calls, not the oldest."""
+        for i in range(10):
+            _post(sim["provider1"], {
+                "jsonrpc": "2.0", "id": i, "method": "eth_blockNumber", "params": [],
+            })
+        # Without ?max, we'd see ids 0..9 in order. With ?max=3, expect ids 7,8,9.
+        _, body = _get(_ctrl(sim, "/history?max=3"))
+        assert body["count"] == 3
+        request_ids = [e["request_id"] for e in body["history"]]
+        assert request_ids == [7, 8, 9], \
+            f"?max=3 should return the 3 most recent ids [7,8,9], got {request_ids}"
+
+    def test_max_preserves_call_order_from_full_timeline(self, sim):
+        """call_order on returned entries reflects the FULL timeline position,
+        not 1..N of the sliced result. Anchors a sliced response back to the
+        full history for the caller."""
+        for i in range(10):
+            _rpc(sim["provider1"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history?max=3"))
+        orders = [e["call_order"] for e in body["history"]]
+        assert orders == [8, 9, 10], \
+            f"call_order should be the tail of the full timeline, got {orders}"
+
+    def test_max_combinable_with_provider_filter(self, sim):
+        """?max= composes with the existing ?provider= filter — applied after it."""
+        for _ in range(5):
+            _rpc(sim["provider1"], "eth_blockNumber")
+        for _ in range(5):
+            _rpc(sim["provider2"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history?provider=2&max=2"))
+        assert body["count"] == 2
+        assert all(e["provider"] == "2" for e in body["history"])
+
+    def test_no_max_returns_all_entries(self, sim):
+        """When ?max= is absent the response is unbounded (up to HISTORY_MAX).
+        Asserts the filter is opt-in — existing callers see no behaviour change."""
+        for _ in range(15):
+            _rpc(sim["provider1"], "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history"))
+        assert body["count"] == 15
 
 
 # ─────────────────────────────────────────────────────────────────────────────

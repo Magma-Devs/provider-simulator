@@ -30,6 +30,7 @@ Control API:
                        ?provider=1       single provider (1/2/3)
                        ?method=eth_call  specific RPC method
                        ?status=error     success | error | rate_limit | down
+                       ?max=N            return at most N most-recent entries (MAG-1822)
                      params are combinable: ?last=120&provider=2&status=error
 """
 
@@ -359,8 +360,9 @@ class ProviderState:
 
         Storage is entirely in RAM — nothing is written to disk or any logging framework.
         The ring-buffer (deque) automatically drops the oldest entry once it reaches
-        HISTORY_MAX (200) entries. All-time counters (total_calls, calls_by_status)
-        are never capped and survive buffer rollovers.
+        HISTORY_MAX (default 2000; override via SIM_HISTORY_MAX env at pod startup)
+        entries. All-time counters (total_calls, calls_by_status) are never capped
+        and survive buffer rollovers.
 
         Args:
             method:       JSON-RPC method name, e.g. "eth_blockNumber". Use "*" for
@@ -1764,6 +1766,11 @@ class ControlHandler(BaseHTTPRequestHandler):
             #   ?status=<name>          — filter by status (success, error, rate_limit, down)
             #   ?request_id=<id>        — filter by the JSON-RPC id echoed in the request
             #   ?lava_header_*=<value>  — filter by lava header name (e.g. lava_header_lava_stateful_api=true)
+            #   ?max=<N>                — return at most N most-recent entries (MAG-1822).
+            #                             Applied AFTER all other filters and AFTER
+            #                             call_order assignment, so each entry keeps its
+            #                             true 1-based timeline index even when sliced.
+            #                             max=0 → []; max<0 → 400; non-int → 400.
             #
             # Each entry in the response includes:
             #   call_order        — 1-based position in the merged timeline (sorted by ts).
@@ -1781,6 +1788,7 @@ class ControlHandler(BaseHTTPRequestHandler):
             #   /history?last=60&status=error
             #   /history?request_id=42
             #   /history?last=60&lava_header_lava_stateful_api=true
+            #   /history?max=50            — tail 50 most-recent across all providers
             qs = parse_qs(urlparse(self.path).query)
 
             t_from        = float(qs["from"][0])      if "from"       in qs else None
@@ -1790,7 +1798,28 @@ class ControlHandler(BaseHTTPRequestHandler):
             f_method      = qs["method"][0]            if "method"     in qs else None
             f_status      = qs["status"][0]            if "status"     in qs else None
             f_request_id  = qs["request_id"][0]        if "request_id" in qs else None
-            
+
+            # ?max=N — MAG-1822 tail-slicing. Parsed here so a malformed value
+            # short-circuits with 400 before we do any history work.
+            f_max = None
+            if "max" in qs:
+                raw_max = qs["max"][0]
+                try:
+                    parsed_max = int(raw_max)
+                except (TypeError, ValueError):
+                    self._reply(400, {
+                        "error": "invalid_max",
+                        "message": f"max must be a non-negative integer, got {raw_max!r}",
+                    })
+                    return
+                if parsed_max < 0:
+                    self._reply(400, {
+                        "error": "invalid_max",
+                        "message": f"max must be >= 0, got {parsed_max}",
+                    })
+                    return
+                f_max = parsed_max
+
             # Extract lava header filters: ?lava_header_lava_stateful_api=true becomes {"lava-stateful-api": "true"}
             f_lava_headers = {}
             for param in qs:
@@ -1846,6 +1875,14 @@ class ControlHandler(BaseHTTPRequestHandler):
             # Assign call_order within the merged timeline
             for i, entry in enumerate(all_calls, start=1):
                 entry["call_order"] = i
+
+            # MAG-1822 — ?max=N tail slice. Applied last so each kept entry's
+            # call_order still reflects its position in the full filtered
+            # timeline (e.g. /history?max=10 on a 50-call history returns
+            # entries with call_order 41..50, not 1..10). max=0 yields [].
+            if f_max is not None:
+                all_calls = all_calls[-f_max:] if f_max > 0 else []
+
             self._reply(200, {"count": len(all_calls), "history": all_calls})
 
         elif self.path == "/ws/subscriptions":
