@@ -718,3 +718,52 @@ class TestFaultCorruptionConsistency:
         # With truncated, the last 10 bytes are chopped → JSON parse must fail.
         with pytest.raises(json.JSONDecodeError):
             json.loads(frame.payload.decode("utf-8"))
+
+
+class TestLavaProviderAddressHeader:
+    """The MAG-1749 WS smoke test asserts that the handshake response carries
+    a Lava-Provider-Address header so the consumer can identify which provider
+    answered the upgrade. Each WS listener (port 18557/8/9 ↔ provider 1/2/3)
+    sends "sim-provider-<N>" matching its provider_id."""
+
+    def _raw_handshake(self, host, port):
+        """Open a raw TCP socket, send a valid WS upgrade, return the entire
+        response-header block as bytes."""
+        s = socket.create_connection((host, port), timeout=2)
+        s.sendall(
+            b"GET /ws HTTP/1.1\r\n"
+            b"Host: x\r\n"
+            b"Upgrade: websocket\r\n"
+            b"Connection: Upgrade\r\n"
+            b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+            b"Sec-WebSocket-Version: 13\r\n"
+            b"\r\n"
+        )
+        s.settimeout(2.0)
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+        # Send CLOSE so the server cleanly exits its reader loop after we
+        # read what we needed.
+        try:
+            import ws_protocol as _wp
+            s.sendall(_wp.encode_frame(_wp.OPCODE_CLOSE, b"", mask=True))
+        except OSError:
+            pass
+        s.close()
+        return buf
+
+    @pytest.mark.parametrize("provider_id,port_key", [
+        ("1", "ws1_port"),
+        ("2", "ws2_port"),
+        ("3", "ws3_port"),
+    ])
+    def test_lava_provider_address_header_present_in_upgrade_response(
+            self, sim, provider_id, port_key):
+        resp = self._raw_handshake(sim["ws1_host"], sim[port_key])
+        assert b" 101 " in resp.split(b"\r\n", 1)[0], f"no 101 in: {resp!r}"
+        expected = f"Lava-Provider-Address: sim-provider-{provider_id}".encode()
+        assert expected in resp, f"missing {expected!r} in: {resp!r}"

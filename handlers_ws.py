@@ -257,9 +257,10 @@ class WsHandler(BaseHTTPRequestHandler):
                                       lava_headers=lava_headers)
             try:
                 if drop_at == "after_headers":
-                    # Complete the 101 then close immediately.
+                    # Complete the 101 (with Lava-Provider-Address) then close.
                     self.connection.sendall(
-                        ws_protocol.build_handshake_response(client_key))
+                        ws_protocol.build_handshake_response(
+                            client_key, extra_headers=self._lava_extra_headers()))
                 elif drop_at == "mid_body":
                     # Send just the status line + truncate before the headers
                     # finish. The 101 reply has no body — "mid_body" maps to
@@ -277,7 +278,9 @@ class WsHandler(BaseHTTPRequestHandler):
 
         # Complete the handshake.
         try:
-            self.connection.sendall(ws_protocol.build_handshake_response(client_key))
+            self.connection.sendall(
+                ws_protocol.build_handshake_response(
+                    client_key, extra_headers=self._lava_extra_headers()))
         except OSError:
             return
 
@@ -443,6 +446,14 @@ class WsHandler(BaseHTTPRequestHandler):
         )
         _register_ws_subscription(handle)
         return sub_id
+
+    def _lava_extra_headers(self) -> Dict[str, str]:
+        """Return the extra response headers attached to a successful WS
+        upgrade. Lava-Provider-Address identifies which of the three
+        simulated providers answered, matching what real Lava providers
+        send so the MAG-1749 smoke test can assert presence without
+        coupling to a real-provider bech32 format."""
+        return {"Lava-Provider-Address": f"sim-provider-{self.server.provider_id}"}
 
     def _send_simple_error(self, status: int, message: str) -> None:
         """Write a tiny HTTP error response with no body and close."""
