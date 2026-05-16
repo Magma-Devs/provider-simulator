@@ -542,3 +542,81 @@ class TestGrpcHistoryTracking:
         _call_get_latest_block(sim["grpc1"])
         _, hist = _get(_ctrl(sim, "/history?provider=1"))
         assert hist["history"][-1]["request_id"] is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAG-1836: cross-transport fault isolation
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestGrpcCrossTransportFaultIsolation:
+    """``ProviderState`` is shared across JSON-RPC and gRPC for the same
+    provider id. A fault primitive (``down`` / ``hang`` / ``rate_limit`` /
+    ``error``) authored for one transport must not fire on the other.
+
+    Without the chain_family gate in ``_apply_grpc_fault``, a JSON-RPC
+    test that sets ``{"chain_family": "eth", "mode": "down"}`` on provider 1
+    would also kill the gRPC port for provider 1 — release-smoke gRPC
+    tests would fail intermittently depending on test ordering.
+
+    These tests verify the gate by setting non-grpc faults via /scenario
+    and asserting the gRPC port still returns a normal stub response.
+    """
+
+    def test_grpc_unaffected_by_eth_down_fault(self, sim):
+        """JSON-RPC ``down`` fault on provider 1 must not kill its gRPC port.
+
+        Without the chain_family gate this asserts ``UNAVAILABLE`` instead.
+        """
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"chain_family": "eth", "mode": "down"}}
+        })
+        resp = _call_get_latest_block(sim["grpc1"])
+        assert resp.block.header.chain_id == "lava-sim"
+        assert resp.block.header.height > 0
+
+    def test_grpc_unaffected_by_eth_hang_fault(self, sim):
+        """JSON-RPC ``hang`` must not make the gRPC port sleep 30s.
+
+        Client deadline is 5s (the helper default); the call should
+        complete in well under that.
+        """
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"chain_family": "eth", "mode": "hang"}}
+        })
+        t0 = time.monotonic()
+        resp = _call_get_latest_block(sim["grpc1"], timeout=5.0)
+        elapsed = time.monotonic() - t0
+        assert resp.block.header.height > 0
+        assert elapsed < 2.0, f"gRPC should not hang for eth fault; got {elapsed:.2f}s"
+
+    def test_grpc_unaffected_by_eth_rate_limit_fault(self, sim):
+        """JSON-RPC ``rate_limit`` must not abort the gRPC port with
+        RESOURCE_EXHAUSTED."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"chain_family": "eth", "mode": "rate_limit"}}
+        })
+        resp = _call_get_latest_block(sim["grpc1"])
+        assert resp.block.header.height > 0
+
+    def test_grpc_unaffected_by_eth_error_fault(self, sim):
+        """JSON-RPC ``error`` must not abort the gRPC port with the
+        translated grpc.StatusCode."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {
+                "chain_family": "eth",
+                "mode": "error",
+                "error_message": "UNAVAILABLE",
+            }}
+        })
+        resp = _call_get_latest_block(sim["grpc1"])
+        assert resp.block.header.height > 0
+
+    def test_grpc_fault_still_fires_when_chain_family_is_grpc(self, sim):
+        """Sanity check: the gate must not break gRPC-side faults.
+
+        A ``down`` fault with ``chain_family="grpc"`` must still abort
+        the gRPC port with UNAVAILABLE."""
+        _set_grpc(sim, "1", mode="down")
+        with pytest.raises(grpc.RpcError) as exc_info:
+            _call_get_latest_block(sim["grpc1"])
+        assert exc_info.value.code() == grpc.StatusCode.UNAVAILABLE

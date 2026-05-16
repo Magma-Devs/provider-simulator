@@ -157,7 +157,21 @@ async def _apply_grpc_fault(state, snap: dict, context: grpc.aio.ServicerContext
     The history entry is appended before the abort so failed requests still
     show up in /history with the matching status — same contract as the
     JSON-RPC side.
+
+    Cross-transport isolation (MAG-1836)
+    ------------------------------------
+    ``ProviderState`` is shared across all transports (JSON-RPC, REST, gRPC,
+    WS) for the same provider id. The fault primitives (``down`` / ``hang`` /
+    ``drop_connection`` / ``rate_limit`` / ``error``) are chain-agnostic
+    fields on the snap, so without an explicit gate a fault authored for
+    JSON-RPC (chain_family="eth") would also kill the gRPC port. Gate the
+    whole ladder on ``chain_family == "grpc"`` and fall through to the
+    normal success stub when the fault was set for another transport.
     """
+    # MAG-1836: only apply faults that were authored for the gRPC transport.
+    if snap.get("chain_family") != "grpc":
+        return False
+
     elapsed_ms = int((time.monotonic() - t_start) * 1000)
 
     # 1. Outage
