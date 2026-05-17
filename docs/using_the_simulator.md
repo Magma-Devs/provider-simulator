@@ -15,8 +15,22 @@ Local (port-forwarded) equivalents:
 
 ```bash
 export SIM_CONTROL_URL="http://localhost:19000"
-# JSON-RPC providers: 18545 / 18546 / 18547
-# gRPC providers   : 18548 / 18549 / 18550
+# JSON-RPC providers (primary tier — ids 1-3): 18545 / 18546 / 18547
+# JSON-RPC providers (backup tier  — ids 4-6): 18560 / 18561 / 18562
+# gRPC providers                              : 18548 / 18549 / 18550
+```
+
+## Primary vs backup pools
+
+Provider ids `1-3` are wired to the smart-router as **primary** providers; ids `4-6` are wired with `is_backup: true` and form the **backup pool**. From the simulator's point of view both pools are identical — same `JSONRPCHandler`, same `ProviderState`, same `/scenario` payload shape. Tier is a router-side concept: the smart-router consults the backup pool only after the primary pool is exhausted on a given request (`PairingListEmptyError` → backup fallback in `consumer_session_manager.go:826`).
+
+This means `sim_control.set_scenario({4: "down", 5: "success", 6: "success"})` works exactly the same way as for primaries — set fault modes per backup id to drive backup-tier resilience tests.
+
+```bash
+# all primaries down, all backups healthy — drives a backup-tier activation
+curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" \
+  -d '{"providers":{"1":{"mode":"down"},"2":{"mode":"down"},"3":{"mode":"down"},
+                    "4":{"mode":"success"},"5":{"mode":"success"},"6":{"mode":"success"}}}'
 ```
 
 ## Set a scenario

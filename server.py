@@ -51,6 +51,8 @@ import handlers_rest
 import handlers_tendermintrpc
 import handlers_ws
 from constants import (
+    ALL_PROVIDER_PORTS,
+    BACKUP_PROVIDER_PORTS,
     CONTROL_PORT,
     GRPC_PROVIDER_PORTS,
     HISTORY_MAX,
@@ -1659,13 +1661,25 @@ class ControlHandler(BaseHTTPRequestHandler):
 def main():
     """Start all simulator servers and block until interrupted.
 
-    Spins up ten HTTPServer/gRPC instances in daemon threads:
-      - Three JSONRPCHandler servers (ports 18545 / 18546 / 18547) — ETH/BTC chains.
-      - Three RestHandler servers (ports 18551 / 18552 / 18553), one per provider,
-        sharing the same ProviderState objects as the JSON-RPC servers (MAG-1777).
-      - One ControlHandler server (port 19000) for scenario config and history queries.
-      - Three gRPC servers (ports 18548 / 18549 / 18550) — Cosmos chain (MAG-1780),
-        sharing the per-provider ProviderState with the matching JSON-RPC port.
+    Spins up nineteen HTTPServer/gRPC instances in daemon threads:
+      - Six JSONRPCHandler servers — three primary (ports 18545 / 18546 / 18547)
+        plus three backup (ports 18560 / 18561 / 18562). Same handler and
+        ProviderState shape across both pools; tier is a router-side concept,
+        not a simulator-side one. See PROVIDER_PORTS / BACKUP_PROVIDER_PORTS /
+        ALL_PROVIDER_PORTS in constants.py.
+      - Three RestHandler servers (ports 18551 / 18552 / 18553), one per primary
+        provider, sharing the same ProviderState objects as the JSON-RPC servers
+        (MAG-1777). REST does not cover the backup pool — backup-tier coverage
+        is JSON-RPC-only.
+      - Three TendermintHandler servers (ports 18554 / 18555 / 18556), one per
+        primary provider, sharing the same ProviderState (MAG-1841).
+      - Three WsHandler servers (ports 18557 / 18558 / 18559), one per primary
+        provider, sharing the same ProviderState (MAG-1801).
+      - Three gRPC servers (ports 18548 / 18549 / 18550) — Cosmos chain
+        (MAG-1780), sharing per-provider ProviderState with the matching
+        JSON-RPC primary port.
+      - One ControlHandler server (port 19000) for scenario config and history
+        queries.
 
     All servers share the same dict of ProviderState objects so control API
     changes are immediately visible to every transport handler.
@@ -1676,10 +1690,10 @@ def main():
 
     Blocks on thread.join() and shuts all servers down cleanly on KeyboardInterrupt.
     """
-    states = {pid: ProviderState() for pid in PROVIDER_PORTS}
+    states = {pid: ProviderState() for pid in ALL_PROVIDER_PORTS}
 
     servers = []
-    for pid, port in PROVIDER_PORTS.items():
+    for pid, port in ALL_PROVIDER_PORTS.items():
         # ThreadingHTTPServer so a slow/hanging request on one provider doesn't
         # block its own subsequent requests or the other providers' threads.
         srv = ThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
@@ -1693,6 +1707,8 @@ def main():
     # provider 1 changes how both the JSON-RPC port (18545) and the REST
     # port (18551) reply. Each server gets its own RestHandler instance
     # because BaseHTTPRequestHandler is per-request.
+    # REST sim only covers the primary pool (ids 1-3); backups (4-6) are
+    # JSON-RPC-only because backup-tier coverage is the only consumer.
     for pid, port in REST_PORTS.items():
         rest_srv = ThreadingHTTPServer(("0.0.0.0", port), RestHandler)
         rest_srv.daemon_threads = True
@@ -1729,7 +1745,9 @@ def main():
 
     print("Provider simulator started")
     for pid, port in PROVIDER_PORTS.items():
-        print(f"  provider {pid} (jsonrpc)       → :{port}")
+        print(f"  provider {pid} (jsonrpc, primary) → :{port}")
+    for pid, port in BACKUP_PROVIDER_PORTS.items():
+        print(f"  provider {pid} (jsonrpc, backup)  → :{port}")
     for pid, port in GRPC_PROVIDER_PORTS.items():
         print(f"  provider {pid} (grpc)          → :{port}")
     for pid, port in REST_PORTS.items():
