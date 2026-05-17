@@ -13,6 +13,11 @@ Import from here instead of defining magic values inline.
 # import sites; ALL_PROVIDER_PORTS is the union used by server bootstrap.
 # Backups live at 18560-18562 (not contiguous with primaries) because
 # 18548-18559 are claimed by gRPC / REST / Tendermint / WebSocket surfaces.
+#
+# Backup-tier coverage is JSON-RPC-only for now. Extending it to the
+# other surfaces (gRPC/REST/TM/WS) is tracked as a followup; the
+# tentative port allocation is 18563-18574 (contiguous block above this
+# backup range). See PR description for the full breakdown.
 PROVIDER_PORTS        = {"1": 18545, "2": 18546, "3": 18547}
 BACKUP_PROVIDER_PORTS = {"4": 18560, "5": 18561, "6": 18562}
 ALL_PROVIDER_PORTS    = {**PROVIDER_PORTS, **BACKUP_PROVIDER_PORTS}
