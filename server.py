@@ -539,6 +539,45 @@ def _elapsed_ms(t_start: float) -> int:
     return int((time.monotonic() - t_start) * 1000)
 
 
+# ── Cross-transport isolation helpers (MAG-1837 / MAG-1838) ───────────────────
+#
+# ProviderState is shared across all transports (JSON-RPC, REST, gRPC, WS,
+# Tendermint-RPC) for the same provider id, so fields like ``corruption_mode``
+# and the ``mode`` fault primitive are chain-agnostic on the snap. Without an
+# explicit gate a value set for one transport (e.g. chain_family="eth") would
+# also fire on the others. These helpers narrow the read to the transport
+# that owns the request: the handler passes its own ``chain_family`` values
+# and gets back ``None`` whenever the snap was authored for some other
+# transport, so the surrounding logic falls through to its normal success
+# path.
+
+def _corruption_for(snap: Dict[str, Any], *chain_families: str) -> Optional[str]:
+    """Return ``snap["corruption_mode"]`` only when the snap's
+    ``chain_family`` is one of ``chain_families``; otherwise ``None``.
+
+    Used at every transport's reply call site (JSON-RPC, REST, Tendermint, WS)
+    so a corruption authored for one transport can't leak into another.
+    Mirrors MAG-1836's _apply_grpc_fault gate (early-return on mismatch).
+    """
+    if snap.get("chain_family") in chain_families:
+        return snap.get("corruption_mode")
+    return None
+
+
+def _missing_field_for(snap: Dict[str, Any], *chain_families: str) -> Optional[str]:
+    """Return ``snap["missing_field"]`` only when the snap's ``chain_family``
+    is one of ``chain_families``; otherwise ``None``.
+
+    ``missing_field`` is the companion slot to ``corruption_mode`` (it names
+    which top-level field to clear / type-swap). Gating both together keeps
+    the cross-transport contract tight — if corruption is suppressed for a
+    transport, the companion slot is suppressed too.
+    """
+    if snap.get("chain_family") in chain_families:
+        return snap.get("missing_field")
+    return None
+
+
 # ── JSON-RPC handler ──────────────────────────────────────────────────────────
 
 class JSONRPCHandler(BaseHTTPRequestHandler):
@@ -571,16 +610,31 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             if k.lower().startswith("lava-")
         }
 
+        # Cross-transport isolation (MAG-1838) — inverse of MAG-1836.
+        # ``ProviderState`` is shared across JSON-RPC, REST, gRPC, WS, and
+        # Tendermint-RPC for the same provider id. The fault primitives in
+        # _apply_fault (down / hang / drop_connection / rate_limit / error)
+        # are chain-agnostic, so without an explicit gate a fault authored
+        # for the gRPC port (chain_family="grpc") would also kill the
+        # JSON-RPC port for that provider. JSON-RPC owns chain_family
+        # values "eth" and "btc" (success-path dispatch lives below); any
+        # other value means the fault was set for a different transport
+        # and the JSON-RPC port should fall through to its normal success
+        # response. ``jsonrpc_owns_snap`` is False in that case and
+        # short-circuits both the pre-parse ``down`` branch immediately
+        # below and the post-parse fault evaluation further down.
+        jsonrpc_owns_snap = snap.get("chain_family") in ("eth", "btc")
+
         # Pre-parse fault check: provider-wide down mode doesn't read the body.
         # Down is the only pre-body-parse fault — there is no per-method
         # variant at this layer because the method label isn't known yet
         # (body unparsed). A per-method down lives behind the merged-config
         # path below and applies on the post-parse branch.
-        if snap["mode"] == "down":
+        if jsonrpc_owns_snap and snap["mode"] == "down":
             fault = _apply_fault(state, snap, "*", None, lava_headers, t_start)
             self._emit_jsonrpc_fault(fault, req_id=None,
-                                     corruption_mode=snap.get("corruption_mode"),
-                                     missing_field=snap.get("missing_field"))
+                                     corruption_mode=_corruption_for(snap, "eth", "btc"),
+                                     missing_field=_missing_field_for(snap, "eth", "btc"))
             return
 
         # Parse the request body before latency/fault evaluation so the
@@ -612,8 +666,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             override_body = method_snap["body"]
             override_status = method_snap.get("status", 200)
             self._reply(override_status, override_body,
-                        corruption_mode=snap.get("corruption_mode"),
-                        missing_field=snap.get("missing_field"))
+                        corruption_mode=_corruption_for(snap, "eth", "btc"),
+                        missing_field=_missing_field_for(snap, "eth", "btc"))
             # History status is always "success" on the body-override path.
             # The override is validated 2xx-only at /scenario time, so the
             # HTTP-level outcome is always successful. Body is arbitrary
@@ -629,11 +683,17 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             return
 
         # Post-parse fault evaluation. _apply_fault records history internally.
-        fault = _apply_fault(state, method_snap, method, req_id, lava_headers, t_start)
+        # MAG-1838 — only evaluate the fault ladder when the snap was authored
+        # for the JSON-RPC transport (chain_family in {"eth","btc"}). Faults
+        # set for any other transport pass through to the success-path below.
+        if jsonrpc_owns_snap:
+            fault = _apply_fault(state, method_snap, method, req_id, lava_headers, t_start)
+        else:
+            fault = None
         if fault is not None:
             self._emit_jsonrpc_fault(fault, req_id=req_id,
-                                     corruption_mode=snap.get("corruption_mode"),
-                                     missing_field=snap.get("missing_field"))
+                                     corruption_mode=_corruption_for(snap, "eth", "btc"),
+                                     missing_field=_missing_field_for(snap, "eth", "btc"))
             return
 
         # Success — delegate the chain-specific success path to a handler module.
@@ -653,8 +713,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             status, response_body = handlers_eth.handle(state, body, snap, lava_headers)
         emit_status = "error" if "error" in response_body else "success"
         self._reply(status, response_body,
-                    corruption_mode=snap.get("corruption_mode"),
-                    missing_field=snap.get("missing_field"))
+                    corruption_mode=_corruption_for(snap, "eth", "btc"),
+                    missing_field=_missing_field_for(snap, "eth", "btc"))
         state.push_call_to_buffer(method, emit_status, _elapsed_ms(t_start),
                                   request_id=req_id, lava_headers=lava_headers)
 
@@ -1083,9 +1143,12 @@ class RestHandler(BaseHTTPRequestHandler):
             state, verb, template, path_params, query, body, snap, lava_headers
         )
         emit_status = "error" if (isinstance(response_body, dict) and "error" in response_body) else "success"
+        # MAG-1837 — only apply corruption_mode if the snap was authored for
+        # the REST transport. A corruption set on chain_family="eth" must not
+        # leak into the REST port.
         self._reply(status, response_body,
-                    corruption_mode=snap.get("corruption_mode"),
-                    missing_field=snap.get("missing_field"))
+                    corruption_mode=_corruption_for(snap, "rest"),
+                    missing_field=_missing_field_for(snap, "rest"))
         state.push_call_to_buffer(method_label, emit_status, _elapsed_ms(t_start),
                                   request_id=req_id, lava_headers=lava_headers)
 
@@ -1164,12 +1227,13 @@ class RestHandler(BaseHTTPRequestHandler):
         # rate_limit / error — REST shape: {"code": ..., "message": ...}.
         # No id echo, no envelope. Caller-configured corruption hooks still
         # apply because the body is a plain JSON object the corruption layer
-        # already knows how to mutate.
+        # already knows how to mutate. MAG-1837 — gate on chain_family="rest"
+        # so a corruption authored for another transport can't reach here.
         snap = self.server.state.snapshot()
         body = {"code": fault["error_code"], "message": fault["error_message"]}
         self._reply(fault["status"], body,
-                    corruption_mode=snap.get("corruption_mode"),
-                    missing_field=snap.get("missing_field"))
+                    corruption_mode=_corruption_for(snap, "rest"),
+                    missing_field=_missing_field_for(snap, "rest"))
 
     def _reply(self, status: int, data: Any,
                corruption_mode: Optional[str] = None,
@@ -1406,11 +1470,14 @@ class TendermintHandler(BaseHTTPRequestHandler):
             }
             history_status = "success"
 
+        # MAG-1837 — gate corruption_mode on chain_family="tendermintrpc"
+        # so a corruption authored for another transport doesn't reach the
+        # Tendermint port.
         self._reply(
             http_status,
             envelope,
-            corruption_mode=snap.get("corruption_mode"),
-            missing_field=snap.get("missing_field"),
+            corruption_mode=_corruption_for(snap, "tendermintrpc"),
+            missing_field=_missing_field_for(snap, "tendermintrpc"),
         )
         state.push_call_to_buffer(
             method_label,
@@ -1525,6 +1592,7 @@ class TendermintHandler(BaseHTTPRequestHandler):
             return
 
         # rate_limit / error — Tendermint wire is a JSON-RPC envelope.
+        # MAG-1837 — gate corruption_mode on chain_family="tendermintrpc".
         snap = self.server.state.snapshot()
         envelope = {
             "jsonrpc": "2.0",
@@ -1537,8 +1605,8 @@ class TendermintHandler(BaseHTTPRequestHandler):
         self._reply(
             fault["status"],
             envelope,
-            corruption_mode=snap.get("corruption_mode"),
-            missing_field=snap.get("missing_field"),
+            corruption_mode=_corruption_for(snap, "tendermintrpc"),
+            missing_field=_missing_field_for(snap, "tendermintrpc"),
         )
 
     def _reply(

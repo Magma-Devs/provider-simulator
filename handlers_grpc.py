@@ -362,7 +362,17 @@ class CosmosBaseTendermintServicer(query_pb2_grpc.ServiceServicer):
         # Structural corruption (missing / wrong-type fields). Applied
         # before byte-level corruption so a "missing_field" response with
         # truncation still has the field cleared on the cleared bytes.
-        cm = snap.get("corruption_mode")
+        #
+        # Cross-transport isolation (MAG-1837): ``corruption_mode`` is a
+        # chain-agnostic field on the snap, so without an explicit gate a
+        # corruption authored for JSON-RPC (chain_family="eth") would also
+        # break the gRPC port. Mirrors MAG-1836's _apply_grpc_fault gate —
+        # fall through to the clean success proto unless the corruption was
+        # authored for the gRPC transport.
+        if snap.get("chain_family") != "grpc":
+            cm = None
+        else:
+            cm = snap.get("corruption_mode")
         missing_field = snap.get("missing_field")
         if cm == "missing_field" and missing_field:
             # proto3 fields are clearable; ClearField is the canonical

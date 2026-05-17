@@ -520,7 +520,9 @@ class TestPreHandshakeFaults:
 class TestCorruptionModes:
 
     def test_truncated_chops_trailing_bytes_from_payload(self, sim):
+        # chain_family="ws" — MAG-1837 gates corruption on chain_family.
         _control(sim, "POST", "/scenario", {"providers": {"1": {
+            "chain_family": "ws",
             "corruption_mode": "truncated",
         }}})
         with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
@@ -533,7 +535,9 @@ class TestCorruptionModes:
             json.loads(frame.payload.decode())
 
     def test_missing_field_strips_top_level_key(self, sim):
+        # chain_family="ws" — MAG-1837 gates corruption on chain_family.
         _control(sim, "POST", "/scenario", {"providers": {"1": {
+            "chain_family": "ws",
             "corruption_mode": "missing_field",
             "missing_field": "result",
         }}})
@@ -545,7 +549,9 @@ class TestCorruptionModes:
         assert reply["jsonrpc"] == "2.0"  # other fields still present
 
     def test_invalid_json_replaces_payload_with_garbage(self, sim):
+        # chain_family="ws" — MAG-1837 gates corruption on chain_family.
         _control(sim, "POST", "/scenario", {"providers": {"1": {
+            "chain_family": "ws",
             "corruption_mode": "invalid_json",
         }}})
         with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
@@ -558,7 +564,9 @@ class TestCorruptionModes:
     def test_wrong_type_swaps_target_field_type(self, sim):
         """wrong_type swaps a string result for an int (or vice versa).
         Default target is "result" -- matches JSONRPCHandler semantics."""
+        # chain_family="ws" — MAG-1837 gates corruption on chain_family.
         _control(sim, "POST", "/scenario", {"providers": {"1": {
+            "chain_family": "ws",
             "corruption_mode": "wrong_type",
         }}})
         with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
@@ -707,7 +715,9 @@ class TestFaultCorruptionConsistency:
         fault-path replies. Without this, the WS transport silently diverges
         from the HTTP transport on combined fault+corruption scenarios."""
         with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
+            # chain_family="ws" — MAG-1837 gates corruption on chain_family.
             _control(sim, "POST", "/scenario", {"providers": {"1": {
+                "chain_family": "ws",
                 "mode": "error", "error_code": -32099,
                 "error_message": "Forced for corruption test",
                 "corruption_mode": "truncated",
