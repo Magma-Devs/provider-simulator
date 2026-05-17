@@ -53,6 +53,31 @@ TM_PORTS = {"1": 18554, "2": 18555, "3": 18556}
 # JSON-RPC range (BACKUP_PROVIDER_PORTS, above).
 WS_PORTS = {"1": 18557, "2": 18558, "3": 18559}
 
+# ── Backup-tier listeners for the non-JSON-RPC surfaces (MAG-18xx) ────────────
+# Same shape contract as BACKUP_PROVIDER_PORTS above — the surface handler is
+# identical to its primary, only the router-side `is_backup: true` flag (in
+# values_sim.yml) and the dedicated port range differ. The simulator process
+# treats every pool the same; tier semantics live in the smart-router.
+#
+# Provider-id scheme: continue the global integer numbering established by the
+# JSON-RPC backup (pids 4-6). Each surface gets its own three contiguous pids
+# so a single /scenario POST can target backup providers per-surface without
+# accidentally configuring the matching primary or another surface's backup.
+# A pid is never shared between two pools; the control API keys by pid string
+# globally so distinct pids = distinct ProviderState instances.
+#
+# Port allocation is a single contiguous block 18563-18574 stacked above the
+# JSON-RPC backup at 18560-18562:
+#
+#   gRPC          : pids  7- 9 → 18563-18565
+#   REST          : pids 10-12 → 18566-18568
+#   Tendermint-RPC: pids 13-15 → 18569-18571
+#   WebSocket     : pids 16-18 → 18572-18574
+GRPC_BACKUP_PORTS = {"7":  18563, "8":  18564, "9":  18565}
+REST_BACKUP_PORTS = {"10": 18566, "11": 18567, "12": 18568}
+TM_BACKUP_PORTS   = {"13": 18569, "14": 18570, "15": 18571}
+WS_BACKUP_PORTS   = {"16": 18572, "17": 18573, "18": 18574}
+
 # ── Provider history — call-log ring-buffer ───────────────────────────────────
 # Each provider keeps the last N calls in memory.
 # When full, the oldest entry is dropped to make room for the newest.

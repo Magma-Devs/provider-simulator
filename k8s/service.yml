@@ -108,3 +108,61 @@ spec:
       port: 18559
       targetPort: 18559
       protocol: TCP
+    # Backup-tier service ports for the non-JSON-RPC surfaces. Same handler
+    # + ProviderState shape as the matching primary; values_sim.yml wires the
+    # matching nodes (SimGrpcBackup1-3, SimRestBackup1-3, SimTmBackup1-3,
+    # SimWsBackup1-3) into the smart-router with `is_backup: true` so each
+    # pool is consulted only after its surface's primary tier is exhausted.
+    # gRPC backup carries appProtocol h2c so GRPCRoute backendRefs resolve
+    # the right protocol; the other surfaces are plain HTTP/1.1.
+    - name: grpc-backup-1
+      port: 18563
+      targetPort: 18563
+      protocol: TCP
+      appProtocol: kubernetes.io/h2c
+    - name: grpc-backup-2
+      port: 18564
+      targetPort: 18564
+      protocol: TCP
+      appProtocol: kubernetes.io/h2c
+    - name: grpc-backup-3
+      port: 18565
+      targetPort: 18565
+      protocol: TCP
+      appProtocol: kubernetes.io/h2c
+    - name: rest-backup-1
+      port: 18566
+      targetPort: 18566
+      protocol: TCP
+    - name: rest-backup-2
+      port: 18567
+      targetPort: 18567
+      protocol: TCP
+    - name: rest-backup-3
+      port: 18568
+      targetPort: 18568
+      protocol: TCP
+    - name: tm-backup-1
+      port: 18569
+      targetPort: 18569
+      protocol: TCP
+    - name: tm-backup-2
+      port: 18570
+      targetPort: 18570
+      protocol: TCP
+    - name: tm-backup-3
+      port: 18571
+      targetPort: 18571
+      protocol: TCP
+    - name: ws-backup-1
+      port: 18572
+      targetPort: 18572
+      protocol: TCP
+    - name: ws-backup-2
+      port: 18573
+      targetPort: 18573
+      protocol: TCP
+    - name: ws-backup-3
+      port: 18574
+      targetPort: 18574
+      protocol: TCP
