@@ -31,7 +31,7 @@ Architectural facts verified by these tests
        In unit tests there is no background traffic — history starts at 0 and
        only grows with calls the tests explicitly make. The four ring-buffer-
        rollover tests pin themselves to MAX_FOR_OVERFLOW_TEST=200 (via the
-       _shrink_provider_history helper) so they don't fire ~2000 calls each.
+       shrink_history fixture) so they don't fire ~2000 calls each.
 
   2. Method filter is the correct isolation tool (deployed env)
        The router's background calls are exclusively eth_blockNumber and
@@ -75,24 +75,10 @@ _CONTROL_PORT   = 29000
 # 200 → 2000, those loops would fire ~2005 calls each and turn the unit suite
 # slow without buying any extra correctness — the cap behaviour is identical
 # at any maxlen. We pin those tests to 200 by swapping the running provider's
-# `history` deque for a freshly-built one with maxlen=200 before pushing.
-# This is a local override scoped to the four overflow tests; every other test
-# keeps using the production-sized 2000-entry buffer.
+# `history` deque for a freshly-built one with maxlen=200 before pushing,
+# then restoring the original maxlen on test teardown (see the shrink_history
+# fixture below) so subsequent tests still see a HISTORY_MAX-sized buffer.
 MAX_FOR_OVERFLOW_TEST = 200
-
-
-def _shrink_provider_history(state: ProviderState, maxlen: int = MAX_FOR_OVERFLOW_TEST) -> None:
-    """Replace a provider's in-memory history deque with a smaller one.
-
-    `deque.maxlen` is immutable after construction, so we build a new deque
-    (locking the state so a concurrent push doesn't drop the new buffer on the
-    floor) and assign it back. Counters are reset to keep the test's
-    pre-condition (empty buffer, zero all-time count) crisp.
-    """
-    with state.lock:
-        state.history = deque(maxlen=maxlen)
-        state.total_calls = 0
-        state.calls_by_status = {}
 
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
@@ -193,6 +179,37 @@ def clean_state(sim):
     _post(_ctrl(sim, "/reset/all"), {})
     yield
     _post(_ctrl(sim, "/reset/all"), {})
+
+
+@pytest.fixture
+def shrink_history(sim):
+    """Temporarily shrink a provider's history deque, restoring the original
+    maxlen on teardown (MAG-1822).
+
+    `deque.maxlen` is immutable after construction — we swap the deque for a
+    smaller one (locking the state so a concurrent push doesn't drop the new
+    buffer on the floor) and remember the original maxlen so we can rebuild
+    a full-sized deque at the end of the test. Without the restore the shrunk
+    deque persists for the rest of the module run, silently capping any later
+    test that pushes past 200 entries to that provider.
+    """
+    original_maxlens: dict[str, int] = {}
+
+    def _shrink(pid: str, maxlen: int = MAX_FOR_OVERFLOW_TEST) -> None:
+        state = sim["states"][pid]
+        with state.lock:
+            if pid not in original_maxlens:
+                original_maxlens[pid] = state.history.maxlen
+            state.history = deque(maxlen=maxlen)
+            state.total_calls = 0
+            state.calls_by_status = {}
+
+    yield _shrink
+
+    for pid, original_maxlen in original_maxlens.items():
+        state = sim["states"][pid]
+        with state.lock:
+            state.history = deque(maxlen=original_maxlen)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -665,16 +682,16 @@ class TestResetAll:
                 f"entry ts={entry['ts']:.3f} < reset ts={t_reset:.3f}"
             )
 
-    def test_history_max_cap_per_provider(self, sim):
+    def test_history_max_cap_per_provider(self, sim, shrink_history):
         """Architectural fact 1 — each provider's history is bounded by a maxlen cap.
 
         Each provider's ring-buffer holds at most HISTORY_MAX entries. The deployed
         default is 2000 (MAG-1822, raised from the original 200) and is overridable
         via SIM_HISTORY_MAX. The cap behaviour itself is the same at any maxlen,
         so we pin this test to MAX_FOR_OVERFLOW_TEST=200 to keep it fast — see the
-        helper comment for why we shrink in-place.
+        shrink_history fixture for why we shrink in-place and how we restore.
         """
-        _shrink_provider_history(sim["states"]["1"])
+        shrink_history("1")
 
         for _ in range(MAX_FOR_OVERFLOW_TEST + 5):
             _rpc(sim["provider1"], "eth_blockNumber")
@@ -1199,13 +1216,13 @@ class TestScenarioEdgeCases:
 
 class TestRingBufferRollover:
 
-    def test_oldest_entry_is_dropped_when_buffer_full(self, sim):
+    def test_oldest_entry_is_dropped_when_buffer_full(self, sim, shrink_history):
         """When the ring buffer is full, the oldest entry is replaced by the newest.
 
         Pinned to MAX_FOR_OVERFLOW_TEST (MAG-1822) — the production HISTORY_MAX
         default is now 2000, but the rollover behaviour is identical at any maxlen.
         """
-        _shrink_provider_history(sim["states"]["1"])
+        shrink_history("1")
 
         # fill the buffer exactly
         for i in range(MAX_FOR_OVERFLOW_TEST):
@@ -1224,13 +1241,13 @@ class TestRingBufferRollover:
         assert hist_after["history"][0]["ts"] > oldest_ts, \
             "oldest entry should have been dropped after overflow"
 
-    def test_all_time_counter_survives_rollover(self, sim):
+    def test_all_time_counter_survives_rollover(self, sim, shrink_history):
         """total_requests_all_time must keep counting past the ring buffer cap.
 
         Pinned to MAX_FOR_OVERFLOW_TEST (MAG-1822) — what we're verifying is the
         invariant "ring caps, all-time counter does not", which holds at every maxlen.
         """
-        _shrink_provider_history(sim["states"]["1"])
+        shrink_history("1")
 
         extra = 10
         for _ in range(MAX_FOR_OVERFLOW_TEST + extra):
@@ -1245,13 +1262,13 @@ class TestRingBufferRollover:
         assert ring == MAX_FOR_OVERFLOW_TEST, \
             f"ring buffer should be capped at {MAX_FOR_OVERFLOW_TEST}, got {ring}"
 
-    def test_newest_entry_always_survives_rollover(self, sim):
+    def test_newest_entry_always_survives_rollover(self, sim, shrink_history):
         """The most recently pushed entry must always be present after rollover.
 
         Pinned to MAX_FOR_OVERFLOW_TEST (MAG-1822). The rollover semantics are
         deque's, not ours — verifying them at 200 is enough.
         """
-        _shrink_provider_history(sim["states"]["1"])
+        shrink_history("1")
 
         for _ in range(MAX_FOR_OVERFLOW_TEST + 5):
             _rpc(sim["provider1"], "eth_blockNumber")
