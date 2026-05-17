@@ -2226,3 +2226,100 @@ class TestDropConnection:
         statuses = {e["status"] for e in entries}
         assert "drop_connection" in statuses or "drop" in statuses, \
             f"expected drop in history, got {statuses}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAG-1838: cross-transport JSON-RPC fault isolation (inverse of MAG-1836)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestJsonRpcCrossTransportFaultIsolation:
+    """``ProviderState`` is shared across JSON-RPC, REST, gRPC, WS, and
+    Tendermint-RPC for the same provider id. The fault primitives in
+    ``_apply_fault`` (down / hang / drop_connection / rate_limit / error)
+    are chain-agnostic on the snap, so without an explicit gate a fault
+    authored for the gRPC port (chain_family="grpc") would also kill the
+    JSON-RPC port for that provider.
+
+    Inverse of MAG-1836 (which gated the gRPC fault ladder on
+    chain_family="grpc"). The JSON-RPC handler owns chain_family values
+    ``"eth"`` and ``"btc"``; any other value means the fault was set for
+    a different transport and the JSON-RPC port should fall through to
+    its normal success response.
+    """
+
+    def test_jsonrpc_unaffected_by_grpc_down_fault(self, sim):
+        """gRPC ``down`` fault on provider 1 must not return 503 on its
+        JSON-RPC port. Without the gate this asserts http 503 instead of
+        a normal success body."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"chain_family": "grpc", "mode": "down"}}
+        })
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200, f"JSON-RPC should ignore grpc-down; got {status}"
+        assert "result" in body, f"expected success body; got {body}"
+
+    def test_jsonrpc_unaffected_by_grpc_rate_limit_fault(self, sim):
+        """gRPC ``rate_limit`` must not return 429 on the JSON-RPC port."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"chain_family": "grpc", "mode": "rate_limit"}}
+        })
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200, f"JSON-RPC should ignore grpc-rate_limit; got {status}"
+        assert "result" in body, f"expected success body; got {body}"
+
+    def test_jsonrpc_unaffected_by_grpc_error_fault(self, sim):
+        """gRPC ``error`` must not return an error envelope on the
+        JSON-RPC port."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {
+                "chain_family": "grpc",
+                "mode": "error",
+                "error_message": "UNAVAILABLE",
+                "error_code": -32603,
+            }}
+        })
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200
+        assert "error" not in body, f"expected no error key; got {body}"
+        assert "result" in body
+
+    def test_jsonrpc_unaffected_by_rest_down_fault(self, sim):
+        """REST ``down`` fault must not kill the JSON-RPC port either —
+        all non-jsonrpc chain_family values are gated the same way."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"chain_family": "rest", "mode": "down"}}
+        })
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200
+        assert "result" in body
+
+    def test_jsonrpc_unaffected_by_tendermintrpc_down_fault(self, sim):
+        """Tendermint ``down`` fault must not kill the JSON-RPC port."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {
+                "chain_family": "tendermintrpc", "mode": "down",
+            }}
+        })
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200
+        assert "result" in body
+
+    def test_jsonrpc_fault_still_fires_when_chain_family_is_eth(self, sim):
+        """Sanity check: the gate must not break JSON-RPC-side faults.
+        A ``down`` fault with default ``chain_family="eth"`` must still
+        return 503."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"chain_family": "eth", "mode": "down"}}
+        })
+        status, _ = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 503
+
+    def test_jsonrpc_fault_still_fires_when_chain_family_is_btc(self, sim):
+        """Sanity check: btc is the other JSON-RPC-owned chain family —
+        a ``rate_limit`` fault with chain_family="btc" must still return
+        429 on the JSON-RPC port."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"chain_family": "btc", "mode": "rate_limit"}}
+        })
+        status, _ = _rpc(sim["provider1"], "getblockcount")
+        assert status == 429

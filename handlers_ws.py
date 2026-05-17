@@ -48,8 +48,8 @@ _SENTINEL_CLOSE = object()
 
 
 def _server_helpers():
-    """Return the (`_apply_fault`, `_elapsed_ms`, `_resolve_method_config`)
-    helpers from server.py.
+    """Return the (`_apply_fault`, `_elapsed_ms`, `_resolve_method_config`,
+    `_corruption_for`, `_missing_field_for`) helpers from server.py.
 
     server.py imports handlers_ws at top level for main(), so importing it
     back at module load would be a cycle. We resolve on first use, which is
@@ -58,9 +58,20 @@ def _server_helpers():
     ``_resolve_method_config`` was added in the MAG-1821 follow-up so the
     WS reader loop can pre-merge per-method overrides into the snap before
     the latency / fault evaluation runs, matching the JSON-RPC dispatcher.
+
+    ``_corruption_for`` / ``_missing_field_for`` were added in MAG-1837 so
+    the WS reader loop can gate corruption_mode on chain_family="ws" the
+    same way the JSON-RPC / REST / Tendermint handlers gate their own
+    transports.
     """
     import server
-    return server._apply_fault, server._elapsed_ms, server._resolve_method_config
+    return (
+        server._apply_fault,
+        server._elapsed_ms,
+        server._resolve_method_config,
+        server._corruption_for,
+        server._missing_field_for,
+    )
 
 
 def _writer_loop(connection, out_queue: "queue.Queue") -> None:
@@ -316,7 +327,7 @@ class WsHandler(BaseHTTPRequestHandler):
     def _reader_loop(self, out_queue: "queue.Queue", lava_headers: Dict[str, str]) -> None:
         state = self.server.state
         provider_id = self.server.provider_id
-        apply_fault, elapsed_ms, resolve_method_config = _server_helpers()
+        apply_fault, elapsed_ms, resolve_method_config, corruption_for, missing_field_for = _server_helpers()
 
         connection_subs: Set[str] = set()
 
@@ -365,10 +376,13 @@ class WsHandler(BaseHTTPRequestHandler):
                 fault = apply_fault(state, method_snap, method, req_id,
                                     lava_headers, t_start)
                 if fault is not None:
+                    # MAG-1837 — gate corruption_mode on chain_family="ws"
+                    # so a corruption authored for JSON-RPC / REST / etc.
+                    # doesn't reach the WS frame encoder.
                     action = _emit_ws_fault(
                         fault, req_id, out_queue, self.connection,
-                        corruption_mode=snap.get("corruption_mode"),
-                        missing_field=snap.get("missing_field"),
+                        corruption_mode=corruption_for(snap, "ws"),
+                        missing_field=missing_field_for(snap, "ws"),
                     )
                     if action == "close":
                         return
@@ -418,6 +432,9 @@ class WsHandler(BaseHTTPRequestHandler):
                     continue
 
                 # Non-subscription request → delegate to existing chain handler.
+                # MAG-1837 — gate corruption_mode on chain_family="ws" so the
+                # WS frame encoder doesn't apply a corruption authored for a
+                # different transport.
                 if snap.get("chain_family") == "btc":
                     _, response = handlers_btc.handle(state, body, snap, lava_headers)
                 else:
@@ -425,8 +442,8 @@ class WsHandler(BaseHTTPRequestHandler):
                 try:
                     out_queue.put_nowait(_text_frame(
                         response,
-                        corruption_mode=snap.get("corruption_mode"),
-                        missing_field=snap.get("missing_field"),
+                        corruption_mode=corruption_for(snap, "ws"),
+                        missing_field=missing_field_for(snap, "ws"),
                     ))
                 except queue.Full:
                     return

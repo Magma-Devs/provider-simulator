@@ -620,3 +620,78 @@ class TestGrpcCrossTransportFaultIsolation:
         with pytest.raises(grpc.RpcError) as exc_info:
             _call_get_latest_block(sim["grpc1"])
         assert exc_info.value.code() == grpc.StatusCode.UNAVAILABLE
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAG-1837: cross-transport corruption isolation
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestGrpcCrossTransportCorruptionIsolation:
+    """``ProviderState`` is shared across JSON-RPC and gRPC for the same
+    provider id, so ``corruption_mode`` is a chain-agnostic field on the
+    snap. Without the chain_family gate in ``_handle``, a corruption
+    authored for JSON-RPC (chain_family="eth") would also break the gRPC
+    port for that provider — release-smoke gRPC tests would see invalid
+    protos or abort statuses they never asked for.
+
+    Mirrors ``TestGrpcCrossTransportFaultIsolation`` (MAG-1836) but for
+    the corruption ladder instead of the fault ladder.
+    """
+
+    def test_grpc_unaffected_by_eth_corruption_invalid_proto(self, sim):
+        """JSON-RPC ``corruption_mode="invalid_proto"`` must not abort the
+        gRPC port with UNKNOWN. Without the chain_family gate this raises
+        an RpcError with StatusCode.UNKNOWN instead of returning a valid
+        proto.
+        """
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {
+                "chain_family": "eth",
+                "corruption_mode": "invalid_proto",
+            }}
+        })
+        resp = _call_get_latest_block(sim["grpc1"])
+        # Clean stub response — chain_id pinned, height > 0.
+        assert resp.block.header.chain_id == "lava-sim"
+        assert resp.block.header.height > 0
+
+    def test_grpc_unaffected_by_eth_corruption_missing_field(self, sim):
+        """JSON-RPC ``corruption_mode="missing_field"`` must not clear the
+        ``block`` field on the gRPC response."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {
+                "chain_family": "eth",
+                "corruption_mode": "missing_field",
+                "missing_field": "block",
+            }}
+        })
+        resp = _call_get_latest_block(sim["grpc1"])
+        # block field is populated normally — height should be > 0 and
+        # chain_id should be the pinned simulator value.
+        assert resp.block.header.chain_id == "lava-sim"
+        assert resp.block.header.height > 0
+
+    def test_grpc_unaffected_by_eth_corruption_wrong_type(self, sim):
+        """JSON-RPC ``corruption_mode="wrong_type"`` must not abort the
+        gRPC port with INTERNAL. Without the gate this raises an RpcError
+        instead of returning a clean proto."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {
+                "chain_family": "eth",
+                "corruption_mode": "wrong_type",
+                "missing_field": "block",
+            }}
+        })
+        resp = _call_get_latest_block(sim["grpc1"])
+        assert resp.block.header.chain_id == "lava-sim"
+        assert resp.block.header.height > 0
+
+    def test_grpc_corruption_still_fires_when_chain_family_is_grpc(self, sim):
+        """Sanity check: the gate must not break gRPC-side corruption.
+
+        A ``corruption_mode="invalid_proto"`` with ``chain_family="grpc"``
+        must still abort the gRPC port with UNKNOWN."""
+        _set_grpc(sim, "1", corruption_mode="invalid_proto")
+        with pytest.raises(grpc.RpcError) as exc_info:
+            _call_get_latest_block(sim["grpc1"])
+        assert exc_info.value.code() == grpc.StatusCode.UNKNOWN
