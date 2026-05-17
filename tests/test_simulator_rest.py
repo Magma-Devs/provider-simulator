@@ -560,6 +560,249 @@ class TestRestPerPathOverrides:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# MAG-1821 follow-up — per-(verb, template) FAULT overrides on REST
+#
+# Extends the JSON-RPC per-method override pattern from MAG-1821 to REST.
+# A per-(verb, template) entry in the `responses` list can now carry
+# `mode` / `latency_ms` / `rate_limit` keys (in addition to the existing
+# success-path `status` / `body` / `error` keys consumed by handlers_rest).
+# Eligible modes are the chain-agnostic fault primitives: down, hang,
+# drop_connection, rate_limit, success. `mode == "error"` is rejected at
+# /scenario time, matching the JSON-RPC validation rule.
+#
+# Composition order mirrors JSON-RPC: latency FIRST, then fault, so a
+# per-path latency_ms is paid even when the per-path mode is rate_limit.
+# Per-key fallback also mirrors JSON-RPC: a partial per-path entry inherits
+# provider-wide fault keys it doesn't override.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestRestPerPathFaultOverrides:
+
+    def test_per_path_mode_down_isolates_to_named_route(self, sim):
+        """``mode: down`` fires only for the matching (verb, template)."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "chain_family": "rest",
+                    "responses": [
+                        [["GET", "/cosmos/staking/v1beta1/validators"],
+                         {"mode": "down"}],
+                    ],
+                }
+            }
+        })
+        status_down, _, _ = _get(sim["rest1"] + "/cosmos/staking/v1beta1/validators")
+        assert status_down == 503, (
+            f"expected 503 on overridden route, got {status_down}"
+        )
+
+        status_ok, body_ok, _ = _get(
+            sim["rest1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest"
+        )
+        assert status_ok == 200, (
+            f"non-overridden route should succeed, got {status_ok}"
+        )
+        assert "block" in body_ok
+
+    def test_per_path_mode_rate_limit_returns_429(self, sim):
+        """``mode: rate_limit`` returns HTTP 429 + REST error envelope."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "chain_family": "rest",
+                    "responses": [
+                        [["GET", "/cosmos/staking/v1beta1/validators"],
+                         {"mode": "rate_limit"}],
+                    ],
+                }
+            }
+        })
+        status, body, _ = _get(sim["rest1"] + "/cosmos/staking/v1beta1/validators")
+        assert status == 429
+        assert isinstance(body, dict)
+        assert body["code"] == 429
+
+    def test_per_path_latency_ms_isolates_to_named_route(self, sim):
+        """``latency_ms`` only delays the matching (verb, template)."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "chain_family": "rest",
+                    "latency_ms": 0,
+                    "responses": [
+                        [["GET", "/cosmos/staking/v1beta1/validators"],
+                         {"latency_ms": 500}],
+                    ],
+                }
+            }
+        })
+        t0 = time.monotonic()
+        _get(sim["rest1"] + "/cosmos/staking/v1beta1/validators")
+        elapsed_overridden_ms = (time.monotonic() - t0) * 1000
+        assert elapsed_overridden_ms >= 480, (
+            f"overridden route should sleep ~500ms, elapsed={elapsed_overridden_ms:.0f}ms"
+        )
+
+        t1 = time.monotonic()
+        _get(sim["rest1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
+        elapsed_other_ms = (time.monotonic() - t1) * 1000
+        assert elapsed_other_ms < 200, (
+            f"non-overridden route should not sleep, elapsed={elapsed_other_ms:.0f}ms"
+        )
+
+    def test_per_key_fallback_inherits_provider_wide_latency(self, sim):
+        """A partial per-path entry inherits provider-wide latency_ms it doesn't override."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "chain_family": "rest",
+                    "latency_ms": 100,
+                    "responses": [
+                        [["GET", "/cosmos/staking/v1beta1/validators"],
+                         {"mode": "down"}],
+                    ],
+                }
+            }
+        })
+        t0 = time.monotonic()
+        status, _, _ = _get(sim["rest1"] + "/cosmos/staking/v1beta1/validators")
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        assert status == 503
+        assert elapsed_ms >= 80, (
+            f"provider-wide latency_ms=100 should still apply, elapsed={elapsed_ms:.0f}ms"
+        )
+
+    def test_composition_order_latency_first_then_fault(self, sim):
+        """Per-path ``{latency_ms: 200, mode: rate_limit}`` → 429 with >=180ms delay."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "chain_family": "rest",
+                    "responses": [
+                        [["GET", "/cosmos/staking/v1beta1/validators"],
+                         {"latency_ms": 200, "mode": "rate_limit"}],
+                    ],
+                }
+            }
+        })
+        t0 = time.monotonic()
+        status, body, _ = _get(sim["rest1"] + "/cosmos/staking/v1beta1/validators")
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        assert status == 429
+        assert body["code"] == 429
+        assert elapsed_ms >= 180, (
+            f"per-path latency should fire before fault, elapsed={elapsed_ms:.0f}ms"
+        )
+
+    def test_per_path_mode_error_rejected_with_400(self, sim):
+        """``mode: error`` is rejected at /scenario POST time (MAG-1821 rule)."""
+        status, body, _ = _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "chain_family": "rest",
+                    "responses": [
+                        [["GET", "/cosmos/staking/v1beta1/validators"],
+                         {"mode": "error"}],
+                    ],
+                }
+            }
+        })
+        assert status == 400, (
+            f"expected 400 on per-path mode=error, got {status}"
+        )
+        assert "error" in body
+        # Message should reference the offending key for diagnosability.
+        assert "mode" in body["error"].lower() or "error" in body["error"].lower()
+
+    def test_per_path_rate_limit_records_status_in_history(self, sim):
+        """Per-path rate_limit records status='rate_limit' in /history under the matched template."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "chain_family": "rest",
+                    "responses": [
+                        [["GET", "/cosmos/staking/v1beta1/validators"],
+                         {"mode": "rate_limit"}],
+                    ],
+                }
+            }
+        })
+        _get(sim["rest1"] + "/cosmos/staking/v1beta1/validators")
+        _, hist, _ = _get(_ctrl(sim, "/history?provider=1"))
+        entries = [
+            e for e in hist["history"]
+            if e["method"] == "GET /cosmos/staking/v1beta1/validators"
+        ]
+        assert len(entries) == 1
+        assert entries[0]["status"] == "rate_limit"
+
+    def test_jsonrpc_string_keys_do_not_affect_rest_tuple_lookups(self, sim):
+        """Cross-transport isolation, reverse direction: a string-keyed
+        JSON-RPC override (e.g. ``eth_blockNumber: {mode: down}``) does
+        not leak into the REST handler's per-(verb, template) lookup on
+        the same provider. The REST handler reads ``state.responses`` by
+        tuple key only, so a string entry never matches.
+        """
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "responses": {
+                        "eth_blockNumber": {"mode": "down"},
+                    },
+                }
+            }
+        })
+
+        # JSON-RPC side fires the override as configured (sanity check).
+        rpc_status, _, _ = _post(
+            sim["jsonrpc1"],
+            body={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber"},
+        )
+        assert rpc_status == 503
+
+        # REST side on the same provider stays healthy — string keys
+        # never match the (verb, template) tuple lookup in handlers_rest.
+        rest_status, rest_body, _ = _get(
+            sim["rest1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest"
+        )
+        assert rest_status == 200
+        assert "block" in rest_body
+
+    def test_rest_tuple_keys_do_not_affect_jsonrpc_string_lookups(self, sim):
+        """Cross-transport isolation: a tuple-keyed REST override does not
+        accidentally shadow a string-keyed JSON-RPC method lookup on the
+        same provider. The JSON-RPC handler on port 48545 stays healthy
+        even though the REST handler on 48551 is faulted.
+        """
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "chain_family": "rest",
+                    "responses": [
+                        [["GET", "/cosmos/staking/v1beta1/validators"],
+                         {"mode": "down"}],
+                    ],
+                }
+            }
+        })
+
+        # REST side faulted as configured.
+        rest_status, _, _ = _get(sim["rest1"] + "/cosmos/staking/v1beta1/validators")
+        assert rest_status == 503
+
+        # JSON-RPC on the same provider — tuple keys never match the
+        # string method-name lookup, so eth_blockNumber stays healthy.
+        rpc_status, rpc_body, _ = _post(
+            sim["jsonrpc1"],
+            body={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber"},
+        )
+        assert rpc_status == 200
+        assert "result" in rpc_body
+        assert "error" not in rpc_body
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Mixed-chain scenario — JSON-RPC + REST in the same /scenario body
 # ─────────────────────────────────────────────────────────────────────────────
 
