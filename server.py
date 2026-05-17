@@ -593,8 +593,17 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             self._reply(override_status, override_body,
                         corruption_mode=snap.get("corruption_mode"),
                         missing_field=snap.get("missing_field"))
-            emit_status = "error" if "error" in override_body else "success"
-            state.push_call_to_buffer(method, emit_status, _elapsed_ms(t_start),
+            # History status is always "success" on the body-override path.
+            # The override is validated 2xx-only at /scenario time, so the
+            # HTTP-level outcome is always successful. Body is arbitrary
+            # test-supplied content and may not follow JSON-RPC conventions,
+            # so inferring status from body shape (e.g. checking for an
+            # "error" key) would surprise testers — a body of
+            # {"success": false, "error": "..."} is still an HTTP success
+            # from the sim's perspective, and /history?status=error should
+            # not match it. Test authors who need /history?status=error
+            # should use mode="error" instead.
+            state.push_call_to_buffer(method, "success", _elapsed_ms(t_start),
                                       request_id=req_id, lava_headers=lava_headers)
             return
 

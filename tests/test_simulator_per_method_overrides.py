@@ -808,3 +808,113 @@ class TestPerMethodBodyOverride:
             assert leaked_key not in body, (
                 f"healthy-stub key {leaked_key!r} leaked into body override response: {body!r}"
             )
+
+    @pytest.mark.timeout(10)
+    def test_body_override_history_status_is_success_regardless_of_body_shape(self, sim):
+        """Body-override responses always record status="success" in /history,
+        regardless of body content.
+
+        Background
+        ----------
+        The body override is validated 2xx-only at /scenario time, so by
+        HTTP semantics the request always succeeds. The body itself is
+        arbitrary test-supplied content and may not follow JSON-RPC
+        conventions — a body of {"success": false, "error": "rate limit"}
+        (the motivating use case for MAG-1846, exercising router behaviour
+        on application-level failure shapes) is still an HTTP-200 success
+        from the simulator's perspective.
+
+        Inferring history status from body content (e.g. recording "error"
+        if the body has an "error" key) would silently mis-classify two
+        common shapes:
+
+          * {"success": false, "error": "..."}  — HTTP 200, but tester
+            asks /history?status=success and finds nothing.
+          * {"data": {"error_count": 0}}        — also flagged as "error"
+            by a naive "error" in body check, even though there's no error.
+
+        Pin both shapes to "success" so a future refactor that re-introduces
+        body-content inference is caught.
+
+        Setup
+        -----
+        Provider 1: mode=success + two body overrides on different methods:
+          - eth_blockNumber: body has "error" key (HTTP-200 failure shape)
+          - eth_chainId:     body has no "error" key (pure success shape)
+
+        Act
+        ---
+        Send one request to each, then read /history filtered to provider 1.
+
+        Assertions
+        ----------
+          * Both history entries have status="success".
+          * /history?status=success returns both entries.
+          * /history?status=error returns neither.
+
+        How to read a failure
+        ---------------------
+          * entry["status"] == "error" on the error-shape body → the
+            body-content inference has crept back in (regression of the
+            fix at server.py do_POST body-override branch). The override
+            is HTTP-2xx by construction; status must not depend on body
+            content.
+          * /history?status=success returns 0 or 1 instead of 2 → the
+            filter path itself is broken, or the second request never
+            recorded.
+        """
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "mode": "success",
+                    "responses": {
+                        "eth_blockNumber": {
+                            "body": {"success": False, "error": "rate limit"},
+                        },
+                        "eth_chainId": {
+                            "body": {"data": {"error_count": 0}},
+                        },
+                    },
+                }
+            }
+        })
+
+        status_err_shape, body_err_shape = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status_err_shape == 200
+        assert body_err_shape == {"success": False, "error": "rate limit"}
+
+        status_ok_shape, body_ok_shape = _rpc(sim["provider1"], "eth_chainId")
+        assert status_ok_shape == 200
+        assert body_ok_shape == {"data": {"error_count": 0}}
+
+        with urllib.request.urlopen(_ctrl(sim, "/history?provider=1"), timeout=5) as resp:
+            entries = json.loads(resp.read())["history"]
+        assert len(entries) == 2, f"expected 2 entries, got {len(entries)}: {entries!r}"
+        for entry in entries:
+            assert entry["status"] == "success", (
+                f"body-override history status must be 'success' regardless "
+                f"of body shape (HTTP-2xx by construction). Got status="
+                f"{entry['status']!r} on method={entry['method']!r} with "
+                f"body={entry['method']!r}. If 'error': the body-content "
+                f"inference has been re-introduced — check the "
+                f"push_call_to_buffer call in the body-override branch of "
+                f"JSONRPCHandler.do_POST."
+            )
+
+        with urllib.request.urlopen(
+            _ctrl(sim, "/history?provider=1&status=success"), timeout=5
+        ) as resp:
+            success_entries = json.loads(resp.read())["history"]
+        assert len(success_entries) == 2, (
+            f"/history?status=success must return both body-override entries; "
+            f"got {len(success_entries)}: {success_entries!r}"
+        )
+
+        with urllib.request.urlopen(
+            _ctrl(sim, "/history?provider=1&status=error"), timeout=5
+        ) as resp:
+            error_entries = json.loads(resp.read())["history"]
+        assert error_entries == [], (
+            f"/history?status=error must not match HTTP-200 body overrides; "
+            f"got {error_entries!r}"
+        )
