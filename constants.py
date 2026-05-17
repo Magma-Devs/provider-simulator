@@ -5,8 +5,17 @@ Import from here instead of defining magic values inline.
 """
 
 # ── Server — network / ports ──────────────────────────────────────────────────
-# JSON-RPC provider servers (one per simulated provider)
-PROVIDER_PORTS = {"1": 18545, "2": 18546, "3": 18547}
+# JSON-RPC provider servers. Primaries serve normal traffic; backups are
+# consumed by the smart-router only after the primary pool is exhausted
+# (PairingListEmptyError → backup fallback in consumer_session_manager.go).
+# The simulator process is identical across both pools — tier is a router-side
+# concept, not a simulator-side one. The split here keeps intent visible at
+# import sites; ALL_PROVIDER_PORTS is the union used by server bootstrap.
+# Backups live at 18560-18562 (not contiguous with primaries) because
+# 18548-18559 are claimed by gRPC / REST / Tendermint / WebSocket surfaces.
+PROVIDER_PORTS        = {"1": 18545, "2": 18546, "3": 18547}
+BACKUP_PROVIDER_PORTS = {"4": 18560, "5": 18561, "6": 18562}
+ALL_PROVIDER_PORTS    = {**PROVIDER_PORTS, **BACKUP_PROVIDER_PORTS}
 
 # Control API (scenario config, reset, stats, history)
 CONTROL_PORT = 19000
@@ -36,7 +45,8 @@ TM_PORTS = {"1": 18554, "2": 18555, "3": 18556}
 # the same ProviderState dict that backs the JSON-RPC / REST / gRPC / TM
 # handlers. A /scenario call with chain_family="ws" reconfigures the matching
 # WS handler (latency, fault primitives, corruption). Pinned to 18557-18559
-# above the MAG-1841 TM range so port allocations stay contiguous.
+# above the MAG-1841 TM range; 18560-18562 above WS is the backup-tier
+# JSON-RPC range (BACKUP_PROVIDER_PORTS, above).
 WS_PORTS = {"1": 18557, "2": 18558, "3": 18559}
 
 # ── Provider history — call-log ring-buffer ───────────────────────────────────
