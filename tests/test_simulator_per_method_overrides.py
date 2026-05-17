@@ -285,6 +285,157 @@ class TestPerMethodOverrides:
         )
 
     @pytest.mark.timeout(10)
+    def test_per_method_down_records_method_req_id_and_latency_in_history(self, sim):
+        """Per-method ``mode: down`` must record the real method, request_id,
+        and latency_ms in the sim history — not placeholder values
+        (regression for commit 924f268).
+
+        Background
+        ----------
+        Provider-wide ``mode: down`` is evaluated pre-body-parse, so the
+        handler has no method label or req_id available and passes
+        ``method="*"``, ``req_id=None``, ``t_start=now()`` into
+        ``_apply_fault`` — yielding a history entry with method ``"*"``,
+        ``request_id=None``, ``latency_ms≈0``. That's expected at that
+        layer.
+
+        Per-method ``mode: down`` is different: it's the post-parse path
+        in ``JSONRPCHandler.do_POST`` (server.py:535), where the body has
+        already been parsed and the inherited per-method ``latency_ms``
+        may have been slept. The handler must pass the *real* values into
+        ``_apply_fault``, and ``_apply_fault``'s down branch
+        (server.py:420-423) must record them — using ``method``, ``req_id``,
+        and ``_elapsed_ms(t_start)`` rather than the provider-wide-down
+        placeholders.
+
+        An earlier draft of the per-method down branch hardcoded ``"*" /
+        None / 0`` even on the post-parse path, which silently broke
+        ``/history?method=X``, ``/history?request_id=Y``, and any
+        latency-based assertion on per-method down outcomes. The fix
+        Denis flagged in code review (924f268) routes the real method /
+        req_id / elapsed time through. This test pins that behaviour so
+        a future refactor can't re-introduce the placeholders quietly.
+
+        Scenario
+        --------
+        Provider 1: provider-wide ``mode=success`` with a per-method
+        override ``eth_blockNumber: {mode: down, latency_ms: 50}``.
+        The provider-wide config is healthy, so the body is parsed
+        normally and the per-method down branch fires post-parse.
+
+        Setup
+        -----
+          * The autouse ``clean_state`` fixture has already POSTed
+            ``/reset/all`` before the test runs, so history starts empty.
+          * POST ``/scenario`` with the per-method override above.
+
+        Act
+        ---
+        Send one JSON-RPC POST for ``eth_blockNumber`` with a known
+        ``id`` field. Expect HTTP 503 (per-method down primitive).
+
+        Assertions
+        ----------
+          * HTTP 503 (confirms the per-method down branch fired).
+          * /history filtered to ``provider=1`` returns exactly 1 entry.
+          * entry["method"] == "eth_blockNumber"  (NOT "*")
+          * entry["request_id"] == the request id we sent  (NOT None)
+          * entry["latency_ms"] >= 40  (real elapsed time covering the
+            50ms inherited per-method latency — NOT the placeholder 0)
+          * entry["status"] == "down"
+          * /history?method=eth_blockNumber resolves to the same entry
+            (filter must work, which only happens if method is correctly
+            labelled).
+
+        How to read a failure
+        ---------------------
+          * ``entry["method"] == "*"`` → the per-method down branch is
+            back on the provider-wide-down placeholder. Check
+            server.py:420-423 and the post-parse call site at
+            server.py:535 — both must pass the real label through.
+          * ``entry["request_id"] is None`` → same root cause; req_id was
+            replaced with the placeholder ``None``.
+          * ``entry["latency_ms"] == 0`` (or < 40) → ``t_start`` is being
+            reset to ``now()`` inside the down branch, or ``_elapsed_ms``
+            was swapped for a literal ``0``. The per-method ``latency_ms``
+            sleep ran before ``_apply_fault`` (server.py:531-532), so
+            elapsed should be ~50ms+.
+          * The /history?method= filter returns no results → method label
+            is wrong even though the bare entry might look right; check
+            the filter logic in ControlHandler.do_GET (server.py:1344).
+        """
+        request_id = 4242
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "mode": "success",
+                    "responses": {
+                        "eth_blockNumber": {
+                            "mode": "down",
+                            "latency_ms": 50,
+                        },
+                    },
+                }
+            }
+        })
+
+        status, body = _post(
+            sim["provider1"],
+            {"jsonrpc": "2.0", "id": request_id, "method": "eth_blockNumber", "params": []},
+        )
+        assert status == 503, f"per-method down should emit 503, got {status}"
+        assert body == {}, f"down emits no body, got {body!r}"
+
+        # Read /history filtered to provider 1 — the test scenario only
+        # configures provider 1, but ?provider=1 makes the assertion robust
+        # if a future test edit adds traffic elsewhere. Inline urllib GET
+        # rather than adding a _get helper for two call sites.
+        with urllib.request.urlopen(_ctrl(sim, "/history?provider=1"), timeout=5) as resp:
+            hist = json.loads(resp.read())
+
+        # /history returns {"count": N, "history": [...]} — peel out the list.
+        entries = hist["history"]
+        assert isinstance(entries, list), f"unexpected /history shape: {hist!r}"
+        assert len(entries) == 1, (
+            f"expected exactly 1 history entry for provider 1, got {len(entries)}: {entries!r}"
+        )
+
+        entry = entries[0]
+        assert entry["method"] == "eth_blockNumber", (
+            f"history method must be the real method, not placeholder. "
+            f"Got method={entry['method']!r}. If '*': per-method down branch "
+            f"reverted to provider-wide placeholder (server.py:420-423)."
+        )
+        assert entry["request_id"] == request_id, (
+            f"history request_id must echo the request id, not None. "
+            f"Got request_id={entry['request_id']!r} (sent id={request_id}). "
+            f"If None: same site as the method regression."
+        )
+        assert entry["latency_ms"] >= 40, (
+            f"history latency_ms must reflect real elapsed time including the "
+            f"inherited 50ms per-method latency, not the placeholder 0. "
+            f"Got latency_ms={entry['latency_ms']}. If 0: t_start or _elapsed_ms "
+            f"was bypassed in the per-method down branch."
+        )
+        assert entry["status"] == "down", (
+            f"status should be 'down', got {entry['status']!r}"
+        )
+
+        # Filter sanity: /history?method=eth_blockNumber must resolve to this
+        # entry. This only works if method was labelled correctly (above);
+        # the redundant check guards against a future regression where the
+        # entry stores the right method but the filter path breaks.
+        with urllib.request.urlopen(
+            _ctrl(sim, "/history?provider=1&method=eth_blockNumber"), timeout=5
+        ) as resp:
+            filtered = json.loads(resp.read())
+        filtered_entries = filtered["history"]
+        assert len(filtered_entries) == 1, (
+            f"/history?method=eth_blockNumber must return the entry; got "
+            f"{filtered_entries!r}. If empty: method label in history is wrong."
+        )
+
+    @pytest.mark.timeout(10)
     def test_composition_order_latency_first_then_fault(self, sim):
         """Q2: per-method composition is latency FIRST, then fault.
 
