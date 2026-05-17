@@ -19,6 +19,7 @@ import socket
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from http.server import HTTPServer, ThreadingHTTPServer
 
@@ -767,3 +768,261 @@ class TestLavaProviderAddressHeader:
         assert b" 101 " in resp.split(b"\r\n", 1)[0], f"no 101 in: {resp!r}"
         expected = f"Lava-Provider-Address: sim-provider-{provider_id}".encode()
         assert expected in resp, f"missing {expected!r} in: {resp!r}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAG-1821 follow-up — per-method FAULT overrides on WS
+#
+# Extends the JSON-RPC per-method override pattern from MAG-1821 to the WS
+# transport. A string-keyed entry in ``responses`` can now carry ``mode`` /
+# ``latency_ms`` / ``rate_limit`` (in addition to the existing success-path
+# ``result`` / ``error_stub`` / ``error`` keys consumed by handlers_eth).
+# Eligible modes: down, hang, drop_connection, rate_limit, success.
+# ``mode == "error"`` is rejected at /scenario time, matching JSON-RPC.
+#
+# Composition order mirrors JSON-RPC: latency FIRST, then fault.
+# Per-key fallback also mirrors JSON-RPC: a partial per-method entry
+# inherits provider-wide fault keys it doesn't override.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _ctrl_post_raw(sim, body):
+    """POST /scenario and return (status, parsed_body) without raising on 4xx.
+
+    The module-level ``_control`` helper raises HTTPError on non-2xx, which
+    swallows the 400 body we want to assert against in the validation test.
+    """
+    req = urllib.request.Request(
+        f"{sim['control']}/scenario",
+        method="POST",
+        headers={"Content-Type": "application/json"},
+        data=json.dumps(body).encode(),
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            parsed = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            parsed = {}
+        return e.code, parsed
+
+
+class TestWsPerMethodFaultOverrides:
+
+    def test_per_method_mode_down_closes_connection_on_named_method(self, sim):
+        """Per-method ``mode: down`` closes the WS connection on that method."""
+        _control(sim, "POST", "/scenario", {
+            "providers": {"1": {
+                "mode": "success",
+                "responses": {
+                    "eth_blockNumber": {"mode": "down"},
+                },
+            }}
+        })
+        with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
+            c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber",
+                         "params": [], "id": 1})
+            with pytest.raises((ConnectionError, ws_protocol.FrameParseError,
+                                socket.timeout, OSError)):
+                c.recv_json(timeout=1.0)
+
+    def test_per_method_eth_subscribe_mode_down_closes_before_registration(self, sim):
+        """Spec's literal example: ``eth_subscribe: {mode: down}`` closes the
+        WS connection on the subscribe attempt — *before* the subscribe
+        branch in _reader_loop registers a SubscriptionHandle. We assert:
+
+          1. The client never receives a sub_id (connection is dropped).
+          2. ``/ws/subscriptions`` shows no entries from the dropped attempt.
+
+        This pins the fault-check-before-subscribe order: the per-method
+        merge has to happen before the SUBSCRIBE_METHODS dispatch branch,
+        otherwise eth_subscribe would silently succeed despite the override.
+        """
+        _control(sim, "POST", "/scenario", {
+            "providers": {"1": {
+                "mode": "success",
+                "responses": {
+                    "eth_subscribe": {"mode": "down"},
+                },
+            }}
+        })
+        with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
+            c.send_json({"jsonrpc": "2.0", "method": "eth_subscribe",
+                         "params": ["newHeads"], "id": 1})
+            with pytest.raises((ConnectionError, ws_protocol.FrameParseError,
+                                socket.timeout, OSError)):
+                c.recv_json(timeout=1.0)
+
+        # No SubscriptionHandle should have been registered for the
+        # dropped attempt — the down branch returns before reaching the
+        # subscribe registration path.
+        _, subs = _control(sim, "GET", "/ws/subscriptions")
+        assert subs["subscriptions"] == [], (
+            f"down override should drop before subscribe registers, "
+            f"got {subs['subscriptions']!r}"
+        )
+
+    def test_per_method_other_methods_unaffected_by_down_override(self, sim):
+        """Non-overridden methods on the same provider serve normally."""
+        _control(sim, "POST", "/scenario", {
+            "providers": {"1": {
+                "mode": "success",
+                "responses": {
+                    "eth_blockNumber": {"mode": "down"},
+                },
+            }}
+        })
+        with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
+            c.send_json({"jsonrpc": "2.0", "method": "eth_getBlockByNumber",
+                         "params": ["latest", False], "id": 1})
+            reply = c.recv_json(timeout=2.0)
+        assert "result" in reply
+        assert "error" not in reply
+
+    def test_per_method_mode_rate_limit_emits_429_error_frame(self, sim):
+        """Per-method ``mode: rate_limit`` emits a JSON-RPC error frame with code 429."""
+        _control(sim, "POST", "/scenario", {
+            "providers": {"1": {
+                "mode": "success",
+                "responses": {
+                    "eth_blockNumber": {"mode": "rate_limit"},
+                },
+            }}
+        })
+        with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
+            c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber",
+                         "params": [], "id": 1})
+            reply = c.recv_json(timeout=2.0)
+        assert "error" in reply
+        assert reply["error"]["code"] == 429
+        assert reply["id"] == 1
+
+    def test_per_method_latency_ms_isolates_to_named_method(self, sim):
+        """Per-method ``latency_ms`` only delays the named method."""
+        _control(sim, "POST", "/scenario", {
+            "providers": {"1": {
+                "mode": "success",
+                "latency_ms": 0,
+                "responses": {
+                    "eth_getBlockByNumber": {"latency_ms": 500},
+                },
+            }}
+        })
+        with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
+            t0 = time.monotonic()
+            c.send_json({"jsonrpc": "2.0", "method": "eth_getBlockByNumber",
+                         "params": ["latest", False], "id": 1})
+            c.recv_json(timeout=2.0)
+            elapsed_overridden_ms = (time.monotonic() - t0) * 1000
+            assert elapsed_overridden_ms >= 480, (
+                f"overridden method should sleep ~500ms, elapsed={elapsed_overridden_ms:.0f}ms"
+            )
+
+            t1 = time.monotonic()
+            c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber",
+                         "params": [], "id": 2})
+            c.recv_json(timeout=2.0)
+            elapsed_other_ms = (time.monotonic() - t1) * 1000
+            assert elapsed_other_ms < 200, (
+                f"non-overridden method should not sleep, elapsed={elapsed_other_ms:.0f}ms"
+            )
+
+    def test_per_key_fallback_inherits_provider_wide_latency(self, sim):
+        """A partial per-method entry inherits provider-wide latency_ms it doesn't override."""
+        _control(sim, "POST", "/scenario", {
+            "providers": {"1": {
+                "mode": "success",
+                "latency_ms": 100,
+                "responses": {
+                    "eth_blockNumber": {"mode": "rate_limit"},
+                },
+            }}
+        })
+        with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
+            t0 = time.monotonic()
+            c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber",
+                         "params": [], "id": 1})
+            reply = c.recv_json(timeout=2.0)
+            elapsed_ms = (time.monotonic() - t0) * 1000
+        assert "error" in reply
+        assert reply["error"]["code"] == 429
+        assert elapsed_ms >= 80, (
+            f"provider-wide latency_ms=100 should still apply, elapsed={elapsed_ms:.0f}ms"
+        )
+
+    def test_composition_order_latency_first_then_fault(self, sim):
+        """Per-method ``{latency_ms: 200, mode: rate_limit}`` → 429 frame after ~200ms."""
+        _control(sim, "POST", "/scenario", {
+            "providers": {"1": {
+                "mode": "success",
+                "responses": {
+                    "eth_blockNumber": {"latency_ms": 200, "mode": "rate_limit"},
+                },
+            }}
+        })
+        with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
+            t0 = time.monotonic()
+            c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber",
+                         "params": [], "id": 1})
+            reply = c.recv_json(timeout=2.0)
+            elapsed_ms = (time.monotonic() - t0) * 1000
+        assert "error" in reply
+        assert reply["error"]["code"] == 429
+        assert elapsed_ms >= 180, (
+            f"per-method latency should fire before fault, elapsed={elapsed_ms:.0f}ms"
+        )
+
+    def test_per_method_mode_error_rejected_with_400(self, sim):
+        """Per-method ``mode: error`` is rejected at /scenario time (MAG-1821 rule)."""
+        status, body = _ctrl_post_raw(sim, {
+            "providers": {"1": {
+                "responses": {
+                    "eth_blockNumber": {"mode": "error"},
+                },
+            }}
+        })
+        assert status == 400, f"expected 400 on per-method mode=error, got {status}"
+        assert "error" in body
+        # Message should reference the offending key for diagnosability.
+        assert "mode" in body["error"].lower() or "error" in body["error"].lower()
+
+    def test_ws_and_jsonrpc_share_string_keyed_overrides_on_same_provider(self, sim):
+        """Cross-transport consistency: the SAME per-method override fires on
+        both JSON-RPC (HTTP POST) and WS for the same provider, because both
+        look up state.responses by the same string method name. The WS
+        transport delegates non-subscription methods through the same fault
+        path that JSON-RPC uses, so the two are intentionally consistent.
+        """
+        _control(sim, "POST", "/scenario", {
+            "providers": {"1": {
+                "mode": "success",
+                "responses": {
+                    "eth_blockNumber": {"mode": "rate_limit"},
+                },
+            }}
+        })
+        # JSON-RPC over HTTP returns 429.
+        rpc_req = urllib.request.Request(
+            sim["provider1"],
+            method="POST",
+            headers={"Content-Type": "application/json"},
+            data=json.dumps({"jsonrpc": "2.0", "id": 1,
+                             "method": "eth_blockNumber"}).encode(),
+        )
+        try:
+            with urllib.request.urlopen(rpc_req, timeout=5) as resp:
+                rpc_code = resp.status
+        except urllib.error.HTTPError as e:
+            rpc_code = e.code
+        assert rpc_code == 429
+
+        # WS emits the same fault envelope as an error frame.
+        with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
+            c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber",
+                         "params": [], "id": 1})
+            reply = c.recv_json(timeout=2.0)
+        assert "error" in reply
+        assert reply["error"]["code"] == 429
