@@ -675,11 +675,6 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if "body" in method_snap and method_snap.get("body") is not None:
             override_body = method_snap["body"]
             override_status = method_snap.get("status", 200)
-            if method_snap["latency_ms"] > 0:
-                time.sleep(method_snap["latency_ms"] / 1000.0)
-            self._reply(override_status, override_body,
-                        corruption_mode=_corruption_for(snap, "eth", "btc"),
-                        missing_field=_missing_field_for(snap, "eth", "btc"))
             # History status is always "success" on the body-override path.
             # The override is validated 2xx-only at /scenario time, so the
             # HTTP-level outcome is always successful. Body is arbitrary
@@ -690,8 +685,18 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             # from the sim's perspective, and /history?status=error should
             # not match it. Test authors who need /history?status=error
             # should use mode="error" instead.
-            state.push_call_to_buffer(method, "success", _elapsed_ms(t_start),
+            #
+            # MAG-1832: push history BEFORE the latency sleep so a router-side
+            # cancel mid-sleep still records the call. Mirrors the success and
+            # fault paths below. Recorded latency_ms is the configured value
+            # (what the call would have taken had it run to completion).
+            state.push_call_to_buffer(method, "success", method_snap["latency_ms"],
                                       request_id=req_id, lava_headers=lava_headers)
+            if method_snap["latency_ms"] > 0:
+                time.sleep(method_snap["latency_ms"] / 1000.0)
+            self._reply(override_status, override_body,
+                        corruption_mode=_corruption_for(snap, "eth", "btc"),
+                        missing_field=_missing_field_for(snap, "eth", "btc"))
             return
 
         # Post-parse fault evaluation. _apply_fault records history internally.
