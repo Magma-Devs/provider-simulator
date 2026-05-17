@@ -157,6 +157,11 @@ async def _apply_grpc_fault(state, snap: dict, context: grpc.aio.ServicerContext
     The history entry is appended before the abort so failed requests still
     show up in /history with the matching status — same contract as the
     JSON-RPC side.
+
+    Per-method MAG-1821 overrides (``mode`` / ``latency_ms`` / etc.) are
+    NOT resolved here. gRPC has its own per-method paths via
+    ``responses[method] = {"error_stub": ...}`` / ``{"error": ...}`` below.
+    See ``server._resolve_method_config`` for the supported transports.
     """
     elapsed_ms = int((time.monotonic() - t_start) * 1000)
 

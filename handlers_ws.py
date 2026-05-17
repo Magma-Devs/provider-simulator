@@ -48,14 +48,15 @@ _SENTINEL_CLOSE = object()
 
 
 def _server_helpers():
-    """Return the (`_apply_fault`, `_elapsed_ms`) helpers from server.py.
+    """Return the (`_apply_fault`, `_elapsed_ms`, `_resolve_method_config`)
+    helpers from server.py.
 
     server.py imports handlers_ws at top level for main(), so importing it
     back at module load would be a cycle. We resolve on first use, which is
     after both modules have finished loading.
     """
     import server
-    return server._apply_fault, server._elapsed_ms
+    return server._apply_fault, server._elapsed_ms, server._resolve_method_config
 
 
 def _writer_loop(connection, out_queue: "queue.Queue") -> None:
@@ -311,7 +312,7 @@ class WsHandler(BaseHTTPRequestHandler):
     def _reader_loop(self, out_queue: "queue.Queue", lava_headers: Dict[str, str]) -> None:
         state = self.server.state
         provider_id = self.server.provider_id
-        apply_fault, elapsed_ms = _server_helpers()
+        apply_fault, elapsed_ms, resolve_method_config = _server_helpers()
 
         connection_subs: Set[str] = set()
 
@@ -344,10 +345,21 @@ class WsHandler(BaseHTTPRequestHandler):
                 snap = state.snapshot()
                 t_start = time.monotonic()
 
-                if snap["latency_ms"] > 0:
-                    time.sleep(snap["latency_ms"] / 1000.0)
+                # MAG-1821 follow-up: per-method overrides on WS frames. Mirrors
+                # the JSON-RPC do_POST path (server.py). One WS-specific caveat:
+                # this reader loop is serial per connection, so a per-method
+                # latency_ms also delays every subsequent frame on the same
+                # socket. A per-method `mode: down` likewise closes the whole
+                # connection (handled by _emit_ws_fault's "down" branch) —
+                # consistent with provider-wide WS down, but not with JSON-RPC
+                # per-method down (which only fails the one request). Use
+                # `rate_limit` or `error` for per-method isolation on WS.
+                method_snap = resolve_method_config(method, snap, state.responses)
 
-                fault = apply_fault(state, snap, method, req_id,
+                if method_snap["latency_ms"] > 0:
+                    time.sleep(method_snap["latency_ms"] / 1000.0)
+
+                fault = apply_fault(state, method_snap, method, req_id,
                                     lava_headers, t_start)
                 if fault is not None:
                     action = _emit_ws_fault(

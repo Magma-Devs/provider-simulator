@@ -767,3 +767,170 @@ class TestLavaProviderAddressHeader:
         assert b" 101 " in resp.split(b"\r\n", 1)[0], f"no 101 in: {resp!r}"
         expected = f"Lava-Provider-Address: sim-provider-{provider_id}".encode()
         assert expected in resp, f"missing {expected!r} in: {resp!r}"
+
+
+# ── Per-method overrides on WS frames (MAG-1821 follow-up) ────────────────────
+
+
+class TestPerMethodOverrides:
+    """Parity tests for per-method overrides on the WS transport.
+
+    Mirrors tests/test_simulator_per_method_overrides.py (which covers the
+    JSON-RPC HTTP transport). The WS layer reuses server._resolve_method_config
+    via handlers_ws._reader_loop, so all assertions about merge semantics
+    are already covered by the JSON-RPC suite — these tests only pin the
+    *transport-specific* wire shape (WS frames vs HTTP responses).
+
+    WS-specific caveat the JSON-RPC suite does NOT capture:
+      A per-method `mode: down` on WS *closes the connection*. WS multiplexes
+      every method on one socket, and `_emit_ws_fault` translates `down` to
+      "close" — matching provider-wide WS down, but NOT matching JSON-RPC
+      per-method down (which only fails the one HTTP request). For per-method
+      isolation on WS, use `rate_limit` or `error` instead — both return
+      "continue" so other frames on the same socket survive.
+    """
+
+    def test_per_method_rate_limit_isolates_to_named_method(self, sim):
+        """A per-method `rate_limit` only triggers on the named method.
+
+        Both frames travel on the same WS connection. The rate_limit frame
+        returns "continue" (handlers_ws._emit_ws_fault), so the connection
+        stays open and the second frame succeeds against the healthy
+        provider-wide config.
+        """
+        _control(sim, "POST", "/scenario", {
+            "providers": {
+                "1": {
+                    "mode": "success",
+                    "responses": {
+                        "eth_blockNumber": {"mode": "rate_limit"},
+                    },
+                }
+            }
+        })
+
+        with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
+            c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber",
+                         "params": [], "id": 1})
+            reply_rl = c.recv_json(timeout=2.0)
+            assert "error" in reply_rl
+            assert reply_rl["error"]["code"] == 429
+
+            c.send_json({"jsonrpc": "2.0", "method": "eth_getBlockByNumber",
+                         "params": ["latest", False], "id": 2})
+            reply_ok = c.recv_json(timeout=2.0)
+            assert reply_ok["id"] == 2
+            assert "result" in reply_ok
+            assert "error" not in reply_ok
+
+    def test_per_method_latency_ms_isolates_to_named_method(self, sim):
+        """Per-method `latency_ms` only delays the named method.
+
+        The reader loop is serial per connection (one frame at a time), so
+        the latency injection delays everything *after* the overridden frame
+        on the same socket. We assert isolation by measuring elapsed time
+        for each call separately and confirming the override fires for the
+        named method only.
+        """
+        _control(sim, "POST", "/scenario", {
+            "providers": {
+                "1": {
+                    "mode": "success",
+                    "latency_ms": 0,
+                    "responses": {
+                        "eth_getBlockByNumber": {"latency_ms": 500},
+                    },
+                }
+            }
+        })
+
+        with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
+            t0 = time.monotonic()
+            c.send_json({"jsonrpc": "2.0", "method": "eth_getBlockByNumber",
+                         "params": ["latest", False], "id": 1})
+            c.recv_json(timeout=2.0)
+            elapsed_overridden_ms = (time.monotonic() - t0) * 1000
+            assert elapsed_overridden_ms >= 480, (
+                f"overridden frame should sleep ~500ms, "
+                f"elapsed={elapsed_overridden_ms:.0f}ms"
+            )
+
+            t1 = time.monotonic()
+            c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber",
+                         "params": [], "id": 2})
+            c.recv_json(timeout=2.0)
+            elapsed_other_ms = (time.monotonic() - t1) * 1000
+            assert elapsed_other_ms < 200, (
+                f"non-overridden frame should not sleep, "
+                f"elapsed={elapsed_other_ms:.0f}ms"
+            )
+
+    def test_per_method_mode_down_closes_connection_documented_caveat(self, sim):
+        """Pin the close-connection semantic for per-method `mode: down` on WS.
+
+        Unlike JSON-RPC (where each request is a separate connection so
+        per-method down only fails that one request), WS multiplexes all
+        traffic on one socket. `_emit_ws_fault` returns "close" for the
+        down branch, so the entire connection terminates. This test exists
+        so a future "fix" that silently changed the semantic would have to
+        update the docstring on _resolve_method_config too.
+
+        For per-method isolation on WS, use `rate_limit` / `error` instead.
+        """
+        _control(sim, "POST", "/scenario", {
+            "providers": {
+                "1": {
+                    "mode": "success",
+                    "responses": {
+                        "eth_blockNumber": {"mode": "down"},
+                    },
+                }
+            }
+        })
+
+        with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
+            c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber",
+                         "params": [], "id": 1})
+            with pytest.raises(
+                (socket.timeout, ConnectionError, ws_protocol.FrameParseError)
+            ):
+                c.recv_json(timeout=1.0)
+
+    def test_per_key_fallback_inherits_provider_wide_latency_on_ws(self, sim):
+        """Q4: a partial per-method entry inherits provider-wide fault keys.
+
+        Provider 1: provider-wide `latency_ms=200, mode=success`, per-method
+        `{eth_blockNumber: {mode: rate_limit}}` — no per-method `latency_ms`.
+
+        The merged config for eth_blockNumber should be
+        `{mode: rate_limit, latency_ms: 200, ...}`, so:
+          - the reply is the rate_limit envelope (429), AND
+          - elapsed time is >= ~200ms (provider-wide latency_ms inherited).
+
+        Also confirms composition order: latency FIRST, then fault.
+        """
+        _control(sim, "POST", "/scenario", {
+            "providers": {
+                "1": {
+                    "mode": "success",
+                    "latency_ms": 200,
+                    "responses": {
+                        "eth_blockNumber": {"mode": "rate_limit"},
+                    },
+                }
+            }
+        })
+
+        with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
+            t0 = time.monotonic()
+            c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber",
+                         "params": [], "id": 1})
+            reply = c.recv_json(timeout=2.0)
+            elapsed_ms = (time.monotonic() - t0) * 1000
+
+        assert "error" in reply
+        assert reply["error"]["code"] == 429
+        assert elapsed_ms >= 180, (
+            f"provider-wide latency_ms=200 should apply, "
+            f"elapsed={elapsed_ms:.0f}ms"
+        )

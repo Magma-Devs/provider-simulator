@@ -170,6 +170,23 @@ def _resolve_method_config(
       - Unknown keys inside ``responses[method]`` are silently ignored —
         forward-compatibility so adding a new override knob doesn't break
         older snap shapes.
+
+    Transport coverage
+    ------------------
+      - JSON-RPC (``JSONRPCHandler.do_POST``)  — wired.
+      - WS frames (``handlers_ws.WsHandler._reader_loop``) — wired.
+        WS-specific caveat: per-method ``mode: down`` closes the whole
+        connection (consistent with provider-wide WS down). For per-method
+        isolation on WS, use ``rate_limit`` or ``error`` — both stay open.
+      - REST (``RESTHandler._handle``) — NOT wired. The REST ``responses``
+        wire shape is list-of-routes, not dict-of-methods, so per-route
+        overrides need a separate config-shape design.
+      - gRPC (``handlers_grpc._apply_grpc_fault``) — NOT wired. gRPC has
+        its own per-method ``error_stub`` / ``error`` paths and no current
+        consumer asks for ``down``/``hang``/``rate_limit`` per gRPC method.
+
+    Add a transport here only after wiring it through at the call site
+    (search ``resolve_method_config`` / ``_resolve_method_config``).
     """
     if method == "*" or not responses:
         return snap
@@ -901,6 +918,10 @@ class RestHandler(BaseHTTPRequestHandler):
         (or ``f"{verb} {path}"`` when no template matched) so /history's
         existing ?method= filter keeps working without code changes on the
         control API side.
+
+        Per-method overrides (MAG-1821) are NOT resolved here: the REST
+        ``responses`` wire shape is list-of-routes, not dict-of-methods.
+        See ``_resolve_method_config`` for the supported transports.
         """
         t_start = time.monotonic()
         state: ProviderState = self.server.state
