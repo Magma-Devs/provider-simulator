@@ -123,6 +123,39 @@ def _normalise_responses(raw: Any) -> Dict[Any, Any]:
                     f"(method={method_name!r}); use responses[{method_name!r}] = "
                     f"{{'error_stub': '<name>'}} or {{'error': {{...}}}} instead"
                 )
+            # MAG-1846 — body+status override validation, JSON-RPC only.
+            # The override returns {status, body} directly and bypasses the
+            # healthy stub. Reject at /scenario time: non-2xx status (use
+            # mode=error for those), body not a dict (json.dumps needs one),
+            # or body+mode combined (they describe different outcomes —
+            # custom success vs. fault — combining them would silently pick
+            # one).
+            #
+            # REST per-path overrides reach this dict-branch after the list
+            # form is normalised to a dict with tuple keys ((verb, path)).
+            # REST has its own per-path body+status semantic that pre-dates
+            # MAG-1846 and intentionally allows non-2xx statuses (handlers_rest
+            # owns that wire-shape contract), so we only apply this validation
+            # to string-keyed (JSON-RPC method-name) entries.
+            if isinstance(method_name, str) and isinstance(cfg, dict) and "body" in cfg:
+                body_val = cfg["body"]
+                if not isinstance(body_val, dict):
+                    raise ValueError(
+                        f"per-method body override must be a dict "
+                        f"(method={method_name!r}); got type {type(body_val).__name__}"
+                    )
+                if "mode" in cfg:
+                    raise ValueError(
+                        f"per-method body and mode are mutually exclusive "
+                        f"(method={method_name!r}); set one or the other, not both"
+                    )
+                status_val = cfg.get("status", 200)
+                if not (isinstance(status_val, int) and 200 <= status_val <= 299):
+                    raise ValueError(
+                        f"per-method body override status must be a 2xx int "
+                        f"(method={method_name!r}); got status={status_val!r}. "
+                        f"Use mode=\"error\" + http_status for non-2xx response shapes."
+                    )
         return raw
     # Unknown shape — clear responses rather than crash.
     return {}
@@ -143,6 +176,12 @@ _METHOD_OVERRIDE_KEYS = (
     "error_message",
     "http_status",
     "drop_at",
+    # MAG-1846 — per-method body+status override. When "body" is set on the
+    # resolved method cfg the JSONRPCHandler emits {status, body} directly
+    # and skips _apply_fault + the chain-handler success path. "status"
+    # defaults to 200 when omitted (enforced at the call site).
+    "body",
+    "status",
 )
 
 
@@ -541,6 +580,23 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
 
         if method_snap["latency_ms"] > 0:
             time.sleep(method_snap["latency_ms"] / 1000.0)
+
+        # MAG-1846 — per-method body override. When set, return the configured
+        # {status, body} directly and bypass _apply_fault + the chain-handler
+        # success path. Validation at /scenario time (_normalise_responses)
+        # guarantees: status is 2xx, body is a dict, and "mode" is not also
+        # set on this method entry, so we can read body unconditionally here
+        # without worrying about silently shadowing a fault primitive.
+        if "body" in method_snap and method_snap.get("body") is not None:
+            override_body = method_snap["body"]
+            override_status = method_snap.get("status", 200)
+            self._reply(override_status, override_body,
+                        corruption_mode=snap.get("corruption_mode"),
+                        missing_field=snap.get("missing_field"))
+            emit_status = "error" if "error" in override_body else "success"
+            state.push_call_to_buffer(method, emit_status, _elapsed_ms(t_start),
+                                      request_id=req_id, lava_headers=lava_headers)
+            return
 
         # Post-parse fault evaluation. _apply_fault records history internally.
         fault = _apply_fault(state, method_snap, method, req_id, lava_headers, t_start)
