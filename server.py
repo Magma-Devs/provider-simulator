@@ -1457,47 +1457,51 @@ class TendermintHandler(BaseHTTPRequestHandler):
             self._emit_tm_fault(fault, request_id=None)
             return
 
-        # 2. Optional latency injection — same shape as JSON-RPC.
-        if snap["latency_ms"] > 0:
-            time.sleep(snap["latency_ms"] / 1000.0)
-
-        # 3. Parse the wire — method + params + request_id depend on the verb.
+        # 2. Parse the wire BEFORE the latency sleep — so method/request_id
+        #    are available when history is written ahead of any sleep
+        #    (MAG-1832, mirrors the JSON-RPC do_POST fix).
         try:
             method, params, request_id = self._extract_method_params(verb)
         except _TmParseError as exc:
-            # Malformed request — JSON-RPC -32700 (parse error). Compose a
-            # bare envelope inline; this path is rare so it doesn't justify
-            # threading through _apply_fault.
+            # Malformed request — JSON-RPC -32700 (parse error). Record
+            # history BEFORE the wire reply so a router-side cancel still
+            # leaves a trace. No latency on this path (parse fault is
+            # synchronous and immediate).
+            state.push_call_to_buffer(
+                "*",
+                "parse_error",
+                0,
+                request_id=None,
+                lava_headers=lava_headers,
+            )
             err_body = {
                 "jsonrpc": "2.0",
                 "id": None,
                 "error": {"code": -32700, "message": f"Parse error: {exc}"},
             }
             self._reply(400, err_body)
-            state.push_call_to_buffer(
-                "*",
-                "parse_error",
-                _elapsed_ms(t_start),
-                request_id=None,
-                lava_headers=lava_headers,
-            )
             return
 
         method_label = method  # For history filtering — matches JSON-RPC convention.
 
-        # 4. Post-parse fault primitives — hang / drop / rate_limit / error.
+        # 3. Post-parse fault primitives — hang / drop / rate_limit / error.
+        #    _apply_fault records history internally with the configured
+        #    latency_ms. If a fault triggers, we still pay the configured
+        #    latency on the wire before emitting, so wire timing is unchanged.
         fault = _apply_fault(state, snap, method_label, request_id, lava_headers, t_start)
         if fault is not None:
+            if snap["latency_ms"] > 0:
+                time.sleep(snap["latency_ms"] / 1000.0)
             self._emit_tm_fault(fault, request_id=request_id)
             return
 
-        # 5. Success path — chain-specific dispatch.
+        # 4. Success path — chain-specific dispatch.
         normalized = handlers_tendermintrpc._normalize_tm_params(verb, params)
         http_status, result_body = handlers_tendermintrpc.handle(
             state, method, normalized, snap, lava_headers
         )
 
-        # 6. Wrap in JSON-RPC envelope. If the handler returned an error dict
+        # 5. Wrap in JSON-RPC envelope. If the handler returned an error dict
         #    (unknown method, per-method override with "error" key), the
         #    envelope carries ``error`` rather than ``result``.
         if isinstance(result_body, dict) and "error" in result_body:
@@ -1515,6 +1519,18 @@ class TendermintHandler(BaseHTTPRequestHandler):
             }
             history_status = "success"
 
+        # 6. MAG-1832: write history BEFORE the latency sleep so a router-side
+        #    cancel mid-sleep still records the call. latency_ms recorded is
+        #    the configured value (what the call would have taken).
+        state.push_call_to_buffer(
+            method_label,
+            history_status,
+            snap["latency_ms"],
+            request_id=request_id,
+            lava_headers=lava_headers,
+        )
+        if snap["latency_ms"] > 0:
+            time.sleep(snap["latency_ms"] / 1000.0)
         # MAG-1837 — gate corruption_mode on chain_family="tendermintrpc"
         # so a corruption authored for another transport doesn't reach the
         # Tendermint port.
@@ -1523,13 +1539,6 @@ class TendermintHandler(BaseHTTPRequestHandler):
             envelope,
             corruption_mode=_corruption_for(snap, "tendermintrpc"),
             missing_field=_missing_field_for(snap, "tendermintrpc"),
-        )
-        state.push_call_to_buffer(
-            method_label,
-            history_status,
-            _elapsed_ms(t_start),
-            request_id=request_id,
-            lava_headers=lava_headers,
         )
 
     # ── Wire parsing ──────────────────────────────────────────────────────────
