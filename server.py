@@ -54,11 +54,15 @@ from constants import (
     ALL_PROVIDER_PORTS,
     BACKUP_PROVIDER_PORTS,
     CONTROL_PORT,
+    GRPC_BACKUP_PORTS,
     GRPC_PROVIDER_PORTS,
     HISTORY_MAX,
     PROVIDER_PORTS,
+    REST_BACKUP_PORTS,
     REST_PORTS,
+    TM_BACKUP_PORTS,
     TM_PORTS,
+    WS_BACKUP_PORTS,
     WS_PORTS,
 )
 from stubs_rest import REST_METHOD_DEFAULTS
@@ -1780,36 +1784,69 @@ class ControlHandler(BaseHTTPRequestHandler):
 def main():
     """Start all simulator servers and block until interrupted.
 
-    Spins up nineteen HTTPServer/gRPC instances in daemon threads:
-      - Six JSONRPCHandler servers — three primary (ports 18545 / 18546 / 18547)
-        plus three backup (ports 18560 / 18561 / 18562). Same handler and
-        ProviderState shape across both pools; tier is a router-side concept,
-        not a simulator-side one. See PROVIDER_PORTS / BACKUP_PROVIDER_PORTS /
-        ALL_PROVIDER_PORTS in constants.py.
-      - Three RestHandler servers (ports 18551 / 18552 / 18553), one per primary
-        provider, sharing the same ProviderState objects as the JSON-RPC servers
-        (MAG-1777). REST does not cover the backup pool — backup-tier coverage
-        is JSON-RPC-only.
-      - Three TendermintHandler servers (ports 18554 / 18555 / 18556), one per
-        primary provider, sharing the same ProviderState (MAG-1841).
-      - Three WsHandler servers (ports 18557 / 18558 / 18559), one per primary
-        provider, sharing the same ProviderState (MAG-1801).
-      - Three gRPC servers (ports 18548 / 18549 / 18550) — Cosmos chain
-        (MAG-1780), sharing per-provider ProviderState with the matching
-        JSON-RPC primary port.
-      - One ControlHandler server (port 19000) for scenario config and history
-        queries.
+    Spins up the full surface matrix in daemon threads:
 
-    All servers share the same dict of ProviderState objects so control API
-    changes are immediately visible to every transport handler.
-    Mixed-chain scenarios (a /scenario payload setting chain_family="eth" on
-    provider 1 and chain_family="rest" on provider 2) work because each
-    provider has its own ProviderState; the JSON-RPC server ignores REST
-    config fields and vice versa.
+      JSON-RPC (six listeners — three primary + three backup)
+        - Primary  : ports 18545 / 18546 / 18547 (pids 1-3)
+        - Backup   : ports 18560 / 18561 / 18562 (pids 4-6)
+        See PROVIDER_PORTS / BACKUP_PROVIDER_PORTS / ALL_PROVIDER_PORTS in
+        constants.py — the simulator process is identical across both pools,
+        the only difference is the smart-router-side `is_backup: true` flag
+        in values_sim.yml.
 
-    Blocks on thread.join() and shuts all servers down cleanly on KeyboardInterrupt.
+      gRPC (six listeners — three primary + three backup)
+        - Primary  : ports 18548 / 18549 / 18550 (pids 1-3, shared state
+                     with the matching JSON-RPC primary)
+        - Backup   : ports 18563 / 18564 / 18565 (pids 7-9, distinct state)
+
+      REST (six listeners — three primary + three backup)
+        - Primary  : ports 18551 / 18552 / 18553 (pids 1-3, shared state)
+        - Backup   : ports 18566 / 18567 / 18568 (pids 10-12)
+
+      Tendermint-RPC (six listeners — three primary + three backup)
+        - Primary  : ports 18554 / 18555 / 18556 (pids 1-3, shared state)
+        - Backup   : ports 18569 / 18570 / 18571 (pids 13-15)
+
+      WebSocket (six listeners — three primary + three backup)
+        - Primary  : ports 18557 / 18558 / 18559 (pids 1-3, shared state)
+        - Backup   : ports 18572 / 18573 / 18574 (pids 16-18)
+
+      One ControlHandler server (port 19000) for scenario config, reset,
+      history, and /ws/emit.
+
+    State sharing model
+    -------------------
+    Primary tier pids (1-3) get ONE ProviderState each that backs every
+    primary surface (JSON-RPC + REST + gRPC + TM + WS at the same time).
+    A /scenario POST targeting pid "1" reconfigures all five primary
+    transports for that provider — this is what mixed-chain tests rely
+    on. Backup pids (4-18) each get their own ProviderState instance per
+    surface: pid "4" is the JSON-RPC backup #1; pid "7" is the gRPC
+    backup #1; these are independent. The control API keys by pid string
+    globally, so distinct pids guarantee distinct configuration.
+
+    Mixed-chain scenarios (a /scenario payload setting chain_family="eth"
+    on provider 1 and chain_family="rest" on provider 2) work for the
+    primary tier because each primary provider's state is shared across
+    surfaces. Backup-tier /scenario calls instead address the specific
+    backup pool by pid (no chain_family ambiguity — the pid range itself
+    encodes the surface).
+
+    Blocks on thread.join() and shuts all servers down cleanly on
+    KeyboardInterrupt.
     """
+    # Primary-tier states are shared across surfaces (one ProviderState backs
+    # JSON-RPC + REST + gRPC + TM + WS for the same pid). Backup-tier states
+    # are independent per surface — distinct pids guarantee distinct state.
     states = {pid: ProviderState() for pid in ALL_PROVIDER_PORTS}
+    for pid in GRPC_BACKUP_PORTS:
+        states[pid] = ProviderState()
+    for pid in REST_BACKUP_PORTS:
+        states[pid] = ProviderState()
+    for pid in TM_BACKUP_PORTS:
+        states[pid] = ProviderState()
+    for pid in WS_BACKUP_PORTS:
+        states[pid] = ProviderState()
 
     servers = []
     for pid, port in ALL_PROVIDER_PORTS.items():
@@ -1821,13 +1858,11 @@ def main():
         srv.provider_id = pid          # available as self.server.provider_id in handler
         servers.append(srv)
 
-    # REST servers (MAG-1777). Share the same ProviderState objects keyed by
-    # the same provider id ("1" / "2" / "3"), so a /scenario update on
+    # REST servers (MAG-1777). Primary tier shares ProviderState with the
+    # matching JSON-RPC primary (pids 1-3), so a /scenario update on
     # provider 1 changes how both the JSON-RPC port (18545) and the REST
     # port (18551) reply. Each server gets its own RestHandler instance
     # because BaseHTTPRequestHandler is per-request.
-    # REST sim only covers the primary pool (ids 1-3); backups (4-6) are
-    # JSON-RPC-only because backup-tier coverage is the only consumer.
     for pid, port in REST_PORTS.items():
         rest_srv = ThreadingHTTPServer(("0.0.0.0", port), RestHandler)
         rest_srv.daemon_threads = True
@@ -1835,10 +1870,20 @@ def main():
         rest_srv.provider_id = pid
         servers.append(rest_srv)
 
-    # Tendermint-RPC servers (MAG-1841). Same pattern as REST — shared
-    # ProviderState, distinct ports. A /scenario update on provider 1
-    # changes how the JSON-RPC (18545), REST (18551), Tendermint (18554),
-    # and WS (18557) ports all reply for that provider.
+    # REST backup tier (pids 10-12 → 18566-18568). Independent ProviderState
+    # per backup pid — the smart-router only routes to this pool after the
+    # primary REST pool is exhausted on a request (is_backup: true in
+    # values_sim.yml).
+    for pid, port in REST_BACKUP_PORTS.items():
+        rest_srv = ThreadingHTTPServer(("0.0.0.0", port), RestHandler)
+        rest_srv.daemon_threads = True
+        rest_srv.state       = states[pid]
+        rest_srv.provider_id = pid
+        servers.append(rest_srv)
+
+    # Tendermint-RPC servers (MAG-1841). Same pattern as REST — primary tier
+    # shares ProviderState with the JSON-RPC primary; backup tier is its
+    # own pool with distinct pids 13-15.
     for pid, port in TM_PORTS.items():
         tm_srv = ThreadingHTTPServer(("0.0.0.0", port), TendermintHandler)
         tm_srv.daemon_threads = True
@@ -1846,12 +1891,25 @@ def main():
         tm_srv.provider_id = pid
         servers.append(tm_srv)
 
-    # WS servers (MAG-1801). Share the same ProviderState objects keyed by
-    # the same provider id ("1" / "2" / "3"), so a /scenario update on
-    # provider 1 changes how all five transports (JSON-RPC, REST, gRPC, TM,
-    # WS) reply. Each server gets its own WsHandler instance because
+    for pid, port in TM_BACKUP_PORTS.items():
+        tm_srv = ThreadingHTTPServer(("0.0.0.0", port), TendermintHandler)
+        tm_srv.daemon_threads = True
+        tm_srv.state       = states[pid]
+        tm_srv.provider_id = pid
+        servers.append(tm_srv)
+
+    # WS servers (MAG-1801). Primary tier shares ProviderState with the
+    # JSON-RPC primary (pids 1-3); backup tier (pids 16-18) gets its own
+    # pool. Each server gets its own WsHandler instance because
     # BaseHTTPRequestHandler is per-request.
     for pid, port in WS_PORTS.items():
+        ws_srv = ThreadingHTTPServer(("0.0.0.0", port), handlers_ws.WsHandler)
+        ws_srv.daemon_threads = True
+        ws_srv.state       = states[pid]
+        ws_srv.provider_id = pid
+        servers.append(ws_srv)
+
+    for pid, port in WS_BACKUP_PORTS.items():
         ws_srv = ThreadingHTTPServer(("0.0.0.0", port), handlers_ws.WsHandler)
         ws_srv.daemon_threads = True
         ws_srv.state       = states[pid]
@@ -1864,17 +1922,25 @@ def main():
 
     print("Provider simulator started")
     for pid, port in PROVIDER_PORTS.items():
-        print(f"  provider {pid} (jsonrpc, primary) → :{port}")
+        print(f"  provider {pid:>2} (jsonrpc,        primary) → :{port}")
     for pid, port in BACKUP_PROVIDER_PORTS.items():
-        print(f"  provider {pid} (jsonrpc, backup)  → :{port}")
+        print(f"  provider {pid:>2} (jsonrpc,        backup)  → :{port}")
     for pid, port in GRPC_PROVIDER_PORTS.items():
-        print(f"  provider {pid} (grpc)          → :{port}")
+        print(f"  provider {pid:>2} (grpc,           primary) → :{port}")
+    for pid, port in GRPC_BACKUP_PORTS.items():
+        print(f"  provider {pid:>2} (grpc,           backup)  → :{port}")
     for pid, port in REST_PORTS.items():
-        print(f"  provider {pid} (rest)          → :{port}")
+        print(f"  provider {pid:>2} (rest,           primary) → :{port}")
+    for pid, port in REST_BACKUP_PORTS.items():
+        print(f"  provider {pid:>2} (rest,           backup)  → :{port}")
     for pid, port in TM_PORTS.items():
-        print(f"  provider {pid} (tendermintrpc) → :{port}")
+        print(f"  provider {pid:>2} (tendermintrpc,  primary) → :{port}")
+    for pid, port in TM_BACKUP_PORTS.items():
+        print(f"  provider {pid:>2} (tendermintrpc,  backup)  → :{port}")
     for pid, port in WS_PORTS.items():
-        print(f"  provider {pid} (ws)            → :{port}")
+        print(f"  provider {pid:>2} (ws,             primary) → :{port}")
+    for pid, port in WS_BACKUP_PORTS.items():
+        print(f"  provider {pid:>2} (ws,             backup)  → :{port}")
     print(f"  control API  → :{CONTROL_PORT}")
     print(f"  GET /stats   → call counts per provider")
     print(f"  GET /history → ordered call log (who was tried first)")
@@ -1883,9 +1949,10 @@ def main():
 
     # gRPC servers (MAG-1780). Each runs its own asyncio loop on a daemon
     # thread, sharing the same ProviderState instance with the matching
-    # JSON-RPC port so /scenario applies to both transports at once.
-    # Import locally so a missing grpcio dep doesn't break the JSON-RPC-only
-    # path (e.g. in tests that don't install gRPC extras).
+    # JSON-RPC port (primary tier) or a dedicated ProviderState (backup
+    # tier) so /scenario applies as expected per pid. Import locally so a
+    # missing grpcio dep doesn't break the JSON-RPC-only path (e.g. in
+    # tests that don't install gRPC extras).
     try:
         import grpc_server  # local import keeps gRPC dep optional
         for pid, port in GRPC_PROVIDER_PORTS.items():
@@ -1894,6 +1961,13 @@ def main():
                 args=(port, states[pid]),
                 daemon=True,
                 name=f"grpc-provider-{pid}",
+            ))
+        for pid, port in GRPC_BACKUP_PORTS.items():
+            threads.append(threading.Thread(
+                target=grpc_server.run_grpc_in_thread,
+                args=(port, states[pid]),
+                daemon=True,
+                name=f"grpc-backup-{pid}",
             ))
     except ImportError as exc:
         print(f"  gRPC servers DISABLED — grpcio import failed: {exc}")

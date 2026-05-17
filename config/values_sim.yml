@@ -2,6 +2,32 @@
 # Copy this file as-is to: ~/smart-router-standalone/values/simulator/values_sim.yml
 #
 # Important: Helm replaces lists entirely. Keep all required routers in this file.
+#
+# Pool model
+# ----------
+# Every sim router has two tiers:
+#   - SimProvider{1,2,3} (or SimGrpcProvider{1,2,3} etc.)  — primary pool
+#   - Sim<Surface>Backup{1,2,3}                            — backup pool,
+#       marked is_backup: true so the smart-router routes here only after
+#       the primary pool is exhausted on a request (PairingListEmptyError
+#       → backup fallback in consumer_session_manager.go:826).
+#
+# Addons MUST match between primary and backup tiers for each surface, or
+# `lava-extension: archive` requests skip the backup pool silently via
+# IsSupportingAddon (consumer_session_manager.go:1361).
+#
+# Provider-id scheme on the simulator side
+# ----------------------------------------
+# Primary tier pids (1-3) share one ProviderState across all surfaces, so a
+# single /scenario POST targeting pid "1" reconfigures every primary
+# transport at once. Backup tier pids are distinct per surface so each pool
+# can be configured independently:
+#
+#   JSON-RPC backup : pids  4- 6 → 18560-18562  (SimBackup1-3)
+#   gRPC     backup : pids  7- 9 → 18563-18565  (SimGrpcBackup1-3)
+#   REST     backup : pids 10-12 → 18566-18568  (SimRestBackup1-3)
+#   TM       backup : pids 13-15 → 18569-18571  (SimTmBackup1-3)
+#   WS       backup : pids 16-18 → 18572-18574  (SimWsBackup1-3)
 
 routers:
   - id: base
@@ -77,7 +103,8 @@ routers:
             interface: jsonrpc
       # Backup tier — consulted only when the primary pool (SimProvider1-3) is
       # exhausted on a request. Same simulator pod, separate JSON-RPC listeners
-      # on 18560-18562 (no ws endpoint — backup-failover tests are JSON-RPC).
+      # on 18560-18562 paired with WS-backup listeners on 18572-18574 (mirrors
+      # the primary tier's http+ws pairing).
       #
       # `is_backup: true` is the contract: the smart-router helm chart reads
       # this per-node flag and routes the entry into the `backup-direct-rpc`
@@ -92,22 +119,156 @@ routers:
       # Provider-name format: the smart-router echoes the node `name` field
       # back in the `lava-provider-address` response header (name only, no
       # port). Test tooling can infer tier from the "Backup" name prefix
-      # OR from the port range 18560-18562 — both are stable contracts.
+      # OR from the port range 18560-18562 (JSON-RPC) / 18572-18574 (WS) —
+      # both are stable contracts.
       - name: SimBackup1
         is_backup: true
         endpoints:
           - url: http://provider-simulator.lava-infra.svc.cluster.local:18560
             interface: jsonrpc
             addons: [archive, trace, debug]
+          - url: ws://provider-simulator.lava-infra.svc.cluster.local:18572/ws
+            interface: jsonrpc
       - name: SimBackup2
         is_backup: true
         endpoints:
           - url: http://provider-simulator.lava-infra.svc.cluster.local:18561
             interface: jsonrpc
             addons: [archive, trace, debug]
+          - url: ws://provider-simulator.lava-infra.svc.cluster.local:18573/ws
+            interface: jsonrpc
       - name: SimBackup3
         is_backup: true
         endpoints:
           - url: http://provider-simulator.lava-infra.svc.cluster.local:18562
             interface: jsonrpc
             addons: [archive, trace, debug]
+          - url: ws://provider-simulator.lava-infra.svc.cluster.local:18574/ws
+            interface: jsonrpc
+
+  # lava-sim-grpc — simulator router for the Cosmos gRPC chain (MAG-1780).
+  # Primaries on 18548-18550 and backups on 18563-18565 share the same
+  # pod, distinct ProviderState instances per backup pid.
+  - id: lava-sim-grpc
+    network: lava
+    nodes:
+      - name: SimGrpcProvider1
+        endpoints:
+          - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18548
+            interface: grpc
+            addons: []
+      - name: SimGrpcProvider2
+        endpoints:
+          - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18549
+            interface: grpc
+            addons: []
+      - name: SimGrpcProvider3
+        endpoints:
+          - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18550
+            interface: grpc
+            addons: []
+      - name: SimGrpcBackup1
+        is_backup: true
+        endpoints:
+          - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18563
+            interface: grpc
+            addons: []
+      - name: SimGrpcBackup2
+        is_backup: true
+        endpoints:
+          - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18564
+            interface: grpc
+            addons: []
+      - name: SimGrpcBackup3
+        is_backup: true
+        endpoints:
+          - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18565
+            interface: grpc
+            addons: []
+
+  # lava-sim-rest — simulator router for the Cosmos REST chain (MAG-1834).
+  # Primaries on 18551-18553; SimRestBackup1-3 on 18566-18568 with
+  # is_backup: true.
+  - id: lava-sim-rest
+    network: lava
+    nodes:
+      - name: SimProvider1
+        endpoints:
+          - url: http://provider-simulator.lava-infra.svc.cluster.local:18551
+            interface: rest
+            addons: []
+      - name: SimProvider2
+        endpoints:
+          - url: http://provider-simulator.lava-infra.svc.cluster.local:18552
+            interface: rest
+            addons: []
+      - name: SimProvider3
+        endpoints:
+          - url: http://provider-simulator.lava-infra.svc.cluster.local:18553
+            interface: rest
+            addons: []
+      - name: SimRestBackup1
+        is_backup: true
+        endpoints:
+          - url: http://provider-simulator.lava-infra.svc.cluster.local:18566
+            interface: rest
+            addons: []
+      - name: SimRestBackup2
+        is_backup: true
+        endpoints:
+          - url: http://provider-simulator.lava-infra.svc.cluster.local:18567
+            interface: rest
+            addons: []
+      - name: SimRestBackup3
+        is_backup: true
+        endpoints:
+          - url: http://provider-simulator.lava-infra.svc.cluster.local:18568
+            interface: rest
+            addons: []
+
+  # lava-sim-tm — simulator router for the Tendermint-RPC chain (MAG-1842).
+  # Primaries on 18554-18556; SimTmBackup1-3 on 18569-18571 with
+  # is_backup: true. Per-node skip_verifications is required because the
+  # simulator returns "lava-sim-tm" as its chain id (constants.TM_NETWORK_ID).
+  - id: lava-sim-tm
+    network: lava
+    nodes:
+      - name: SimProvider1
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: http://provider-simulator.lava-infra.svc.cluster.local:18554
+            interface: tendermintrpc
+            addons: []
+      - name: SimProvider2
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: http://provider-simulator.lava-infra.svc.cluster.local:18555
+            interface: tendermintrpc
+            addons: []
+      - name: SimProvider3
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: http://provider-simulator.lava-infra.svc.cluster.local:18556
+            interface: tendermintrpc
+            addons: []
+      - name: SimTmBackup1
+        is_backup: true
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: http://provider-simulator.lava-infra.svc.cluster.local:18569
+            interface: tendermintrpc
+            addons: []
+      - name: SimTmBackup2
+        is_backup: true
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: http://provider-simulator.lava-infra.svc.cluster.local:18570
+            interface: tendermintrpc
+            addons: []
+      - name: SimTmBackup3
+        is_backup: true
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: http://provider-simulator.lava-infra.svc.cluster.local:18571
+            interface: tendermintrpc
+            addons: []
