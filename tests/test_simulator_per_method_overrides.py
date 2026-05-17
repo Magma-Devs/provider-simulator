@@ -1,30 +1,31 @@
 """
-MAG-1821 — per-method overrides for the JSON-RPC provider simulator.
+MAG-1821 + MAG-1846 — per-method overrides for the JSON-RPC provider simulator.
 
 These tests exercise the per-method override path on the simulator's
 ``responses`` dict: a test can set ``latency_ms``, ``mode``, or
 ``rate_limit`` (and the keys those modes need) for one specific JSON-RPC
 method on a provider, while every other method on the same provider keeps
-the provider-wide config.
+the provider-wide config. MAG-1846 extends this with ``body`` + ``status``
+override keys that emit a custom 2xx response and bypass the chain handler.
 
 What they cover
 ---------------
-  1. per-method ``mode: down``           — the override fires only on the
-                                            named method; other methods on
-                                            the same provider stay healthy.
-  2. per-method ``latency_ms``           — the override fires only on the
-                                            named method; non-overridden
-                                            methods see no delay.
-  3. per-key fallback                    — a partial per-method entry
-                                            inherits provider-wide fault
-                                            keys it doesn't override
-                                            (Q4 of MAG-1821).
-  4. ``mode == "error"`` is rejected     — the validation pass in
-                                            ``_normalise_responses`` raises;
-                                            the /scenario POST returns 400.
-  5. composition order — latency FIRST   — per-method latency is paid even
-                                            when the fault outcome is
-                                            rate_limit (Q2 of MAG-1821).
+  MAG-1821:
+    1. per-method ``mode: down``           — fires only on the named method.
+    2. per-method ``latency_ms``           — fires only on the named method.
+    3. per-key fallback                    — partial entries inherit
+                                              provider-wide fault keys.
+    4. ``mode == "error"`` is rejected     — /scenario POST returns 400.
+    5. composition order — latency FIRST   — latency paid even on fault.
+
+  MAG-1846 (TestPerMethodBodyOverride):
+    6. body+status returns custom shape    — exact wire bytes, no chain
+                                              handler involvement.
+    7. status defaults to 200              — omitting ``status`` is fine.
+    8. non-2xx status is rejected          — 4xx/5xx via mode=error path.
+    9. body+latency composes               — latency first, then body.
+   10. body+mode mutually exclusive        — 400 from /scenario.
+   11. body bypasses healthy stub          — no stub fields leak through.
 
 Reuses the in-process fixture pattern from ``tests/test_simulator.py``
 (separate test ports so a parallel run doesn't collide with the existing
@@ -473,3 +474,337 @@ class TestPerMethodOverrides:
         assert elapsed_ms >= 180, (
             f"per-method latency should fire before fault, elapsed={elapsed_ms:.0f}ms"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAG-1846 — per-method body+status override behaviour
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestPerMethodBodyOverride:
+    """Per-method body+status override (MAG-1846).
+
+    Extends MAG-1821's per-method ``responses`` dict with two optional keys:
+
+      * ``status`` — HTTP status code, must be 2xx (200-299), default 200.
+      * ``body``   — response body dict, JSON-encoded onto the wire.
+
+    When ``body`` is set on a method entry, the sim returns ``{status, body}``
+    directly and bypasses the healthy-stub lookup in handlers_eth /
+    handlers_btc. ``body`` is mutually exclusive with ``mode`` (validated at
+    /scenario POST time); it composes with ``latency_ms`` in the documented
+    order (latency first, then body).
+
+    Why: lets a test pin a provider to "200 OK with this exact body" without
+    routing through the chain-specific success-shape builder. Specifically
+    unblocks ``test_status_200_with_body_error_passes_through`` in
+    smart-router-automation, where the router needs to receive a 200 carrying
+    an application-level failure body (e.g. ``{"success": false, ...}``).
+    """
+
+    @pytest.mark.timeout(10)
+    def test_body_override_returns_custom_status_and_body(self, sim):
+        """Given a per-method override with ``status: 200`` and a custom
+        ``body``, the sim returns exactly that wire shape — HTTP 200 and the
+        body verbatim — instead of the chain-handler success stub.
+
+        Background
+        ----------
+        Without this override, every ``eth_blockNumber`` response on the eth
+        chain_family is built by ``handlers_eth.handle``. Tests that need to
+        assert router behaviour against a non-standard success body (e.g. a
+        provider that returns 200 OK with ``{"success": false, "error": ...}``)
+        had no way to drive the sim into that shape.
+
+        Setup
+        -----
+        Provider 1 is left at its default ``mode: success``. POST /scenario
+        with a per-method ``responses`` entry pinning ``eth_blockNumber`` to
+        ``{"status": 200, "body": {"success": False, "error": "oops"}}``.
+
+        Act
+        ---
+        Send one JSON-RPC POST for ``eth_blockNumber``.
+
+        Assertions
+        ----------
+          * HTTP status == 200 (the override status).
+          * Response body equals the override dict exactly — no extra keys
+            from the chain handler, no JSON-RPC wrapping, no result field.
+
+        How to read a failure
+        ---------------------
+          * Status 200 but body has ``"result"`` / ``"jsonrpc"`` keys → the
+            chain handler still ran; the bypass branch in do_POST wasn't
+            taken. Check the ``"body" in method_snap`` guard at
+            server.py do_POST.
+          * Status != 200 → the override status wasn't read; check
+            ``method_snap.get("status", 200)`` resolution.
+        """
+        override_body = {"success": False, "error": "oops"}
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "mode": "success",
+                    "responses": {
+                        "eth_blockNumber": {
+                            "status": 200,
+                            "body": override_body,
+                        },
+                    },
+                }
+            }
+        })
+
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200, f"expected override status 200, got {status}"
+        assert body == override_body, (
+            f"expected exact override body {override_body!r}, got {body!r}. "
+            f"Extra keys indicate the chain handler ran instead of the bypass."
+        )
+
+    @pytest.mark.timeout(10)
+    def test_body_override_default_status_is_200(self, sim):
+        """When ``status`` is omitted on the body override, the sim defaults
+        to HTTP 200.
+
+        Background
+        ----------
+        The body override declares its 2xx-only contract at /scenario time;
+        leaving ``status`` unset should not require the test to spell out
+        the default. The handler resolves ``method_snap.get("status", 200)``.
+
+        Setup
+        -----
+        Provider 1: ``mode: success`` + per-method override
+        ``eth_blockNumber: {"body": {...}}`` (no ``status`` key).
+
+        Act
+        ---
+        Send one JSON-RPC POST.
+
+        Assertions
+        ----------
+          * HTTP status == 200 (the default).
+          * Body matches the override.
+        """
+        override_body = {"custom": True}
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "mode": "success",
+                    "responses": {
+                        "eth_blockNumber": {"body": override_body},
+                    },
+                }
+            }
+        })
+
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200, f"expected default status 200, got {status}"
+        assert body == override_body, f"expected {override_body!r}, got {body!r}"
+
+    @pytest.mark.timeout(10)
+    def test_body_override_rejects_non_2xx_status(self, sim):
+        """Setting ``status`` outside the 2xx band is rejected at /scenario
+        POST time with HTTP 400.
+
+        Background
+        ----------
+        The body override is for "this 200 OK response with a custom body"
+        scenarios. Non-2xx response shapes (4xx / 5xx) are already covered
+        by ``mode: "error"`` + ``http_status`` / ``error_code`` /
+        ``error_message`` — that path owns the error-envelope wire shape.
+        Letting body+status pretend to be a fault would silently bypass the
+        envelope contract; we reject at config-time instead.
+
+        Setup
+        -----
+        Issue POST /scenario with
+        ``eth_blockNumber: {"status": 500, "body": {"oops": True}}``.
+
+        Assertions
+        ----------
+          * /scenario returns HTTP 400.
+          * Response body carries an ``"error"`` key with a message that
+            mentions ``status`` or ``2xx``, so the test failure points at
+            the right validation rule.
+        """
+        status, body = _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "responses": {
+                        "eth_blockNumber": {
+                            "status": 500,
+                            "body": {"oops": True},
+                        },
+                    },
+                }
+            }
+        })
+        assert status == 400, f"expected 400 for non-2xx body override status, got {status}"
+        assert "error" in body, f"expected error payload, got {body!r}"
+        err_msg = body["error"].lower()
+        assert "status" in err_msg or "2xx" in err_msg, (
+            f"error should mention status / 2xx, got {body['error']!r}"
+        )
+
+    @pytest.mark.timeout(10)
+    def test_body_override_with_latency_applies_latency_first(self, sim):
+        """A body override composes with ``latency_ms`` in the same order as
+        every other per-method primitive: latency FIRST, then the body
+        response (Q2 of MAG-1821 carried forward).
+
+        Background
+        ----------
+        Latency is injected once in do_POST, before any branch decides what
+        to emit. So a per-method ``{latency_ms: 200, body: {...}}`` should
+        sleep for ~200ms before writing the override body to the wire — the
+        same composition order as ``{latency_ms: 200, mode: rate_limit}``
+        (already pinned by ``test_composition_order_latency_first_then_fault``).
+
+        Setup
+        -----
+        Provider 1: ``mode: success`` + per-method override
+        ``eth_blockNumber: {"latency_ms": 200, "body": {"ok": True}}``.
+
+        Act
+        ---
+        Send one JSON-RPC POST, measure elapsed wall-clock around it.
+
+        Assertions
+        ----------
+          * HTTP status == 200 (override default).
+          * Body equals the override.
+          * Elapsed time >= ~180ms — proving latency was paid before
+            the body was emitted. 180ms (not exactly 200ms) leaves slack
+            for HTTP framing / scheduler jitter.
+        """
+        override_body = {"ok": True}
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "mode": "success",
+                    "responses": {
+                        "eth_blockNumber": {
+                            "latency_ms": 200,
+                            "body": override_body,
+                        },
+                    },
+                }
+            }
+        })
+
+        t0 = time.monotonic()
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        elapsed_ms = (time.monotonic() - t0) * 1000
+
+        assert status == 200, f"expected status 200, got {status}"
+        assert body == override_body, f"expected {override_body!r}, got {body!r}"
+        assert elapsed_ms >= 180, (
+            f"latency should fire before body override, elapsed={elapsed_ms:.0f}ms. "
+            f"If under ~180ms, the latency_ms sleep is being skipped on the body path."
+        )
+
+    @pytest.mark.timeout(10)
+    def test_body_and_mode_mutually_exclusive(self, sim):
+        """Setting both ``body`` and ``mode`` on the same method entry is
+        rejected at /scenario POST time with HTTP 400.
+
+        Background
+        ----------
+        ``body`` describes a custom success response; ``mode`` describes a
+        fault primitive (down / hang / drop_connection / rate_limit). They
+        describe different outcomes, and the wire can only emit one. Letting
+        both coexist would force the sim to silently pick — instead, the
+        config is rejected up front.
+
+        Setup
+        -----
+        Issue POST /scenario with
+        ``eth_blockNumber: {"mode": "down", "body": {"ok": True}}``.
+
+        Assertions
+        ----------
+          * /scenario returns HTTP 400.
+          * Response body carries an ``"error"`` with a message that
+            mentions ``body`` and ``mode`` (or "mutually exclusive"), so a
+            failure surfaces the rule.
+        """
+        status, body = _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "responses": {
+                        "eth_blockNumber": {
+                            "mode": "down",
+                            "body": {"ok": True},
+                        },
+                    },
+                }
+            }
+        })
+        assert status == 400, f"expected 400 for body+mode combination, got {status}"
+        assert "error" in body, f"expected error payload, got {body!r}"
+        err_msg = body["error"].lower()
+        assert ("body" in err_msg and "mode" in err_msg) or "mutually exclusive" in err_msg, (
+            f"error should mention body+mode conflict, got {body['error']!r}"
+        )
+
+    @pytest.mark.timeout(10)
+    def test_body_override_bypasses_healthy_stub(self, sim):
+        """The body override returns exactly the configured payload — no
+        keys from the healthy stub leak through, even when the chosen body
+        doesn't look like a valid JSON-RPC response.
+
+        Background
+        ----------
+        A regression-shaped test: if a future refactor wires the body
+        override through the chain handler (instead of bypassing it), the
+        handler might "helpfully" merge stub fields into the response.
+        Pinning an obviously non-RPC-shaped body proves the bypass is
+        absolute — nothing else gets added.
+
+        Setup
+        -----
+        Provider 1: ``mode: success`` + per-method override
+        ``eth_blockNumber: {"body": {"completely": "unrelated",
+        "fields": [1, 2, 3]}}`` — no ``result`` / ``jsonrpc`` / ``id`` keys,
+        so a chain-handler leak would be obvious.
+
+        Act
+        ---
+        Send one JSON-RPC POST.
+
+        Assertions
+        ----------
+          * HTTP status == 200.
+          * Response body equals the override dict exactly — same keys,
+            same values, no extras. ``"jsonrpc"`` / ``"result"`` / ``"id"``
+            must be absent (their presence would prove the healthy stub
+            was merged in).
+        """
+        override_body = {"completely": "unrelated", "fields": [1, 2, 3]}
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "mode": "success",
+                    "responses": {
+                        "eth_blockNumber": {"body": override_body},
+                    },
+                }
+            }
+        })
+
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200, f"expected status 200, got {status}"
+        assert body == override_body, (
+            f"override body must be returned verbatim. "
+            f"Expected {override_body!r}, got {body!r}. "
+            f"Extra keys would indicate the chain handler merged stub fields."
+        )
+        # Belt-and-braces: explicitly assert the canonical JSON-RPC envelope
+        # keys are absent. If a future refactor adds a "helpful" wrap, this
+        # catches it even if the override dict accidentally collides on keys.
+        for leaked_key in ("jsonrpc", "result", "id"):
+            assert leaked_key not in body, (
+                f"healthy-stub key {leaked_key!r} leaked into body override response: {body!r}"
+            )
