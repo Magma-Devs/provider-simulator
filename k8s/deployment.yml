@@ -33,6 +33,21 @@ spec:
             - name: provider-3
               containerPort: 18547
               protocol: TCP
+            # Backup-tier provider listeners. Same JSONRPCHandler binding as
+            # provider-1/2/3; values_sim.yml flags the matching nodes
+            # (SimBackup1-3) with is_backup: true so the router routes to
+            # this pool only after exhausting the primary tier on a request.
+            # Pinned to 18560-18562 (above WS at 18557-18559) because every
+            # port between primary and here is claimed by another surface.
+            - name: provider-4
+              containerPort: 18560
+              protocol: TCP
+            - name: provider-5
+              containerPort: 18561
+              protocol: TCP
+            - name: provider-6
+              containerPort: 18562
+              protocol: TCP
             # REST sim listeners (MAG-1777) — peer to provider-1/2/3, one per
             # simulated provider, sharing ProviderState so a /scenario update
             # is visible from both the JSON-RPC and REST ports.
