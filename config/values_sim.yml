@@ -75,3 +75,39 @@ routers:
             addons: [archive, trace, debug]
           - url: ws://provider-simulator.lava-infra.svc.cluster.local:18559/ws
             interface: jsonrpc
+      # Backup tier — consulted only when the primary pool (SimProvider1-3) is
+      # exhausted on a request. Same simulator pod, separate JSON-RPC listeners
+      # on 18560-18562 (no ws endpoint — backup-failover tests are JSON-RPC).
+      #
+      # `is_backup: true` is the contract: the smart-router helm chart reads
+      # this per-node flag and routes the entry into the `backup-direct-rpc`
+      # pool instead of `direct-rpc`. The router then consults the backup pool
+      # only after a `PairingListEmptyError` on the primary pool (smart-router
+      # consumer_session_manager.go:823-855 — the backup fallback gate).
+      #
+      # Addons MUST match the primary tier or `lava-extension: archive`
+      # requests skip this pool silently via IsSupportingAddon (smart-router
+      # consumer_session_manager.go:1361).
+      #
+      # Provider-name format: the smart-router echoes the node `name` field
+      # back in the `lava-provider-address` response header (name only, no
+      # port). Test tooling can infer tier from the "Backup" name prefix
+      # OR from the port range 18560-18562 — both are stable contracts.
+      - name: SimBackup1
+        is_backup: true
+        endpoints:
+          - url: http://provider-simulator.lava-infra.svc.cluster.local:18560
+            interface: jsonrpc
+            addons: [archive, trace, debug]
+      - name: SimBackup2
+        is_backup: true
+        endpoints:
+          - url: http://provider-simulator.lava-infra.svc.cluster.local:18561
+            interface: jsonrpc
+            addons: [archive, trace, debug]
+      - name: SimBackup3
+        is_backup: true
+        endpoints:
+          - url: http://provider-simulator.lava-infra.svc.cluster.local:18562
+            interface: jsonrpc
+            addons: [archive, trace, debug]

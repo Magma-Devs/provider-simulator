@@ -22,6 +22,25 @@ spec:
       port: 18547
       targetPort: 18547
       protocol: TCP
+    # Backup-tier provider ports. Same JSON-RPC handler + ProviderState shape as
+    # provider-1/2/3; the only difference is that values_sim.yml wires these
+    # into the smart-router's `backup-direct-rpc:` config block via
+    # `is_backup: true` on the matching nodes (SimBackup1-3). The router
+    # consults this pool only after the primary tier is exhausted on a request.
+    # Pinned to 18560-18562 (above WS at 18557-18559) because every port
+    # between primary and here is claimed by another surface.
+    - name: provider-4
+      port: 18560
+      targetPort: 18560
+      protocol: TCP
+    - name: provider-5
+      port: 18561
+      targetPort: 18561
+      protocol: TCP
+    - name: provider-6
+      port: 18562
+      targetPort: 18562
+      protocol: TCP
     # REST sim service ports (MAG-1777) — mirror the deployment's rest-sim-1/2/3
     # named ports. The HTTPRoute (k8s/httproute-lava-sim-rest.yml) references
     # these names so the gateway can resolve them by name rather than number.
