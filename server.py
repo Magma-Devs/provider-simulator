@@ -85,14 +85,17 @@ def _normalise_responses(raw: Any) -> Dict[Any, Any]:
     same provider) are NOT supported intentionally — a provider has one
     chain_family at a time.
 
-    MAG-1821 — validation pass for per-method override entries (JSON-RPC):
+    MAG-1821 — validation pass for per-method override entries:
 
       A per-method entry may carry ``mode`` ∈ {success, down, hang,
       drop_connection, rate_limit}. ``mode == "error"`` is rejected here so
       the /scenario POST returns 400 with a clear message — error semantics
       are already covered by the per-method ``error_stub`` / ``error`` keys
-      (resolved inside handlers_eth.handle), and mixing them at the snap
-      layer would silently shadow the catalogue path.
+      (resolved inside handlers_eth.handle / handlers_rest.handle), and
+      mixing them at the snap layer would silently shadow the catalogue
+      path. The same rule applies to both shapes — the JSON-RPC dict path
+      and the REST list path (MAG-1821 follow-up: per-method overrides
+      were extended to WS + REST handlers; WS reuses the dict shape).
 
       Other unknown keys are forwarded as-is so the helpers can evolve the
       override shape without re-versioning the wire payload.
@@ -105,6 +108,18 @@ def _normalise_responses(raw: Any) -> Dict[Any, Any]:
             if not isinstance(entry, (list, tuple)) or len(entry) != 2:
                 continue
             key, cfg = entry
+            # MAG-1821 follow-up — reject per-(verb, template) mode="error"
+            # on REST too. Same rationale as the dict-shape branch below:
+            # error semantics are owned by the per-path ``error`` key
+            # consumed in handlers_rest.handle; allowing mode="error" here
+            # would silently shadow that path via the merged-snap fault
+            # branch in _apply_fault.
+            if isinstance(cfg, dict) and cfg.get("mode") == "error":
+                raise ValueError(
+                    f"per-method mode=\"error\" is not supported "
+                    f"(key={key!r}); use responses[{key!r}] = "
+                    f"{{'error': {{...}}}} instead"
+                )
             if isinstance(key, (list, tuple)) and len(key) == 2:
                 out[(key[0], key[1])] = cfg
             else:
@@ -922,19 +937,14 @@ class RestHandler(BaseHTTPRequestHandler):
         # call still gets a stable correlation_group in /history.
         req_id: Any = self.headers.get("X-Request-Id") or _next_sim_request_id()
 
-        # Latency injection — same as JSON-RPC, applied between down/parse.
-        # We can't pre-check down here because _apply_fault wants the method
-        # label; we evaluate down separately to mirror JSONRPCHandler's order.
-        # In practice REST has no body-parse barrier so down/latency/post-
-        # parse-fault simplify into a single _apply_fault call with method=
-        # f"{verb} {path}" pre-route, refined to template after routing.
+        # Pre-route fault: provider-wide down doesn't need the (verb,
+        # template) key. Mirrors JSONRPCHandler's pre-body-parse down
+        # branch. Per-(verb, template) down lives in the post-route
+        # merged-snap branch below.
         if snap["mode"] == "down":
             fault = _apply_fault(state, snap, "*", None, lava_headers, t_start)
             self._emit_rest_fault(fault)
             return
-
-        if snap["latency_ms"] > 0:
-            time.sleep(snap["latency_ms"] / 1000.0)
 
         # Read body for verbs that may carry one. GET/HEAD/DELETE typically
         # don't, but the HTTP spec doesn't forbid it — be permissive.
@@ -948,11 +958,18 @@ class RestHandler(BaseHTTPRequestHandler):
                 # whether to 400. Don't crash the dispatcher.
                 body = None
 
-        # Route match before fault evaluation (other than down/latency above)
-        # so the method label in history records the matched template, not the
-        # raw path with placeholders unsubstituted.
+        # Route match before latency / fault evaluation. We need the matched
+        # (verb, template) before the per-method merge so MAG-1821-style
+        # overrides keyed by ``(verb, template)`` can shadow provider-wide
+        # latency_ms and fault keys. Order matches JSON-RPC: parse first,
+        # then merge per-method, then sleep, then fault.
         match_result = self._match_route(verb, path)
         if match_result is None:
+            # Unmatched path — no per-method merge to attempt (the (verb,
+            # path) key isn't a registered template). Honor only the
+            # provider-wide latency / fault snap.
+            if snap["latency_ms"] > 0:
+                time.sleep(snap["latency_ms"] / 1000.0)
             method_label = f"{verb} {path}"
             fault = _apply_fault(state, snap, method_label, req_id,
                                  lava_headers, t_start)
@@ -969,7 +986,22 @@ class RestHandler(BaseHTTPRequestHandler):
         template, path_params = match_result
         method_label = f"{verb} {template}"
 
-        fault = _apply_fault(state, snap, method_label, req_id,
+        # Merge per-(verb, template) overrides into the snap (MAG-1821
+        # follow-up). When no override applies for this route,
+        # ``method_snap is snap`` and behaviour matches pre-follow-up
+        # exactly. Order matches JSON-RPC: latency FIRST, then fault — so
+        # a per-route ``latency_ms`` is paid even on a per-route
+        # rate_limit / drop response. Per-key fallback: a partial
+        # per-route entry inherits provider-wide fault keys it doesn't
+        # override.
+        method_snap = _resolve_method_config(
+            (verb, template), snap, state.responses
+        )
+
+        if method_snap["latency_ms"] > 0:
+            time.sleep(method_snap["latency_ms"] / 1000.0)
+
+        fault = _apply_fault(state, method_snap, method_label, req_id,
                              lava_headers, t_start)
         if fault is not None:
             self._emit_rest_fault(fault)
