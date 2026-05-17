@@ -48,14 +48,19 @@ _SENTINEL_CLOSE = object()
 
 
 def _server_helpers():
-    """Return the (`_apply_fault`, `_elapsed_ms`) helpers from server.py.
+    """Return the (`_apply_fault`, `_elapsed_ms`, `_resolve_method_config`)
+    helpers from server.py.
 
     server.py imports handlers_ws at top level for main(), so importing it
     back at module load would be a cycle. We resolve on first use, which is
     after both modules have finished loading.
+
+    ``_resolve_method_config`` was added in the MAG-1821 follow-up so the
+    WS reader loop can pre-merge per-method overrides into the snap before
+    the latency / fault evaluation runs, matching the JSON-RPC dispatcher.
     """
     import server
-    return server._apply_fault, server._elapsed_ms
+    return server._apply_fault, server._elapsed_ms, server._resolve_method_config
 
 
 def _writer_loop(connection, out_queue: "queue.Queue") -> None:
@@ -311,7 +316,7 @@ class WsHandler(BaseHTTPRequestHandler):
     def _reader_loop(self, out_queue: "queue.Queue", lava_headers: Dict[str, str]) -> None:
         state = self.server.state
         provider_id = self.server.provider_id
-        apply_fault, elapsed_ms = _server_helpers()
+        apply_fault, elapsed_ms, resolve_method_config = _server_helpers()
 
         connection_subs: Set[str] = set()
 
@@ -344,10 +349,20 @@ class WsHandler(BaseHTTPRequestHandler):
                 snap = state.snapshot()
                 t_start = time.monotonic()
 
-                if snap["latency_ms"] > 0:
-                    time.sleep(snap["latency_ms"] / 1000.0)
+                # Merge per-method overrides into the snap (MAG-1821
+                # follow-up). When no override applies for this method,
+                # ``method_snap is snap`` and behaviour matches pre-follow-up
+                # exactly. Order matches JSON-RPC: latency FIRST, then fault
+                # — so a per-method ``latency_ms`` is paid even on a
+                # per-method rate_limit / drop response. Per-key fallback
+                # (provider-wide fault keys inherited by partial per-method
+                # entries) is also handled inside _resolve_method_config.
+                method_snap = resolve_method_config(method, snap, state.responses)
 
-                fault = apply_fault(state, snap, method, req_id,
+                if method_snap["latency_ms"] > 0:
+                    time.sleep(method_snap["latency_ms"] / 1000.0)
+
+                fault = apply_fault(state, method_snap, method, req_id,
                                     lava_headers, t_start)
                 if fault is not None:
                     action = _emit_ws_fault(
