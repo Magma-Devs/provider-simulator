@@ -411,11 +411,15 @@ def _apply_fault(
            "error_message": str}
             Caller composes a chain-appropriate error body. History recorded.
     """
-    # 1. Outage — fires before any body parse. method is "*" because we never
-    #    look at the request body in down mode.
+    # 1. Outage — for provider-wide down, the pre-parse caller passes
+    #    method="*", req_id=None, t_start=now() so this records a "*" entry
+    #    with ~0ms latency. For per-method down (post-parse path) the caller
+    #    passes the actual method / req_id and the original t_start, so any
+    #    inherited per-method latency_ms already slept is reflected in
+    #    _elapsed_ms(t_start) and /history?method=X resolves correctly.
     if snap["mode"] == "down":
-        state.push_call_to_buffer("*", "down", 0,
-                                  request_id=None, lava_headers=lava_headers)
+        state.push_call_to_buffer(method, "down", _elapsed_ms(t_start),
+                                  request_id=req_id, lava_headers=lava_headers)
         return {"kind": "down"}
 
     # 2. Hang — accept request, sleep "forever". 30s is long enough for any
@@ -1166,14 +1170,34 @@ class ControlHandler(BaseHTTPRequestHandler):
             # MAG-1821 — validation errors raised inside state.update (via
             # _normalise_responses) come back as ValueError. Surface them
             # as 400 so the test sees a clear message instead of a 500.
+            #
+            # All-or-nothing application: pre-normalise every provider's
+            # responses dict (and resolve the target state) FIRST so a
+            # ValueError raised on provider N doesn't leave providers
+            # 1..N-1 with partially-applied scalar fields. Only after the
+            # full validation pass succeeds do we mutate any state.
+            providers_payload = body.get("providers", {})
+            staged: list = []
             try:
-                for pid, cfg in body.get("providers", {}).items():
+                for pid, cfg in providers_payload.items():
                     state = self.server.provider_states.get(str(pid))
-                    if state:
-                        state.update(cfg)
+                    if state is None:
+                        continue
+                    staged_cfg = dict(cfg)
+                    if "responses" in staged_cfg:
+                        # Pre-normalise so ValueError fires here, before any
+                        # state.update mutates scalar fields. The result is
+                        # already a dict so state.update's re-call of
+                        # _normalise_responses is an idempotent no-op.
+                        staged_cfg["responses"] = _normalise_responses(
+                            staged_cfg["responses"]
+                        )
+                    staged.append((state, staged_cfg))
             except ValueError as exc:
                 self._reply(400, {"error": str(exc)})
                 return
+            for state, staged_cfg in staged:
+                state.update(staged_cfg)
             self._reply(200, {"status": "ok"})
 
         elif self.path == "/reset":
