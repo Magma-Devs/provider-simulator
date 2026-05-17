@@ -15,22 +15,53 @@ Local (port-forwarded) equivalents:
 
 ```bash
 export SIM_CONTROL_URL="http://localhost:19000"
-# JSON-RPC providers (primary tier — ids 1-3): 18545 / 18546 / 18547
-# JSON-RPC providers (backup tier  — ids 4-6): 18560 / 18561 / 18562
-# gRPC providers                              : 18548 / 18549 / 18550
+# Primary tier (pids 1-3, shared ProviderState across surfaces):
+#   JSON-RPC      : 18545 / 18546 / 18547
+#   gRPC          : 18548 / 18549 / 18550
+#   REST          : 18551 / 18552 / 18553
+#   Tendermint-RPC: 18554 / 18555 / 18556
+#   WebSocket     : 18557 / 18558 / 18559
+# Backup tier (distinct pid per surface, independent ProviderState):
+#   JSON-RPC      : pids  4- 6 → 18560 / 18561 / 18562
+#   gRPC          : pids  7- 9 → 18563 / 18564 / 18565
+#   REST          : pids 10-12 → 18566 / 18567 / 18568
+#   Tendermint-RPC: pids 13-15 → 18569 / 18570 / 18571
+#   WebSocket     : pids 16-18 → 18572 / 18573 / 18574
 ```
 
 ## Primary vs backup pools
 
-Provider ids `1-3` are wired to the smart-router as **primary** providers; ids `4-6` are wired with `is_backup: true` and form the **backup pool**. From the simulator's point of view both pools are identical — same `JSONRPCHandler`, same `ProviderState`, same `/scenario` payload shape. Tier is a router-side concept: the smart-router consults the backup pool only after the primary pool is exhausted on a given request (`PairingListEmptyError` → backup fallback in `consumer_session_manager.go:826`).
+Primary provider ids `1-3` are wired to the smart-router as **primary** providers across every surface (one `ProviderState` per pid backs JSON-RPC + gRPC + REST + TM + WS at the same time — a `/scenario` POST on pid `1` reconfigures every primary transport). Backup pids `4-18` are wired with `is_backup: true` and form **per-surface backup pools** — each surface gets its own pid range and its own independent `ProviderState` per pid so the backup tiers can be configured without colliding with each other or with the primary.
 
-This means `sim_control.set_scenario({4: "down", 5: "success", 6: "success"})` works exactly the same way as for primaries — set fault modes per backup id to drive backup-tier resilience tests.
+| Surface | Primary pids | Primary ports | Backup pids | Backup ports |
+|---|---|---|---|---|
+| JSON-RPC | 1, 2, 3 | 18545-18547 | 4, 5, 6 | 18560-18562 |
+| gRPC | 1, 2, 3 | 18548-18550 | 7, 8, 9 | 18563-18565 |
+| REST | 1, 2, 3 | 18551-18553 | 10, 11, 12 | 18566-18568 |
+| Tendermint-RPC | 1, 2, 3 | 18554-18556 | 13, 14, 15 | 18569-18571 |
+| WebSocket | 1, 2, 3 | 18557-18559 | 16, 17, 18 | 18572-18574 |
+
+From the simulator's point of view every pool is identical — same handler module per surface, same `ProviderState` shape, same `/scenario` payload shape. Tier is a router-side concept: the smart-router consults a surface's backup pool only after that surface's primary pool is exhausted on a given request (`PairingListEmptyError` → backup fallback in `consumer_session_manager.go:826`). The simulator's job is to expose listeners that the router-side `is_backup: true` flag in `values_sim.yml` can route to.
+
+This means `sim_control.set_scenario({"4": {"mode": "down"}, ...})` works exactly the same way as for primaries — set fault modes per backup pid to drive that surface's backup-tier resilience tests.
 
 ```bash
-# all primaries down, all backups healthy — drives a backup-tier activation
+# all JSON-RPC primaries down, all JSON-RPC backups healthy
+# → drives a JSON-RPC backup-tier activation
 curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" \
   -d '{"providers":{"1":{"mode":"down"},"2":{"mode":"down"},"3":{"mode":"down"},
                     "4":{"mode":"success"},"5":{"mode":"success"},"6":{"mode":"success"}}}'
+
+# gRPC-specific backup activation — primaries down on pid 1 (which also takes
+# down the JSON-RPC/REST/TM/WS primaries on pid 1 because they share state),
+# backup gRPC pool (pids 7-9) responds healthy.
+curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" \
+  -d '{"providers":{"1":{"mode":"down"},"2":{"mode":"down"},"3":{"mode":"down"},
+                    "7":{"mode":"success"},"8":{"mode":"success"},"9":{"mode":"success"}}}'
+
+# REST-only backup activation (pids 10-12).
+curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" \
+  -d '{"providers":{"10":{"mode":"success"},"11":{"mode":"success"},"12":{"mode":"success"}}}'
 ```
 
 ## Set a scenario
@@ -190,3 +221,19 @@ curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" 
 ## REST surface (planned, not yet on develop)
 
 `chain_family="rest"` and REST listener ports `18551` / `18552` / `18553` are reserved in `constants.py` and `k8s/service.yml` but the listeners are not bound on develop yet. MAG-1777 (REST sim) merged on a feature branch and is staged to land — this doc will pick up REST recipes once it does.
+
+## Backup-tier listeners per surface
+
+Each surface boots an additional pool of listeners on dedicated ports above the JSON-RPC backup at 18560-18562. The handler binding is identical to the matching primary — only the router-side `is_backup: true` flag in `values_sim.yml` and the pid (which selects a distinct `ProviderState`) differ:
+
+```
+Surface         Primary range   Backup range   Backup pids
+─────────────   ─────────────   ─────────────  ───────────
+JSON-RPC        18545-18547     18560-18562    4, 5, 6
+gRPC            18548-18550     18563-18565    7, 8, 9
+REST            18551-18553     18566-18568    10, 11, 12
+Tendermint-RPC  18554-18556     18569-18571    13, 14, 15
+WebSocket       18557-18559     18572-18574    16, 17, 18
+```
+
+Per-surface backups give each tier its own pid range so a `/scenario` POST can address a single surface's backup pool without accidentally configuring another surface's backup. The primary tier remains pid-shared across all surfaces (pid `1` reconfigures every primary at once), but every backup pid maps to exactly one surface's backup listener.

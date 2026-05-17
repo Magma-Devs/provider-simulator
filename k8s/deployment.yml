@@ -97,6 +97,52 @@ spec:
             - name: ws-sim-3
               containerPort: 18559
               protocol: TCP
+            # Backup-tier listeners for the non-JSON-RPC surfaces. Same handler
+            # binding as the matching primary; values_sim.yml flags the matching
+            # nodes (SimGrpcBackup1-3, SimRestBackup1-3, SimTmBackup1-3,
+            # SimWsBackup1-3) with `is_backup: true` so the smart-router routes
+            # to each pool only after exhausting its surface's primary on a
+            # request. Each pool has its own ProviderState — distinct pids
+            # (7-18) keep the control-API addressing unambiguous.
+            #
+            # Port allocation is a single contiguous block 18563-18574 stacked
+            # above the JSON-RPC backup at 18560-18562.
+            - name: grpc-backup-1
+              containerPort: 18563
+              protocol: TCP
+            - name: grpc-backup-2
+              containerPort: 18564
+              protocol: TCP
+            - name: grpc-backup-3
+              containerPort: 18565
+              protocol: TCP
+            - name: rest-backup-1
+              containerPort: 18566
+              protocol: TCP
+            - name: rest-backup-2
+              containerPort: 18567
+              protocol: TCP
+            - name: rest-backup-3
+              containerPort: 18568
+              protocol: TCP
+            - name: tm-backup-1
+              containerPort: 18569
+              protocol: TCP
+            - name: tm-backup-2
+              containerPort: 18570
+              protocol: TCP
+            - name: tm-backup-3
+              containerPort: 18571
+              protocol: TCP
+            - name: ws-backup-1
+              containerPort: 18572
+              protocol: TCP
+            - name: ws-backup-2
+              containerPort: 18573
+              protocol: TCP
+            - name: ws-backup-3
+              containerPort: 18574
+              protocol: TCP
           resources:
             requests:
               cpu: "100m"
