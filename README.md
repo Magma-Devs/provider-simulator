@@ -4,7 +4,7 @@ A small simulator pod used to test smart-router behaviour against deterministic,
 
 It runs **7 listeners** in a single pod:
 
-- **3 JSON-RPC providers** on ports `18545` / `18546` / `18547` — dispatch to ETH or BTC chain handlers based on each provider's `chain_family`.
+- **3 JSON-RPC providers** on ports `18545` / `18546` / `18547` — dispatch to ETH, BTC, or Lightning Network (LND) chain handlers based on each provider's `chain_family`.
 - **1 control API** on port `19000` — `POST /scenario`, `POST /reset[/all]`, `GET /scenario`, `GET /stats`, `GET /history`, `GET /health`.
 - **3 gRPC providers** on ports `18548` / `18549` / `18550` (MAG-1780) — Cosmos `Service` with reflection enabled.
 
@@ -16,12 +16,15 @@ Each provider's `chain_family` is set per-scenario and selects the dispatch path
 
 | `chain_family` | Transport | Status | Where it dispatches |
 |---|---|---|---|
-| `eth` (default) | JSON-RPC | live on develop | `handlers_eth.handle()` — ETH methods + `eth_getBlockByNumber` block-number echo |
-| `btc` | JSON-RPC | live on develop | `handlers_btc.handle()` — BTC RPC method set, see `stubs_btc.py` |
-| `grpc` | gRPC | live on develop | `handlers_grpc.CosmosBaseTendermintServicer` on a separate port range |
-| `rest` | REST | planned (MAG-1777, not yet on develop) | — |
+| `eth` (default) | JSON-RPC | live on main | `handlers_eth.handle()` — ETH methods + `eth_getBlockByNumber` block-number echo |
+| `btc` | JSON-RPC | live on main (MAG-1716) | `handlers_btc.handle()` — BTC RPC method set, see `stubs_btc.py` |
+| `ln` | JSON-RPC | live on main (MAG-1726) | `handlers_lnd.handle()` — LND method set (`getinfo`, `listchannels`, `openchannel`, `decodepayreq`, `payinvoice`, `listpeers`), see `stubs_lnd.py` |
+| `grpc` | gRPC | live on main | `handlers_grpc.CosmosBaseTendermintServicer` on a separate port range |
+| `rest` | REST | live on main (MAG-1777) | `handlers_rest.handle()` on ports `18551`–`18553` |
+| `tendermintrpc` | JSON-RPC | live on main (MAG-1841) | `handlers_tendermintrpc` on ports `18554`–`18556` |
+| `ws` | WebSocket | live on main (MAG-1801) | `handlers_ws` on ports `18557`–`18559` |
 
-> The `chain_family="rest"` path and ports `18551` / `18552` / `18553` are reserved in `constants.py` and the k8s service for future REST sim work. They are **not** bound yet on develop.
+> `chain_family="btc"` and `chain_family="ln"` share the JSON-RPC listener pool with the default ETH path — each is selected per-provider via a `/scenario` call, not by binding to a different port. The handler is picked from `snap["chain_family"]` inside `JSONRPCHandler.do_POST` after the chain-agnostic fault-injection step.
 
 ## Fault-injection primitives
 
@@ -95,10 +98,12 @@ Derived from `BASE_DOMAIN` in `config/base-domain.env`:
 server.py              — process entry: JSON-RPC servers, gRPC servers, control API
 handlers_eth.py        — ETH success-branch dispatch (chain_family="eth")
 handlers_btc.py        — BTC success-branch dispatch (chain_family="btc", MAG-1716)
+handlers_lnd.py        — Lightning Network (LND) dispatch (chain_family="ln", MAG-1726)
 handlers_grpc.py       — Cosmos gRPC servicer (chain_family="grpc", MAG-1780)
 grpc_server.py         — gRPC server bootstrap (3 servers on 18548-18550, reflection on)
 stubs.py               — default ETH JSON-RPC results + ERROR_STUBS catalogue
 stubs_btc.py           — default BTC JSON-RPC results
+stubs_lnd.py           — default LND JSON-RPC results + LND_ERROR_STUBS catalogue
 constants.py           — port maps, chain constants, history caps
 cosmos_pb2/            — vendored Cosmos protobufs (MAG-1780)
 config/base-domain.env — sets BASE_DOMAIN for deploy
@@ -106,7 +111,7 @@ config/values_sim.yml  — smart-router Helm values used to wire the sim in
 Dockerfile             — image used by scripts/deploy.sh
 k8s/                   — Deployment, Service, HTTPRoute (control), GRPCRoute (gRPC sim)
 scripts/deploy.sh      — build/import/apply/restart deploy flow
-tests/                 — pytest suite (ETH, BTC, gRPC)
+tests/                 — pytest suite (ETH, BTC, LN, gRPC, REST, TM, WS)
 ```
 
 ## Notes
