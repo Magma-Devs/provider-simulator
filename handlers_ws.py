@@ -363,19 +363,20 @@ class WsHandler(BaseHTTPRequestHandler):
                 # Merge per-method overrides into the snap (MAG-1821
                 # follow-up). When no override applies for this method,
                 # ``method_snap is snap`` and behaviour matches pre-follow-up
-                # exactly. Order matches JSON-RPC: latency FIRST, then fault
-                # — so a per-method ``latency_ms`` is paid even on a
-                # per-method rate_limit / drop response. Per-key fallback
-                # (provider-wide fault keys inherited by partial per-method
-                # entries) is also handled inside _resolve_method_config.
+                # exactly. Per-key fallback (provider-wide fault keys
+                # inherited by partial per-method entries) is handled inside
+                # _resolve_method_config.
                 method_snap = resolve_method_config(method, snap, state.responses)
 
-                if method_snap["latency_ms"] > 0:
-                    time.sleep(method_snap["latency_ms"] / 1000.0)
-
+                # MAG-1832 — fault evaluation BEFORE the latency sleep so
+                # apply_fault's internal push_call_to_buffer fires before
+                # any cancel window opens. Fault path sleeps AFTER the
+                # record but before the wire emit so timing is unchanged.
                 fault = apply_fault(state, method_snap, method, req_id,
                                     lava_headers, t_start)
                 if fault is not None:
+                    if method_snap["latency_ms"] > 0:
+                        time.sleep(method_snap["latency_ms"] / 1000.0)
                     # MAG-1837 — gate corruption_mode on chain_family="ws"
                     # so a corruption authored for JSON-RPC / REST / etc.
                     # doesn't reach the WS frame encoder.
@@ -388,22 +389,29 @@ class WsHandler(BaseHTTPRequestHandler):
                         return
                     continue
 
+                # Success-path branches below all follow the JSON-RPC pattern:
+                # record history with the configured latency BEFORE the sleep
+                # so a client disconnect mid-sleep still leaves a trace
+                # (MAG-1832), then sleep, then enqueue the response frame.
+
                 # Subscribe request — register and return sub_id.
                 if method in stubs_ws.SUBSCRIBE_METHODS:
                     sub_id = self._register_subscription(provider_id, method, out_queue)
                     connection_subs.add(sub_id)
                     response = {"jsonrpc": "2.0", "id": req_id, "result": sub_id}
+                    state.push_call_to_buffer(
+                        method,
+                        "success",
+                        method_snap["latency_ms"],
+                        request_id=req_id,
+                        lava_headers=lava_headers,
+                    )
+                    if method_snap["latency_ms"] > 0:
+                        time.sleep(method_snap["latency_ms"] / 1000.0)
                     try:
                         out_queue.put_nowait(_text_frame(response))
                     except queue.Full:
                         return
-                    state.push_call_to_buffer(
-                        method,
-                        "success",
-                        elapsed_ms(t_start),
-                        request_id=req_id,
-                        lava_headers=lava_headers,
-                    )
                     continue
 
                 # Unsubscribe request — remove from registry and return bool result.
@@ -418,17 +426,19 @@ class WsHandler(BaseHTTPRequestHandler):
                             connection_subs.discard(target_id)
                             removed = True
                     response = {"jsonrpc": "2.0", "id": req_id, "result": removed}
+                    state.push_call_to_buffer(
+                        method,
+                        "success",
+                        method_snap["latency_ms"],
+                        request_id=req_id,
+                        lava_headers=lava_headers,
+                    )
+                    if method_snap["latency_ms"] > 0:
+                        time.sleep(method_snap["latency_ms"] / 1000.0)
                     try:
                         out_queue.put_nowait(_text_frame(response))
                     except queue.Full:
                         return
-                    state.push_call_to_buffer(
-                        method,
-                        "success",
-                        elapsed_ms(t_start),
-                        request_id=req_id,
-                        lava_headers=lava_headers,
-                    )
                     continue
 
                 # Non-subscription request → delegate to existing chain handler.
@@ -439,6 +449,15 @@ class WsHandler(BaseHTTPRequestHandler):
                     _, response = handlers_btc.handle(state, body, snap, lava_headers)
                 else:
                     _, response = handlers_eth.handle(state, body, snap, lava_headers)
+                state.push_call_to_buffer(
+                    method,
+                    "error" if "error" in response else "success",
+                    method_snap["latency_ms"],
+                    request_id=req_id,
+                    lava_headers=lava_headers,
+                )
+                if method_snap["latency_ms"] > 0:
+                    time.sleep(method_snap["latency_ms"] / 1000.0)
                 try:
                     out_queue.put_nowait(_text_frame(
                         response,
@@ -447,13 +466,6 @@ class WsHandler(BaseHTTPRequestHandler):
                     ))
                 except queue.Full:
                     return
-                state.push_call_to_buffer(
-                    method,
-                    "error" if "error" in response else "success",
-                    elapsed_ms(t_start),
-                    request_id=req_id,
-                    lava_headers=lava_headers,
-                )
         finally:
             # Clean up all subscriptions still active for this connection.
             from server import _unregister_ws_subscription

@@ -482,14 +482,25 @@ def _apply_fault(
            "error_message": str}
             Caller composes a chain-appropriate error body. History recorded.
     """
+    # Latency value to stamp on history entries: the *configured* latency_ms,
+    # NOT _elapsed_ms(t_start). MAG-1832 inverted the order so the JSON-RPC
+    # handler now writes history BEFORE any latency sleep, which means
+    # _elapsed_ms here would be ~0 even when a 5s latency was configured —
+    # misleading on /history filters. Recording the configured value reflects
+    # "the latency the request would have taken had it run to completion",
+    # consistent with the success-path recording at the JSON-RPC handler.
+    # For pre-parse provider-wide down the caller passes the request-entry
+    # snap, so configured == provider-wide latency_ms (which the sim skips
+    # paying on the down fast path — the recorded value is still meaningful
+    # as the configured value, not as wall time).
+    recorded_latency_ms = snap.get("latency_ms", 0)
+
     # 1. Outage — for provider-wide down, the pre-parse caller passes
-    #    method="*", req_id=None, t_start=now() so this records a "*" entry
-    #    with ~0ms latency. For per-method down (post-parse path) the caller
-    #    passes the actual method / req_id and the original t_start, so any
-    #    inherited per-method latency_ms already slept is reflected in
-    #    _elapsed_ms(t_start) and /history?method=X resolves correctly.
+    #    method="*", req_id=None. For per-method down (post-parse path) the
+    #    caller passes the actual method / req_id; either way /history?method=X
+    #    resolves correctly because the method label is taken from the caller.
     if snap["mode"] == "down":
-        state.push_call_to_buffer(method, "down", _elapsed_ms(t_start),
+        state.push_call_to_buffer(method, "down", recorded_latency_ms,
                                   request_id=req_id, lava_headers=lava_headers)
         return {"kind": "down"}
 
@@ -505,13 +516,13 @@ def _apply_fault(
     if snap["mode"] == "drop_connection":
         drop_at = snap.get("drop_at", "before_headers")
         state.push_call_to_buffer(method, "drop_connection",
-                                  _elapsed_ms(t_start),
+                                  recorded_latency_ms,
                                   request_id=req_id, lava_headers=lava_headers)
         return {"kind": "drop", "drop_at": drop_at}
 
     # 4. Rate limit — HTTP 429.
     if snap["mode"] == "rate_limit":
-        state.push_call_to_buffer(method, "rate_limit", _elapsed_ms(t_start),
+        state.push_call_to_buffer(method, "rate_limit", recorded_latency_ms,
                                   request_id=req_id, lava_headers=lava_headers)
         return {
             "kind": "rate_limit",
@@ -522,7 +533,7 @@ def _apply_fault(
 
     # 5. Probabilistic / forced error — configurable code, message, HTTP status.
     if snap["mode"] == "error" or random.random() < snap["error_probability"]:
-        state.push_call_to_buffer(method, "error", _elapsed_ms(t_start),
+        state.push_call_to_buffer(method, "error", recorded_latency_ms,
                                   request_id=req_id, lava_headers=lava_headers)
         return {
             "kind": "error",
@@ -639,8 +650,10 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
 
         # Parse the request body before latency/fault evaluation so the
         # method label is available for per-method override resolution
-        # (MAG-1821). Parsing first is safe: it's a small in-memory JSON
-        # load that doesn't depend on any provider config.
+        # (MAG-1821), and so method/req_id are available when history is
+        # written ahead of any latency sleep (MAG-1832). Parsing first is
+        # safe: it's a small in-memory JSON load that doesn't depend on any
+        # provider config.
         length = int(self.headers.get("Content-Length", 0))
         body   = json.loads(self.rfile.read(length)) if length else {}
         req_id = body.get("id", 1)
@@ -653,9 +666,6 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # paid even on a per-method rate_limit / drop response.
         method_snap = _resolve_method_config(method, snap, state.responses)
 
-        if method_snap["latency_ms"] > 0:
-            time.sleep(method_snap["latency_ms"] / 1000.0)
-
         # MAG-1846 — per-method body override. When set, return the configured
         # {status, body} directly and bypass _apply_fault + the chain-handler
         # success path. Validation at /scenario time (_normalise_responses)
@@ -665,9 +675,6 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if "body" in method_snap and method_snap.get("body") is not None:
             override_body = method_snap["body"]
             override_status = method_snap.get("status", 200)
-            self._reply(override_status, override_body,
-                        corruption_mode=_corruption_for(snap, "eth", "btc"),
-                        missing_field=_missing_field_for(snap, "eth", "btc"))
             # History status is always "success" on the body-override path.
             # The override is validated 2xx-only at /scenario time, so the
             # HTTP-level outcome is always successful. Body is arbitrary
@@ -678,11 +685,27 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             # from the sim's perspective, and /history?status=error should
             # not match it. Test authors who need /history?status=error
             # should use mode="error" instead.
-            state.push_call_to_buffer(method, "success", _elapsed_ms(t_start),
+            #
+            # MAG-1832: push history BEFORE the latency sleep so a router-side
+            # cancel mid-sleep still records the call. Mirrors the success and
+            # fault paths below. Recorded latency_ms is the configured value
+            # (what the call would have taken had it run to completion).
+            state.push_call_to_buffer(method, "success", method_snap["latency_ms"],
                                       request_id=req_id, lava_headers=lava_headers)
+            if method_snap["latency_ms"] > 0:
+                time.sleep(method_snap["latency_ms"] / 1000.0)
+            self._reply(override_status, override_body,
+                        corruption_mode=_corruption_for(snap, "eth", "btc"),
+                        missing_field=_missing_field_for(snap, "eth", "btc"))
             return
 
         # Post-parse fault evaluation. _apply_fault records history internally.
+        # Fault paths record FIRST then optionally sleep — mirrors the
+        # hang-mode pattern in _apply_fault (write first, sleep second), so
+        # a router-side cancel mid-latency-sleep still records the call in
+        # /history (MAG-1832). _apply_fault stamps the configured latency on
+        # the history entry (not elapsed) so per-method-override callers see
+        # the latency the call *would have taken*.
         # MAG-1838 — only evaluate the fault ladder when the snap was authored
         # for the JSON-RPC transport (chain_family in {"eth","btc"}). Faults
         # set for any other transport pass through to the success-path below.
@@ -691,6 +714,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         else:
             fault = None
         if fault is not None:
+            if method_snap["latency_ms"] > 0:
+                time.sleep(method_snap["latency_ms"] / 1000.0)
             self._emit_jsonrpc_fault(fault, req_id=req_id,
                                      corruption_mode=_corruption_for(snap, "eth", "btc"),
                                      missing_field=_missing_field_for(snap, "eth", "btc"))
@@ -712,11 +737,19 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         else:
             status, response_body = handlers_eth.handle(state, body, snap, lava_headers)
         emit_status = "error" if "error" in response_body else "success"
+        # MAG-1832: write history BEFORE the latency sleep so a router-side
+        # cancel mid-sleep (hedge ticker firing) still records the call.
+        # Mirrors the hang-mode pattern in _apply_fault (write first, sleep
+        # second). latency_ms recorded is the configured post-MAG-1821-override
+        # value — that's what the call *would have taken* had it run to
+        # completion.
+        state.push_call_to_buffer(method, emit_status, method_snap["latency_ms"],
+                                  request_id=req_id, lava_headers=lava_headers)
+        if method_snap["latency_ms"] > 0:
+            time.sleep(method_snap["latency_ms"] / 1000.0)
         self._reply(status, response_body,
                     corruption_mode=_corruption_for(snap, "eth", "btc"),
                     missing_field=_missing_field_for(snap, "eth", "btc"))
-        state.push_call_to_buffer(method, emit_status, _elapsed_ms(t_start),
-                                  request_id=req_id, lava_headers=lava_headers)
 
     def _emit_jsonrpc_fault(self, fault: Dict[str, Any], req_id: Any,
                              corruption_mode: Optional[str] = None,
@@ -1089,29 +1122,35 @@ class RestHandler(BaseHTTPRequestHandler):
                 # whether to 400. Don't crash the dispatcher.
                 body = None
 
-        # Route match before latency / fault evaluation. We need the matched
+        # Route match before fault / latency evaluation. We need the matched
         # (verb, template) before the per-method merge so MAG-1821-style
         # overrides keyed by ``(verb, template)`` can shadow provider-wide
         # latency_ms and fault keys. Order matches JSON-RPC: parse first,
-        # then merge per-method, then sleep, then fault.
+        # then merge per-method, then fault, then write history, then sleep
+        # (MAG-1832 — history before sleep so a router-side cancel
+        # mid-latency-sleep still records the call).
         match_result = self._match_route(verb, path)
         if match_result is None:
             # Unmatched path — no per-method merge to attempt (the (verb,
             # path) key isn't a registered template). Honor only the
             # provider-wide latency / fault snap.
-            if snap["latency_ms"] > 0:
-                time.sleep(snap["latency_ms"] / 1000.0)
             method_label = f"{verb} {path}"
             fault = _apply_fault(state, snap, method_label, req_id,
                                  lava_headers, t_start)
             if fault is not None:
+                if snap["latency_ms"] > 0:
+                    time.sleep(snap["latency_ms"] / 1000.0)
                 self._emit_rest_fault(fault)
                 return
-            # Genuine 404 — record so /history shows the miss.
-            self._reply(404, {"code": "not_found", "method": verb, "path": path})
+            # Genuine 404 — record so /history shows the miss. Push BEFORE
+            # the sleep so a cancel mid-latency-sleep still records the
+            # 404 (MAG-1832). Recorded latency_ms is the configured value.
             state.push_call_to_buffer(method_label, "not_found",
-                                      _elapsed_ms(t_start),
+                                      snap["latency_ms"],
                                       request_id=req_id, lava_headers=lava_headers)
+            if snap["latency_ms"] > 0:
+                time.sleep(snap["latency_ms"] / 1000.0)
+            self._reply(404, {"code": "not_found", "method": verb, "path": path})
             return
 
         template, path_params = match_result
@@ -1120,21 +1159,22 @@ class RestHandler(BaseHTTPRequestHandler):
         # Merge per-(verb, template) overrides into the snap (MAG-1821
         # follow-up). When no override applies for this route,
         # ``method_snap is snap`` and behaviour matches pre-follow-up
-        # exactly. Order matches JSON-RPC: latency FIRST, then fault — so
-        # a per-route ``latency_ms`` is paid even on a per-route
-        # rate_limit / drop response. Per-key fallback: a partial
-        # per-route entry inherits provider-wide fault keys it doesn't
-        # override.
+        # exactly. Per-key fallback: a partial per-route entry inherits
+        # provider-wide fault keys it doesn't override.
         method_snap = _resolve_method_config(
             (verb, template), snap, state.responses
         )
 
-        if method_snap["latency_ms"] > 0:
-            time.sleep(method_snap["latency_ms"] / 1000.0)
-
+        # Fault evaluation BEFORE the latency sleep — mirrors the JSON-RPC
+        # post-parse fault branch (MAG-1832). _apply_fault records history
+        # internally with the configured latency_ms. If a fault triggers,
+        # we still pay the configured latency on the wire before emitting,
+        # so wire timing is unchanged for the router.
         fault = _apply_fault(state, method_snap, method_label, req_id,
                              lava_headers, t_start)
         if fault is not None:
+            if method_snap["latency_ms"] > 0:
+                time.sleep(method_snap["latency_ms"] / 1000.0)
             self._emit_rest_fault(fault)
             return
 
@@ -1143,14 +1183,19 @@ class RestHandler(BaseHTTPRequestHandler):
             state, verb, template, path_params, query, body, snap, lava_headers
         )
         emit_status = "error" if (isinstance(response_body, dict) and "error" in response_body) else "success"
+        # MAG-1832: write history BEFORE the latency sleep so a router-side
+        # cancel mid-sleep still records the call. latency_ms recorded is
+        # the configured post-MAG-1821-override value.
+        state.push_call_to_buffer(method_label, emit_status, method_snap["latency_ms"],
+                                  request_id=req_id, lava_headers=lava_headers)
+        if method_snap["latency_ms"] > 0:
+            time.sleep(method_snap["latency_ms"] / 1000.0)
         # MAG-1837 — only apply corruption_mode if the snap was authored for
         # the REST transport. A corruption set on chain_family="eth" must not
         # leak into the REST port.
         self._reply(status, response_body,
                     corruption_mode=_corruption_for(snap, "rest"),
                     missing_field=_missing_field_for(snap, "rest"))
-        state.push_call_to_buffer(method_label, emit_status, _elapsed_ms(t_start),
-                                  request_id=req_id, lava_headers=lava_headers)
 
     # ── Routing ───────────────────────────────────────────────────────────────
 
@@ -1412,47 +1457,51 @@ class TendermintHandler(BaseHTTPRequestHandler):
             self._emit_tm_fault(fault, request_id=None)
             return
 
-        # 2. Optional latency injection — same shape as JSON-RPC.
-        if snap["latency_ms"] > 0:
-            time.sleep(snap["latency_ms"] / 1000.0)
-
-        # 3. Parse the wire — method + params + request_id depend on the verb.
+        # 2. Parse the wire BEFORE the latency sleep — so method/request_id
+        #    are available when history is written ahead of any sleep
+        #    (MAG-1832, mirrors the JSON-RPC do_POST fix).
         try:
             method, params, request_id = self._extract_method_params(verb)
         except _TmParseError as exc:
-            # Malformed request — JSON-RPC -32700 (parse error). Compose a
-            # bare envelope inline; this path is rare so it doesn't justify
-            # threading through _apply_fault.
+            # Malformed request — JSON-RPC -32700 (parse error). Record
+            # history BEFORE the wire reply so a router-side cancel still
+            # leaves a trace. No latency on this path (parse fault is
+            # synchronous and immediate).
+            state.push_call_to_buffer(
+                "*",
+                "parse_error",
+                0,
+                request_id=None,
+                lava_headers=lava_headers,
+            )
             err_body = {
                 "jsonrpc": "2.0",
                 "id": None,
                 "error": {"code": -32700, "message": f"Parse error: {exc}"},
             }
             self._reply(400, err_body)
-            state.push_call_to_buffer(
-                "*",
-                "parse_error",
-                _elapsed_ms(t_start),
-                request_id=None,
-                lava_headers=lava_headers,
-            )
             return
 
         method_label = method  # For history filtering — matches JSON-RPC convention.
 
-        # 4. Post-parse fault primitives — hang / drop / rate_limit / error.
+        # 3. Post-parse fault primitives — hang / drop / rate_limit / error.
+        #    _apply_fault records history internally with the configured
+        #    latency_ms. If a fault triggers, we still pay the configured
+        #    latency on the wire before emitting, so wire timing is unchanged.
         fault = _apply_fault(state, snap, method_label, request_id, lava_headers, t_start)
         if fault is not None:
+            if snap["latency_ms"] > 0:
+                time.sleep(snap["latency_ms"] / 1000.0)
             self._emit_tm_fault(fault, request_id=request_id)
             return
 
-        # 5. Success path — chain-specific dispatch.
+        # 4. Success path — chain-specific dispatch.
         normalized = handlers_tendermintrpc._normalize_tm_params(verb, params)
         http_status, result_body = handlers_tendermintrpc.handle(
             state, method, normalized, snap, lava_headers
         )
 
-        # 6. Wrap in JSON-RPC envelope. If the handler returned an error dict
+        # 5. Wrap in JSON-RPC envelope. If the handler returned an error dict
         #    (unknown method, per-method override with "error" key), the
         #    envelope carries ``error`` rather than ``result``.
         if isinstance(result_body, dict) and "error" in result_body:
@@ -1470,6 +1519,18 @@ class TendermintHandler(BaseHTTPRequestHandler):
             }
             history_status = "success"
 
+        # 6. MAG-1832: write history BEFORE the latency sleep so a router-side
+        #    cancel mid-sleep still records the call. latency_ms recorded is
+        #    the configured value (what the call would have taken).
+        state.push_call_to_buffer(
+            method_label,
+            history_status,
+            snap["latency_ms"],
+            request_id=request_id,
+            lava_headers=lava_headers,
+        )
+        if snap["latency_ms"] > 0:
+            time.sleep(snap["latency_ms"] / 1000.0)
         # MAG-1837 — gate corruption_mode on chain_family="tendermintrpc"
         # so a corruption authored for another transport doesn't reach the
         # Tendermint port.
@@ -1478,13 +1539,6 @@ class TendermintHandler(BaseHTTPRequestHandler):
             envelope,
             corruption_mode=_corruption_for(snap, "tendermintrpc"),
             missing_field=_missing_field_for(snap, "tendermintrpc"),
-        )
-        state.push_call_to_buffer(
-            method_label,
-            history_status,
-            _elapsed_ms(t_start),
-            request_id=request_id,
-            lava_headers=lava_headers,
         )
 
     # ── Wire parsing ──────────────────────────────────────────────────────────
