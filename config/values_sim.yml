@@ -153,40 +153,40 @@ routers:
     network: lava
     nodes:
       - name: SimGrpcProvider1
-        skip_verifications: "chain-id,pruning,simulate,tx-indexing,grpc"
+        skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18548
             interface: grpc
             addons: []
       - name: SimGrpcProvider2
-        skip_verifications: "chain-id,pruning,simulate,tx-indexing,grpc"
+        skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18549
             interface: grpc
             addons: []
       - name: SimGrpcProvider3
-        skip_verifications: "chain-id,pruning,simulate,tx-indexing,grpc"
+        skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18550
             interface: grpc
             addons: []
       - name: SimGrpcBackup1
         is_backup: true
-        skip_verifications: "chain-id,pruning,simulate,tx-indexing,grpc"
+        skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18563
             interface: grpc
             addons: []
       - name: SimGrpcBackup2
         is_backup: true
-        skip_verifications: "chain-id,pruning,simulate,tx-indexing,grpc"
+        skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18564
             interface: grpc
             addons: []
       - name: SimGrpcBackup3
         is_backup: true
-        skip_verifications: "chain-id,pruning,simulate,tx-indexing,grpc"
+        skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18565
             interface: grpc
