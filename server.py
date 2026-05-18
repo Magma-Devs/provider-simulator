@@ -590,6 +590,34 @@ def _missing_field_for(snap: Dict[str, Any], *chain_families: str) -> Optional[s
     return None
 
 
+def _mode_for(snap: Dict[str, Any], *chain_families: str) -> Optional[str]:
+    """Return ``snap["mode"]`` only when the snap's ``chain_family`` is one
+    of ``chain_families``; otherwise ``None``.
+
+    Companion to ``_corruption_for`` / ``_missing_field_for``. The ``mode``
+    field drives the fault primitives evaluated by ``_apply_fault`` (down /
+    hang / drop_connection / rate_limit / error). Without an explicit gate,
+    a ``mode="error"`` set for one transport (e.g. ``chain_family="btc"``)
+    fires on requests dispatched to every other transport that shares the
+    same provider id — the cross-transport leak surfaced in the
+    2026-05-18 suite triage as ~37 spurious failures.
+
+    Helpers return ``None`` for the mismatch case so callers can write the
+    same shape they already use for ``_corruption_for``:
+
+        mode = _mode_for(snap, "rest")
+        if mode == "down": ...
+        if mode == "error" or ...: ...
+
+    The JSON-RPC handler uses the ``jsonrpc_owns_snap`` short-circuit
+    instead (logically equivalent — it skips the whole ``_apply_fault``
+    call when the snap was authored for a different transport).
+    """
+    if snap.get("chain_family") in chain_families:
+        return snap.get("mode")
+    return None
+
+
 # ── JSON-RPC handler ──────────────────────────────────────────────────────────
 
 class JSONRPCHandler(BaseHTTPRequestHandler):
@@ -629,13 +657,17 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # are chain-agnostic, so without an explicit gate a fault authored
         # for the gRPC port (chain_family="grpc") would also kill the
         # JSON-RPC port for that provider. JSON-RPC owns chain_family
-        # values "eth" and "btc" (success-path dispatch lives below); any
-        # other value means the fault was set for a different transport
-        # and the JSON-RPC port should fall through to its normal success
+        # values "eth", "btc", and "ln" (success-path dispatch below
+        # routes all three through the same listener); any other value
+        # means the fault was set for a different transport and the
+        # JSON-RPC port should fall through to its normal success
         # response. ``jsonrpc_owns_snap`` is False in that case and
         # short-circuits both the pre-parse ``down`` branch immediately
-        # below and the post-parse fault evaluation further down.
-        jsonrpc_owns_snap = snap.get("chain_family") in ("eth", "btc")
+        # below and the post-parse fault evaluation further down. LN was
+        # added when MAG-1726 landed the LN handler — without it,
+        # ``chain_family="ln"`` LN tests in tests/test_simulator_ln.py
+        # couldn't exercise the fault ladder on the LN port.
+        jsonrpc_owns_snap = snap.get("chain_family") in ("eth", "btc", "ln")
 
         # Pre-parse fault check: provider-wide down mode doesn't read the body.
         # Down is the only pre-body-parse fault — there is no per-method
@@ -645,8 +677,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if jsonrpc_owns_snap and snap["mode"] == "down":
             fault = _apply_fault(state, snap, "*", None, lava_headers, t_start)
             self._emit_jsonrpc_fault(fault, req_id=None,
-                                     corruption_mode=_corruption_for(snap, "eth", "btc"),
-                                     missing_field=_missing_field_for(snap, "eth", "btc"))
+                                     corruption_mode=_corruption_for(snap, "eth", "btc", "ln"),
+                                     missing_field=_missing_field_for(snap, "eth", "btc", "ln"))
             return
 
         # Parse the request body before latency/fault evaluation so the
@@ -696,8 +728,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             if method_snap["latency_ms"] > 0:
                 time.sleep(method_snap["latency_ms"] / 1000.0)
             self._reply(override_status, override_body,
-                        corruption_mode=_corruption_for(snap, "eth", "btc"),
-                        missing_field=_missing_field_for(snap, "eth", "btc"))
+                        corruption_mode=_corruption_for(snap, "eth", "btc", "ln"),
+                        missing_field=_missing_field_for(snap, "eth", "btc", "ln"))
             return
 
         # Post-parse fault evaluation. _apply_fault records history internally.
@@ -718,8 +750,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             if method_snap["latency_ms"] > 0:
                 time.sleep(method_snap["latency_ms"] / 1000.0)
             self._emit_jsonrpc_fault(fault, req_id=req_id,
-                                     corruption_mode=_corruption_for(snap, "eth", "btc"),
-                                     missing_field=_missing_field_for(snap, "eth", "btc"))
+                                     corruption_mode=_corruption_for(snap, "eth", "btc", "ln"),
+                                     missing_field=_missing_field_for(snap, "eth", "btc", "ln"))
             return
 
         # Success — delegate the chain-specific success path to a handler module.
@@ -753,8 +785,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if method_snap["latency_ms"] > 0:
             time.sleep(method_snap["latency_ms"] / 1000.0)
         self._reply(status, response_body,
-                    corruption_mode=_corruption_for(snap, "eth", "btc"),
-                    missing_field=_missing_field_for(snap, "eth", "btc"))
+                    corruption_mode=_corruption_for(snap, "eth", "btc", "ln"),
+                    missing_field=_missing_field_for(snap, "eth", "btc", "ln"))
 
     def _emit_jsonrpc_fault(self, fault: Dict[str, Any], req_id: Any,
                              corruption_mode: Optional[str] = None,
@@ -1106,11 +1138,25 @@ class RestHandler(BaseHTTPRequestHandler):
         # call still gets a stable correlation_group in /history.
         req_id: Any = self.headers.get("X-Request-Id") or _next_sim_request_id()
 
+        # Cross-transport isolation — mirrors MAG-1838's jsonrpc_owns_snap
+        # gate. ``ProviderState`` is shared across all transports for the
+        # same provider id, so a fault authored for one transport leaks
+        # onto every other transport that reads ``snap["mode"]`` without
+        # a chain_family check. The REST handler owns chain_family="rest";
+        # for any other value the fault ladder is skipped and the request
+        # falls through to its normal success path. Surfaced as ~37 spurious
+        # failures in the 2026-05-18 suite triage when a BTC test set
+        # ``chain_family="btc", mode="error"`` and a subsequent REST test
+        # got the BTC error instead of a healthy REST response.
+        rest_owns_snap = snap.get("chain_family") == "rest"
+
         # Pre-route fault: provider-wide down doesn't need the (verb,
         # template) key. Mirrors JSONRPCHandler's pre-body-parse down
         # branch. Per-(verb, template) down lives in the post-route
-        # merged-snap branch below.
-        if snap["mode"] == "down":
+        # merged-snap branch below. Gated on rest_owns_snap so a down
+        # set on chain_family="eth"/"btc"/"grpc"/etc. doesn't 503 the
+        # REST port.
+        if rest_owns_snap and snap["mode"] == "down":
             fault = _apply_fault(state, snap, "*", None, lava_headers, t_start)
             self._emit_rest_fault(fault)
             return
@@ -1138,10 +1184,12 @@ class RestHandler(BaseHTTPRequestHandler):
         if match_result is None:
             # Unmatched path — no per-method merge to attempt (the (verb,
             # path) key isn't a registered template). Honor only the
-            # provider-wide latency / fault snap.
+            # provider-wide latency / fault snap. Fault eval is gated on
+            # rest_owns_snap so a fault authored for another transport
+            # doesn't override a genuine 404.
             method_label = f"{verb} {path}"
             fault = _apply_fault(state, snap, method_label, req_id,
-                                 lava_headers, t_start)
+                                 lava_headers, t_start) if rest_owns_snap else None
             if fault is not None:
                 if snap["latency_ms"] > 0:
                     time.sleep(snap["latency_ms"] / 1000.0)
@@ -1174,9 +1222,11 @@ class RestHandler(BaseHTTPRequestHandler):
         # post-parse fault branch (MAG-1832). _apply_fault records history
         # internally with the configured latency_ms. If a fault triggers,
         # we still pay the configured latency on the wire before emitting,
-        # so wire timing is unchanged for the router.
+        # so wire timing is unchanged for the router. Gated on
+        # rest_owns_snap so faults authored for other transports pass
+        # through to the success-path below.
         fault = _apply_fault(state, method_snap, method_label, req_id,
-                             lava_headers, t_start)
+                             lava_headers, t_start) if rest_owns_snap else None
         if fault is not None:
             if method_snap["latency_ms"] > 0:
                 time.sleep(method_snap["latency_ms"] / 1000.0)
@@ -1456,8 +1506,21 @@ class TendermintHandler(BaseHTTPRequestHandler):
             k: v for k, v in self.headers.items() if k.lower().startswith("lava-")
         }
 
+        # Cross-transport isolation — mirrors MAG-1838's jsonrpc_owns_snap
+        # gate. ``ProviderState`` is shared across all transports for the
+        # same provider id, so a fault authored for one transport leaks
+        # onto every other transport that reads ``snap["mode"]`` without
+        # a chain_family check. The Tendermint handler owns
+        # chain_family="tendermintrpc"; for any other value the fault
+        # ladder is skipped and the request falls through to its normal
+        # success path. Surfaced in the 2026-05-18 suite triage as one of
+        # the leak paths feeding the ~37 spurious failures.
+        tm_owns_snap = snap.get("chain_family") == "tendermintrpc"
+
         # 1. Outage gate — return 503 with no body. ``method`` not yet known.
-        if snap["mode"] == "down":
+        #    Gated on tm_owns_snap so a down set on chain_family="eth"
+        #    (etc.) doesn't 503 the Tendermint port.
+        if tm_owns_snap and snap["mode"] == "down":
             fault = _apply_fault(state, snap, "*", None, lava_headers, t_start)
             self._emit_tm_fault(fault, request_id=None)
             return
@@ -1493,7 +1556,10 @@ class TendermintHandler(BaseHTTPRequestHandler):
         #    _apply_fault records history internally with the configured
         #    latency_ms. If a fault triggers, we still pay the configured
         #    latency on the wire before emitting, so wire timing is unchanged.
-        fault = _apply_fault(state, snap, method_label, request_id, lava_headers, t_start)
+        #    Gated on tm_owns_snap so faults authored for other transports
+        #    pass through to the success-path below.
+        fault = _apply_fault(state, snap, method_label, request_id, lava_headers, t_start) \
+            if tm_owns_snap else None
         if fault is not None:
             if snap["latency_ms"] > 0:
                 time.sleep(snap["latency_ms"] / 1000.0)

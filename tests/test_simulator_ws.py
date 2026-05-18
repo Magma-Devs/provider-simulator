@@ -359,7 +359,9 @@ class TestPostHandshakeFaults:
     def test_mode_error_returns_jsonrpc_error_frame(self, sim):
         """With mode=error set after handshake, every request frame yields a JSON-RPC error reply."""
         with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
+            # chain_family="ws" — fault ladder is gated on chain_family.
             _control(sim, "POST", "/scenario", {"providers": {"1": {
+                "chain_family": "ws",
                 "mode": "error", "error_code": -32601,
                 "error_message": "Method not found",
             }}})
@@ -372,7 +374,10 @@ class TestPostHandshakeFaults:
     def test_rate_limit_returns_429_error_frame_post_handshake(self, sim):
         """mode=rate_limit set after handshake returns a 429-shaped error frame."""
         with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
-            _control(sim, "POST", "/scenario", {"providers": {"1": {"mode": "rate_limit"}}})
+            # chain_family="ws" — fault ladder is gated on chain_family.
+            _control(sim, "POST", "/scenario", {"providers": {"1": {
+                "chain_family": "ws", "mode": "rate_limit",
+            }}})
             c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber",
                          "params": [], "id": 8})
             reply = c.recv_json(timeout=2.0)
@@ -381,7 +386,10 @@ class TestPostHandshakeFaults:
     def test_hang_yields_no_reply_within_1s(self, sim):
         """mode=hang set after handshake: the reader records history but does not enqueue a reply."""
         with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
-            _control(sim, "POST", "/scenario", {"providers": {"1": {"mode": "hang"}}})
+            # chain_family="ws" — fault ladder is gated on chain_family.
+            _control(sim, "POST", "/scenario", {"providers": {"1": {
+                "chain_family": "ws", "mode": "hang",
+            }}})
             c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber",
                          "params": [], "id": 9})
             with pytest.raises(socket.timeout):
@@ -408,7 +416,12 @@ class TestPostHandshakeFaults:
                          "params": [], "id": 1})
             c.recv_json(timeout=2.0)
             # Flip to down. Next request should close the connection.
-            _control(sim, "POST", "/scenario", {"providers": {"1": {"mode": "down"}}})
+            # chain_family="ws" — fault primitives are gated on chain_family
+            # so a fault authored for another transport doesn't fire here
+            # (and vice versa). Sets the WS-owned snap explicitly.
+            _control(sim, "POST", "/scenario", {"providers": {"1": {
+                "chain_family": "ws", "mode": "down",
+            }}})
             c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber",
                          "params": [], "id": 2})
             with pytest.raises((socket.timeout, ConnectionError, ws_protocol.FrameParseError)):
@@ -417,7 +430,9 @@ class TestPostHandshakeFaults:
     def test_error_probability_one_always_errors(self, sim):
         """error_probability=1.0 forces an error on every request."""
         with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
+            # chain_family="ws" so the fault ladder fires on WS.
             _control(sim, "POST", "/scenario", {"providers": {"1": {
+                "chain_family": "ws",
                 "mode": "success", "error_probability": 1.0,
                 "error_code": -32007, "error_message": "Forced",
             }}})
@@ -429,7 +444,9 @@ class TestPostHandshakeFaults:
     def test_drop_connection_before_headers_closes_socket_immediately(self, sim):
         """drop_connection before_headers set after handshake: no reply frame, socket closed."""
         with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
+            # chain_family="ws" so the fault ladder fires on WS.
             _control(sim, "POST", "/scenario", {"providers": {"1": {
+                "chain_family": "ws",
                 "mode": "drop_connection", "drop_at": "before_headers",
             }}})
             c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber",
@@ -440,7 +457,9 @@ class TestPostHandshakeFaults:
     def test_drop_connection_mid_body_sends_partial_payload(self, sim):
         """drop_connection mid_body set after handshake: client receives partial WS frame then EOF."""
         with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
+            # chain_family="ws" so the fault ladder fires on WS.
             _control(sim, "POST", "/scenario", {"providers": {"1": {
+                "chain_family": "ws",
                 "mode": "drop_connection", "drop_at": "mid_body",
             }}})
             c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber",
@@ -482,19 +501,28 @@ class TestPreHandshakeFaults:
 
     def test_mode_down_blocks_upgrade_with_503(self, sim):
         """A WS upgrade attempt while mode=down returns HTTP 503, no 101."""
-        _control(sim, "POST", "/scenario", {"providers": {"1": {"mode": "down"}}})
+        # chain_family="ws" — pre-handshake fault ladder is gated on chain_family.
+        _control(sim, "POST", "/scenario", {"providers": {"1": {
+            "chain_family": "ws", "mode": "down",
+        }}})
         data = _raw_ws_upgrade(sim["ws1_host"], sim["ws1_port"])
         assert b" 503 " in data.split(b"\r\n", 1)[0]
 
     def test_mode_rate_limit_blocks_upgrade_with_429(self, sim):
-        _control(sim, "POST", "/scenario", {"providers": {"1": {"mode": "rate_limit"}}})
+        # chain_family="ws" — pre-handshake fault ladder is gated on chain_family.
+        _control(sim, "POST", "/scenario", {"providers": {"1": {
+            "chain_family": "ws", "mode": "rate_limit",
+        }}})
         data = _raw_ws_upgrade(sim["ws1_host"], sim["ws1_port"])
         assert b" 429 " in data.split(b"\r\n", 1)[0]
 
     def test_mode_error_blocks_upgrade_with_400(self, sim):
         """mode=error pre-handshake: we override http_status 200 -> 400 so the
         response is non-200 + non-101 (200 with no Upgrade would be confusing)."""
-        _control(sim, "POST", "/scenario", {"providers": {"1": {"mode": "error"}}})
+        # chain_family="ws" — pre-handshake fault ladder is gated on chain_family.
+        _control(sim, "POST", "/scenario", {"providers": {"1": {
+            "chain_family": "ws", "mode": "error",
+        }}})
         data = _raw_ws_upgrade(sim["ws1_host"], sim["ws1_port"])
         assert b" 400 " in data.split(b"\r\n", 1)[0]
 
@@ -502,7 +530,10 @@ class TestPreHandshakeFaults:
         """mode=hang pre-handshake: the upgrade hangs (no 101 within 1s) then
         the server closes the socket. We don't wait the full 30s — assert no
         bytes arrive within a short window and then close."""
-        _control(sim, "POST", "/scenario", {"providers": {"1": {"mode": "hang"}}})
+        # chain_family="ws" — pre-handshake fault ladder is gated on chain_family.
+        _control(sim, "POST", "/scenario", {"providers": {"1": {
+            "chain_family": "ws", "mode": "hang",
+        }}})
         s = socket.create_connection((sim["ws1_host"], sim["ws1_port"]), timeout=2)
         s.sendall(b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n"
                   b"Connection: Upgrade\r\n"
@@ -824,8 +855,13 @@ class TestWsPerMethodFaultOverrides:
 
     def test_per_method_mode_down_closes_connection_on_named_method(self, sim):
         """Per-method ``mode: down`` closes the WS connection on that method."""
+        # chain_family="ws" — per-method fault ladder is gated on chain_family
+        # (it inherits the provider-wide mode via _resolve_method_config when
+        # the per-method dict doesn't override it, but the fault evaluation
+        # itself only runs when the snap is WS-owned).
         _control(sim, "POST", "/scenario", {
             "providers": {"1": {
+                "chain_family": "ws",
                 "mode": "success",
                 "responses": {
                     "eth_blockNumber": {"mode": "down"},
@@ -851,8 +887,10 @@ class TestWsPerMethodFaultOverrides:
         merge has to happen before the SUBSCRIBE_METHODS dispatch branch,
         otherwise eth_subscribe would silently succeed despite the override.
         """
+        # chain_family="ws" — fault ladder is gated on chain_family.
         _control(sim, "POST", "/scenario", {
             "providers": {"1": {
+                "chain_family": "ws",
                 "mode": "success",
                 "responses": {
                     "eth_subscribe": {"mode": "down"},
@@ -894,8 +932,10 @@ class TestWsPerMethodFaultOverrides:
 
     def test_per_method_mode_rate_limit_emits_429_error_frame(self, sim):
         """Per-method ``mode: rate_limit`` emits a JSON-RPC error frame with code 429."""
+        # chain_family="ws" — fault ladder is gated on chain_family.
         _control(sim, "POST", "/scenario", {
             "providers": {"1": {
+                "chain_family": "ws",
                 "mode": "success",
                 "responses": {
                     "eth_blockNumber": {"mode": "rate_limit"},
@@ -942,8 +982,10 @@ class TestWsPerMethodFaultOverrides:
 
     def test_per_key_fallback_inherits_provider_wide_latency(self, sim):
         """A partial per-method entry inherits provider-wide latency_ms it doesn't override."""
+        # chain_family="ws" — fault ladder is gated on chain_family.
         _control(sim, "POST", "/scenario", {
             "providers": {"1": {
+                "chain_family": "ws",
                 "mode": "success",
                 "latency_ms": 100,
                 "responses": {
@@ -965,8 +1007,10 @@ class TestWsPerMethodFaultOverrides:
 
     def test_composition_order_latency_first_then_fault(self, sim):
         """Per-method ``{latency_ms: 200, mode: rate_limit}`` → 429 frame after ~200ms."""
+        # chain_family="ws" — fault ladder is gated on chain_family.
         _control(sim, "POST", "/scenario", {
             "providers": {"1": {
+                "chain_family": "ws",
                 "mode": "success",
                 "responses": {
                     "eth_blockNumber": {"latency_ms": 200, "mode": "rate_limit"},
@@ -999,22 +1043,31 @@ class TestWsPerMethodFaultOverrides:
         # Message should reference the offending key for diagnosability.
         assert "mode" in body["error"].lower() or "error" in body["error"].lower()
 
-    def test_ws_and_jsonrpc_share_string_keyed_overrides_on_same_provider(self, sim):
-        """Cross-transport consistency: the SAME per-method override fires on
-        both JSON-RPC (HTTP POST) and WS for the same provider, because both
-        look up state.responses by the same string method name. The WS
-        transport delegates non-subscription methods through the same fault
-        path that JSON-RPC uses, so the two are intentionally consistent.
+    def test_ws_and_jsonrpc_isolated_by_chain_family_on_same_provider(self, sim):
+        """Cross-transport isolation: a per-method override authored for
+        ``chain_family="ws"`` fires on WS but not on the JSON-RPC port for
+        the same provider; and an override authored for
+        ``chain_family="eth"`` fires on JSON-RPC but not on WS.
+
+        Inverse of the old shared-override test (pre-MAG-1838 +
+        2026-05-18 mode-gate fix). The transports now look up the same
+        ``state.responses`` map by method name, but the fault ladder is
+        gated by ``snap.get("chain_family")`` so a fault authored for one
+        transport doesn't leak onto another. The lookup-by-name is still
+        the underlying mechanism — the gate sits on top.
         """
+        # Snap A — WS-authored fault. WS should 429; JSON-RPC should succeed.
         _control(sim, "POST", "/scenario", {
             "providers": {"1": {
+                "chain_family": "ws",
                 "mode": "success",
                 "responses": {
                     "eth_blockNumber": {"mode": "rate_limit"},
                 },
             }}
         })
-        # JSON-RPC over HTTP returns 429.
+
+        # JSON-RPC port should NOT see the WS-authored fault.
         rpc_req = urllib.request.Request(
             sim["provider1"],
             method="POST",
@@ -1027,12 +1080,116 @@ class TestWsPerMethodFaultOverrides:
                 rpc_code = resp.status
         except urllib.error.HTTPError as e:
             rpc_code = e.code
-        assert rpc_code == 429
+        assert rpc_code == 200, (
+            f"JSON-RPC must ignore ws-authored fault; got {rpc_code}"
+        )
 
-        # WS emits the same fault envelope as an error frame.
+        # WS port SHOULD see the WS-authored fault.
         with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
             c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber",
                          "params": [], "id": 1})
             reply = c.recv_json(timeout=2.0)
         assert "error" in reply
         assert reply["error"]["code"] == 429
+
+        # Snap B — JSON-RPC-authored fault. JSON-RPC should 429; WS should succeed.
+        _control(sim, "POST", "/scenario", {
+            "providers": {"1": {
+                "chain_family": "eth",
+                "mode": "success",
+                "responses": {
+                    "eth_blockNumber": {"mode": "rate_limit"},
+                },
+            }}
+        })
+
+        # JSON-RPC port now SHOULD see the eth-authored fault.
+        try:
+            with urllib.request.urlopen(rpc_req, timeout=5) as resp:
+                rpc_code_2 = resp.status
+        except urllib.error.HTTPError as e:
+            rpc_code_2 = e.code
+        assert rpc_code_2 == 429, (
+            f"JSON-RPC must fire eth-authored fault; got {rpc_code_2}"
+        )
+
+        # WS port should NOT see the eth-authored fault — success body.
+        with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
+            c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber",
+                         "params": [], "id": 1})
+            reply_2 = c.recv_json(timeout=2.0)
+        assert "result" in reply_2, (
+            f"WS must ignore eth-authored fault; got {reply_2!r}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cross-transport isolation — the WS handler's fault ladder (both pre-handshake
+# and post-handshake in the reader loop) is gated on chain_family="ws" so a
+# fault authored for another transport doesn't leak onto the WS port. Mirrors
+# MAG-1838's JSON-RPC isolation and the corresponding REST/TM isolation tests.
+# Surfaced in the 2026-05-18 suite triage as one of the leak paths feeding
+# the ~37 spurious failures.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestWsCrossTransportFaultIsolation:
+    """WS port must ignore faults authored for any other chain_family."""
+
+    def test_ws_handshake_unaffected_by_eth_down_fault(self, sim):
+        """A ``chain_family="eth"`` down fault must not 503 the WS upgrade."""
+        _control(sim, "POST", "/scenario", {
+            "providers": {"1": {"chain_family": "eth", "mode": "down"}}
+        })
+        data = _raw_ws_upgrade(sim["ws1_host"], sim["ws1_port"])
+        assert b" 101 " in data.split(b"\r\n", 1)[0], (
+            f"WS upgrade should complete (101); got {data[:80]!r}"
+        )
+
+    def test_ws_handshake_unaffected_by_btc_error_fault(self, sim):
+        """A ``chain_family="btc"`` mode=error must not 400 the WS upgrade —
+        the leak shape from 2026-05-18 triage."""
+        _control(sim, "POST", "/scenario", {"providers": {"1": {
+            "chain_family": "btc",
+            "mode": "error", "error_code": -32000,
+            "error_message": "BTC error stub",
+        }}})
+        data = _raw_ws_upgrade(sim["ws1_host"], sim["ws1_port"])
+        assert b" 101 " in data.split(b"\r\n", 1)[0], (
+            f"WS upgrade should complete (101); got {data[:80]!r}"
+        )
+
+    def test_ws_reader_loop_unaffected_by_btc_error_fault(self, sim):
+        """A ``chain_family="btc"`` mode=error fault set AFTER handshake
+        must not produce an error frame on the WS reader loop. The WS
+        success-path response should arrive instead."""
+        with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
+            _control(sim, "POST", "/scenario", {"providers": {"1": {
+                "chain_family": "btc",
+                "mode": "error", "error_code": -32000,
+                "error_message": "BTC error stub",
+            }}})
+            c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber",
+                         "params": [], "id": 1})
+            reply = c.recv_json(timeout=2.0)
+        assert "result" in reply, (
+            f"WS reader should ignore btc-error; got {reply!r}"
+        )
+        assert "error" not in reply
+
+    def test_ws_unaffected_by_rest_rate_limit_fault(self, sim):
+        """REST rate_limit must not 429 the WS upgrade."""
+        _control(sim, "POST", "/scenario", {
+            "providers": {"1": {"chain_family": "rest", "mode": "rate_limit"}}
+        })
+        data = _raw_ws_upgrade(sim["ws1_host"], sim["ws1_port"])
+        assert b" 101 " in data.split(b"\r\n", 1)[0]
+
+    def test_ws_fault_still_fires_when_chain_family_is_ws(self, sim):
+        """Sanity check: ``chain_family="ws"`` + mode=down must still 503
+        the WS upgrade. The gate must not regress WS-authored faults."""
+        _control(sim, "POST", "/scenario", {
+            "providers": {"1": {"chain_family": "ws", "mode": "down"}}
+        })
+        data = _raw_ws_upgrade(sim["ws1_host"], sim["ws1_port"])
+        assert b" 503 " in data.split(b"\r\n", 1)[0]
