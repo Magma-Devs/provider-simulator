@@ -355,8 +355,54 @@ class ProviderState:
             self.total_calls       = 0
             self.calls_by_status   = {}
 
+    def record_arrival(self, lava_headers: dict = None) -> dict:
+        """Push an in-flight stub entry the moment a request arrives and return the
+        dict so the caller can update it once method / status / latency are known.
+
+        MAG-1832 (cancel-during-response race). PR #22 closed the
+        sleep-then-write window by moving ``push_call_to_buffer`` ahead of the
+        latency sleep. But the handler still does work BEFORE that push call
+        — most notably ``self.rfile.read(Content-Length)``, which blocks on
+        socket I/O. When the router cancels the request (TCP RST after a hedge
+        peer returned first), that read raises ``ConnectionResetError`` and the
+        handler dies before the history entry is written, so /history misses
+        the cancelled peer entirely. The invariant
+        ``Lava-Retries + 1 == history_count`` then fails.
+
+        Recording arrival as the very first handler action — before body parse,
+        scenario merge, fault evaluation, or any sleep — guarantees the entry
+        exists no matter when the cancellation lands. Subsequent stages mutate
+        this dict in place (via ``push_call_to_buffer(..., entry=stub)``) to
+        fill in method / req_id / final status / configured latency.
+
+        The stub is recorded with method ``"*"``, status ``"in_flight"``,
+        latency_ms 0, request_id None. If the cancellation lands before the
+        update, the entry stays as ``in_flight`` — that's strictly better than
+        no entry at all because:
+          - The router-vs-sim consistency invariant only counts entries, not
+            their final status.
+          - The /history filter ``?status=in_flight`` can surface cancellations
+            for diagnosis without changing the contract for any other test.
+        """
+        now = time.time()
+        entry = {
+            "ts":           now,
+            "time":         datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S.") + f"{int(now % 1 * 1000):03d} UTC",
+            "request_id":   None,
+            "method":       "*",
+            "status":       "in_flight",
+            "latency_ms":   0,
+            "lava_headers": lava_headers or {},
+        }
+        with self.lock:
+            self.history.append(entry)
+            self.total_calls += 1
+            self.calls_by_status["in_flight"] = self.calls_by_status.get("in_flight", 0) + 1
+        return entry
+
     def push_call_to_buffer(self, method: str, status: str, latency_ms: int,
-                             request_id: object = None, lava_headers: dict = None) -> None:
+                             request_id: object = None, lava_headers: dict = None,
+                             entry: Optional[dict] = None) -> None:
         """Push one call record into the in-memory ring-buffer and update all-time counters.
 
         Storage is entirely in RAM — nothing is written to disk or any logging framework.
@@ -376,8 +422,33 @@ class ProviderState:
                           is never parsed.
             lava_headers: Dict of all ``lava-*`` HTTP request headers provided by the router.
                           ``{}`` if no lava headers were sent.
+            entry:        MAG-1832. When supplied, update this existing entry (returned by
+                          ``record_arrival``) in place instead of pushing a new dict. Status,
+                          method, latency_ms always overwrite the previous value. The
+                          ``calls_by_status`` counter is decremented on the old status and
+                          incremented on the new one so the bookkeeping stays consistent with
+                          the deque. request_id / lava_headers overwrite only when the caller
+                          passes a non-None value, so stages that don't know one of them yet
+                          (e.g. a body-parse failure that knows req_id stays None) don't wipe
+                          a value an earlier stage already filled in.
         """
         now = time.time()
+        if entry is not None:
+            with self.lock:
+                old_status = entry["status"]
+                entry["method"]     = method
+                entry["latency_ms"] = latency_ms
+                if request_id is not None:
+                    entry["request_id"] = request_id
+                if lava_headers is not None:
+                    entry["lava_headers"] = lava_headers
+                if old_status != status:
+                    self.calls_by_status[old_status] = max(
+                        0, self.calls_by_status.get(old_status, 0) - 1
+                    )
+                    self.calls_by_status[status] = self.calls_by_status.get(status, 0) + 1
+                    entry["status"] = status
+            return
         with self.lock:
             self.history.append({
                 "ts":            now,
@@ -435,6 +506,7 @@ def _apply_fault(
     req_id: Any,
     lava_headers: Dict[str, str],
     t_start: float,
+    entry: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Evaluate post-parse fault primitives and emit history.
 
@@ -502,7 +574,8 @@ def _apply_fault(
     #    resolves correctly because the method label is taken from the caller.
     if snap["mode"] == "down":
         state.push_call_to_buffer(method, "down", recorded_latency_ms,
-                                  request_id=req_id, lava_headers=lava_headers)
+                                  request_id=req_id, lava_headers=lava_headers,
+                                  entry=entry)
         return {"kind": "down"}
 
     # 2. Hang — accept request, sleep "forever". 30s is long enough for any
@@ -510,7 +583,8 @@ def _apply_fault(
     #    exits and we don't leak threads if the client disconnects.
     if snap["mode"] == "hang":
         state.push_call_to_buffer(method, "hang", 0,
-                                  request_id=req_id, lava_headers=lava_headers)
+                                  request_id=req_id, lava_headers=lava_headers,
+                                  entry=entry)
         return {"kind": "hang"}
 
     # 3. Drop connection — close socket at one of three points.
@@ -518,13 +592,15 @@ def _apply_fault(
         drop_at = snap.get("drop_at", "before_headers")
         state.push_call_to_buffer(method, "drop_connection",
                                   recorded_latency_ms,
-                                  request_id=req_id, lava_headers=lava_headers)
+                                  request_id=req_id, lava_headers=lava_headers,
+                                  entry=entry)
         return {"kind": "drop", "drop_at": drop_at}
 
     # 4. Rate limit — HTTP 429.
     if snap["mode"] == "rate_limit":
         state.push_call_to_buffer(method, "rate_limit", recorded_latency_ms,
-                                  request_id=req_id, lava_headers=lava_headers)
+                                  request_id=req_id, lava_headers=lava_headers,
+                                  entry=entry)
         return {
             "kind": "rate_limit",
             "status": 429,
@@ -535,7 +611,8 @@ def _apply_fault(
     # 5. Probabilistic / forced error — configurable code, message, HTTP status.
     if snap["mode"] == "error" or random.random() < snap["error_probability"]:
         state.push_call_to_buffer(method, "error", recorded_latency_ms,
-                                  request_id=req_id, lava_headers=lava_headers)
+                                  request_id=req_id, lava_headers=lava_headers,
+                                  entry=entry)
         return {
             "kind": "error",
             "status": snap.get("http_status", 200),
@@ -622,6 +699,23 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             if k.lower().startswith("lava-")
         }
 
+        # MAG-1832 — close the cancel-during-response race. Record arrival as
+        # the very first state-mutating action, BEFORE the body is read off the
+        # socket, the scenario is consulted, or any fault is evaluated.
+        # ``self.rfile.read(Content-Length)`` blocks on socket I/O and is the
+        # cancellation window the router's hedge mechanism rides — when a
+        # faster peer wins, the router sends a TCP RST and the read here
+        # raises ``ConnectionResetError``. Without an arrival stub the
+        # cancelled peer's call is invisible in /history, breaking the
+        # invariant ``Lava-Retries + 1 == history_count``.
+        #
+        # The stub is later updated in place (status, method, latency_ms,
+        # request_id) by ``_apply_fault`` or the success branches via
+        # ``push_call_to_buffer(..., entry=arrival)``. If a cancellation lands
+        # before any of those updates fire, the entry stays as ``in_flight``
+        # which is strictly better than no entry for the invariant.
+        arrival = state.record_arrival(lava_headers=lava_headers)
+
         # Cross-transport isolation (MAG-1838) — inverse of MAG-1836.
         # ``ProviderState`` is shared across JSON-RPC, REST, gRPC, WS, and
         # Tendermint-RPC for the same provider id. The fault primitives in
@@ -643,7 +737,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # (body unparsed). A per-method down lives behind the merged-config
         # path below and applies on the post-parse branch.
         if jsonrpc_owns_snap and snap["mode"] == "down":
-            fault = _apply_fault(state, snap, "*", None, lava_headers, t_start)
+            fault = _apply_fault(state, snap, "*", None, lava_headers, t_start,
+                                 entry=arrival)
             self._emit_jsonrpc_fault(fault, req_id=None,
                                      corruption_mode=_corruption_for(snap, "eth", "btc"),
                                      missing_field=_missing_field_for(snap, "eth", "btc"))
@@ -691,8 +786,12 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             # cancel mid-sleep still records the call. Mirrors the success and
             # fault paths below. Recorded latency_ms is the configured value
             # (what the call would have taken had it run to completion).
+            # The arrival stub from record_arrival is updated in place so the
+            # cancel-during-response race (cancel BEFORE this push fires) still
+            # leaves an entry for the invariant.
             state.push_call_to_buffer(method, "success", method_snap["latency_ms"],
-                                      request_id=req_id, lava_headers=lava_headers)
+                                      request_id=req_id, lava_headers=lava_headers,
+                                      entry=arrival)
             if method_snap["latency_ms"] > 0:
                 time.sleep(method_snap["latency_ms"] / 1000.0)
             self._reply(override_status, override_body,
@@ -711,7 +810,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # for the JSON-RPC transport (chain_family in {"eth","btc"}). Faults
         # set for any other transport pass through to the success-path below.
         if jsonrpc_owns_snap:
-            fault = _apply_fault(state, method_snap, method, req_id, lava_headers, t_start)
+            fault = _apply_fault(state, method_snap, method, req_id, lava_headers,
+                                 t_start, entry=arrival)
         else:
             fault = None
         if fault is not None:
@@ -747,9 +847,12 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # Mirrors the hang-mode pattern in _apply_fault (write first, sleep
         # second). latency_ms recorded is the configured post-MAG-1821-override
         # value — that's what the call *would have taken* had it run to
-        # completion.
+        # completion. The arrival stub is updated in place so the entry exists
+        # regardless of whether the cancellation lands before or after this
+        # update — the cancel-during-response race is closed.
         state.push_call_to_buffer(method, emit_status, method_snap["latency_ms"],
-                                  request_id=req_id, lava_headers=lava_headers)
+                                  request_id=req_id, lava_headers=lava_headers,
+                                  entry=arrival)
         if method_snap["latency_ms"] > 0:
             time.sleep(method_snap["latency_ms"] / 1000.0)
         self._reply(status, response_body,
