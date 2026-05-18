@@ -158,6 +158,19 @@ async def _apply_grpc_fault(state, snap: dict, context: grpc.aio.ServicerContext
     show up in /history with the matching status — same contract as the
     JSON-RPC side.
 
+    MAG-1832 — write history BEFORE any latency sleep so a deadline cancel
+    mid-sleep still leaves a trace in /history. Each fault branch follows
+    the record-before-sleep pattern Avi rolled out for JSON-RPC / REST /
+    Tendermint-RPC / WebSocket: ``_record_history(snap["latency_ms"])`` →
+    ``await asyncio.sleep(snap["latency_ms"] / 1000)`` → ``await
+    context.abort(...)``. The recorded latency is the *configured* value
+    (what the call would have taken had it run to completion) — measuring
+    elapsed time after the sleep moves to inside the branch would be ~0ms
+    on a canceled-mid-sleep path, which is exactly the case we're fixing.
+
+    ``down`` and ``hang`` stay as-is — ``down`` has no latency at all and
+    ``hang`` already had its 30s sleep AFTER recording.
+
     Cross-transport isolation (MAG-1836)
     ------------------------------------
     ``ProviderState`` is shared across all transports (JSON-RPC, REST, gRPC,
@@ -171,32 +184,33 @@ async def _apply_grpc_fault(state, snap: dict, context: grpc.aio.ServicerContext
     # MAG-1836: only apply faults that were authored for the gRPC transport.
     if snap.get("chain_family") != "grpc":
         return False
-
-    elapsed_ms = int((time.monotonic() - t_start) * 1000)
-
-    # 1. Outage
+    # 1. Outage — no latency on the down path (provider drops the request
+    #    immediately, mirroring JSON-RPC ``down`` semantics).
     if snap["mode"] == "down":
         _record_history(state, method, "down", 0, lava_headers)
         await context.abort(grpc.StatusCode.UNAVAILABLE, "provider down")
         return True  # unreachable — abort raises, but keep type-checkers happy
 
-    # 2. Latency injection (does not short-circuit)
-    if snap["latency_ms"] > 0:
-        await asyncio.sleep(snap["latency_ms"] / 1000.0)
-
-    # 3. Hang — accept request, sleep ~forever so the client hits its
+    # 2. Hang — accept request, sleep ~forever so the client hits its
     #    deadline. Same 30s cap as the JSON-RPC handler so a stuck request
-    #    eventually unwinds and the asyncio task doesn't leak.
+    #    eventually unwinds and the asyncio task doesn't leak. Already
+    #    write-before-sleep; left untouched per Avi's review.
     if snap["mode"] == "hang":
         _record_history(state, method, "hang", 0, lava_headers)
         await asyncio.sleep(30)
         await context.abort(grpc.StatusCode.CANCELLED, "hang timeout")
         return True
 
-    # 4. Connection drop
+    # 3. Connection drop — record first, then pay the configured latency on
+    #    the wire, then abort. Order matters: history must be durable before
+    #    the abort surface so a router-side deadline cancel doesn't drop the
+    #    entry.
     if snap["mode"] == "drop_connection":
         drop_at = snap.get("drop_at", "before_headers")
-        _record_history(state, method, "drop_connection", elapsed_ms, lava_headers)
+        _record_history(state, method, "drop_connection", snap["latency_ms"],
+                        lava_headers)
+        if snap["latency_ms"] > 0:
+            await asyncio.sleep(snap["latency_ms"] / 1000.0)
         if drop_at in ("after_headers", "mid_body"):
             # Send empty initial metadata so the client sees a half-open
             # response, then abort. Unary RPCs collapse the "mid_body"
@@ -208,13 +222,16 @@ async def _apply_grpc_fault(state, snap: dict, context: grpc.aio.ServicerContext
         await context.abort(grpc.StatusCode.UNAVAILABLE, "connection dropped")
         return True
 
-    # 5. Rate limit
+    # 4. Rate limit
     if snap["mode"] == "rate_limit":
-        _record_history(state, method, "rate_limit", elapsed_ms, lava_headers)
+        _record_history(state, method, "rate_limit", snap["latency_ms"],
+                        lava_headers)
+        if snap["latency_ms"] > 0:
+            await asyncio.sleep(snap["latency_ms"] / 1000.0)
         await context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "Too many requests")
         return True
 
-    # 6. Forced or probabilistic error — translate error_message / error_code
+    # 5. Forced or probabilistic error — translate error_message / error_code
     #    to a grpc.StatusCode. Symbolic name wins; integer code is the
     #    fallback for legacy payloads. UNKNOWN is the last-resort default.
     if snap["mode"] == "error" or random.random() < snap["error_probability"]:
@@ -225,7 +242,9 @@ async def _apply_grpc_fault(state, snap: dict, context: grpc.aio.ServicerContext
             or _GRPC_STATUS_BY_VALUE.get(err_code)
             or grpc.StatusCode.UNKNOWN
         )
-        _record_history(state, method, "error", elapsed_ms, lava_headers)
+        _record_history(state, method, "error", snap["latency_ms"], lava_headers)
+        if snap["latency_ms"] > 0:
+            await asyncio.sleep(snap["latency_ms"] / 1000.0)
         await context.abort(status_code, err_msg)
         return True
 
@@ -318,6 +337,13 @@ class CosmosBaseTendermintServicer(query_pb2_grpc.ServiceServicer):
         returns the proto message or aborts. ``build_response_fn(snap)``
         produces the method-specific success proto so we can share the
         rest of the pipeline.
+
+        MAG-1832 — every downstream branch (override / corruption /
+        success) follows the record-before-sleep pattern: record history
+        with the configured ``snap["latency_ms"]`` FIRST, sleep, then emit
+        the wire response. Mirrors what landed for JSON-RPC / REST /
+        Tendermint-RPC / WebSocket so a deadline cancel mid-sleep still
+        leaves a /history entry.
         """
         t_start = time.monotonic()
         snap = self._state.snapshot()
@@ -339,8 +365,10 @@ class CosmosBaseTendermintServicer(query_pb2_grpc.ServiceServicer):
         if "error_stub" in method_cfg:
             status_code = _GRPC_STATUS_BY_NAME.get(method_cfg["error_stub"],
                                                     grpc.StatusCode.UNKNOWN)
-            elapsed_ms = int((time.monotonic() - t_start) * 1000)
-            _record_history(self._state, method, "error", elapsed_ms, lava_headers)
+            _record_history(self._state, method, "error", snap["latency_ms"],
+                            lava_headers)
+            if snap["latency_ms"] > 0:
+                await asyncio.sleep(snap["latency_ms"] / 1000.0)
             await context.abort(status_code, method_cfg.get("message", method_cfg["error_stub"]))
             return
         if "error" in method_cfg:
@@ -351,8 +379,10 @@ class CosmosBaseTendermintServicer(query_pb2_grpc.ServiceServicer):
                 or _GRPC_STATUS_BY_VALUE.get(code if isinstance(code, int) else -1)
                 or grpc.StatusCode.UNKNOWN
             )
-            elapsed_ms = int((time.monotonic() - t_start) * 1000)
-            _record_history(self._state, method, "error", elapsed_ms, lava_headers)
+            _record_history(self._state, method, "error", snap["latency_ms"],
+                            lava_headers)
+            if snap["latency_ms"] > 0:
+                await asyncio.sleep(snap["latency_ms"] / 1000.0)
             await context.abort(status_code, err.get("message", "override"))
             return
 
@@ -385,8 +415,10 @@ class CosmosBaseTendermintServicer(query_pb2_grpc.ServiceServicer):
             # mismatched field type at the Python layer. We surface the
             # corruption as an INTERNAL status so the client sees a
             # well-defined failure rather than a partial parse.
-            elapsed_ms = int((time.monotonic() - t_start) * 1000)
-            _record_history(self._state, method, "error", elapsed_ms, lava_headers)
+            _record_history(self._state, method, "error", snap["latency_ms"],
+                            lava_headers)
+            if snap["latency_ms"] > 0:
+                await asyncio.sleep(snap["latency_ms"] / 1000.0)
             await context.abort(grpc.StatusCode.INTERNAL,
                                  f"wrong_type corruption on {missing_field or 'response'}")
             return
@@ -395,12 +427,17 @@ class CosmosBaseTendermintServicer(query_pb2_grpc.ServiceServicer):
             # truncated all break the wire contract the same way as a
             # parse error on the client. Surface as UNKNOWN so the client
             # sees a generic parse-failure surface.
-            elapsed_ms = int((time.monotonic() - t_start) * 1000)
-            _record_history(self._state, method, "error", elapsed_ms, lava_headers)
+            _record_history(self._state, method, "error", snap["latency_ms"],
+                            lava_headers)
+            if snap["latency_ms"] > 0:
+                await asyncio.sleep(snap["latency_ms"] / 1000.0)
             await context.abort(grpc.StatusCode.UNKNOWN, f"corruption: {cm}")
             return
 
-        # Success
-        elapsed_ms = int((time.monotonic() - t_start) * 1000)
-        _record_history(self._state, method, "success", elapsed_ms, lava_headers)
+        # Success — record history with the configured latency BEFORE the
+        # sleep so a router-side cancel mid-sleep still leaves a trace.
+        _record_history(self._state, method, "success", snap["latency_ms"],
+                        lava_headers)
+        if snap["latency_ms"] > 0:
+            await asyncio.sleep(snap["latency_ms"] / 1000.0)
         return response
