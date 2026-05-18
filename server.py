@@ -48,6 +48,7 @@ from urllib.parse import urlparse, parse_qs
 
 import handlers_btc
 import handlers_eth
+import handlers_lnd
 import handlers_rest
 import handlers_tendermintrpc
 import handlers_ws
@@ -259,7 +260,7 @@ class ProviderState:
     missing_field: Optional[str] = None       # field-name slot — which top-level field to target when corruption_mode is "missing_field" (omit it) or "wrong_type" (swap its type). Defaults to "result" for wrong_type when unset.
     blocks_behind: int = 0    # 0 = current head; positive = behind; negative = ahead
     drop_at: str = "before_headers"   # one of: "before_headers", "after_headers", "mid_body"; only applies when mode="drop_connection"
-    chain_family: str = "eth"   # one of: "eth", "btc", "grpc", "rest", "tendermintrpc", "ws"; selects which chain-specific handler module dispatches the success-branch response. Default "eth" preserves backward-compat. "grpc" → handlers_grpc on ports 18548-50. "rest" → handlers_rest on ports 18551-53 (MAG-1777). "tendermintrpc" → handlers_tendermintrpc on ports 18554-56 (MAG-1841). "ws" → handlers_ws on ports 18557-59 (MAG-1801) for WebSocket-style providers with subscription lifecycle — the handler delegates non-subscription methods back to handlers_eth.handle / handlers_btc.handle so request/response semantics are identical to HTTP JSON-RPC; subscription frames are wrapped in chain-specific envelopes from stubs_ws.
+    chain_family: str = "eth"   # one of: "eth", "btc", "ln", "grpc", "rest", "tendermintrpc", "ws"; selects which chain-specific handler module dispatches the success-branch response. Default "eth" preserves backward-compat. "btc" → handlers_btc on the JSON-RPC ports 18545-47 (MAG-1716). "ln" → handlers_lnd on the SAME JSON-RPC ports (MAG-1726) — LN reuses the existing listener pool the same way BTC does, selected per-provider via chain_family. "grpc" → handlers_grpc on ports 18548-50. "rest" → handlers_rest on ports 18551-53 (MAG-1777). "tendermintrpc" → handlers_tendermintrpc on ports 18554-56 (MAG-1841). "ws" → handlers_ws on ports 18557-59 (MAG-1801) for WebSocket-style providers with subscription lifecycle — the handler delegates non-subscription methods back to handlers_eth.handle / handlers_btc.handle so request/response semantics are identical to HTTP JSON-RPC; subscription frames are wrapped in chain-specific envelopes from stubs_ws.
     # MAG-1791: provider-stale-on-getLogs primitive — head-fresh but logs-indexing-lagged.
     # Models the real production failure mode where providers update eth_blockNumber
     # immediately but index logs in a separate pipeline that can fall behind seconds-to-minutes.
@@ -728,12 +729,16 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # Only the method-lookup + result-shape logic is chain-specific — we
         # pick the handler module based on snap["chain_family"]. Default "eth"
         # preserves backward-compat for every payload that doesn't set
-        # chain_family.
+        # chain_family. "btc" (MAG-1716) and "ln" (MAG-1726) both reuse the
+        # JSON-RPC listener pool — they're selected per-provider via
+        # chain_family rather than per-port.
         #
         # The handler returns the status + response envelope; this layer is
         # responsible for I/O (corruption hooks, history accounting).
         if snap.get("chain_family") == "btc":
             status, response_body = handlers_btc.handle(state, body, snap, lava_headers)
+        elif snap.get("chain_family") == "ln":
+            status, response_body = handlers_lnd.handle(state, body, snap, lava_headers)
         else:
             status, response_body = handlers_eth.handle(state, body, snap, lava_headers)
         emit_status = "error" if "error" in response_body else "success"

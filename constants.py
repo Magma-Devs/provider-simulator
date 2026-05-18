@@ -149,3 +149,31 @@ TM_APP_HASH      = "AB" * 32                          # 64-char hex, distinct fr
 TM_VALIDATOR_ADDR = "C" * 40                          # 40-char hex, validator addr shape
 TM_PROPOSER_ADDR = "D" * 40                           # 40-char hex, proposer addr shape
 
+
+# ── Lightning Network (LND) — chain identity + stub primitives (MAG-1726) ─────
+# Successor to MAG-1716 (BTC). LN dispatches over the same JSON-RPC ports
+# (18545-18547) using ``chain_family="ln"`` — no new listener bound. This
+# mirrors what BTC did: the LN method-name namespace (``getinfo``,
+# ``listchannels``, ``openchannel``, ``decodepayreq``, ``payinvoice``,
+# ``listpeers``) doesn't overlap with ETH (``eth_*`` / ``net_*`` / ``web3_*``)
+# or BTC (``getblockcount`` / ``getblock`` / ``getblockhash`` / ...), so a
+# per-provider chain_family flag is enough to select the right handler.
+#
+# Why no LN_PROVIDER_PORTS dict: BTC didn't add one either. Both chains share
+# the JSON-RPC listener pool and select the handler by chain_family. Adding a
+# parallel port range would force a router-side spec wire-up that LN doesn't
+# yet have on the smart-router side, and would double the simulator's listener
+# count for no behavioural gain on a JSON-RPC-only surface.
+LN_NETWORK            = "regtest"   # LND's network field — "mainnet" | "testnet" | "regtest" | "signet"
+LN_IDENTITY_PUBKEY    = "02" + "ab" * 32      # 33-byte secp256k1 compressed pubkey: 0x02-prefix + 32-byte X coord
+LN_PEER_PUBKEY        = "02" + "cd" * 32      # distinct peer pubkey for listpeers / openchannel responses
+LN_BLOCK_HEIGHT       = 850_000               # LN nodes track the underlying BTC chain head
+LN_NUM_PEERS          = 1
+LN_NUM_ACTIVE_CHANNELS = 1
+LN_CHAN_POINT          = f"{'ab' * 32}:0"     # funding_txid_str:funding_output_index — LND's channel identifier
+LN_PAYMENT_HASH        = "ef" * 32            # 32-byte payment hash, hex-encoded (no 0x prefix)
+LN_PAYMENT_PREIMAGE    = "12" * 32            # 32-byte preimage; LND returns this on successful payinvoice
+# bech32 invoice prefix is hrp + version, signed and tag-encoded. The stub doesn't
+# need to be cryptographically valid — tests assert on shape, not signature.
+LN_BOLT11_INVOICE      = "lnbcrt1u1psim000000000000000000000000000000000000000000000000000000000000000"
+
