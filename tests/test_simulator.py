@@ -2535,3 +2535,73 @@ class TestCancelDuringResponseRecordsArrival:
         assert state.history[0]["status"] == "success"
         assert state.history[0]["method"] == "eth_blockNumber"
         assert state.history[0]["request_id"] == 42
+
+    def test_in_place_update_after_reset_re_appends(self, sim):
+        """Denis P2 follow-up on PR #37 (MAG-1832).
+
+        If ``clear_history()`` (POST /history/clear) or ``/reset/all`` runs
+        between ``record_arrival`` and the final in-place update, the stub
+        has already been evicted from ``self.history`` and the counters are
+        back to zero. Without the fix, the update path mutates the detached
+        dict, bumps ``calls_by_status[status]`` (off the now-empty counter
+        dict), and never re-appends — leaving the completed request missing
+        from /history with the broken invariant
+        ``total_calls != len(history)``.
+
+        The fix stamps a per-state ``_reset_generation`` on every stub at
+        arrival and bumps it inside ``clear_history``. The update path
+        compares the stamp to the current generation; on mismatch it
+        re-appends the entry and re-bumps counters as if it were a fresh
+        push. This test exercises that re-append path.
+        """
+        state = sim["states"]["1"]
+        # clean_state autouse already reset the state, but be explicit so a
+        # standalone run of this test in isolation is deterministic.
+        with state.lock:
+            state.history.clear()
+            state.total_calls = 0
+            state.calls_by_status = {}
+
+        stub = state.record_arrival(lava_headers={"Lava-Guid": "g-reset-mid"})
+        assert state.total_calls == 1
+        assert len(state.history) == 1
+        assert state.calls_by_status.get("in_flight") == 1
+
+        # Simulate /history/clear or /reset/all racing with the in-flight
+        # handler — the stub gets evicted between arrival and completion.
+        state.clear_history()
+        assert state.total_calls == 0
+        assert len(state.history) == 0
+        assert state.calls_by_status == {}
+
+        # In-flight handler resumes and calls push_call_to_buffer with the
+        # now-detached stub. The fix detects the reset_generation mismatch
+        # and re-appends the entry + re-bumps counters.
+        state.push_call_to_buffer(
+            "eth_blockNumber", "success", 0,
+            request_id=99, lava_headers={"Lava-Guid": "g-reset-mid"},
+            entry=stub,
+        )
+
+        assert len(state.history) == 1, (
+            "stub must be re-appended to history after detached update"
+        )
+        assert state.history[0] is stub, (
+            "re-appended entry must be the same dict the handler held"
+        )
+        assert state.total_calls == 1, (
+            "total_calls must be re-bumped so it matches len(history)"
+        )
+        assert state.calls_by_status.get("success") == 1, (
+            "final status must be reflected in calls_by_status"
+        )
+        assert state.calls_by_status.get("in_flight", 0) == 0, (
+            "stale in_flight counter must NOT be revived — clear_history "
+            "zeroed it and the re-append path only bumps the final status"
+        )
+        # The mutated stub itself carries the final values.
+        assert stub["status"] == "success"
+        assert stub["method"] == "eth_blockNumber"
+        assert stub["request_id"] == 99
+        # The captured lava header from arrival must still be present.
+        assert stub.get("lava_headers", {}).get("Lava-Guid") == "g-reset-mid"

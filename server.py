@@ -278,6 +278,15 @@ class ProviderState:
     # all-time counters — never capped, survives history ring-buffer rollover
     total_calls: int = 0
     calls_by_status: Dict[str, int] = field(default_factory=dict, repr=False)
+    # MAG-1832 P2 follow-up. Bumped by clear_history() so the in-place update
+    # path in push_call_to_buffer can detect when /history/clear or /reset/all
+    # ran between record_arrival and the final update. Without this signal the
+    # detached stub would be mutated without being re-appended to self.history,
+    # breaking the total_calls == len(history) invariant for the cleared-then-
+    # completed request. See push_call_to_buffer entry-branch for the recovery
+    # path. /reset/all calls clear_history() per state, so bumping here covers
+    # both reset routes (no separate /reset/all bump needed).
+    _reset_generation: int = field(default=0, repr=False)
 
     def snapshot(self) -> dict:
         """Return a thread-safe copy of the mutable config fields.
@@ -349,11 +358,19 @@ class ProviderState:
     def clear_history(self) -> None:
         """Wipe the in-memory call buffer and reset all-time counters to zero.
         Does NOT touch the scenario config (mode, latency, responses).
-        Called by POST /history/clear — use before a specific request to isolate its history."""
+        Called by POST /history/clear — use before a specific request to isolate its history.
+
+        MAG-1832 P2 follow-up: bumps _reset_generation so any in-flight stub
+        from record_arrival can be detected as detached when its eventual
+        push_call_to_buffer(entry=...) update arrives. /reset/all iterates
+        provider states and calls clear_history per state, so this single
+        bump covers both /history/clear and /reset/all reset paths.
+        """
         with self.lock:
             self.history.clear()
             self.total_calls       = 0
             self.calls_by_status   = {}
+            self._reset_generation += 1
 
     def record_arrival(self, lava_headers: dict = None) -> dict:
         """Push an in-flight stub entry the moment a request arrives and return the
@@ -398,6 +415,10 @@ class ProviderState:
             self.history.append(entry)
             self.total_calls += 1
             self.calls_by_status["in_flight"] = self.calls_by_status.get("in_flight", 0) + 1
+            # MAG-1832 P2: stamp the current reset generation so push_call_to_buffer
+            # can detect a clear_history()/reset_all that ran between now and the
+            # in-place update. See _reset_generation field comment.
+            entry["_reset_gen"] = self._reset_generation
         return entry
 
     def push_call_to_buffer(self, method: str, status: str, latency_ms: int,
@@ -435,6 +456,24 @@ class ProviderState:
         now = time.time()
         if entry is not None:
             with self.lock:
+                # MAG-1832 P2 follow-up. If clear_history()/reset_all ran between
+                # record_arrival and now, the stub was evicted from self.history
+                # and the counters were reset. The detached dict's old status is
+                # stale — re-append the stub and re-bump counters so total_calls
+                # and len(history) stay consistent for the now-completed request.
+                if entry.get("_reset_gen") != self._reset_generation:
+                    entry["method"]     = method
+                    entry["latency_ms"] = latency_ms
+                    entry["status"]     = status
+                    if request_id is not None:
+                        entry["request_id"] = request_id
+                    if lava_headers is not None:
+                        entry["lava_headers"] = lava_headers
+                    entry["_reset_gen"] = self._reset_generation
+                    self.history.append(entry)
+                    self.total_calls += 1
+                    self.calls_by_status[status] = self.calls_by_status.get(status, 0) + 1
+                    return
                 old_status = entry["status"]
                 entry["method"]     = method
                 entry["latency_ms"] = latency_ms
