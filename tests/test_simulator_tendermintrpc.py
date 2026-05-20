@@ -490,3 +490,59 @@ class TestTmHistory:
         # Sim-assigned id is a positive integer.
         assert isinstance(latest["request_id"], int)
         assert latest["request_id"] >= 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cross-transport isolation — the Tendermint handler's fault ladder is gated
+# on chain_family="tendermintrpc" so a fault authored for another transport
+# doesn't leak onto the TM port. Mirrors MAG-1838's JSON-RPC isolation
+# (TestJsonRpcCrossTransportFaultIsolation in test_simulator.py) and
+# TestRestCrossTransportFaultIsolation in test_simulator_rest.py. Surfaced
+# in the 2026-05-18 suite triage as one of the leak paths feeding the ~37
+# spurious failures.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTmCrossTransportFaultIsolation:
+    """TM port must ignore faults authored for any other chain_family."""
+
+    def test_tm_unaffected_by_eth_down_fault(self, sim):
+        """A ``chain_family="eth"`` down fault must not 503 the TM port."""
+        _request("POST", _ctrl(sim, "/scenario"), body={
+            "providers": {"1": {"chain_family": "eth", "mode": "down"}}
+        })
+        status, body, _ = _tm_get(sim, "1", "status")
+        assert status == 200, f"TM should ignore eth-down; got {status}"
+        assert "result" in body, f"expected TM success body; got {body!r}"
+
+    def test_tm_unaffected_by_btc_error_fault(self, sim):
+        """A ``chain_family="btc"`` mode=error must not produce an error
+        body on the TM port — direct mirror of the leak shape surfaced in
+        2026-05-18 triage."""
+        _request("POST", _ctrl(sim, "/scenario"), body={"providers": {"1": {
+            "chain_family": "btc",
+            "mode": "error", "error_code": -32000,
+            "error_message": "BTC error stub",
+        }}})
+        status, body, _ = _tm_get(sim, "1", "status")
+        assert status == 200, f"TM should ignore btc-error; got {status}"
+        assert "result" in body, f"expected TM success body; got {body!r}"
+
+    def test_tm_unaffected_by_rest_rate_limit_fault(self, sim):
+        """REST rate_limit must not 429 the TM port."""
+        _request("POST", _ctrl(sim, "/scenario"), body={
+            "providers": {"1": {"chain_family": "rest", "mode": "rate_limit"}}
+        })
+        status, body, _ = _tm_get(sim, "1", "status")
+        assert status == 200
+        assert "result" in body
+
+    def test_tm_fault_still_fires_when_chain_family_is_tendermintrpc(self, sim):
+        """Sanity check: ``chain_family="tendermintrpc"`` + mode=rate_limit
+        must still fire on the TM port. The gate must not regress
+        TM-authored faults."""
+        _request("POST", _ctrl(sim, "/scenario"), body={
+            "providers": {"1": {"chain_family": "tendermintrpc", "mode": "rate_limit"}}
+        })
+        status, _, _ = _tm_get(sim, "1", "status")
+        assert status == 429

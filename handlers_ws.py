@@ -231,21 +231,33 @@ class WsHandler(BaseHTTPRequestHandler):
         state = self.server.state
         snap = state.snapshot()
 
-        if snap["mode"] == "down":
+        # Cross-transport isolation — mirrors MAG-1838's jsonrpc_owns_snap
+        # gate. ``ProviderState`` is shared across all transports for the
+        # same provider id, so a fault authored for one transport leaks
+        # onto every other transport that reads ``snap["mode"]`` without
+        # a chain_family check. The WS handler owns chain_family="ws";
+        # for any other value the pre-handshake fault ladder is skipped
+        # and the handshake completes normally. Surfaced in the 2026-05-18
+        # suite triage as one of the leak paths feeding the ~37 spurious
+        # failures.
+        ws_owns_snap = snap.get("chain_family") == "ws"
+        ws_mode = snap["mode"] if ws_owns_snap else "success"
+
+        if ws_mode == "down":
             state.push_call_to_buffer("*", "down", 0,
                                       request_id=None,
                                       lava_headers=lava_headers)
             self._send_simple_error(503, "provider down")
             return
 
-        if snap["mode"] == "rate_limit":
+        if ws_mode == "rate_limit":
             state.push_call_to_buffer("ws_upgrade", "rate_limit", 0,
                                       request_id=None,
                                       lava_headers=lava_headers)
             self._send_simple_error(429, "rate limited")
             return
 
-        if snap["mode"] == "error":
+        if ws_mode == "error":
             # Override http_status 200 -> 400 here because 200-without-101 is
             # non-spec for WS upgrades. 4xx is the cleanest "upgrade refused"
             # signal a client can read.
@@ -255,7 +267,7 @@ class WsHandler(BaseHTTPRequestHandler):
             self._send_simple_error(400, snap["error_message"])
             return
 
-        if snap["mode"] == "hang":
+        if ws_mode == "hang":
             state.push_call_to_buffer("ws_upgrade", "hang", 0,
                                       request_id=None,
                                       lava_headers=lava_headers)
@@ -266,7 +278,7 @@ class WsHandler(BaseHTTPRequestHandler):
                 pass
             return
 
-        if snap["mode"] == "drop_connection":
+        if ws_mode == "drop_connection":
             drop_at = snap.get("drop_at", "before_headers")
             state.push_call_to_buffer("ws_upgrade", "drop_connection", 0,
                                       request_id=None,
@@ -368,12 +380,21 @@ class WsHandler(BaseHTTPRequestHandler):
                 # _resolve_method_config.
                 method_snap = resolve_method_config(method, snap, state.responses)
 
+                # Cross-transport isolation — mirrors MAG-1838's
+                # jsonrpc_owns_snap gate. The WS reader-loop fault path
+                # was missing a chain_family check, so a fault authored
+                # for chain_family="eth"/"btc"/"rest"/etc. fired on WS
+                # requests. Gate on the WS snap so the fault ladder only
+                # runs when the snap is WS-authored; otherwise fall through
+                # to the success-path response below.
+                ws_owns_snap = snap.get("chain_family") == "ws"
+
                 # MAG-1832 — fault evaluation BEFORE the latency sleep so
                 # apply_fault's internal push_call_to_buffer fires before
                 # any cancel window opens. Fault path sleeps AFTER the
                 # record but before the wire emit so timing is unchanged.
                 fault = apply_fault(state, method_snap, method, req_id,
-                                    lava_headers, t_start)
+                                    lava_headers, t_start) if ws_owns_snap else None
                 if fault is not None:
                     if method_snap["latency_ms"] > 0:
                         time.sleep(method_snap["latency_ms"] / 1000.0)

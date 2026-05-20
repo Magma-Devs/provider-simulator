@@ -913,6 +913,70 @@ class TestRestHistory:
         assert last["status"] == "not_found"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Cross-transport isolation — REST handler's fault ladder is gated on
+# chain_family="rest" so a fault authored for another transport doesn't
+# leak onto the REST port. Mirrors MAG-1838's JSON-RPC isolation
+# (TestJsonRpcCrossTransportFaultIsolation in test_simulator.py).
+# Surfaced in the 2026-05-18 suite triage as one of the leak paths feeding
+# the ~37 spurious failures.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestRestCrossTransportFaultIsolation:
+    """REST port must ignore faults authored for any other chain_family."""
+
+    def test_rest_unaffected_by_eth_down_fault(self, sim):
+        """A ``chain_family="eth"`` down fault must not return 503 on the
+        REST port. Without the gate this asserts http 503 instead of a
+        normal REST success body."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"chain_family": "eth", "mode": "down"}}
+        })
+        status, body, _ = _get(sim["rest1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
+        assert status == 200, f"REST should ignore eth-down; got {status}"
+        assert "block" in body, f"expected REST success body; got {body!r}"
+
+    def test_rest_unaffected_by_btc_error_fault(self, sim):
+        """A ``chain_family="btc"`` mode=error must not produce an error
+        body on the REST port — the exact leak surfaced in 2026-05-18 triage
+        (BTC test set mode=error, subsequent REST test got BTC error)."""
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {
+            "chain_family": "btc",
+            "mode": "error", "error_code": -32000,
+            "error_message": "BTC error stub",
+        }}})
+        status, body, _ = _get(sim["rest1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
+        assert status == 200, f"REST should ignore btc-error; got {status}"
+        assert "block" in body, f"expected REST success body; got {body!r}"
+
+    def test_rest_unaffected_by_grpc_rate_limit_fault(self, sim):
+        """gRPC rate_limit must not 429 the REST port."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"chain_family": "grpc", "mode": "rate_limit"}}
+        })
+        status, body, _ = _get(sim["rest1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
+        assert status == 200, f"REST should ignore grpc-rate-limit; got {status}"
+        assert "block" in body
+
+    def test_rest_unaffected_by_tendermintrpc_down_fault(self, sim):
+        """Tendermint down must not kill the REST port."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"chain_family": "tendermintrpc", "mode": "down"}}
+        })
+        status, body, _ = _get(sim["rest1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
+        assert status == 200
+        assert "block" in body
+
+    def test_rest_fault_still_fires_when_chain_family_is_rest(self, sim):
+        """Sanity check: the gate must not break REST-side faults.
+        ``chain_family="rest"`` + mode=rate_limit must still 429 the REST port."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"chain_family": "rest", "mode": "rate_limit"}}
+        })
+        status, _, _ = _get(sim["rest1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
+        assert status == 429
+
+
 def http_err():
     """Lazy reference to urllib's HTTPError for parametrize tuples."""
     return urllib.error.HTTPError
