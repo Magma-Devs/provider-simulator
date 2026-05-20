@@ -51,12 +51,15 @@ Run with:
 """
 
 import json
+import socket
+import struct
 import threading
 import time
 import urllib.error
 import urllib.request
 from collections import deque
 from http.server import HTTPServer, ThreadingHTTPServer
+from urllib.parse import urlparse
 
 import pytest
 
@@ -2323,3 +2326,282 @@ class TestJsonRpcCrossTransportFaultIsolation:
         })
         status, _ = _rpc(sim["provider1"], "getblockcount")
         assert status == 429
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAG-1832: cancel-during-response race — arrival is always recorded
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _force_rst_mid_handler(url: str, content_length: int = 100,
+                           pre_close_delay_s: float = 0.02) -> None:
+    """Open a TCP socket to ``url``, send POST headers that promise a body of
+    ``content_length`` bytes, briefly let the server's handler thread start
+    reading, then close the socket with SO_LINGER=0 so the kernel emits a
+    TCP RST instead of a clean FIN.
+
+    Why SO_LINGER=0: a clean close lets ``self.rfile.read(content_length)``
+    return ``b""`` (EOF) which the handler may swallow. We want
+    ``ConnectionResetError`` to fire on the read so the test exercises the
+    real cancellation path the router triggers when a hedge peer wins. The
+    short pre_close_delay gives the server thread time to enter ``rfile.read``
+    before the RST lands.
+    """
+    parsed = urlparse(url)
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                 struct.pack("ii", 1, 0))
+    s.connect((parsed.hostname, parsed.port))
+    s.send(
+        f"POST / HTTP/1.1\r\n"
+        f"Host: {parsed.hostname}:{parsed.port}\r\n"
+        f"Content-Type: application/json\r\n"
+        f"Content-Length: {content_length}\r\n"
+        f"\r\n".encode()
+    )
+    time.sleep(pre_close_delay_s)
+    s.close()
+
+
+class TestCancelDuringResponseRecordsArrival:
+    """MAG-1832 — the cancel-during-response race lives in the handler stages
+    between request arrival and the first ``push_call_to_buffer``. The biggest
+    window is ``self.rfile.read(Content-Length)``: when the router's hedge
+    mechanism picks a faster peer it sends a TCP RST on the cancelled peer's
+    connection, that read raises ``ConnectionResetError``, and without an
+    arrival stub the handler dies before the history entry is written. The
+    invariant ``Lava-Retries + 1 == history_count`` then fails because the
+    router still counts the cancelled attempt in its retries header.
+
+    PR #22 closed the sleep-then-write window (latency sleep was upstream of
+    the push). This test class pins the post-PR-#22 fix: arrival is recorded
+    BEFORE the body read so even a cancellation that lands mid-read leaves
+    the entry in /history.
+
+    Recorded statuses:
+      - Cancellation lands before any update          → ``in_flight``
+      - Cancellation lands during latency sleep / response build → final status
+        (``success`` / ``error`` / fault status), because the in-place update
+        already fired.
+    Either way the entry exists, which is the only thing the router-vs-sim
+    invariant counts.
+    """
+
+    def test_rst_before_body_arrives_still_records_history(self, sim):
+        """Real reproducer: TCP RST in the middle of the handler's body read
+        used to drop the call from /history. After MAG-1832-v2 the arrival
+        stub is pushed before the read, so the entry survives.
+
+        Without the fix the assertion below sees count=0.
+        """
+        # baseline: history is empty (autouse clean_state reset just ran)
+        _, before = _get(_ctrl(sim, "/history?provider=1"))
+        assert before["count"] == 0, (
+            f"expected empty history before the RST request, got {before['count']}"
+        )
+
+        _force_rst_mid_handler(sim["provider1"])
+
+        # The server thread that owns the cancelled connection still needs to
+        # finish unwinding; give it a brief moment to flush the entry. Without
+        # the fix this poll loop never sees an entry — the test would fail
+        # even at 2s. With the fix the entry shows up within 100ms.
+        deadline = time.monotonic() + 2.0
+        entries: list = []
+        while time.monotonic() < deadline:
+            _, after = _get(_ctrl(sim, "/history?provider=1"))
+            entries = after.get("history", [])
+            if entries:
+                break
+            time.sleep(0.05)
+
+        assert entries, (
+            "expected an arrival stub in history after a TCP-RST mid-handler "
+            "cancellation; the cancel-during-response race regressed"
+        )
+        assert len(entries) == 1, (
+            f"expected exactly one entry for one cancelled request, got "
+            f"{len(entries)}: {entries}"
+        )
+        # The entry's status depends on how far the handler got before the RST
+        # raised. Any of the legitimate "this request existed" statuses is
+        # acceptable — the load-bearing assertion is that the entry exists.
+        assert entries[0]["status"] in {
+            "in_flight", "success", "error", "down", "hang",
+            "rate_limit", "drop_connection",
+        }, f"unexpected status on arrival entry: {entries[0]}"
+
+    def test_rst_before_body_does_not_double_record(self, sim):
+        """When the cancellation lands while the handler is still racing the
+        update path, the in-place update must not produce a second entry.
+        Asserts the single-arrival, single-history-entry invariant.
+        """
+        for _ in range(5):
+            _force_rst_mid_handler(sim["provider2"])
+
+        # Wait for all five handler threads to flush
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            _, after = _get(_ctrl(sim, "/history?provider=2"))
+            entries = after.get("history", [])
+            if len(entries) >= 5:
+                break
+            time.sleep(0.05)
+
+        _, after = _get(_ctrl(sim, "/history?provider=2"))
+        entries = after.get("history", [])
+        assert len(entries) == 5, (
+            f"expected exactly 5 entries for 5 cancelled requests "
+            f"(no double-records, no drops), got {len(entries)}: "
+            f"{[e['status'] for e in entries]}"
+        )
+
+    def test_arrival_stub_carries_lava_headers(self, sim):
+        """Diagnostic value: cancelled-mid-handler entries must keep their
+        captured lava-* headers so /history filters by GUID still match.
+        The headers are read off ``self.headers`` before the body read, so
+        they're available at the arrival moment.
+        """
+        parsed = urlparse(sim["provider3"])
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                     struct.pack("ii", 1, 0))
+        s.connect((parsed.hostname, parsed.port))
+        s.send(
+            b"POST / HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Lava-Guid: test-cancel-during-response-guid\r\n"
+            b"Content-Length: 50\r\n"
+            b"\r\n"
+        )
+        time.sleep(0.02)
+        s.close()
+
+        deadline = time.monotonic() + 2.0
+        entries: list = []
+        while time.monotonic() < deadline:
+            _, after = _get(_ctrl(sim, "/history?provider=3"))
+            entries = after.get("history", [])
+            if entries:
+                break
+            time.sleep(0.05)
+
+        assert entries, "no arrival entry recorded for cancelled request"
+        # BaseHTTPRequestHandler normalises header casing — the captured key
+        # may be "Lava-Guid" or "lava-guid" depending on Python's parser
+        # version. Match case-insensitively.
+        captured = entries[0].get("lava_headers", {})
+        captured_lower = {k.lower(): v for k, v in captured.items()}
+        assert captured_lower.get("lava-guid") == "test-cancel-during-response-guid", (
+            f"lava-guid header lost on cancelled-mid-handler entry; "
+            f"got {captured}"
+        )
+
+    def test_unit_level_arrival_then_update_does_not_double_count(self, sim):
+        """White-box unit test against the ProviderState API itself.
+        ``record_arrival`` followed by ``push_call_to_buffer(..., entry=stub)``
+        must produce exactly one history entry with the final status, and
+        the ``calls_by_status`` counter must rebalance from ``in_flight``
+        to the final status.
+        """
+        state = sim["states"]["1"]
+        # clean_state autouse already reset the state, but be explicit
+        with state.lock:
+            state.history.clear()
+            state.total_calls = 0
+            state.calls_by_status = {}
+
+        stub = state.record_arrival(lava_headers={"Lava-Guid": "g1"})
+        assert state.calls_by_status.get("in_flight") == 1
+        assert state.total_calls == 1
+        assert len(state.history) == 1
+
+        state.push_call_to_buffer("eth_blockNumber", "success", 0,
+                                  request_id=42, lava_headers={"Lava-Guid": "g1"},
+                                  entry=stub)
+        assert state.total_calls == 1, (
+            "update must not bump total_calls — the entry is the same entry"
+        )
+        assert len(state.history) == 1, (
+            "update must not append a new entry"
+        )
+        assert state.calls_by_status.get("in_flight", 0) == 0, (
+            "in_flight counter must be decremented on update"
+        )
+        assert state.calls_by_status.get("success") == 1, (
+            "final status must be reflected in calls_by_status"
+        )
+        assert state.history[0]["status"] == "success"
+        assert state.history[0]["method"] == "eth_blockNumber"
+        assert state.history[0]["request_id"] == 42
+
+    def test_in_place_update_after_reset_re_appends(self, sim):
+        """Denis P2 follow-up on PR #37 (MAG-1832).
+
+        If ``clear_history()`` (POST /history/clear) or ``/reset/all`` runs
+        between ``record_arrival`` and the final in-place update, the stub
+        has already been evicted from ``self.history`` and the counters are
+        back to zero. Without the fix, the update path mutates the detached
+        dict, bumps ``calls_by_status[status]`` (off the now-empty counter
+        dict), and never re-appends — leaving the completed request missing
+        from /history with the broken invariant
+        ``total_calls != len(history)``.
+
+        The fix stamps a per-state ``_reset_generation`` on every stub at
+        arrival and bumps it inside ``clear_history``. The update path
+        compares the stamp to the current generation; on mismatch it
+        re-appends the entry and re-bumps counters as if it were a fresh
+        push. This test exercises that re-append path.
+        """
+        state = sim["states"]["1"]
+        # clean_state autouse already reset the state, but be explicit so a
+        # standalone run of this test in isolation is deterministic.
+        with state.lock:
+            state.history.clear()
+            state.total_calls = 0
+            state.calls_by_status = {}
+
+        stub = state.record_arrival(lava_headers={"Lava-Guid": "g-reset-mid"})
+        assert state.total_calls == 1
+        assert len(state.history) == 1
+        assert state.calls_by_status.get("in_flight") == 1
+
+        # Simulate /history/clear or /reset/all racing with the in-flight
+        # handler — the stub gets evicted between arrival and completion.
+        state.clear_history()
+        assert state.total_calls == 0
+        assert len(state.history) == 0
+        assert state.calls_by_status == {}
+
+        # In-flight handler resumes and calls push_call_to_buffer with the
+        # now-detached stub. The fix detects the reset_generation mismatch
+        # and re-appends the entry + re-bumps counters.
+        state.push_call_to_buffer(
+            "eth_blockNumber", "success", 0,
+            request_id=99, lava_headers={"Lava-Guid": "g-reset-mid"},
+            entry=stub,
+        )
+
+        assert len(state.history) == 1, (
+            "stub must be re-appended to history after detached update"
+        )
+        assert state.history[0] is stub, (
+            "re-appended entry must be the same dict the handler held"
+        )
+        assert state.total_calls == 1, (
+            "total_calls must be re-bumped so it matches len(history)"
+        )
+        assert state.calls_by_status.get("success") == 1, (
+            "final status must be reflected in calls_by_status"
+        )
+        assert state.calls_by_status.get("in_flight", 0) == 0, (
+            "stale in_flight counter must NOT be revived — clear_history "
+            "zeroed it and the re-append path only bumps the final status"
+        )
+        # The mutated stub itself carries the final values.
+        assert stub["status"] == "success"
+        assert stub["method"] == "eth_blockNumber"
+        assert stub["request_id"] == 99
+        # The captured lava header from arrival must still be present.
+        assert stub.get("lava_headers", {}).get("Lava-Guid") == "g-reset-mid"
