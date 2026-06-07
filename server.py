@@ -36,6 +36,7 @@ Control API:
 
 import datetime
 import json
+import os
 import random
 import re
 import threading
@@ -287,6 +288,10 @@ class ProviderState:
     # path. /reset/all calls clear_history() per state, so bumping here covers
     # both reset routes (no separate /reset/all bump needed).
     _reset_generation: int = field(default=0, repr=False)
+    # MAG-2022: timestamp of the last /scenario write touching this provider.
+    # Used by the background TTL sweep to revert stale state (e.g., a leftover
+    # mode=hang from a prior test session) before a router pod restart can hit it.
+    last_scenario_write_at: float = field(default_factory=time.time, repr=False)
 
     def snapshot(self) -> dict:
         """Return a thread-safe copy of the mutable config fields.
@@ -332,6 +337,9 @@ class ProviderState:
             self.logs_lag_mode      = cfg.get("logs_lag_mode",      self.logs_lag_mode)
             if "responses" in cfg:
                 self.responses = _normalise_responses(cfg["responses"])
+            # MAG-2022: bump the write timestamp so the TTL sweep treats this
+            # provider as fresh and won't revert it for at least SIM_SCENARIO_TTL_SECONDS.
+            self.last_scenario_write_at = time.time()
 
     def reset_scenario(self) -> None:
         """Reset only the scenario config fields back to startup defaults (mode, latency, responses).
@@ -2249,6 +2257,23 @@ class ControlHandler(BaseHTTPRequestHandler):
 # ── Server startup ────────────────────────────────────────────────────────────
 
 
+def _scenario_ttl_sweep(states: Dict[str, ProviderState], ttl_s: int, interval_s: float = 60.0) -> None:
+    """Background daemon (MAG-2022): every interval_s, revert any provider whose
+    scenario hasn't been written-to in > ttl_s seconds back to defaults.
+    Prevents stale state (e.g., mode=hang from a prior test) from surviving
+    a router pod restart and breaking the router's startup validation.
+    Only reverts non-default state — providers in mode='success' are skipped."""
+    while True:
+        time.sleep(interval_s)
+        now = time.time()
+        for pid, state in list(states.items()):
+            with state.lock:
+                age = now - state.last_scenario_write_at
+                non_default = state.mode != "success"
+            if age > ttl_s and non_default:
+                state.reset_scenario()
+                print(f"[ttl-sweep] reverted provider {pid} (idle {age:.0f}s > {ttl_s}s TTL)")
+
 
 def main():
     """Start all simulator servers and block until interrupted.
@@ -2388,6 +2413,23 @@ def main():
     ctrl = HTTPServer(("0.0.0.0", CONTROL_PORT), ControlHandler)
     ctrl.provider_states = states
     servers.append(ctrl)
+
+    # MAG-2022: background TTL sweep — revert any per-provider scenario state
+    # that has been idle for > SIM_SCENARIO_TTL_SECONDS back to defaults.
+    # Prevents stale state (e.g., mode=hang from a prior test) from surviving
+    # a router pod restart and breaking the router's startup validation.
+    # Set SIM_SCENARIO_TTL_SECONDS=0 to disable.
+    scenario_ttl_s = int(os.environ.get("SIM_SCENARIO_TTL_SECONDS", "1800"))
+    if scenario_ttl_s > 0:
+        sweep_thread = threading.Thread(
+            target=_scenario_ttl_sweep,
+            args=(states, scenario_ttl_s),
+            daemon=True,
+            name="scenario-ttl-sweep",
+        )
+        sweep_thread.start()
+        print(f"[ttl-sweep] started — scenario TTL = {scenario_ttl_s}s "
+              f"(set SIM_SCENARIO_TTL_SECONDS=0 to disable)")
 
     print("Provider simulator started")
     for pid, port in PROVIDER_PORTS.items():
