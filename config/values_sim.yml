@@ -52,27 +52,18 @@ routers:
   - id: eth
     network: eth1
     nodes:
+      # Pairs http + wss under one provider; interface stays "jsonrpc" — binary picks WS transport from URL scheme.
       - name: Google1
+        skip_verifications: "chain-id,pruning"
         endpoints:
           - url: YOUR_ETH_RPC_PROVIDER_URL
             interface: jsonrpc
             addons: [archive, trace, debug]
-      - name: Google2
-        endpoints:
-          - url: YOUR_ETH_RPC_PROVIDER_URL
+          - url: wss://g.w.lavanet.xyz:443/gateway/eth/rpc/YOUR_LAVA_GRPC_KEY
             interface: jsonrpc
-            addons: [archive, trace, debug]
-      - name: QuickNode1
-        endpoints:
-          - url: https://YOUR_QUICKNODE_ENDPOINT.quiknode.pro/YOUR_QUICKNODE_TOKEN/
-            interface: jsonrpc
-            addons: [archive, trace, debug]
-      - name: QuickNode2
-        endpoints:
-          - url: https://YOUR_QUICKNODE_ENDPOINT.quiknode.pro/YOUR_QUICKNODE_TOKEN/
-            interface: jsonrpc
-            addons: [archive, trace, debug]
 
+  # eth-sim — simulator router (only in values_sim.yml, not in core values.yml)
+  # Three sim providers wired to the in-cluster provider-simulator service.
   - id: eth-sim
     network: eth1
     nodes:
@@ -145,56 +136,39 @@ routers:
             addons: [archive, trace, debug]
           - url: ws://provider-simulator.lava-infra.svc.cluster.local:18574/ws
             interface: jsonrpc
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 1
+      targetCPUUtilizationPercentage: 75
+      targetMemoryUtilizationPercentage: 75
 
-  # lava-sim-grpc — simulator router for the Cosmos gRPC chain (MAG-1780).
-  # Primaries on 18548-18550 and backups on 18563-18565 share the same
-  # pod, distinct ProviderState instances per backup pid.
-  - id: lava-sim-grpc
+  # LAVA over REST
+  - id: lava-rest
     network: lava
     nodes:
-      - name: SimGrpcProvider1
-        skip_verifications: "chain-id,pruning,simulate,tx-indexing,grpc"
+      - name: LavaGateway
         endpoints:
-          - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18548
-            interface: grpc
-            addons: []
-      - name: SimGrpcProvider2
-        skip_verifications: "chain-id,pruning,simulate,tx-indexing,grpc"
-        endpoints:
-          - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18549
-            interface: grpc
-            addons: []
-      - name: SimGrpcProvider3
-        skip_verifications: "chain-id,pruning,simulate,tx-indexing,grpc"
-        endpoints:
-          - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18550
-            interface: grpc
-            addons: []
-      - name: SimGrpcBackup1
-        is_backup: true
-        skip_verifications: "chain-id,pruning,simulate,tx-indexing,grpc"
-        endpoints:
-          - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18563
-            interface: grpc
-            addons: []
-      - name: SimGrpcBackup2
-        is_backup: true
-        skip_verifications: "chain-id,pruning,simulate,tx-indexing,grpc"
-        endpoints:
-          - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18564
-            interface: grpc
-            addons: []
-      - name: SimGrpcBackup3
-        is_backup: true
-        skip_verifications: "chain-id,pruning,simulate,tx-indexing,grpc"
-        endpoints:
-          - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18565
-            interface: grpc
+          - url: https://g.w.lavanet.xyz:443/gateway/lava/rest/YOUR_LAVA_GRPC_KEY
+            interface: rest
             addons: []
 
   # lava-sim-rest — simulator router for the Cosmos REST chain (MAG-1834).
-  # Primaries on 18551-18553; SimRestBackup1-3 on 18566-18568 with
-  # is_backup: true.
+  # Three sim providers wired to the in-cluster provider-simulator's REST
+  # listeners on ports 18551–18553 (added by MAG-1777 / provider-simulator
+  # PR #18). Required by MAG-1740's REST-routing tests, which need a
+  # smart-router REST endpoint that fronts the simulator's REST handlers
+  # so retry / failover / status-mapping behaviors can be exercised
+  # deterministically.
+  #
+  # Distinct from:
+  #   - ``lava-rest`` above — the real Lava gateway, used by MAG-1772.
+  #   - ``lava-sim-rest.<host>`` — the simulator-direct ingress (no
+  #     smart-router in the path), useful for debugging the simulator's
+  #     own response shapes but not for testing router behavior.
+  #
+  # Rendered ingress (chain-interface convention):
+  # ``lava-sim-rest-rest.<host>``.
   - id: lava-sim-rest
     network: lava
     nodes:
@@ -216,6 +190,11 @@ routers:
           - url: http://provider-simulator.lava-infra.svc.cluster.local:18553
             interface: rest
             addons: []
+      # Backup tier (provider-simulator MAG-18xx surface-backup PR).
+      # Distinct ProviderState pids 10-12 → 18566-18568 in the simulator;
+      # the smart-router consults this pool only after the primary
+      # SimProvider1-3 pool is exhausted on a request. Addons must match
+      # the primary tier (empty here) — see IsSupportingAddon note above.
       - name: SimRestBackup1
         is_backup: true
         skip_verifications: "chain-id,pruning,simulate"
@@ -237,50 +216,240 @@ routers:
           - url: http://provider-simulator.lava-infra.svc.cluster.local:18568
             interface: rest
             addons: []
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 1
+      targetCPUUtilizationPercentage: 75
+      targetMemoryUtilizationPercentage: 75
+
+  # lava-sim-grpc — simulator router for the Cosmos gRPC chain (MAG-1780
+  # primary + MAG-18xx surface-backup PR). Wires the simulator's gRPC
+  # listeners (handlers_grpc.CosmosBaseTendermintServicer) into the
+  # smart-router so retry / failover / status-mapping over gRPC can be
+  # exercised end-to-end the same way lava-sim-rest covers REST.
+  #
+  # Distinct from:
+  #   - ``lava-grpc`` below — the real Lava gateway over gRPC.
+  #   - The bare gRPCRoute (k8s/grpcroute-lava-sim-grpc.yml) which exposes
+  #     the primary listeners directly without a smart-router in front.
+  #
+  # Primaries on 18548-18550 (pids 1-3, shared ProviderState with the
+  # matching JSON-RPC primary). Backups on 18563-18565 (pids 7-9, distinct
+  # ProviderState per pid).
+  - id: lava-sim-grpc
+    network: lava
+    nodes:
+      - name: SimGrpcProvider1
+        skip_verifications: "chain-id,pruning,simulate,tx-indexing"
+        endpoints:
+          - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18548
+            interface: grpc
+            addons: []
+      - name: SimGrpcProvider2
+        skip_verifications: "chain-id,pruning,simulate,tx-indexing"
+        endpoints:
+          - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18549
+            interface: grpc
+            addons: []
+      - name: SimGrpcProvider3
+        skip_verifications: "chain-id,pruning,simulate,tx-indexing"
+        endpoints:
+          - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18550
+            interface: grpc
+            addons: []
+      - name: SimGrpcBackup1
+        is_backup: true
+        skip_verifications: "chain-id,pruning,simulate,tx-indexing"
+        endpoints:
+          - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18563
+            interface: grpc
+            addons: []
+      - name: SimGrpcBackup2
+        is_backup: true
+        skip_verifications: "chain-id,pruning,simulate,tx-indexing"
+        endpoints:
+          - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18564
+            interface: grpc
+            addons: []
+      - name: SimGrpcBackup3
+        is_backup: true
+        skip_verifications: "chain-id,pruning,simulate,tx-indexing"
+        endpoints:
+          - url: grpc://provider-simulator.lava-infra.svc.cluster.local:18565
+            interface: grpc
+            addons: []
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 1
+      targetCPUUtilizationPercentage: 75
+      targetMemoryUtilizationPercentage: 75
+
+  # LAVA over gRPC (token-prefix subdomain format). Chart 5.0.1 (MAG-1684)
+  # accepts grpcs:// directly — no manual ConfigMap edit needed.
+  - id: lava-grpc
+    network: lava
+    nodes:
+      - name: LavaGateway
+        endpoints:
+          - url: grpcs://YOUR_LAVA_GRPC_KEY-lava.g.w.lavanet.xyz:443
+            interface: grpc
+            auth-config:
+              use-tls: true
+
+  # LAVA Tendermint RPC — wss endpoint omitted (test framework can't COMPARE
+  # against wss URLs; see BUGS/JIRA_DRAFT_WEBSOCKET_TRANSPORT.md).
+  - id: lava-tm
+    network: lava
+    nodes:
+      - name: LavaGateway
+        endpoints:
+          - url: https://g.w.lavanet.xyz:443/gateway/lava/rpc-http/YOUR_LAVA_GRPC_KEY
+            interface: tendermintrpc
+            addons: []
 
   # lava-sim-tm — simulator router for the Tendermint-RPC chain (MAG-1842).
-  # Primaries on 18554-18556; SimTmBackup1-3 on 18569-18571 with
-  # is_backup: true. Per-node skip_verifications is required because the
-  # simulator returns "lava-sim-tm" as its chain id (constants.TM_NETWORK_ID).
+  # Three sim providers wired to the in-cluster provider-simulator's
+  # Tendermint-RPC listeners on ports 18554–18556 (added by MAG-1841 /
+  # provider-simulator PR #26). Required by MAG-1741's residual scope
+  # (failure-mode + routing-behavior tests over TM RPC) which needs a
+  # smart-router TM endpoint that fronts the simulator's TM handlers so
+  # retry / failover / status-mapping behaviors can be exercised
+  # deterministically.
+  #
+  # Distinct from:
+  #   - ``lava-tm`` above — the real Lava gateway, used by PR #71's ~22
+  #     happy-path tests under tests/tendermint/.
+  #
+  # Rendered ingress (chain-interface convention):
+  # ``lava-sim-tm-tendermintrpc.<host>``.
+  #
+  # ``skip_verifications`` per sim node: the simulator returns
+  # ``lava-sim-tm`` as its chain id (constants.TM_NETWORK_ID) rather
+  # than ``lava-mainnet-1``, so the router's chain-id verification on
+  # startup would otherwise reject the upstream. The ``pruning`` and
+  # ``simulate`` skips mirror the lava-sim-rest precedent on MAG-1834.
   - id: lava-sim-tm
     network: lava
     nodes:
       - name: SimProvider1
-        skip_verifications: "chain-id,pruning,simulate"
+        skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: http://provider-simulator.lava-infra.svc.cluster.local:18554
             interface: tendermintrpc
             addons: []
       - name: SimProvider2
-        skip_verifications: "chain-id,pruning,simulate"
+        skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: http://provider-simulator.lava-infra.svc.cluster.local:18555
             interface: tendermintrpc
             addons: []
       - name: SimProvider3
-        skip_verifications: "chain-id,pruning,simulate"
+        skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: http://provider-simulator.lava-infra.svc.cluster.local:18556
             interface: tendermintrpc
             addons: []
+      # Backup tier (provider-simulator MAG-18xx surface-backup PR).
+      # Distinct ProviderState pids 13-15 → 18569-18571. skip_verifications
+      # repeats per-node because chain-id verification runs per-endpoint
+      # during the router's BackupProviders validation pass.
       - name: SimTmBackup1
         is_backup: true
-        skip_verifications: "chain-id,pruning,simulate"
+        skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: http://provider-simulator.lava-infra.svc.cluster.local:18569
             interface: tendermintrpc
             addons: []
       - name: SimTmBackup2
         is_backup: true
-        skip_verifications: "chain-id,pruning,simulate"
+        skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: http://provider-simulator.lava-infra.svc.cluster.local:18570
             interface: tendermintrpc
             addons: []
       - name: SimTmBackup3
         is_backup: true
-        skip_verifications: "chain-id,pruning,simulate"
+        skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: http://provider-simulator.lava-infra.svc.cluster.local:18571
             interface: tendermintrpc
             addons: []
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 1
+      targetCPUUtilizationPercentage: 75
+      targetMemoryUtilizationPercentage: 75
+
+  # Solana JSON-RPC (Phase 4 bonus — unblocks Solana classifier paths).
+  # wss endpoint omitted; see BUGS/JIRA_DRAFT_WEBSOCKET_TRANSPORT.md.
+  - id: solana
+    network: solana
+    nodes:
+      - name: LavaGateway
+        endpoints:
+          - url: https://g.w.lavanet.xyz:443/gateway/solana/rpc-http/YOUR_LAVA_GRPC_KEY
+            interface: jsonrpc
+            addons: []
+
+  # Bitcoin JSON-RPC (Phase 4 bonus — unblocks Group 13 tier-2 classifier tests)
+  - id: btc
+    network: btc
+    nodes:
+      - name: LavaGateway
+        endpoints:
+          - url: https://g.w.lavanet.xyz:443/gateway/btc/rpc-http/YOUR_LAVA_GRPC_KEY
+            interface: jsonrpc
+            addons: []
+
+  # Bitcoin JSON-RPC simulator-backed — unblocks MAG-1744 (the BTC suite
+  # at smart_router_automation/tests/simulator/btc/). Mirrors eth-sim's
+  # shape; the upstream simulator pod dispatches each request through
+  # handlers_btc.py vs handlers_eth.py based on the chain_family field
+  # in the per-test scenario (per-provider config via
+  # sim_control.ProviderConfig.chain_family, MAG-1716). That dispatching
+  # is why we can safely reuse the existing JSON-RPC sim ports
+  # 18545–18547 alongside eth-sim — the simulator process is the same;
+  # only the chain_family selected per-request differs.
+  #
+  # Rendered ingress (chain-interface convention):
+  # ``btc-sim-jsonrpc.<host>``.
+  #
+  # ``skip_verifications`` per sim node: the simulator returns its
+  # static BTC stubs (height 850000, deterministic block hashes from
+  # btc_block_hash(N)) rather than the production Bitcoin chain values
+  # the router's startup chain-id / pruning verifications expect.
+  # Mirrors the lava-sim-rest precedent on MAG-1834. The eth-sim
+  # variant escapes verification entirely because handlers_eth.py
+  # returns chain-id consistent with the deployed spec; the BTC sim
+  # stubs are intentionally short for test determinism and would
+  # otherwise fail pre-request validation.
+  - id: btc-sim
+    network: btc
+    nodes:
+      - name: SimBtcProvider1
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: http://provider-simulator.lava-infra.svc.cluster.local:18545
+            interface: jsonrpc
+            addons: []
+      - name: SimBtcProvider2
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: http://provider-simulator.lava-infra.svc.cluster.local:18546
+            interface: jsonrpc
+            addons: []
+      - name: SimBtcProvider3
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: http://provider-simulator.lava-infra.svc.cluster.local:18547
+            interface: jsonrpc
+            addons: []
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 1
+      targetCPUUtilizationPercentage: 75
+      targetMemoryUtilizationPercentage: 75
