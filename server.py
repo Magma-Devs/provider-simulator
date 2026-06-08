@@ -2085,6 +2085,58 @@ class ControlHandler(BaseHTTPRequestHandler):
         if self.path == "/health":
             self._reply(200, {"status": "ok"})
 
+        elif self.path == "/ready":
+            # Real readiness check: confirms every JSON-RPC / gRPC / REST /
+            # Tendermint-RPC / WebSocket listener is actually accepting TCP
+            # connections, not just that the python process started. Wired
+            # to the chart's readinessProbe so kube-proxy stops routing
+            # Service traffic to a pod that's still binding ports.
+            #
+            # Without this gate, the smart-router's earliest relay attempts
+            # race the simulator's listener-bind step. They fail with
+            # connection-refused, get translated to "HTTP 503
+            # NODE_SERVICE_UNAVAILABLE" by the router's error classifier,
+            # and the providers go straight onto the blocked list. The
+            # suite then runs against a router whose pairing pool is
+            # poisoned from the start.
+            import socket
+            from constants import (
+                PROVIDER_PORTS, BACKUP_PROVIDER_PORTS,
+                GRPC_PROVIDER_PORTS, GRPC_BACKUP_PORTS,
+                REST_PORTS, REST_BACKUP_PORTS,
+                TM_PORTS, TM_BACKUP_PORTS,
+                WS_PORTS, WS_BACKUP_PORTS,
+            )
+            all_ports = sorted({
+                *PROVIDER_PORTS.values(), *BACKUP_PROVIDER_PORTS.values(),
+                *GRPC_PROVIDER_PORTS.values(), *GRPC_BACKUP_PORTS.values(),
+                *REST_PORTS.values(), *REST_BACKUP_PORTS.values(),
+                *TM_PORTS.values(), *TM_BACKUP_PORTS.values(),
+                *WS_PORTS.values(), *WS_BACKUP_PORTS.values(),
+            })
+            missing = []
+            for port in all_ports:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(0.1)
+                try:
+                    if s.connect_ex(("127.0.0.1", port)) != 0:
+                        missing.append(port)
+                finally:
+                    s.close()
+            if missing:
+                self._reply(503, {
+                    "status": "not_ready",
+                    "listening": len(all_ports) - len(missing),
+                    "expected": len(all_ports),
+                    "missing_ports": missing,
+                })
+            else:
+                self._reply(200, {
+                    "status": "ready",
+                    "listening": len(all_ports),
+                    "expected": len(all_ports),
+                })
+
         elif self.path == "/scenario":
             self._reply(200, {
                 "providers": {pid: s.snapshot()
