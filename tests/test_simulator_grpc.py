@@ -562,17 +562,26 @@ class TestGrpcCrossTransportFaultIsolation:
     and asserting the gRPC port still returns a normal stub response.
     """
 
-    def test_grpc_unaffected_by_eth_down_fault(self, sim):
-        """JSON-RPC ``down`` fault on provider 1 must not kill its gRPC port.
+    def test_grpc_killed_by_eth_down_fault(self, sim):
+        """A ``chain_family="eth"`` down fault MUST abort the gRPC port
+        with ``UNAVAILABLE``.
 
-        Without the chain_family gate this asserts ``UNAVAILABLE`` instead.
-        """
+        MAG-2092: mode="down" is honored on every transport regardless of
+        chain_family because reachability is provider-wide. Without the
+        universal-down semantic, an ETH provider in mode=down would keep
+        serving gRPC requests, hiding router-side bugs that depend on the
+        provider being unreachable across every node-url (e.g. MAG-2061).
+        Per-transport isolation still applies to content modes (error /
+        corrupt / hang / rate_limit / drop_connection) — see sibling
+        hang / rate_limit / error tests below."""
         _post(_ctrl(sim, "/scenario"), {
             "providers": {"1": {"chain_family": "eth", "mode": "down"}}
         })
-        resp = _call_get_latest_block(sim["grpc1"])
-        assert resp.block.header.chain_id == "lava-sim"
-        assert resp.block.header.height > 0
+        with pytest.raises(grpc.RpcError) as exc_info:
+            _call_get_latest_block(sim["grpc1"])
+        assert exc_info.value.code() == grpc.StatusCode.UNAVAILABLE, (
+            f"gRPC should abort with UNAVAILABLE under universal-down; got {exc_info.value.code()}"
+        )
 
     def test_grpc_unaffected_by_eth_hang_fault(self, sim):
         """JSON-RPC ``hang`` must not make the gRPC port sleep 30s.
@@ -620,6 +629,30 @@ class TestGrpcCrossTransportFaultIsolation:
         with pytest.raises(grpc.RpcError) as exc_info:
             _call_get_latest_block(sim["grpc1"])
         assert exc_info.value.code() == grpc.StatusCode.UNAVAILABLE
+
+    def test_grpc_killed_by_btc_down_fault(self, sim):
+        """MAG-2092 universal-down: a ``chain_family="btc"`` mode=down
+        also aborts the gRPC port with UNAVAILABLE."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"chain_family": "btc", "mode": "down"}}
+        })
+        with pytest.raises(grpc.RpcError) as exc_info:
+            _call_get_latest_block(sim["grpc1"])
+        assert exc_info.value.code() == grpc.StatusCode.UNAVAILABLE, (
+            f"gRPC should abort with UNAVAILABLE under universal-down; got {exc_info.value.code()}"
+        )
+
+    def test_grpc_killed_by_rest_down_fault(self, sim):
+        """MAG-2092 universal-down: a ``chain_family="rest"`` mode=down
+        also aborts the gRPC port with UNAVAILABLE."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"chain_family": "rest", "mode": "down"}}
+        })
+        with pytest.raises(grpc.RpcError) as exc_info:
+            _call_get_latest_block(sim["grpc1"])
+        assert exc_info.value.code() == grpc.StatusCode.UNAVAILABLE, (
+            f"gRPC should abort with UNAVAILABLE under universal-down; got {exc_info.value.code()}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
