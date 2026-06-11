@@ -2240,14 +2240,18 @@ class TestJsonRpcCrossTransportFaultIsolation:
     Tendermint-RPC for the same provider id. The fault primitives in
     ``_apply_fault`` (down / hang / drop_connection / rate_limit / error)
     are chain-agnostic on the snap, so without an explicit gate a fault
-    authored for the gRPC port (chain_family="grpc") would also kill the
-    JSON-RPC port for that provider.
+    authored for one transport would also fire on every other transport
+    sharing the same state.
 
-    Inverse of MAG-1836 (which gated the gRPC fault ladder on
-    chain_family="grpc"). The JSON-RPC handler owns chain_family values
-    ``"eth"`` and ``"btc"``; any other value means the fault was set for
-    a different transport and the JSON-RPC port should fall through to
-    its normal success response.
+    MAG-2089 sharpened the gate: each JSON-RPC listener fires faults only
+    when the snap's ``chain_family`` matches its OWN listener's
+    ``handler_chain_family``. The ETH listener (at ports 18545-7) owns
+    ``"eth"`` exclusively; BTC and LN have their own dedicated listener
+    pools at 18575-7 / 18578-80 that gate on ``"btc"`` / ``"ln"``
+    respectively. Any non-matching ``chain_family`` value (incl. "btc"
+    or "ln" on an ETH listener — what used to bleed) means the fault was
+    set for a different transport and the listener falls through to its
+    normal success response.
     """
 
     def test_jsonrpc_unaffected_by_grpc_down_fault(self, sim):
@@ -2317,15 +2321,34 @@ class TestJsonRpcCrossTransportFaultIsolation:
         status, _ = _rpc(sim["provider1"], "eth_blockNumber")
         assert status == 503
 
-    def test_jsonrpc_fault_still_fires_when_chain_family_is_btc(self, sim):
-        """Sanity check: btc is the other JSON-RPC-owned chain family —
-        a ``rate_limit`` fault with chain_family="btc" must still return
-        429 on the JSON-RPC port."""
+    def test_jsonrpc_eth_listener_ignores_btc_chain_family_fault(self, sim):
+        """MAG-2089 — the ETH listener must NOT fire a fault authored for
+        chain_family="btc". Pre-MAG-2089 the ETH listener evaluated faults
+        for chain_family in {eth, btc, ln} and bled a BTC scenario's
+        rate_limit / down / hang onto the ETH port whenever the BTC and
+        ETH listeners shared a ProviderState. With BTC moved to its own
+        listener pool, the ETH listener's gate is exact-match on "eth"
+        — a BTC-tagged rate_limit must pass through to the ETH success
+        path. (The BTC listener on its own dedicated port would still
+        return 429 — that's the BTC suite's job to assert.)
+        """
         _post(_ctrl(sim, "/scenario"), {
             "providers": {"1": {"chain_family": "btc", "mode": "rate_limit"}}
         })
-        status, _ = _rpc(sim["provider1"], "getblockcount")
-        assert status == 429
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200, f"ETH listener should ignore BTC-tagged fault; got {status}"
+        assert "result" in body, f"expected ETH success body; got {body}"
+
+    def test_jsonrpc_eth_listener_ignores_ln_chain_family_fault(self, sim):
+        """MAG-2089 companion to the BTC isolation test. LN faults set on
+        a shared ProviderState must not bleed onto the ETH listener.
+        """
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"chain_family": "ln", "mode": "down"}}
+        })
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200, f"ETH listener should ignore LN-tagged fault; got {status}"
+        assert "result" in body, f"expected ETH success body; got {body}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
