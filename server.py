@@ -56,10 +56,12 @@ import handlers_ws
 from constants import (
     ALL_PROVIDER_PORTS,
     BACKUP_PROVIDER_PORTS,
+    BTC_PRIMARY_PORTS,
     CONTROL_PORT,
     GRPC_BACKUP_PORTS,
     GRPC_PROVIDER_PORTS,
     HISTORY_MAX,
+    LN_PRIMARY_PORTS,
     PROVIDER_PORTS,
     REST_BACKUP_PORTS,
     REST_PORTS,
@@ -768,6 +770,33 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         state: ProviderState = self.server.state
         snap = state.snapshot()
 
+        # MAG-2089 — handler dispatch is now PORT-DERIVED on JSON-RPC.
+        # Each listener server is attached at startup with two attributes:
+        #
+        #   handler_chain_family  — one of "eth", "btc", "ln"; identifies
+        #                            which JSON-RPC chain this port serves.
+        #   handler_module        — the dispatch module (handlers_eth /
+        #                            handlers_btc / handlers_lnd) called on
+        #                            the success path.
+        #
+        # Defaults (when unset) are "eth" / handlers_eth so any direct
+        # ``ThreadingHTTPServer(..., JSONRPCHandler)`` construction outside
+        # ``main()`` behaves the same as before this change. ETH listeners
+        # at PROVIDER_PORTS / BACKUP_PROVIDER_PORTS leave the defaults in
+        # place; BTC listeners (BTC_PRIMARY_PORTS) and LN listeners
+        # (LN_PRIMARY_PORTS) override both attributes at bootstrap.
+        #
+        # The fault-injection ladder and the corruption helpers are gated
+        # to ``handler_chain_family`` so a fault primitive set for one
+        # transport (e.g. ``chain_family="grpc"``) doesn't fire on a JSON-RPC
+        # request, AND a BTC-scenario fault doesn't fire on an ETH listener
+        # (this last property is what MAG-2089 fixes — previously the ETH
+        # listener evaluated the fault for any chain_family in {eth,btc,ln},
+        # so a BTC test that left mode=hang on a provider would also hang
+        # an ETH listener using the same shared ProviderState).
+        listener_family = getattr(self.server, "handler_chain_family", "eth")
+        handler_module  = getattr(self.server, "handler_module", handlers_eth)
+
         # Capture all lava-* headers from the router
         lava_headers = {
             k: v for k, v in self.headers.items()
@@ -791,24 +820,20 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # which is strictly better than no entry for the invariant.
         arrival = state.record_arrival(lava_headers=lava_headers)
 
-        # Cross-transport isolation (MAG-1838) — inverse of MAG-1836.
+        # Cross-transport isolation (MAG-1838 → MAG-2089).
         # ``ProviderState`` is shared across JSON-RPC, REST, gRPC, WS, and
         # Tendermint-RPC for the same provider id. The fault primitives in
         # _apply_fault (down / hang / drop_connection / rate_limit / error)
         # are chain-agnostic, so without an explicit gate a fault authored
-        # for the gRPC port (chain_family="grpc") would also kill the
-        # JSON-RPC port for that provider. JSON-RPC owns chain_family
-        # values "eth", "btc", and "ln" (success-path dispatch below
-        # routes all three through the same listener); any other value
-        # means the fault was set for a different transport and the
-        # JSON-RPC port should fall through to its normal success
-        # response. ``jsonrpc_owns_snap`` is False in that case and
+        # for one transport's chain_family would also fire on every other
+        # transport sharing the same ProviderState. The gate is the
+        # listener's own ``handler_chain_family``: each JSON-RPC listener
+        # only fires faults that match its OWN chain_family. ETH listener
+        # owns "eth"; BTC listener owns "btc"; LN listener owns "ln". Any
+        # other ``chain_family`` value on the snap (or a non-matching one)
         # short-circuits both the pre-parse ``down`` branch immediately
-        # below and the post-parse fault evaluation further down. LN was
-        # added when MAG-1726 landed the LN handler — without it,
-        # ``chain_family="ln"`` LN tests in tests/test_simulator_ln.py
-        # couldn't exercise the fault ladder on the LN port.
-        jsonrpc_owns_snap = snap.get("chain_family") in ("eth", "btc", "ln")
+        # below and the post-parse fault evaluation further down.
+        jsonrpc_owns_snap = snap.get("chain_family") == listener_family
 
         # Pre-parse fault check: provider-wide down mode doesn't read the body.
         # Down is the only pre-body-parse fault — there is no per-method
@@ -819,8 +844,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             fault = _apply_fault(state, snap, "*", None, lava_headers, t_start,
                                  entry=arrival)
             self._emit_jsonrpc_fault(fault, req_id=None,
-                                     corruption_mode=_corruption_for(snap, "eth", "btc", "ln"),
-                                     missing_field=_missing_field_for(snap, "eth", "btc", "ln"))
+                                     corruption_mode=_corruption_for(snap, listener_family),
+                                     missing_field=_missing_field_for(snap, listener_family))
             return
 
         # Parse the request body before latency/fault evaluation so the
@@ -874,8 +899,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             if method_snap["latency_ms"] > 0:
                 time.sleep(method_snap["latency_ms"] / 1000.0)
             self._reply(override_status, override_body,
-                        corruption_mode=_corruption_for(snap, "eth", "btc", "ln"),
-                        missing_field=_missing_field_for(snap, "eth", "btc", "ln"))
+                        corruption_mode=_corruption_for(snap, listener_family),
+                        missing_field=_missing_field_for(snap, listener_family))
             return
 
         # Post-parse fault evaluation. _apply_fault records history internally.
@@ -885,9 +910,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # /history (MAG-1832). _apply_fault stamps the configured latency on
         # the history entry (not elapsed) so per-method-override callers see
         # the latency the call *would have taken*.
-        # MAG-1838 — only evaluate the fault ladder when the snap was authored
-        # for the JSON-RPC transport (chain_family in {"eth","btc"}). Faults
-        # set for any other transport pass through to the success-path below.
+        # MAG-2089 — only evaluate the fault ladder when the snap's
+        # chain_family matches THIS listener's chain_family. Faults set for
+        # any other transport pass through to the success-path below.
         if jsonrpc_owns_snap:
             fault = _apply_fault(state, method_snap, method, req_id, lava_headers,
                                  t_start, entry=arrival)
@@ -897,29 +922,25 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             if method_snap["latency_ms"] > 0:
                 time.sleep(method_snap["latency_ms"] / 1000.0)
             self._emit_jsonrpc_fault(fault, req_id=req_id,
-                                     corruption_mode=_corruption_for(snap, "eth", "btc", "ln"),
-                                     missing_field=_missing_field_for(snap, "eth", "btc", "ln"))
+                                     corruption_mode=_corruption_for(snap, listener_family),
+                                     missing_field=_missing_field_for(snap, listener_family))
             return
 
-        # Success — delegate the chain-specific success path to a handler module.
-        #
-        # Fault branches above (down / hang / drop / rate-limit / forced or
-        # probabilistic error) are chain-agnostic and stay in _apply_fault.
-        # Only the method-lookup + result-shape logic is chain-specific — we
-        # pick the handler module based on snap["chain_family"]. Default "eth"
-        # preserves backward-compat for every payload that doesn't set
-        # chain_family. "btc" (MAG-1716) and "ln" (MAG-1726) both reuse the
-        # JSON-RPC listener pool — they're selected per-provider via
-        # chain_family rather than per-port.
+        # Success — delegate the chain-specific success path to a handler
+        # module. Fault branches above (down / hang / drop / rate-limit /
+        # forced or probabilistic error) are chain-agnostic and stay in
+        # _apply_fault. The success path is dispatched per LISTENER PORT
+        # via ``handler_module`` (MAG-2089): the ETH listener always calls
+        # handlers_eth, the BTC listener always calls handlers_btc, the LN
+        # listener always calls handlers_lnd. The snap's ``chain_family``
+        # field is NOT consulted here — it stayed in the payload solely for
+        # fault-primitive gating on the non-JSON-RPC transports (REST / gRPC
+        # / TM / WS), which still read it via ``_corruption_for`` /
+        # ``_missing_field_for`` / ``_mode_for``.
         #
         # The handler returns the status + response envelope; this layer is
         # responsible for I/O (corruption hooks, history accounting).
-        if snap.get("chain_family") == "btc":
-            status, response_body = handlers_btc.handle(state, body, snap, lava_headers)
-        elif snap.get("chain_family") == "ln":
-            status, response_body = handlers_lnd.handle(state, body, snap, lava_headers)
-        else:
-            status, response_body = handlers_eth.handle(state, body, snap, lava_headers)
+        status, response_body = handler_module.handle(state, body, snap, lava_headers)
         emit_status = "error" if "error" in response_body else "success"
         # MAG-1832: write history BEFORE the latency sleep so a router-side
         # cancel mid-sleep (hedge ticker firing) still records the call.
@@ -935,8 +956,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if method_snap["latency_ms"] > 0:
             time.sleep(method_snap["latency_ms"] / 1000.0)
         self._reply(status, response_body,
-                    corruption_mode=_corruption_for(snap, "eth", "btc", "ln"),
-                    missing_field=_missing_field_for(snap, "eth", "btc", "ln"))
+                    corruption_mode=_corruption_for(snap, listener_family),
+                    missing_field=_missing_field_for(snap, listener_family))
 
     def _emit_jsonrpc_fault(self, fault: Dict[str, Any], req_id: Any,
                              corruption_mode: Optional[str] = None,
@@ -2102,6 +2123,7 @@ class ControlHandler(BaseHTTPRequestHandler):
             import socket
             from constants import (
                 PROVIDER_PORTS, BACKUP_PROVIDER_PORTS,
+                BTC_PRIMARY_PORTS, LN_PRIMARY_PORTS,
                 GRPC_PROVIDER_PORTS, GRPC_BACKUP_PORTS,
                 REST_PORTS, REST_BACKUP_PORTS,
                 TM_PORTS, TM_BACKUP_PORTS,
@@ -2109,6 +2131,7 @@ class ControlHandler(BaseHTTPRequestHandler):
             )
             all_ports = sorted({
                 *PROVIDER_PORTS.values(), *BACKUP_PROVIDER_PORTS.values(),
+                *BTC_PRIMARY_PORTS.values(), *LN_PRIMARY_PORTS.values(),
                 *GRPC_PROVIDER_PORTS.values(), *GRPC_BACKUP_PORTS.values(),
                 *REST_PORTS.values(), *REST_BACKUP_PORTS.values(),
                 *TM_PORTS.values(), *TM_BACKUP_PORTS.values(),
@@ -2332,13 +2355,25 @@ def main():
 
     Spins up the full surface matrix in daemon threads:
 
-      JSON-RPC (six listeners — three primary + three backup)
-        - Primary  : ports 18545 / 18546 / 18547 (pids 1-3)
-        - Backup   : ports 18560 / 18561 / 18562 (pids 4-6)
+      JSON-RPC ETH (six listeners — three primary + three backup)
+        - Primary  : ports 18545 / 18546 / 18547 (pids 1-3, handler=eth)
+        - Backup   : ports 18560 / 18561 / 18562 (pids 4-6, handler=eth)
         See PROVIDER_PORTS / BACKUP_PROVIDER_PORTS / ALL_PROVIDER_PORTS in
         constants.py — the simulator process is identical across both pools,
         the only difference is the smart-router-side `is_backup: true` flag
         in values_sim.yml.
+
+      JSON-RPC BTC (three listeners — primary only) — MAG-2089
+        - Primary  : ports 18575 / 18576 / 18577 (pids 1-3, handler=btc)
+        - ProviderState shared with the matching ETH primary pid.
+          Handler dispatch is port-derived; the BTC listener at port 18575
+          always calls handlers_btc regardless of the snap's chain_family.
+
+      JSON-RPC LN  (three listeners — primary only) — MAG-2089
+        - Primary  : ports 18578 / 18579 / 18580 (pids 1-3, handler=ln)
+        - ProviderState shared with the matching ETH primary pid.
+          Handler dispatch is port-derived; the LN listener at port 18578
+          always calls handlers_lnd regardless of the snap's chain_family.
 
       gRPC (six listeners — three primary + three backup)
         - Primary  : ports 18548 / 18549 / 18550 (pids 1-3, shared state
@@ -2398,11 +2433,48 @@ def main():
     for pid, port in ALL_PROVIDER_PORTS.items():
         # ThreadingHTTPServer so a slow/hanging request on one provider doesn't
         # block its own subsequent requests or the other providers' threads.
+        # ETH listener pool: ``handler_chain_family`` defaults to "eth" and
+        # ``handler_module`` defaults to ``handlers_eth`` inside JSONRPCHandler,
+        # so the ETH listeners don't need to set them explicitly — leaving the
+        # defaults documents intent on read.
         srv = ThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
         srv.daemon_threads = True
-        srv.state       = states[pid]
-        srv.provider_id = pid          # available as self.server.provider_id in handler
+        srv.state                = states[pid]
+        srv.provider_id          = pid    # available as self.server.provider_id in handler
+        srv.handler_chain_family = "eth"
+        srv.handler_module       = handlers_eth
         servers.append(srv)
+
+    # BTC JSON-RPC primary listeners (MAG-2089). Each runs JSONRPCHandler with
+    # ``handler_chain_family="btc"`` so the fault-injection ladder fires only
+    # on snaps authored for BTC, AND ``handler_module=handlers_btc`` so the
+    # success path always dispatches to BTC regardless of any other
+    # ``chain_family`` written into the snap. The ProviderState is shared with
+    # the matching ETH primary pid (1-3), so a single ``/scenario`` POST that
+    # sets ``chain_family="btc"`` on pid "1" reconfigures both the ETH port
+    # (which will ignore the BTC fault) and the BTC port (which acts on it).
+    for pid, port in BTC_PRIMARY_PORTS.items():
+        btc_srv = ThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
+        btc_srv.daemon_threads = True
+        btc_srv.state                = states[pid]
+        btc_srv.provider_id          = pid
+        btc_srv.handler_chain_family = "btc"
+        btc_srv.handler_module       = handlers_btc
+        servers.append(btc_srv)
+
+    # LN JSON-RPC primary listeners (MAG-2089). Same shape as the BTC pool:
+    # dedicated listener pool, port-derived handler dispatch, fault gating
+    # on ``chain_family="ln"``. Shares ProviderState with the matching ETH
+    # primary pid (1-3) so a mixed-chain scenario can independently faulted
+    # the ETH and LN listeners that share a pid.
+    for pid, port in LN_PRIMARY_PORTS.items():
+        ln_srv = ThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
+        ln_srv.daemon_threads = True
+        ln_srv.state                = states[pid]
+        ln_srv.provider_id          = pid
+        ln_srv.handler_chain_family = "ln"
+        ln_srv.handler_module       = handlers_lnd
+        servers.append(ln_srv)
 
     # REST servers (MAG-1777). Primary tier shares ProviderState with the
     # matching JSON-RPC primary (pids 1-3), so a /scenario update on
@@ -2485,9 +2557,13 @@ def main():
 
     print("Provider simulator started")
     for pid, port in PROVIDER_PORTS.items():
-        print(f"  provider {pid:>2} (jsonrpc,        primary) → :{port}")
+        print(f"  provider {pid:>2} (jsonrpc-eth,    primary) → :{port}")
     for pid, port in BACKUP_PROVIDER_PORTS.items():
-        print(f"  provider {pid:>2} (jsonrpc,        backup)  → :{port}")
+        print(f"  provider {pid:>2} (jsonrpc-eth,    backup)  → :{port}")
+    for pid, port in BTC_PRIMARY_PORTS.items():
+        print(f"  provider {pid:>2} (jsonrpc-btc,    primary) → :{port}")
+    for pid, port in LN_PRIMARY_PORTS.items():
+        print(f"  provider {pid:>2} (jsonrpc-ln,     primary) → :{port}")
     for pid, port in GRPC_PROVIDER_PORTS.items():
         print(f"  provider {pid:>2} (grpc,           primary) → :{port}")
     for pid, port in GRPC_BACKUP_PORTS.items():
