@@ -2,29 +2,35 @@
 
 A small simulator pod used to test smart-router behaviour against deterministic, fault-injectable backends.
 
-It runs **7 listeners** in a single pod:
+It runs many listeners in a single pod:
 
-- **3 JSON-RPC providers** on ports `18545` / `18546` / `18547` — dispatch to ETH, BTC, or Lightning Network (LND) chain handlers based on each provider's `chain_family`.
-- **1 control API** on port `19000` — `POST /scenario`, `POST /reset[/all]`, `GET /scenario`, `GET /stats`, `GET /history`, `GET /health`.
+- **3 ETH JSON-RPC providers** on ports `18545` / `18546` / `18547` — dispatch to `handlers_eth`.
+- **3 BTC JSON-RPC providers** on ports `18575` / `18576` / `18577` — dispatch to `handlers_btc` (MAG-2089).
+- **3 LN JSON-RPC providers** on ports `18578` / `18579` / `18580` — dispatch to `handlers_lnd` (MAG-2089).
 - **3 gRPC providers** on ports `18548` / `18549` / `18550` (MAG-1780) — Cosmos `Service` with reflection enabled.
+- **3 REST providers** on ports `18551` / `18552` / `18553` (MAG-1777).
+- **3 Tendermint-RPC providers** on ports `18554` / `18555` / `18556` (MAG-1841).
+- **3 WebSocket providers** on ports `18557` / `18558` / `18559` (MAG-1801).
+- **3 JSON-RPC backup providers** on `18560` / `18561` / `18562`, plus per-surface backup ranges in `18563`–`18574`.
+- **1 control API** on port `19000` — `POST /scenario`, `POST /reset[/all]`, `GET /scenario`, `GET /stats`, `GET /history`, `GET /health`, `GET /ready`.
 
-All 6 providers share the same per-provider `ProviderState`, so one `POST /scenario` call reconfigures both transports for the same logical provider.
+For each pid (1-3), the ETH / BTC / LN / REST / gRPC / TM / WS primary listeners all share **the same `ProviderState`**, so one `POST /scenario` call reconfigures every transport for the same logical provider.
 
 ## Chain families
 
-Each provider's `chain_family` is set per-scenario and selects the dispatch path on the success branch. Fault branches (down / hang / drop / rate_limit / error / corruption) are chain-agnostic.
+JSON-RPC handler dispatch is **port-derived** (MAG-2089): the ETH listener pool always calls `handlers_eth`, the BTC pool always calls `handlers_btc`, the LN pool always calls `handlers_lnd`. The `chain_family` field on `/scenario` payloads is still meaningful — REST / gRPC / TM / WS read it to gate fault primitives (down / hang / rate_limit / error / corruption) to the transport that authored them, and the JSON-RPC listeners use it to gate fault primitives to their own pool (ETH listener fires `chain_family="eth"` faults only, BTC fires `chain_family="btc"` only, LN fires `chain_family="ln"` only).
 
-| `chain_family` | Transport | Status | Where it dispatches |
-|---|---|---|---|
-| `eth` (default) | JSON-RPC | live on main | `handlers_eth.handle()` — ETH methods + `eth_getBlockByNumber` block-number echo |
-| `btc` | JSON-RPC | live on main (MAG-1716) | `handlers_btc.handle()` — BTC RPC method set, see `stubs_btc.py` |
-| `ln` | JSON-RPC | live on main (MAG-1726) | `handlers_lnd.handle()` — LND method set (`getinfo`, `listchannels`, `openchannel`, `decodepayreq`, `payinvoice`, `listpeers`), see `stubs_lnd.py` |
-| `grpc` | gRPC | live on main | `handlers_grpc.CosmosBaseTendermintServicer` on a separate port range |
-| `rest` | REST | live on main (MAG-1777) | `handlers_rest.handle()` on ports `18551`–`18553` |
-| `tendermintrpc` | JSON-RPC | live on main (MAG-1841) | `handlers_tendermintrpc` on ports `18554`–`18556` |
-| `ws` | WebSocket | live on main (MAG-1801) | `handlers_ws` on ports `18557`–`18559` |
+| `chain_family` | Transport | Status | Listener ports | Where it dispatches |
+|---|---|---|---|---|
+| `eth` (default) | JSON-RPC | live on main | `18545`–`18547` | `handlers_eth.handle()` — ETH methods + `eth_getBlockByNumber` block-number echo |
+| `btc` | JSON-RPC | live on main (MAG-1716, ports moved MAG-2089) | `18575`–`18577` | `handlers_btc.handle()` — BTC RPC method set, see `stubs_btc.py` |
+| `ln` | JSON-RPC | live on main (MAG-1726, ports moved MAG-2089) | `18578`–`18580` | `handlers_lnd.handle()` — LND method set (`getinfo`, `listchannels`, `openchannel`, `decodepayreq`, `payinvoice`, `listpeers`), see `stubs_lnd.py` |
+| `grpc` | gRPC | live on main | `18548`–`18550` | `handlers_grpc.CosmosBaseTendermintServicer` |
+| `rest` | REST | live on main (MAG-1777) | `18551`–`18553` | `handlers_rest.handle()` |
+| `tendermintrpc` | JSON-RPC | live on main (MAG-1841) | `18554`–`18556` | `handlers_tendermintrpc` |
+| `ws` | WebSocket | live on main (MAG-1801) | `18557`–`18559` | `handlers_ws` |
 
-> `chain_family="btc"` and `chain_family="ln"` share the JSON-RPC listener pool with the default ETH path — each is selected per-provider via a `/scenario` call, not by binding to a different port. The handler is picked from `snap["chain_family"]` inside `JSONRPCHandler.do_POST` after the chain-agnostic fault-injection step.
+> Pre-MAG-2089 the BTC and LN JSON-RPC handlers were selected per-provider from `snap["chain_family"]` on the shared ETH listener pool (18545-18547). A test on `btc-sim-router` that set `chain_family="btc"` could be flipped back to `chain_family="eth"` by a concurrent test on `eth-sim-router` against the shared `ProviderState`, contaminating BTC responses. MAG-2089 moved BTC + LN to their own dedicated listener pools and made dispatch port-derived. The `chain_family` field is still set on `/scenario` payloads for fault-primitive gating, but no longer steers handler selection on JSON-RPC.
 
 ## Fault-injection primitives
 
@@ -96,9 +102,9 @@ Derived from `BASE_DOMAIN` in `config/base-domain.env`:
 
 ```
 server.py              — process entry: JSON-RPC servers, gRPC servers, control API
-handlers_eth.py        — ETH success-branch dispatch (chain_family="eth")
-handlers_btc.py        — BTC success-branch dispatch (chain_family="btc", MAG-1716)
-handlers_lnd.py        — Lightning Network (LND) dispatch (chain_family="ln", MAG-1726)
+handlers_eth.py        — ETH success-branch dispatch (ports 18545-18547)
+handlers_btc.py        — BTC success-branch dispatch (ports 18575-18577, MAG-1716 / MAG-2089)
+handlers_lnd.py        — Lightning Network (LND) dispatch (ports 18578-18580, MAG-1726 / MAG-2089)
 handlers_grpc.py       — Cosmos gRPC servicer (chain_family="grpc", MAG-1780)
 grpc_server.py         — gRPC server bootstrap (3 servers on 18548-18550, reflection on)
 stubs.py               — default ETH JSON-RPC results + ERROR_STUBS catalogue
