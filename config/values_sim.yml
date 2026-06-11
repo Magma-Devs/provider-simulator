@@ -384,19 +384,19 @@ routers:
       - name: "SimBtcProvider1"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18545"
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18575"
             interface: "jsonrpc"
             addons: []
       - name: "SimBtcProvider2"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18546"
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18576"
             interface: "jsonrpc"
             addons: []
       - name: "SimBtcProvider3"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18547"
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18577"
             interface: "jsonrpc"
             addons: []
       # Backup tier mirrors eth-sim's pattern (3+3 parity across sim routers).
