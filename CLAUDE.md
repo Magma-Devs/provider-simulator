@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A multi-transport JSON-RPC / BTC RPC / REST / gRPC / WebSocket simulator used to test smart-router behavior. Top-level Python — no subpackages — with two C-extension deps (`grpcio`, `protobuf`) required only for the gRPC transport. Runs many `HTTPServer` instances plus three asyncio gRPC servers in daemon threads from a single process, all sharing one in-memory state map:
 
-- JSON-RPC providers on `18545`/`18546`/`18547` (chain_family="eth", "btc", or "ln"; selects between handlers_eth, handlers_btc, and handlers_lnd).
+- ETH JSON-RPC providers on `18545`/`18546`/`18547` (dispatch always handlers_eth).
+- BTC JSON-RPC providers on `18575`/`18576`/`18577` (dispatch always handlers_btc — MAG-2089 gave BTC its own dedicated listener pool, the handler is port-derived).
+- LN JSON-RPC providers on `18578`/`18579`/`18580` (dispatch always handlers_lnd — MAG-2089 ditto for LN).
 - gRPC providers on `18548`/`18549`/`18550` (chain_family="grpc"; cosmos-tendermint servicer in handlers_grpc).
 - REST providers on `18551`/`18552`/`18553` (chain_family="rest"; handlers_rest).
 - WebSocket providers on `18557`/`18558`/`18559` (chain_family="ws"; handlers_ws — supports subscribe/unsubscribe lifecycle plus request/response over a single frame; delegates non-subscription methods back to handlers_eth/handlers_btc).
