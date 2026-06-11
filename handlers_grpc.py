@@ -180,9 +180,18 @@ async def _apply_grpc_fault(state, snap: dict, context: grpc.aio.ServicerContext
     JSON-RPC (chain_family="eth") would also kill the gRPC port. Gate the
     whole ladder on ``chain_family == "grpc"`` and fall through to the
     normal success stub when the fault was set for another transport.
+
+    Exception (MAG-2092): ``mode="down"`` is honored on every transport
+    because reachability is provider-wide; per-transport isolation only
+    applies to content modes (error / corrupt / hang / rate_limit /
+    latency / drop_connection). Without this exemption, an ETH provider
+    in mode=down would still serve gRPC requests, hiding router-side
+    bugs whose reproduction depends on the provider being unreachable
+    across every node-url (e.g. MAG-2061).
     """
     # MAG-1836: only apply faults that were authored for the gRPC transport.
-    if snap.get("chain_family") != "grpc":
+    # MAG-2092: but always honor mode="down" regardless of chain_family.
+    if snap.get("chain_family") != "grpc" and snap["mode"] != "down":
         return False
     # 1. Outage — no latency on the down path (provider drops the request
     #    immediately, mirroring JSON-RPC ``down`` semantics).
