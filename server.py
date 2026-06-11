@@ -833,14 +833,23 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # other ``chain_family`` value on the snap (or a non-matching one)
         # short-circuits both the pre-parse ``down`` branch immediately
         # below and the post-parse fault evaluation further down.
+        #
+        # Exception (MAG-2092): ``mode="down"`` is honored on every
+        # transport because reachability is provider-wide; per-transport
+        # isolation only applies to content modes (error / corrupt /
+        # hang / rate_limit / latency / drop_connection). Under this
+        # exemption a BTC provider in mode=down still 503s the ETH
+        # JSON-RPC port — consistent with the universal "down means
+        # unreachable" semantic shipped for WS / gRPC / REST / TM.
         jsonrpc_owns_snap = snap.get("chain_family") == listener_family
+        jsonrpc_run_fault = jsonrpc_owns_snap or snap["mode"] == "down"
 
         # Pre-parse fault check: provider-wide down mode doesn't read the body.
         # Down is the only pre-body-parse fault — there is no per-method
         # variant at this layer because the method label isn't known yet
         # (body unparsed). A per-method down lives behind the merged-config
         # path below and applies on the post-parse branch.
-        if jsonrpc_owns_snap and snap["mode"] == "down":
+        if jsonrpc_run_fault and snap["mode"] == "down":
             fault = _apply_fault(state, snap, "*", None, lava_headers, t_start,
                                  entry=arrival)
             self._emit_jsonrpc_fault(fault, req_id=None,
@@ -913,7 +922,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # MAG-2089 — only evaluate the fault ladder when the snap's
         # chain_family matches THIS listener's chain_family. Faults set for
         # any other transport pass through to the success-path below.
-        if jsonrpc_owns_snap:
+        # MAG-2092 — but always honor mode="down" regardless of
+        # chain_family because reachability is provider-wide.
+        if jsonrpc_owns_snap or method_snap["mode"] == "down":
             fault = _apply_fault(state, method_snap, method, req_id, lava_headers,
                                  t_start, entry=arrival)
         else:
@@ -1319,15 +1330,24 @@ class RestHandler(BaseHTTPRequestHandler):
         # failures in the 2026-05-18 suite triage when a BTC test set
         # ``chain_family="btc", mode="error"`` and a subsequent REST test
         # got the BTC error instead of a healthy REST response.
+        #
+        # Exception (MAG-2092): ``mode="down"`` is honored on every
+        # transport because reachability is provider-wide; per-transport
+        # isolation only applies to content modes (error / corrupt /
+        # hang / rate_limit / latency / drop_connection). Under this
+        # exemption an ETH provider in mode=down still 503s the REST
+        # port — consistent with the universal "down means unreachable"
+        # semantic.
         rest_owns_snap = snap.get("chain_family") == "rest"
+        rest_run_fault = rest_owns_snap or snap["mode"] == "down"
 
         # Pre-route fault: provider-wide down doesn't need the (verb,
         # template) key. Mirrors JSONRPCHandler's pre-body-parse down
         # branch. Per-(verb, template) down lives in the post-route
-        # merged-snap branch below. Gated on rest_owns_snap so a down
-        # set on chain_family="eth"/"btc"/"grpc"/etc. doesn't 503 the
-        # REST port.
-        if rest_owns_snap and snap["mode"] == "down":
+        # merged-snap branch below. Gated on rest_run_fault so a down
+        # set on any chain_family 503s the REST port (MAG-2092), while
+        # non-down content faults still only fire when chain_family="rest".
+        if rest_run_fault and snap["mode"] == "down":
             fault = _apply_fault(state, snap, "*", None, lava_headers, t_start)
             self._emit_rest_fault(fault)
             return
@@ -1359,8 +1379,11 @@ class RestHandler(BaseHTTPRequestHandler):
             # rest_owns_snap so a fault authored for another transport
             # doesn't override a genuine 404.
             method_label = f"{verb} {path}"
+            # MAG-2092: also fire the fault ladder on mode=down regardless
+            # of chain_family so an unmatched URI still 503s a downed
+            # provider before the 404 path runs.
             fault = _apply_fault(state, snap, method_label, req_id,
-                                 lava_headers, t_start) if rest_owns_snap else None
+                                 lava_headers, t_start) if rest_run_fault else None
             if fault is not None:
                 if snap["latency_ms"] > 0:
                     time.sleep(snap["latency_ms"] / 1000.0)
@@ -1395,9 +1418,12 @@ class RestHandler(BaseHTTPRequestHandler):
         # we still pay the configured latency on the wire before emitting,
         # so wire timing is unchanged for the router. Gated on
         # rest_owns_snap so faults authored for other transports pass
-        # through to the success-path below.
+        # through to the success-path below. MAG-2092: but always honor
+        # mode="down" regardless of chain_family because reachability is
+        # provider-wide.
+        run_fault_ladder = rest_owns_snap or method_snap["mode"] == "down"
         fault = _apply_fault(state, method_snap, method_label, req_id,
-                             lava_headers, t_start) if rest_owns_snap else None
+                             lava_headers, t_start) if run_fault_ladder else None
         if fault is not None:
             if method_snap["latency_ms"] > 0:
                 time.sleep(method_snap["latency_ms"] / 1000.0)
@@ -1686,12 +1712,22 @@ class TendermintHandler(BaseHTTPRequestHandler):
         # ladder is skipped and the request falls through to its normal
         # success path. Surfaced in the 2026-05-18 suite triage as one of
         # the leak paths feeding the ~37 spurious failures.
+        #
+        # Exception (MAG-2092): ``mode="down"`` is honored on every
+        # transport because reachability is provider-wide; per-transport
+        # isolation only applies to content modes (error / corrupt /
+        # hang / rate_limit / latency / drop_connection). Under this
+        # exemption an ETH provider in mode=down still 503s the
+        # Tendermint port — consistent with the universal "down means
+        # unreachable" semantic.
         tm_owns_snap = snap.get("chain_family") == "tendermintrpc"
+        tm_run_fault = tm_owns_snap or snap["mode"] == "down"
 
         # 1. Outage gate — return 503 with no body. ``method`` not yet known.
-        #    Gated on tm_owns_snap so a down set on chain_family="eth"
-        #    (etc.) doesn't 503 the Tendermint port.
-        if tm_owns_snap and snap["mode"] == "down":
+        #    Gated on tm_run_fault so a down set on any chain_family
+        #    503s the Tendermint port (MAG-2092), while non-down content
+        #    faults still only fire when chain_family="tendermintrpc".
+        if tm_run_fault and snap["mode"] == "down":
             fault = _apply_fault(state, snap, "*", None, lava_headers, t_start)
             self._emit_tm_fault(fault, request_id=None)
             return
@@ -1728,9 +1764,11 @@ class TendermintHandler(BaseHTTPRequestHandler):
         #    latency_ms. If a fault triggers, we still pay the configured
         #    latency on the wire before emitting, so wire timing is unchanged.
         #    Gated on tm_owns_snap so faults authored for other transports
-        #    pass through to the success-path below.
+        #    pass through to the success-path below. MAG-2092: but always
+        #    honor mode="down" regardless of chain_family.
+        run_fault_ladder = tm_owns_snap or snap["mode"] == "down"
         fault = _apply_fault(state, snap, method_label, request_id, lava_headers, t_start) \
-            if tm_owns_snap else None
+            if run_fault_ladder else None
         if fault is not None:
             if snap["latency_ms"] > 0:
                 time.sleep(snap["latency_ms"] / 1000.0)

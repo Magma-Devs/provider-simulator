@@ -240,8 +240,18 @@ class WsHandler(BaseHTTPRequestHandler):
         # and the handshake completes normally. Surfaced in the 2026-05-18
         # suite triage as one of the leak paths feeding the ~37 spurious
         # failures.
+        #
+        # Exception (MAG-2092): mode="down" is honored on every transport
+        # because reachability is provider-wide; per-transport isolation
+        # only applies to content modes (error / corrupt / hang /
+        # rate_limit / latency / drop_connection). Without this exemption
+        # an ETH provider in mode=down would still complete the WS upgrade
+        # at port 18557-59, hiding router-side bugs that depend on the
+        # provider being unreachable across every node-url (e.g.
+        # MAG-2061).
         ws_owns_snap = snap.get("chain_family") == "ws"
-        ws_mode = snap["mode"] if ws_owns_snap else "success"
+        raw_mode = snap["mode"]
+        ws_mode = raw_mode if (ws_owns_snap or raw_mode == "down") else "success"
 
         if ws_mode == "down":
             state.push_call_to_buffer("*", "down", 0,
@@ -387,14 +397,23 @@ class WsHandler(BaseHTTPRequestHandler):
                 # requests. Gate on the WS snap so the fault ladder only
                 # runs when the snap is WS-authored; otherwise fall through
                 # to the success-path response below.
+                #
+                # Exception (MAG-2092): mode="down" is honored on every
+                # transport because reachability is provider-wide;
+                # per-transport isolation only applies to content modes
+                # (error / corrupt / hang / rate_limit / latency /
+                # drop_connection). A live WS connection whose provider
+                # is set to mode=down mid-stream still closes via the
+                # down branch in _emit_ws_fault.
                 ws_owns_snap = snap.get("chain_family") == "ws"
+                run_fault_ladder = ws_owns_snap or method_snap["mode"] == "down"
 
                 # MAG-1832 — fault evaluation BEFORE the latency sleep so
                 # apply_fault's internal push_call_to_buffer fires before
                 # any cancel window opens. Fault path sleeps AFTER the
                 # record but before the wire emit so timing is unchanged.
                 fault = apply_fault(state, method_snap, method, req_id,
-                                    lava_headers, t_start) if ws_owns_snap else None
+                                    lava_headers, t_start) if run_fault_ladder else None
                 if fault is not None:
                     if method_snap["latency_ms"] > 0:
                         time.sleep(method_snap["latency_ms"] / 1000.0)
