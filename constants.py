@@ -19,9 +19,47 @@ import os
 # Backup-tier coverage is JSON-RPC-only for now. Tentative follow-up
 # allocation (contiguous block above this range):
 #   gRPC 18563-18565 / REST 18566-18568 / TM 18569-18571 / WS 18572-18574
+#
+# BTC and LN JSON-RPC pools sit at 18575-18577 (BTC) and 18578-18580 (LN).
+# They each get their own dedicated listeners — handler **dispatch** is
+# port-derived, NOT per-provider via ``chain_family``. The ETH JSON-RPC pool
+# (18545-18547) handles ETH only. Content fault primitives (error /
+# rate_limit / hang / drop_connection / corruption) are still gated per
+# listener on the snap's ``chain_family`` matching the listener's own
+# ``handler_chain_family``; ``mode="down"`` is the universal exception
+# (MAG-2092) and fires on every listener regardless of ``chain_family``.
+# See BTC_PRIMARY_PORTS / LN_PRIMARY_PORTS below for the full allocation.
 PROVIDER_PORTS        = {"1": 18545, "2": 18546, "3": 18547}
 BACKUP_PROVIDER_PORTS = {"4": 18560, "5": 18561, "6": 18562}
 ALL_PROVIDER_PORTS    = {**PROVIDER_PORTS, **BACKUP_PROVIDER_PORTS}
+
+# Bitcoin JSON-RPC primary pool (MAG-2089). Each listener routes the
+# success branch unconditionally through ``handlers_btc.handle(...)`` —
+# success-path dispatch is port-derived, with no ``chain_family`` check.
+# Content fault primitives (error / rate_limit / hang / drop_connection
+# / corruption) are still chain_family-gated and fire only when the
+# snap's ``chain_family == "btc"``. ``mode="down"`` is the universal
+# exception (MAG-2092) and fires on every listener regardless of
+# ``chain_family``. The 18575-18577 range was picked so it sits above
+# the existing JSON-RPC backup block (18560-18562) and the non-JSON-RPC
+# surface ranges, and so it doesn't collide with any documented router
+# service / chart values. Primary tier only — backup tier (if/when
+# needed) would extend contiguously upward.
+BTC_PRIMARY_PORTS = {"1": 18575, "2": 18576, "3": 18577}
+
+# Lightning Network JSON-RPC primary pool (MAG-2089). Each listener routes
+# the success branch unconditionally through ``handlers_lnd.handle(...)``
+# — success-path dispatch is port-derived, with no ``chain_family``
+# check. Content fault primitives are still chain_family-gated and fire
+# only when the snap's ``chain_family == "ln"``; ``mode="down"`` is the
+# universal exception (MAG-2092) and fires on every listener regardless
+# of ``chain_family``. Pinned to 18578-18580 immediately above the BTC
+# range so the two new JSON-RPC chain pools sit contiguously. Primary
+# tier only. No router routes traffic to LN today (MAG-1726 is the
+# upstream tracking ticket); allocating dedicated ports here keeps the
+# port-allocation pattern symmetric for when the router-side wire-up
+# lands.
+LN_PRIMARY_PORTS  = {"1": 18578, "2": 18579, "3": 18580}
 
 # Control API (scenario config, reset, stats, history)
 CONTROL_PORT = 19000
@@ -151,19 +189,15 @@ TM_PROPOSER_ADDR = "D" * 40                           # 40-char hex, proposer ad
 
 
 # ── Lightning Network (LND) — chain identity + stub primitives (MAG-1726) ─────
-# Successor to MAG-1716 (BTC). LN dispatches over the same JSON-RPC ports
-# (18545-18547) using ``chain_family="ln"`` — no new listener bound. This
-# mirrors what BTC did: the LN method-name namespace (``getinfo``,
-# ``listchannels``, ``openchannel``, ``decodepayreq``, ``payinvoice``,
-# ``listpeers``) doesn't overlap with ETH (``eth_*`` / ``net_*`` / ``web3_*``)
-# or BTC (``getblockcount`` / ``getblock`` / ``getblockhash`` / ...), so a
-# per-provider chain_family flag is enough to select the right handler.
-#
-# Why no LN_PROVIDER_PORTS dict: BTC didn't add one either. Both chains share
-# the JSON-RPC listener pool and select the handler by chain_family. Adding a
-# parallel port range would force a router-side spec wire-up that LN doesn't
-# yet have on the smart-router side, and would double the simulator's listener
-# count for no behavioural gain on a JSON-RPC-only surface.
+# LN dispatches over its own dedicated JSON-RPC listener pool at
+# ``LN_PRIMARY_PORTS`` (18578-18580); handler dispatch is port-derived.
+# The LN method-name namespace (``getinfo``, ``listchannels``, ``openchannel``,
+# ``decodepayreq``, ``payinvoice``, ``listpeers``) doesn't overlap with ETH
+# or BTC, but the dedicated listener pool means we no longer rely on a
+# per-provider ``chain_family`` flag to pick the LN handler on JSON-RPC.
+# The ``chain_family`` field is still attached to ``/scenario`` payloads
+# so REST / gRPC / TM / WS fault-primitive gating keeps working — it just
+# stops being load-bearing for BTC / LN JSON-RPC handler selection (MAG-2089).
 LN_NETWORK            = "regtest"   # LND's network field — "mainnet" | "testnet" | "regtest" | "signet"
 LN_IDENTITY_PUBKEY    = "02" + "ab" * 32      # 33-byte secp256k1 compressed pubkey: 0x02-prefix + 32-byte X coord
 LN_PEER_PUBKEY        = "02" + "cd" * 32      # distinct peer pubkey for listpeers / openchannel responses

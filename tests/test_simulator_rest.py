@@ -925,16 +925,21 @@ class TestRestHistory:
 class TestRestCrossTransportFaultIsolation:
     """REST port must ignore faults authored for any other chain_family."""
 
-    def test_rest_unaffected_by_eth_down_fault(self, sim):
-        """A ``chain_family="eth"`` down fault must not return 503 on the
-        REST port. Without the gate this asserts http 503 instead of a
-        normal REST success body."""
+    def test_rest_killed_by_eth_down_fault(self, sim):
+        """A ``chain_family="eth"`` down fault MUST 503 the REST port.
+
+        MAG-2092: mode="down" is honored on every transport regardless of
+        chain_family because reachability is provider-wide. Without the
+        universal-down semantic, an ETH provider in mode=down would keep
+        serving REST responses, hiding router-side bugs that depend on
+        the provider being unreachable across every node-url (e.g.
+        MAG-2061). Per-transport isolation still applies to content modes
+        (error / corrupt / hang / rate_limit / drop_connection)."""
         _post(_ctrl(sim, "/scenario"), {
             "providers": {"1": {"chain_family": "eth", "mode": "down"}}
         })
         status, body, _ = _get(sim["rest1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
-        assert status == 200, f"REST should ignore eth-down; got {status}"
-        assert "block" in body, f"expected REST success body; got {body!r}"
+        assert status == 503, f"REST should refuse with 503 under universal-down; got {status}"
 
     def test_rest_unaffected_by_btc_error_fault(self, sim):
         """A ``chain_family="btc"`` mode=error must not produce an error
@@ -958,14 +963,15 @@ class TestRestCrossTransportFaultIsolation:
         assert status == 200, f"REST should ignore grpc-rate-limit; got {status}"
         assert "block" in body
 
-    def test_rest_unaffected_by_tendermintrpc_down_fault(self, sim):
-        """Tendermint down must not kill the REST port."""
+    def test_rest_killed_by_tendermintrpc_down_fault(self, sim):
+        """MAG-2092 universal-down: a ``chain_family="tendermintrpc"`` mode=down
+        also 503s the REST port. Other modes (rate_limit / error / etc.)
+        stay per-transport — see sibling tests above."""
         _post(_ctrl(sim, "/scenario"), {
             "providers": {"1": {"chain_family": "tendermintrpc", "mode": "down"}}
         })
-        status, body, _ = _get(sim["rest1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
-        assert status == 200
-        assert "block" in body
+        status, _, _ = _get(sim["rest1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
+        assert status == 503, f"REST should refuse with 503 under universal-down; got {status}"
 
     def test_rest_fault_still_fires_when_chain_family_is_rest(self, sim):
         """Sanity check: the gate must not break REST-side faults.
@@ -975,6 +981,24 @@ class TestRestCrossTransportFaultIsolation:
         })
         status, _, _ = _get(sim["rest1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
         assert status == 429
+
+    def test_rest_killed_by_btc_down_fault(self, sim):
+        """MAG-2092 universal-down: a ``chain_family="btc"`` mode=down
+        also 503s the REST port."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"chain_family": "btc", "mode": "down"}}
+        })
+        status, _, _ = _get(sim["rest1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
+        assert status == 503, f"REST should refuse with 503 under universal-down; got {status}"
+
+    def test_rest_killed_by_grpc_down_fault(self, sim):
+        """MAG-2092 universal-down: a ``chain_family="grpc"`` mode=down
+        also 503s the REST port."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"chain_family": "grpc", "mode": "down"}}
+        })
+        status, _, _ = _get(sim["rest1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
+        assert status == 503, f"REST should refuse with 503 under universal-down; got {status}"
 
 
 def http_err():
