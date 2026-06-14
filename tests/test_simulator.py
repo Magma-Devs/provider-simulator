@@ -2243,15 +2243,23 @@ class TestJsonRpcCrossTransportFaultIsolation:
     authored for one transport would also fire on every other transport
     sharing the same state.
 
-    MAG-2089 sharpened the gate: each JSON-RPC listener fires faults only
+    MAG-2089 sharpened the gate: each JSON-RPC listener fires content
+    faults (error / corrupt / hang / rate_limit / drop_connection) only
     when the snap's ``chain_family`` matches its OWN listener's
     ``handler_chain_family``. The ETH listener (at ports 18545-7) owns
     ``"eth"`` exclusively; BTC and LN have their own dedicated listener
     pools at 18575-7 / 18578-80 that gate on ``"btc"`` / ``"ln"``
     respectively. Any non-matching ``chain_family`` value (incl. "btc"
-    or "ln" on an ETH listener — what used to bleed) means the fault was
-    set for a different transport and the listener falls through to its
-    normal success response.
+    or "ln" on an ETH listener — what used to bleed) means the content
+    fault was set for a different transport and the listener falls
+    through to its normal success response.
+
+    MAG-2092 exception: ``mode="down"`` is honored on every JSON-RPC
+    listener regardless of ``chain_family`` because reachability is
+    provider-wide. Per-transport isolation applies to content modes
+    only; a BTC-tagged ``mode="down"`` still 503s the ETH JSON-RPC
+    port, matching the universal-down semantic on WS / gRPC / REST /
+    TM. The cross-transport-down tests immediately below assert this.
     """
 
     def test_jsonrpc_killed_by_grpc_down_fault(self, sim):
