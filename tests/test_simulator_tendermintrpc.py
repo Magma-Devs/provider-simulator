@@ -506,14 +506,21 @@ class TestTmHistory:
 class TestTmCrossTransportFaultIsolation:
     """TM port must ignore faults authored for any other chain_family."""
 
-    def test_tm_unaffected_by_eth_down_fault(self, sim):
-        """A ``chain_family="eth"`` down fault must not 503 the TM port."""
+    def test_tm_killed_by_eth_down_fault(self, sim):
+        """A ``chain_family="eth"`` down fault MUST 503 the TM port.
+
+        MAG-2092: mode="down" is honored on every transport regardless of
+        chain_family because reachability is provider-wide. Without the
+        universal-down semantic, an ETH provider in mode=down would keep
+        serving TM responses, hiding router-side bugs that depend on the
+        provider being unreachable across every node-url (e.g. MAG-2061).
+        Per-transport isolation still applies to content modes (error /
+        corrupt / hang / rate_limit / drop_connection)."""
         _request("POST", _ctrl(sim, "/scenario"), body={
             "providers": {"1": {"chain_family": "eth", "mode": "down"}}
         })
-        status, body, _ = _tm_get(sim, "1", "status")
-        assert status == 200, f"TM should ignore eth-down; got {status}"
-        assert "result" in body, f"expected TM success body; got {body!r}"
+        status, _, _ = _tm_get(sim, "1", "status")
+        assert status == 503, f"TM should refuse with 503 under universal-down; got {status}"
 
     def test_tm_unaffected_by_btc_error_fault(self, sim):
         """A ``chain_family="btc"`` mode=error must not produce an error
@@ -546,3 +553,21 @@ class TestTmCrossTransportFaultIsolation:
         })
         status, _, _ = _tm_get(sim, "1", "status")
         assert status == 429
+
+    def test_tm_killed_by_btc_down_fault(self, sim):
+        """MAG-2092 universal-down: a ``chain_family="btc"`` mode=down
+        also 503s the TM port."""
+        _request("POST", _ctrl(sim, "/scenario"), body={
+            "providers": {"1": {"chain_family": "btc", "mode": "down"}}
+        })
+        status, _, _ = _tm_get(sim, "1", "status")
+        assert status == 503, f"TM should refuse with 503 under universal-down; got {status}"
+
+    def test_tm_killed_by_rest_down_fault(self, sim):
+        """MAG-2092 universal-down: a ``chain_family="rest"`` mode=down
+        also 503s the TM port."""
+        _request("POST", _ctrl(sim, "/scenario"), body={
+            "providers": {"1": {"chain_family": "rest", "mode": "down"}}
+        })
+        status, _, _ = _tm_get(sim, "1", "status")
+        assert status == 503, f"TM should refuse with 503 under universal-down; got {status}"

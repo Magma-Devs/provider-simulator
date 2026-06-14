@@ -2240,26 +2240,44 @@ class TestJsonRpcCrossTransportFaultIsolation:
     Tendermint-RPC for the same provider id. The fault primitives in
     ``_apply_fault`` (down / hang / drop_connection / rate_limit / error)
     are chain-agnostic on the snap, so without an explicit gate a fault
-    authored for the gRPC port (chain_family="grpc") would also kill the
-    JSON-RPC port for that provider.
+    authored for one transport would also fire on every other transport
+    sharing the same state.
 
-    Inverse of MAG-1836 (which gated the gRPC fault ladder on
-    chain_family="grpc"). The JSON-RPC handler owns chain_family values
-    ``"eth"`` and ``"btc"``; any other value means the fault was set for
-    a different transport and the JSON-RPC port should fall through to
-    its normal success response.
+    MAG-2089 sharpened the gate: each JSON-RPC listener fires content
+    faults (error / corrupt / hang / rate_limit / drop_connection) only
+    when the snap's ``chain_family`` matches its OWN listener's
+    ``handler_chain_family``. The ETH listener (at ports 18545-7) owns
+    ``"eth"`` exclusively; BTC and LN have their own dedicated listener
+    pools at 18575-7 / 18578-80 that gate on ``"btc"`` / ``"ln"``
+    respectively. Any non-matching ``chain_family`` value (incl. "btc"
+    or "ln" on an ETH listener — what used to bleed) means the content
+    fault was set for a different transport and the listener falls
+    through to its normal success response.
+
+    MAG-2092 exception: ``mode="down"`` is honored on every JSON-RPC
+    listener regardless of ``chain_family`` because reachability is
+    provider-wide. Per-transport isolation applies to content modes
+    only; a BTC-tagged ``mode="down"`` still 503s the ETH JSON-RPC
+    port, matching the universal-down semantic on WS / gRPC / REST /
+    TM. The cross-transport-down tests immediately below assert this.
     """
 
-    def test_jsonrpc_unaffected_by_grpc_down_fault(self, sim):
-        """gRPC ``down`` fault on provider 1 must not return 503 on its
-        JSON-RPC port. Without the gate this asserts http 503 instead of
-        a normal success body."""
+    def test_jsonrpc_killed_by_grpc_down_fault(self, sim):
+        """A ``chain_family="grpc"`` down fault MUST 503 the JSON-RPC port.
+
+        MAG-2092: mode="down" is honored on every transport regardless of
+        chain_family because reachability is provider-wide. Without the
+        universal-down semantic, a gRPC-tagged down would leave the
+        JSON-RPC port serving, hiding router-side bugs that depend on the
+        provider being unreachable across every node-url (e.g. MAG-2061).
+        Per-transport isolation still applies to content modes (error /
+        corrupt / hang / rate_limit / drop_connection) — see sibling
+        rate_limit / error tests below."""
         _post(_ctrl(sim, "/scenario"), {
             "providers": {"1": {"chain_family": "grpc", "mode": "down"}}
         })
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
-        assert status == 200, f"JSON-RPC should ignore grpc-down; got {status}"
-        assert "result" in body, f"expected success body; got {body}"
+        status, _ = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 503, f"JSON-RPC should refuse with 503 under universal-down; got {status}"
 
     def test_jsonrpc_unaffected_by_grpc_rate_limit_fault(self, sim):
         """gRPC ``rate_limit`` must not return 429 on the JSON-RPC port."""
@@ -2286,26 +2304,25 @@ class TestJsonRpcCrossTransportFaultIsolation:
         assert "error" not in body, f"expected no error key; got {body}"
         assert "result" in body
 
-    def test_jsonrpc_unaffected_by_rest_down_fault(self, sim):
-        """REST ``down`` fault must not kill the JSON-RPC port either —
-        all non-jsonrpc chain_family values are gated the same way."""
+    def test_jsonrpc_killed_by_rest_down_fault(self, sim):
+        """MAG-2092 universal-down: a ``chain_family="rest"`` mode=down
+        also 503s the JSON-RPC port."""
         _post(_ctrl(sim, "/scenario"), {
             "providers": {"1": {"chain_family": "rest", "mode": "down"}}
         })
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
-        assert status == 200
-        assert "result" in body
+        status, _ = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 503, f"JSON-RPC should refuse with 503 under universal-down; got {status}"
 
-    def test_jsonrpc_unaffected_by_tendermintrpc_down_fault(self, sim):
-        """Tendermint ``down`` fault must not kill the JSON-RPC port."""
+    def test_jsonrpc_killed_by_tendermintrpc_down_fault(self, sim):
+        """MAG-2092 universal-down: a ``chain_family="tendermintrpc"`` mode=down
+        also 503s the JSON-RPC port."""
         _post(_ctrl(sim, "/scenario"), {
             "providers": {"1": {
                 "chain_family": "tendermintrpc", "mode": "down",
             }}
         })
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
-        assert status == 200
-        assert "result" in body
+        status, _ = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 503, f"JSON-RPC should refuse with 503 under universal-down; got {status}"
 
     def test_jsonrpc_fault_still_fires_when_chain_family_is_eth(self, sim):
         """Sanity check: the gate must not break JSON-RPC-side faults.
@@ -2317,15 +2334,50 @@ class TestJsonRpcCrossTransportFaultIsolation:
         status, _ = _rpc(sim["provider1"], "eth_blockNumber")
         assert status == 503
 
-    def test_jsonrpc_fault_still_fires_when_chain_family_is_btc(self, sim):
-        """Sanity check: btc is the other JSON-RPC-owned chain family —
-        a ``rate_limit`` fault with chain_family="btc" must still return
-        429 on the JSON-RPC port."""
+    def test_jsonrpc_eth_listener_ignores_btc_chain_family_fault(self, sim):
+        """MAG-2089 — the ETH listener must NOT fire a fault authored for
+        chain_family="btc". Pre-MAG-2089 the ETH listener evaluated faults
+        for chain_family in {eth, btc, ln} and bled a BTC scenario's
+        rate_limit / down / hang onto the ETH port whenever the BTC and
+        ETH listeners shared a ProviderState. With BTC moved to its own
+        listener pool, the ETH listener's gate is exact-match on "eth"
+        — a BTC-tagged rate_limit must pass through to the ETH success
+        path. (The BTC listener on its own dedicated port would still
+        return 429 — that's the BTC suite's job to assert.)
+        """
         _post(_ctrl(sim, "/scenario"), {
             "providers": {"1": {"chain_family": "btc", "mode": "rate_limit"}}
         })
-        status, _ = _rpc(sim["provider1"], "getblockcount")
-        assert status == 429
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200, f"ETH listener should ignore BTC-tagged fault; got {status}"
+        assert "result" in body, f"expected ETH success body; got {body}"
+
+    def test_jsonrpc_eth_listener_ignores_ln_chain_family_rate_limit_fault(self, sim):
+        """MAG-2089 companion to the BTC isolation test. LN-tagged content
+        faults set on a shared ProviderState must not bleed onto the ETH
+        listener.
+
+        MAG-2092: this test now uses mode=rate_limit (a content mode) instead
+        of mode=down. mode=down is universal across transports and would
+        legitimately 503 the ETH listener even when authored for chain_family="ln".
+        Per-transport isolation only applies to content modes (error / corrupt /
+        hang / rate_limit / drop_connection)."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"chain_family": "ln", "mode": "rate_limit"}}
+        })
+        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 200, f"ETH listener should ignore LN-tagged rate_limit; got {status}"
+        assert "result" in body, f"expected ETH success body; got {body}"
+
+    def test_jsonrpc_eth_listener_killed_by_ln_down_fault(self, sim):
+        """MAG-2092 universal-down: a ``chain_family="ln"`` mode=down
+        also 503s the ETH JSON-RPC listener — reachability is provider-wide.
+        Companion to the rate_limit isolation test above."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"chain_family": "ln", "mode": "down"}}
+        })
+        status, _ = _rpc(sim["provider1"], "eth_blockNumber")
+        assert status == 503, f"JSON-RPC should refuse with 503 under universal-down; got {status}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -166,3 +166,37 @@ spec:
       port: 18574
       targetPort: 18574
       protocol: TCP
+    # BTC JSON-RPC primary ports (MAG-2089). Dedicated per-chain pool so
+    # handler dispatch is port-derived instead of per-provider `chain_family`.
+    # Routes every request received on these ports to handlers_btc.handle
+    # unconditionally. Eliminates the cross-test contamination that was
+    # possible when BTC and ETH shared 18545-18547.
+    - name: provider-btc-1
+      port: 18575
+      targetPort: 18575
+      protocol: TCP
+    - name: provider-btc-2
+      port: 18576
+      targetPort: 18576
+      protocol: TCP
+    - name: provider-btc-3
+      port: 18577
+      targetPort: 18577
+      protocol: TCP
+    # LN (Lightning Network) JSON-RPC primary ports (MAG-2089). Dedicated
+    # per-chain pool so handler dispatch is port-derived. Routes every request
+    # received on these ports to handlers_lnd.handle unconditionally.
+    # No LN router is deployed today, but the pool is in place so a future
+    # LN router lands without further sim changes.
+    - name: provider-ln-1
+      port: 18578
+      targetPort: 18578
+      protocol: TCP
+    - name: provider-ln-2
+      port: 18579
+      targetPort: 18579
+      protocol: TCP
+    - name: provider-ln-3
+      port: 18580
+      targetPort: 18580
+      protocol: TCP

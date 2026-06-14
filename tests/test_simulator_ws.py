@@ -1136,14 +1136,23 @@ class TestWsPerMethodFaultOverrides:
 class TestWsCrossTransportFaultIsolation:
     """WS port must ignore faults authored for any other chain_family."""
 
-    def test_ws_handshake_unaffected_by_eth_down_fault(self, sim):
-        """A ``chain_family="eth"`` down fault must not 503 the WS upgrade."""
+    def test_ws_handshake_killed_by_eth_down_fault(self, sim):
+        """A ``chain_family="eth"`` down fault MUST 503 the WS upgrade.
+
+        MAG-2092: mode="down" is honored on every transport regardless of
+        chain_family because reachability is provider-wide. Without this
+        universal-down semantic, an ETH provider in mode=down would still
+        complete the WS handshake at port 18557-59, hiding router-side
+        bugs that depend on the provider being unreachable across every
+        node-url (e.g. MAG-2061). Per-transport isolation still applies to
+        content modes (error / corrupt / hang / rate_limit /
+        drop_connection) — see sibling tests below."""
         _control(sim, "POST", "/scenario", {
             "providers": {"1": {"chain_family": "eth", "mode": "down"}}
         })
         data = _raw_ws_upgrade(sim["ws1_host"], sim["ws1_port"])
-        assert b" 101 " in data.split(b"\r\n", 1)[0], (
-            f"WS upgrade should complete (101); got {data[:80]!r}"
+        assert b" 503 " in data.split(b"\r\n", 1)[0], (
+            f"WS upgrade should refuse with 503 under universal-down; got {data[:80]!r}"
         )
 
     def test_ws_handshake_unaffected_by_btc_error_fault(self, sim):
@@ -1193,3 +1202,26 @@ class TestWsCrossTransportFaultIsolation:
         })
         data = _raw_ws_upgrade(sim["ws1_host"], sim["ws1_port"])
         assert b" 503 " in data.split(b"\r\n", 1)[0]
+
+    def test_ws_handshake_killed_by_btc_down_fault(self, sim):
+        """MAG-2092 universal-down: a ``chain_family="btc"`` mode=down
+        also 503s the WS upgrade. Without the universal-down semantic,
+        a BTC-tagged down would leave the WS handshake open."""
+        _control(sim, "POST", "/scenario", {
+            "providers": {"1": {"chain_family": "btc", "mode": "down"}}
+        })
+        data = _raw_ws_upgrade(sim["ws1_host"], sim["ws1_port"])
+        assert b" 503 " in data.split(b"\r\n", 1)[0], (
+            f"WS upgrade should refuse with 503 under universal-down; got {data[:80]!r}"
+        )
+
+    def test_ws_handshake_killed_by_tendermintrpc_down_fault(self, sim):
+        """MAG-2092 universal-down: a ``chain_family="tendermintrpc"`` mode=down
+        also 503s the WS upgrade."""
+        _control(sim, "POST", "/scenario", {
+            "providers": {"1": {"chain_family": "tendermintrpc", "mode": "down"}}
+        })
+        data = _raw_ws_upgrade(sim["ws1_host"], sim["ws1_port"])
+        assert b" 503 " in data.split(b"\r\n", 1)[0], (
+            f"WS upgrade should refuse with 503 under universal-down; got {data[:80]!r}"
+        )
