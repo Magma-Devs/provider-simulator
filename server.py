@@ -65,6 +65,7 @@ from constants import (
     PROVIDER_PORTS,
     REST_BACKUP_PORTS,
     REST_PORTS,
+    SOLO_PROVIDER_PORTS,
     TM_BACKUP_PORTS,
     TM_PORTS,
     WS_BACKUP_PORTS,
@@ -2160,7 +2161,7 @@ class ControlHandler(BaseHTTPRequestHandler):
             # poisoned from the start.
             import socket
             from constants import (
-                PROVIDER_PORTS, BACKUP_PROVIDER_PORTS,
+                PROVIDER_PORTS, BACKUP_PROVIDER_PORTS, SOLO_PROVIDER_PORTS,
                 BTC_PRIMARY_PORTS, LN_PRIMARY_PORTS,
                 GRPC_PROVIDER_PORTS, GRPC_BACKUP_PORTS,
                 REST_PORTS, REST_BACKUP_PORTS,
@@ -2169,6 +2170,7 @@ class ControlHandler(BaseHTTPRequestHandler):
             )
             all_ports = sorted({
                 *PROVIDER_PORTS.values(), *BACKUP_PROVIDER_PORTS.values(),
+                *SOLO_PROVIDER_PORTS.values(),
                 *BTC_PRIMARY_PORTS.values(), *LN_PRIMARY_PORTS.values(),
                 *GRPC_PROVIDER_PORTS.values(), *GRPC_BACKUP_PORTS.values(),
                 *REST_PORTS.values(), *REST_BACKUP_PORTS.values(),
@@ -2598,6 +2600,8 @@ def main():
         print(f"  provider {pid:>2} (jsonrpc-eth,    primary) → :{port}")
     for pid, port in BACKUP_PROVIDER_PORTS.items():
         print(f"  provider {pid:>2} (jsonrpc-eth,    backup)  → :{port}")
+    for pid, port in SOLO_PROVIDER_PORTS.items():
+        print(f"  provider {pid:>2} (jsonrpc-eth,    solo)    → :{port}")
     for pid, port in BTC_PRIMARY_PORTS.items():
         print(f"  provider {pid:>2} (jsonrpc-btc,    primary) → :{port}")
     for pid, port in LN_PRIMARY_PORTS.items():

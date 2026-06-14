@@ -41,6 +41,13 @@ spec:
       port: 18562
       targetPort: 18562
       protocol: TCP
+    # Solo JSON-RPC service port (MAG-2061) — mirrors the deployment's
+    # provider-solo container port. Wired by the eth-solo-sim-router via
+    # the matching containerPort.
+    - name: provider-solo
+      port: 18581
+      targetPort: 18581
+      protocol: TCP
     # REST sim service ports (MAG-1777) — mirror the deployment's rest-sim-1/2/3
     # named ports. The HTTPRoute (k8s/httproute-lava-sim-rest.yml) references
     # these names so the gateway can resolve them by name rather than number.
