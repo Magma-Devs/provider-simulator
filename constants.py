@@ -31,7 +31,16 @@ import os
 # See BTC_PRIMARY_PORTS / LN_PRIMARY_PORTS below for the full allocation.
 PROVIDER_PORTS        = {"1": 18545, "2": 18546, "3": 18547}
 BACKUP_PROVIDER_PORTS = {"4": 18560, "5": 18561, "6": 18562}
-ALL_PROVIDER_PORTS    = {**PROVIDER_PORTS, **BACKUP_PROVIDER_PORTS}
+# Solo JSON-RPC primary listener (MAG-2061). One provider, no backup — the
+# customer-outage deployment shape. Pid 19 (next after the WS-backup pool's
+# pid 18) keeps the global pid namespace contiguous; port 18581 sits one
+# above the LN primary range (18578-18580). Handler dispatch is the default
+# ETH path (handlers_eth.handle) because this listener is bound by the same
+# bootstrap loop that owns PROVIDER_PORTS / BACKUP_PROVIDER_PORTS — adding
+# the entry to ALL_PROVIDER_PORTS is sufficient; no separate listener block
+# is required.
+SOLO_PROVIDER_PORTS   = {"19": 18581}
+ALL_PROVIDER_PORTS    = {**PROVIDER_PORTS, **BACKUP_PROVIDER_PORTS, **SOLO_PROVIDER_PORTS}
 
 # Bitcoin JSON-RPC primary pool (MAG-2089). Each listener routes the
 # success branch unconditionally through ``handlers_btc.handle(...)`` —
