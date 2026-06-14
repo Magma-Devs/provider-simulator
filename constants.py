@@ -21,30 +21,44 @@ import os
 #   gRPC 18563-18565 / REST 18566-18568 / TM 18569-18571 / WS 18572-18574
 #
 # BTC and LN JSON-RPC pools sit at 18575-18577 (BTC) and 18578-18580 (LN).
-# They each get their own dedicated listeners — handler dispatch is
+# They each get their own dedicated listeners — handler **dispatch** is
 # port-derived, NOT per-provider via ``chain_family``. The ETH JSON-RPC pool
-# (18545-18547) handles ETH only. See BTC_PRIMARY_PORTS / LN_PRIMARY_PORTS
-# below for the full allocation.
+# (18545-18547) handles ETH only. Content fault primitives (error /
+# rate_limit / hang / drop_connection / corruption) are still gated per
+# listener on the snap's ``chain_family`` matching the listener's own
+# ``handler_chain_family``; ``mode="down"`` is the universal exception
+# (MAG-2092) and fires on every listener regardless of ``chain_family``.
+# See BTC_PRIMARY_PORTS / LN_PRIMARY_PORTS below for the full allocation.
 PROVIDER_PORTS        = {"1": 18545, "2": 18546, "3": 18547}
 BACKUP_PROVIDER_PORTS = {"4": 18560, "5": 18561, "6": 18562}
 ALL_PROVIDER_PORTS    = {**PROVIDER_PORTS, **BACKUP_PROVIDER_PORTS}
 
-# Bitcoin JSON-RPC primary pool (MAG-2089). Each listener routes requests
-# unconditionally through ``handlers_btc.handle(...)`` — there is no
-# ``chain_family`` check on these ports. The 18575-18577 range was picked
-# so it sits above the existing JSON-RPC backup block (18560-18562) and
-# the non-JSON-RPC surface ranges, and so it doesn't collide with any
-# documented router service / chart values. Primary tier only — backup
-# tier (if/when needed) would extend contiguously upward.
+# Bitcoin JSON-RPC primary pool (MAG-2089). Each listener routes the
+# success branch unconditionally through ``handlers_btc.handle(...)`` —
+# success-path dispatch is port-derived, with no ``chain_family`` check.
+# Content fault primitives (error / rate_limit / hang / drop_connection
+# / corruption) are still chain_family-gated and fire only when the
+# snap's ``chain_family == "btc"``. ``mode="down"`` is the universal
+# exception (MAG-2092) and fires on every listener regardless of
+# ``chain_family``. The 18575-18577 range was picked so it sits above
+# the existing JSON-RPC backup block (18560-18562) and the non-JSON-RPC
+# surface ranges, and so it doesn't collide with any documented router
+# service / chart values. Primary tier only — backup tier (if/when
+# needed) would extend contiguously upward.
 BTC_PRIMARY_PORTS = {"1": 18575, "2": 18576, "3": 18577}
 
 # Lightning Network JSON-RPC primary pool (MAG-2089). Each listener routes
-# requests unconditionally through ``handlers_lnd.handle(...)`` — no
-# ``chain_family`` check on these ports. Pinned to 18578-18580 immediately
-# above the BTC range so the two new JSON-RPC chain pools sit contiguously.
-# Primary tier only. No router routes traffic to LN today (MAG-1726 is the
+# the success branch unconditionally through ``handlers_lnd.handle(...)``
+# — success-path dispatch is port-derived, with no ``chain_family``
+# check. Content fault primitives are still chain_family-gated and fire
+# only when the snap's ``chain_family == "ln"``; ``mode="down"`` is the
+# universal exception (MAG-2092) and fires on every listener regardless
+# of ``chain_family``. Pinned to 18578-18580 immediately above the BTC
+# range so the two new JSON-RPC chain pools sit contiguously. Primary
+# tier only. No router routes traffic to LN today (MAG-1726 is the
 # upstream tracking ticket); allocating dedicated ports here keeps the
-# port-allocation pattern symmetric for when the router-side wire-up lands.
+# port-allocation pattern symmetric for when the router-side wire-up
+# lands.
 LN_PRIMARY_PORTS  = {"1": 18578, "2": 18579, "3": 18580}
 
 # Control API (scenario config, reset, stats, history)

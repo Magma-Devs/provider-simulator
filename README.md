@@ -18,7 +18,7 @@ For each pid (1-3), the ETH / BTC / LN / REST / gRPC / TM / WS primary listeners
 
 ## Chain families
 
-JSON-RPC handler dispatch is **port-derived** (MAG-2089): the ETH listener pool always calls `handlers_eth`, the BTC pool always calls `handlers_btc`, the LN pool always calls `handlers_lnd`. The `chain_family` field on `/scenario` payloads is still meaningful — REST / gRPC / TM / WS read it to gate fault primitives (down / hang / rate_limit / error / corruption) to the transport that authored them, and the JSON-RPC listeners use it to gate fault primitives to their own pool (ETH listener fires `chain_family="eth"` faults only, BTC fires `chain_family="btc"` only, LN fires `chain_family="ln"` only).
+JSON-RPC handler dispatch is **port-derived** (MAG-2089): the ETH listener pool always calls `handlers_eth`, the BTC pool always calls `handlers_btc`, the LN pool always calls `handlers_lnd`. The `chain_family` field on `/scenario` payloads is still meaningful — REST / gRPC / TM / WS read it to gate **content** fault primitives (`error` / `rate_limit` / `hang` / `drop_connection` / `corruption`) to the transport that authored them, and the JSON-RPC listeners use it to gate content faults to their own pool (ETH listener fires `chain_family="eth"` content faults only, BTC fires `chain_family="btc"` only, LN fires `chain_family="ln"` only). `mode="down"` is the universal exception (MAG-2092): it is honored on every transport regardless of `chain_family` because reachability is provider-wide — a BTC-tagged `mode="down"` still 503s the ETH JSON-RPC, REST, gRPC, TM, and WS surfaces for the same provider id.
 
 | `chain_family` | Transport | Status | Listener ports | Where it dispatches |
 |---|---|---|---|---|
