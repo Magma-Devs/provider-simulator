@@ -48,6 +48,13 @@ spec:
             - name: provider-6
               containerPort: 18562
               protocol: TCP
+            # Solo JSON-RPC listener (MAG-2061) — pid 19 / port 18581. Single
+            # provider, no backup pair; serves the eth-solo-sim-router which
+            # is wired as the customer-outage deployment shape. The server
+            # bootstrap loop owns the entry via ALL_PROVIDER_PORTS.
+            - name: provider-solo
+              containerPort: 18581
+              protocol: TCP
             # REST sim listeners (MAG-1777) — peer to provider-1/2/3, one per
             # simulated provider, sharing ProviderState so a /scenario update
             # is visible from both the JSON-RPC and REST ports.
