@@ -552,3 +552,31 @@ class TestBTCHistoryTracking:
         _, hist = _get(_ctrl(sim, "/history?provider=1&status=error"))
         assert hist["count"] >= 1
         assert hist["history"][-1]["method"] == "getblockhash"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cross-transport fault isolation — mode=down is universal across chain_family
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestBTCCrossTransportFaultIsolation:
+    """BTC port must honor mode=down regardless of chain_family."""
+
+    def test_btc_killed_by_eth_down_fault(self, sim):
+        """A ``chain_family="eth"`` down fault MUST 503 the BTC port.
+
+        Universal-down semantics: mode="down" is honored on every transport
+        regardless of chain_family because reachability is provider-wide.
+        Without it, an ETH provider in mode=down would keep serving BTC
+        responses, hiding router-side bugs that depend on the provider being
+        unreachable across every node-url. Per-transport isolation still
+        applies to content modes (error / corrupt / hang / rate_limit /
+        drop_connection) — those gate on chain_family.
+        """
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"chain_family": "eth", "mode": "down"}}
+        })
+        status, _ = _rpc(sim["provider1"], "getblockcount")
+        assert status == 503, (
+            f"BTC port should refuse with 503 under universal-down; got {status}"
+        )
