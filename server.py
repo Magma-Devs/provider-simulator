@@ -2372,12 +2372,16 @@ class ControlHandler(BaseHTTPRequestHandler):
 # ── Server startup ────────────────────────────────────────────────────────────
 
 
-def _scenario_ttl_sweep(states: Dict[str, ProviderState], ttl_s: int, interval_s: float = 60.0) -> None:
+def _scenario_ttl_sweep(states: Dict[str, ProviderState], ttl_s: int, interval_s: float = 120.0) -> None:
     """Background daemon (MAG-2022): every interval_s, revert any provider whose
     scenario hasn't been written-to in > ttl_s seconds back to defaults.
     Prevents stale state (e.g., mode=hang from a prior test) from surviving
     a router pod restart and breaking the router's startup validation.
-    Only reverts non-default state — providers in mode='success' are skipped."""
+    Only reverts non-default state — providers in mode='success' are skipped.
+
+    Wake interval default 120 s (was 60 s — halved wake-up frequency since the
+    default TTL is much longer than the wake interval, so checking every minute
+    was overkill)."""
     while True:
         time.sleep(interval_s)
         now = time.time()
@@ -2582,8 +2586,11 @@ def main():
     # that has been idle for > SIM_SCENARIO_TTL_SECONDS back to defaults.
     # Prevents stale state (e.g., mode=hang from a prior test) from surviving
     # a router pod restart and breaking the router's startup validation.
+    # Default TTL 900 s (15 min) — long enough that no realistic single test
+    # has a scenario sit untouched that long, short enough that orphaned
+    # state is cleared within one test session window in most cases.
     # Set SIM_SCENARIO_TTL_SECONDS=0 to disable.
-    scenario_ttl_s = int(os.environ.get("SIM_SCENARIO_TTL_SECONDS", "1800"))
+    scenario_ttl_s = int(os.environ.get("SIM_SCENARIO_TTL_SECONDS", "900"))
     if scenario_ttl_s > 0:
         sweep_thread = threading.Thread(
             target=_scenario_ttl_sweep,
