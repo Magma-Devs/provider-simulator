@@ -270,11 +270,13 @@ class ProviderState:
     # result.value.lastValidBlockHeight = S - solana_slot_block_gap. The two
     # numbers feed the router's two different reads: per-user seenBlock comes
     # from context.slot, the endpoint chain-tracker value from
-    # lastValidBlockHeight. Default 21_900_000 mirrors the ~22M real-mainnet
-    # gap and exceeds the router's 50-block consistency threshold, reproducing
-    # the "No pairings available" filter (MAG-1591). Only read by the Solana
-    # listener pool (18582-18584); ignored by every other handler.
-    solana_slot_block_gap: int = 21_900_000
+    # lastValidBlockHeight. The default mirrors the ~22M real-mainnet gap and
+    # exceeds the router's 50-block consistency threshold, reproducing the
+    # "No pairings available" filter (MAG-1591). Sourced from the Solana
+    # handler's own default so the field, the handler fallback, and /reset all
+    # share one number. Only read by the Solana listener pool (18582-18584);
+    # ignored by every other handler.
+    solana_slot_block_gap: int = handlers_solana.SOLANA_DEFAULT_SLOT_BLOCK_GAP
     drop_at: str = "before_headers"   # one of: "before_headers", "after_headers", "mid_body"; only applies when mode="drop_connection"
     chain_family: str = "eth"   # one of: "eth", "btc", "ln", "solana", "grpc", "rest", "tendermintrpc", "ws"; gates the per-listener FAULT primitives (the success-path handler is selected by LISTENER PORT, not by this field — MAG-2089). Default "eth" preserves backward-compat. "btc" → handlers_btc on the dedicated BTC JSON-RPC ports 18575-77 (MAG-1716). "ln" → handlers_lnd on the dedicated LN JSON-RPC ports 18578-80 (MAG-1726). "solana" → handlers_solana on the dedicated Solana JSON-RPC ports 18582-84 (MAG-2231) — same port-derived dispatch as BTC/LN; the success handler emits result.context.slot vs result.value.lastValidBlockHeight separated by solana_slot_block_gap. "grpc" → handlers_grpc on ports 18548-50. "rest" → handlers_rest on ports 18551-53 (MAG-1777). "tendermintrpc" → handlers_tendermintrpc on ports 18554-56 (MAG-1841). "ws" → handlers_ws on ports 18557-59 (MAG-1801) for WebSocket-style providers with subscription lifecycle — the handler delegates non-subscription methods back to handlers_eth.handle / handlers_btc.handle so request/response semantics are identical to HTTP JSON-RPC; subscription frames are wrapped in chain-specific envelopes from stubs_ws.
     # MAG-1791: provider-stale-on-getLogs primitive — head-fresh but logs-indexing-lagged.
@@ -346,7 +348,8 @@ class ProviderState:
             self.blocks_behind     = cfg.get("blocks_behind",     self.blocks_behind)
             # MAG-2231: backward-compat — a /scenario payload that omits
             # solana_slot_block_gap leaves the existing per-provider value
-            # untouched (defaults to 21_900_000 at construction).
+            # untouched (the field default at construction is the Solana
+            # handler's SOLANA_DEFAULT_SLOT_BLOCK_GAP).
             self.solana_slot_block_gap = cfg.get("solana_slot_block_gap", self.solana_slot_block_gap)
             self.drop_at           = cfg.get("drop_at",           self.drop_at)
             self.chain_family      = cfg.get("chain_family",      self.chain_family)
@@ -377,8 +380,9 @@ class ProviderState:
             self.missing_field     = None
             self.blocks_behind     = 0
             # MAG-2231: reset restores the default Solana slot/blockHeight gap
-            # so a /reset between tests clears any per-test override.
-            self.solana_slot_block_gap = 21_900_000
+            # so a /reset between tests clears any per-test override. Same source
+            # as the field default — the Solana handler's own constant.
+            self.solana_slot_block_gap = handlers_solana.SOLANA_DEFAULT_SLOT_BLOCK_GAP
             self.drop_at           = "before_headers"
             self.chain_family      = "eth"
             # MAG-1791: reset clears the eth_getLogs stale-indexing primitive

@@ -60,8 +60,10 @@ from typing import Any, Dict, Tuple
 
 # Base mainnet slot — a realistic post-2024 Solana slot number. Tests that pin
 # exact equality on the default getSlot / getLatestBlockhash slot can pin
-# against this value. The slot may advance per request via wall-clock stepping
-# below; the base is the floor.
+# against this value. _solana_slot() returns this verbatim today, so the slot
+# is fixed per request; the slot ↔ lastValidBlockHeight gap is the only moving
+# part. (A future variant could step the slot off the wall clock — see the
+# _solana_slot docstring — in which case this becomes the floor.)
 SOLANA_BASE_SLOT = 419_709_627
 
 # Default distance between context.slot and value.lastValidBlockHeight.
