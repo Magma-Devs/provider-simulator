@@ -207,3 +207,22 @@ spec:
       port: 18580
       targetPort: 18580
       protocol: TCP
+    # Solana JSON-RPC primary ports (MAG-2231). Dedicated per-chain pool so
+    # handler dispatch is port-derived. Routes every request received on these
+    # ports to handlers_solana.handle unconditionally. The getLatestBlockhash
+    # stub returns result.context.slot and result.value.lastValidBlockHeight
+    # separated by a configurable gap (solana_slot_block_gap) to reproduce the
+    # router's Solana consistency-filter bug (MAG-1591). 18582-18584 sits above
+    # the solo listener (18581), keeping the JSON-RPC chain pools contiguous.
+    - name: provider-solana-1
+      port: 18582
+      targetPort: 18582
+      protocol: TCP
+    - name: provider-solana-2
+      port: 18583
+      targetPort: 18583
+      protocol: TCP
+    - name: provider-solana-3
+      port: 18584
+      targetPort: 18584
+      protocol: TCP

@@ -51,6 +51,7 @@ import handlers_btc
 import handlers_eth
 import handlers_lnd
 import handlers_rest
+import handlers_solana
 import handlers_tendermintrpc
 import handlers_ws
 from constants import (
@@ -65,6 +66,7 @@ from constants import (
     PROVIDER_PORTS,
     REST_BACKUP_PORTS,
     REST_PORTS,
+    SOLANA_PRIMARY_PORTS,
     SOLO_PROVIDER_PORTS,
     TM_BACKUP_PORTS,
     TM_PORTS,
@@ -263,8 +265,20 @@ class ProviderState:
     corruption_mode: Optional[str] = None     # one of: None, "truncated", "missing_field", "invalid_json", "empty_response", "wrong_type"
     missing_field: Optional[str] = None       # field-name slot — which top-level field to target when corruption_mode is "missing_field" (omit it) or "wrong_type" (swap its type). Defaults to "result" for wrong_type when unset.
     blocks_behind: int = 0    # 0 = current head; positive = behind; negative = ahead
+    # MAG-2231: Solana getLatestBlockhash slot ↔ lastValidBlockHeight gap.
+    # handlers_solana emits result.context.slot = S and
+    # result.value.lastValidBlockHeight = S - solana_slot_block_gap. The two
+    # numbers feed the router's two different reads: per-user seenBlock comes
+    # from context.slot, the endpoint chain-tracker value from
+    # lastValidBlockHeight. The default mirrors the ~22M real-mainnet gap and
+    # exceeds the router's 50-block consistency threshold, reproducing the
+    # "No pairings available" filter (MAG-1591). Sourced from the Solana
+    # handler's own default so the field, the handler fallback, and /reset all
+    # share one number. Only read by the Solana listener pool (18582-18584);
+    # ignored by every other handler.
+    solana_slot_block_gap: int = handlers_solana.SOLANA_DEFAULT_SLOT_BLOCK_GAP
     drop_at: str = "before_headers"   # one of: "before_headers", "after_headers", "mid_body"; only applies when mode="drop_connection"
-    chain_family: str = "eth"   # one of: "eth", "btc", "ln", "grpc", "rest", "tendermintrpc", "ws"; selects which chain-specific handler module dispatches the success-branch response. Default "eth" preserves backward-compat. "btc" → handlers_btc on the JSON-RPC ports 18545-47 (MAG-1716). "ln" → handlers_lnd on the SAME JSON-RPC ports (MAG-1726) — LN reuses the existing listener pool the same way BTC does, selected per-provider via chain_family. "grpc" → handlers_grpc on ports 18548-50. "rest" → handlers_rest on ports 18551-53 (MAG-1777). "tendermintrpc" → handlers_tendermintrpc on ports 18554-56 (MAG-1841). "ws" → handlers_ws on ports 18557-59 (MAG-1801) for WebSocket-style providers with subscription lifecycle — the handler delegates non-subscription methods back to handlers_eth.handle / handlers_btc.handle so request/response semantics are identical to HTTP JSON-RPC; subscription frames are wrapped in chain-specific envelopes from stubs_ws.
+    chain_family: str = "eth"   # one of: "eth", "btc", "ln", "solana", "grpc", "rest", "tendermintrpc", "ws"; gates the per-listener FAULT primitives (the success-path handler is selected by LISTENER PORT, not by this field — MAG-2089). Default "eth" preserves backward-compat. "btc" → handlers_btc on the dedicated BTC JSON-RPC ports 18575-77 (MAG-1716). "ln" → handlers_lnd on the dedicated LN JSON-RPC ports 18578-80 (MAG-1726). "solana" → handlers_solana on the dedicated Solana JSON-RPC ports 18582-84 (MAG-2231) — same port-derived dispatch as BTC/LN; the success handler emits result.context.slot vs result.value.lastValidBlockHeight separated by solana_slot_block_gap. "grpc" → handlers_grpc on ports 18548-50. "rest" → handlers_rest on ports 18551-53 (MAG-1777). "tendermintrpc" → handlers_tendermintrpc on ports 18554-56 (MAG-1841). "ws" → handlers_ws on ports 18557-59 (MAG-1801) for WebSocket-style providers with subscription lifecycle — the handler delegates non-subscription methods back to handlers_eth.handle / handlers_btc.handle so request/response semantics are identical to HTTP JSON-RPC; subscription frames are wrapped in chain-specific envelopes from stubs_ws.
     # MAG-1791: provider-stale-on-getLogs primitive — head-fresh but logs-indexing-lagged.
     # Models the real production failure mode where providers update eth_blockNumber
     # immediately but index logs in a separate pipeline that can fall behind seconds-to-minutes.
@@ -311,6 +325,7 @@ class ProviderState:
                 "corruption_mode":   self.corruption_mode,
                 "missing_field":     self.missing_field,
                 "blocks_behind":     self.blocks_behind,
+                "solana_slot_block_gap": self.solana_slot_block_gap,
                 "drop_at":           self.drop_at,
                 "chain_family":      self.chain_family,
                 "logs_indexed_up_to": self.logs_indexed_up_to,
@@ -331,6 +346,11 @@ class ProviderState:
             self.corruption_mode   = cfg.get("corruption_mode",   self.corruption_mode)
             self.missing_field     = cfg.get("missing_field",     self.missing_field)
             self.blocks_behind     = cfg.get("blocks_behind",     self.blocks_behind)
+            # MAG-2231: backward-compat — a /scenario payload that omits
+            # solana_slot_block_gap leaves the existing per-provider value
+            # untouched (the field default at construction is the Solana
+            # handler's SOLANA_DEFAULT_SLOT_BLOCK_GAP).
+            self.solana_slot_block_gap = cfg.get("solana_slot_block_gap", self.solana_slot_block_gap)
             self.drop_at           = cfg.get("drop_at",           self.drop_at)
             self.chain_family      = cfg.get("chain_family",      self.chain_family)
             # MAG-1791: backward-compat — missing keys keep current value, so
@@ -359,6 +379,10 @@ class ProviderState:
             self.corruption_mode   = None
             self.missing_field     = None
             self.blocks_behind     = 0
+            # MAG-2231: reset restores the default Solana slot/blockHeight gap
+            # so a /reset between tests clears any per-test override. Same source
+            # as the field default — the Solana handler's own constant.
+            self.solana_slot_block_gap = handlers_solana.SOLANA_DEFAULT_SLOT_BLOCK_GAP
             self.drop_at           = "before_headers"
             self.chain_family      = "eth"
             # MAG-1791: reset clears the eth_getLogs stale-indexing primitive
@@ -2162,7 +2186,7 @@ class ControlHandler(BaseHTTPRequestHandler):
             import socket
             from constants import (
                 PROVIDER_PORTS, BACKUP_PROVIDER_PORTS, SOLO_PROVIDER_PORTS,
-                BTC_PRIMARY_PORTS, LN_PRIMARY_PORTS,
+                BTC_PRIMARY_PORTS, LN_PRIMARY_PORTS, SOLANA_PRIMARY_PORTS,
                 GRPC_PROVIDER_PORTS, GRPC_BACKUP_PORTS,
                 REST_PORTS, REST_BACKUP_PORTS,
                 TM_PORTS, TM_BACKUP_PORTS,
@@ -2172,6 +2196,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                 *PROVIDER_PORTS.values(), *BACKUP_PROVIDER_PORTS.values(),
                 *SOLO_PROVIDER_PORTS.values(),
                 *BTC_PRIMARY_PORTS.values(), *LN_PRIMARY_PORTS.values(),
+                *SOLANA_PRIMARY_PORTS.values(),
                 *GRPC_PROVIDER_PORTS.values(), *GRPC_BACKUP_PORTS.values(),
                 *REST_PORTS.values(), *REST_BACKUP_PORTS.values(),
                 *TM_PORTS.values(), *TM_BACKUP_PORTS.values(),
@@ -2419,6 +2444,15 @@ def main():
           Handler dispatch is port-derived; the LN listener at port 18578
           always calls handlers_lnd regardless of the snap's chain_family.
 
+      JSON-RPC Solana (three listeners — primary only) — MAG-2231
+        - Primary  : ports 18582 / 18583 / 18584 (pids 1-3, handler=solana)
+        - ProviderState shared with the matching ETH primary pid.
+          Handler dispatch is port-derived; the Solana listener at port 18582
+          always calls handlers_solana regardless of the snap's chain_family.
+          The success path emits result.context.slot vs
+          result.value.lastValidBlockHeight separated by solana_slot_block_gap
+          (default 21_900_000) to reproduce the MAG-1591 consistency-filter bug.
+
       gRPC (six listeners — three primary + three backup)
         - Primary  : ports 18548 / 18549 / 18550 (pids 1-3, shared state
                      with the matching JSON-RPC primary)
@@ -2520,6 +2554,25 @@ def main():
         ln_srv.handler_module       = handlers_lnd
         servers.append(ln_srv)
 
+    # Solana JSON-RPC primary listeners (MAG-2231). Same shape as the BTC / LN
+    # pools: dedicated listener pool, port-derived handler dispatch, fault
+    # gating on ``chain_family="solana"``. Shares ProviderState with the
+    # matching ETH primary pid (1-3) so a single /scenario POST that sets
+    # ``solana_slot_block_gap`` on pid "1" is visible from the Solana port.
+    # These ports are deliberately NOT in ALL_PROVIDER_PORTS — that union is
+    # bound by the ETH-default loop above (handlers_eth), so adding Solana
+    # there would (a) double-bind 18582-18584 and (b) route them to the ETH
+    # handler. The dedicated loop here is what gives them handlers_solana,
+    # exactly mirroring how BTC_PRIMARY_PORTS / LN_PRIMARY_PORTS are wired.
+    for pid, port in SOLANA_PRIMARY_PORTS.items():
+        sol_srv = ThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
+        sol_srv.daemon_threads = True
+        sol_srv.state                = states[pid]
+        sol_srv.provider_id          = pid
+        sol_srv.handler_chain_family = "solana"
+        sol_srv.handler_module       = handlers_solana
+        servers.append(sol_srv)
+
     # REST servers (MAG-1777). Primary tier shares ProviderState with the
     # matching JSON-RPC primary (pids 1-3), so a /scenario update on
     # provider 1 changes how both the JSON-RPC port (18545) and the REST
@@ -2613,6 +2666,8 @@ def main():
         print(f"  provider {pid:>2} (jsonrpc-btc,    primary) → :{port}")
     for pid, port in LN_PRIMARY_PORTS.items():
         print(f"  provider {pid:>2} (jsonrpc-ln,     primary) → :{port}")
+    for pid, port in SOLANA_PRIMARY_PORTS.items():
+        print(f"  provider {pid:>2} (jsonrpc-solana, primary) → :{port}")
     for pid, port in GRPC_PROVIDER_PORTS.items():
         print(f"  provider {pid:>2} (grpc,           primary) → :{port}")
     for pid, port in GRPC_BACKUP_PORTS.items():

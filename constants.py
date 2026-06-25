@@ -70,6 +70,24 @@ BTC_PRIMARY_PORTS = {"1": 18575, "2": 18576, "3": 18577}
 # lands.
 LN_PRIMARY_PORTS  = {"1": 18578, "2": 18579, "3": 18580}
 
+# Solana JSON-RPC primary pool (MAG-2231). Each listener routes the success
+# branch unconditionally through ``handlers_solana.handle(...)`` — success-path
+# dispatch is port-derived, with no ``chain_family`` check, exactly like the
+# BTC (18575-18577) and LN (18578-18580) pools. Content fault primitives
+# (error / rate_limit / hang / drop_connection / corruption) are still
+# chain_family-gated and fire only when the snap's ``chain_family ==
+# "solana"``; ``mode="down"`` is the universal exception (MAG-2092) and fires
+# on every listener regardless of ``chain_family``. Pinned to 18582-18584
+# immediately above the solo listener (18581) so the new JSON-RPC chain pool
+# sits contiguously with the BTC / LN / solo allocation. Primary tier only.
+# Reproduces the Solana consistency-filter bug (MAG-1591): the success
+# handler emits ``result.context.slot`` and ``result.value.lastValidBlockHeight``
+# separated by a configurable gap (``solana_slot_block_gap``) so the router's
+# per-user seenBlock (= context.slot) diverges from the endpoint chain-tracker
+# value (= lastValidBlockHeight) by more than the 50-block consistency
+# threshold.
+SOLANA_PRIMARY_PORTS = {"1": 18582, "2": 18583, "3": 18584}
+
 # Control API (scenario config, reset, stats, history)
 CONTROL_PORT = 19000
 
