@@ -58,12 +58,14 @@ this module owns; per-method error overrides (``responses[method] =
 
 from typing import Any, Dict, Tuple
 
-# Base mainnet slot — a realistic post-2024 Solana slot number. Tests that pin
-# exact equality on the default getSlot / getLatestBlockhash slot can pin
-# against this value. _solana_slot() returns this verbatim today, so the slot
-# is fixed per request; the slot ↔ lastValidBlockHeight gap is the only moving
-# part. (A future variant could step the slot off the wall clock — see the
-# _solana_slot docstring — in which case this becomes the floor.)
+# Base mainnet slot — a realistic post-2024 Solana slot number. _solana_slot()
+# returns this plus the provider's solana_slot_offset (default 0), so with no
+# offset every provider reports exactly this value and tests can pin exact
+# equality on the default getSlot / getLatestBlockhash slot. A non-zero offset
+# shifts a single provider off this base for multi-slot divergence tests; the
+# slot stays fixed per request either way (the simulator does not step it off
+# the wall clock), so the offset and the slot ↔ lastValidBlockHeight gap are the
+# only moving parts.
 SOLANA_BASE_SLOT = 419_709_627
 
 # Default distance between context.slot and value.lastValidBlockHeight.
@@ -155,12 +157,19 @@ def handle(state, request: dict, snap: dict, lava_headers: dict) -> Tuple[int, D
 
 
 def _solana_slot(snap: dict) -> int:
-    """Return the effective Solana slot for this request.
+    """Return the effective Solana slot for this provider's request.
 
-    Pinned to ``SOLANA_BASE_SLOT`` so tests can assert exact equality. A real
-    validator's slot advances ~2.5 times/sec; the simulator keeps the slot
-    fixed by default so the slot ↔ lastValidBlockHeight gap is the only moving
-    part under test. (A future wall-clock-stepped variant can read a snap field
-    to advance the floor; today the base is returned verbatim.)
+    ``SOLANA_BASE_SLOT + solana_slot_offset`` (offset read off the provider
+    snapshot, default 0). The base is a fixed realistic mainnet slot; the
+    per-provider offset shifts THIS provider's reported slot off that base so a
+    test can stand up multiple providers at different slots (one current, others
+    stale-behind) and watch the router's Solana consistency filter keep the
+    current provider and drop the stale ones. Offset 0 ⇒ the base verbatim, so
+    every provider sits at the same slot (no divergence). Negative = behind the
+    base, positive = ahead.
+
+    The slot stays fixed per request (the simulator does not advance it off the
+    wall clock) so tests can pin exact equality; the offset and the
+    slot ↔ lastValidBlockHeight gap are the only moving parts under test.
     """
-    return SOLANA_BASE_SLOT
+    return SOLANA_BASE_SLOT + snap.get("solana_slot_offset", 0)

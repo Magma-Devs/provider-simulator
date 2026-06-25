@@ -320,6 +320,104 @@ class TestGetLatestBlockhashGap:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# solana_slot_offset — per-provider slot divergence (MAG-2233 #1). The reported
+# slot is SOLANA_BASE_SLOT + offset (default 0). Distinct offsets per provider
+# let a blackbox test stand up one current + several stale-behind providers so
+# the router's Solana consistency filter can keep the current one and drop the
+# rest. lastValidBlockHeight stays slot - gap, so the gap applies on top.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSolanaSlotOffset:
+
+    def test_default_offset_zero_reports_base_slot(self, sim):
+        """No /scenario call — the default offset is 0, so getSlot and
+        getLatestBlockhash.context.slot both report exactly SOLANA_BASE_SLOT
+        (no regression from pre-MAG-2233 behaviour)."""
+        _, slot_body = _rpc(sim["provider1"], "getSlot")
+        _, bh_body   = _rpc(sim["provider1"], "getLatestBlockhash")
+        assert slot_body["result"] == SOLANA_BASE_SLOT
+        assert bh_body["result"]["context"]["slot"] == SOLANA_BASE_SLOT
+
+    def test_negative_offset_shifts_slot_below_base_and_gap_applies_on_top(self, sim):
+        """offset = -10_000_000 ⇒ slot == base - 10_000_000, on BOTH getSlot and
+        getLatestBlockhash.context.slot. And value.lastValidBlockHeight stays
+        slot - default_gap, proving the gap applies on top of the offset rather
+        than replacing it."""
+        offset = -10_000_000
+        _set_solana(sim, "1", solana_slot_offset=offset)
+
+        _, slot_body = _rpc(sim["provider1"], "getSlot")
+        assert slot_body["result"] == SOLANA_BASE_SLOT + offset
+
+        _, bh_body = _rpc(sim["provider1"], "getLatestBlockhash")
+        result   = bh_body["result"]
+        slot     = result["context"]["slot"]
+        last_vbh = result["value"]["lastValidBlockHeight"]
+        assert slot == SOLANA_BASE_SLOT + offset
+        # Gap stacks on top of the offset: lastValidBlockHeight == slot - gap.
+        assert last_vbh == slot - SOLANA_DEFAULT_SLOT_BLOCK_GAP
+
+    def test_positive_offset_puts_provider_ahead_of_base(self, sim):
+        """offset = +5_000_000 ⇒ a provider ahead of the base slot. Slot and the
+        gap-derived lastValidBlockHeight both shift up by the offset."""
+        offset = 5_000_000
+        _set_solana(sim, "1", solana_slot_offset=offset)
+
+        _, slot_body = _rpc(sim["provider1"], "getSlot")
+        assert slot_body["result"] == SOLANA_BASE_SLOT + offset
+
+        _, bh_body = _rpc(sim["provider1"], "getLatestBlockhash")
+        result = bh_body["result"]
+        assert result["context"]["slot"] == SOLANA_BASE_SLOT + offset
+        assert (
+            result["value"]["lastValidBlockHeight"]
+            == SOLANA_BASE_SLOT + offset - SOLANA_DEFAULT_SLOT_BLOCK_GAP
+        )
+
+    def test_per_provider_offsets_are_independent(self, sim):
+        """Distinct offsets on pid 1/2/3 each report their OWN slot — the
+        per-provider divergence the multi-slot test needs. pid 1 current (0),
+        pid 2 far behind, pid 3 slightly ahead; per-provider ProviderState
+        isolation keeps them from leaking into each other."""
+        _set_solana(sim, "1", solana_slot_offset=0)
+        _set_solana(sim, "2", solana_slot_offset=-12_000_000)
+        _set_solana(sim, "3", solana_slot_offset=3_000_000)
+
+        _, b1 = _rpc(sim["provider1"], "getSlot")
+        _, b2 = _rpc(sim["provider2"], "getSlot")
+        _, b3 = _rpc(sim["provider3"], "getSlot")
+
+        assert b1["result"] == SOLANA_BASE_SLOT
+        assert b2["result"] == SOLANA_BASE_SLOT - 12_000_000
+        assert b3["result"] == SOLANA_BASE_SLOT + 3_000_000
+        # All three distinct — proves no cross-provider contamination.
+        assert len({b1["result"], b2["result"], b3["result"]}) == 3
+
+    def test_offset_on_one_provider_does_not_leak_to_another(self, sim):
+        """An offset override on provider 1 must not change provider 2's default
+        (offset 0 ⇒ base slot) — same per-provider isolation the gap test locks."""
+        _set_solana(sim, "1", solana_slot_offset=-7_000_000)
+        _, b1 = _rpc(sim["provider1"], "getSlot")
+        _, b2 = _rpc(sim["provider2"], "getSlot")
+        assert b1["result"] == SOLANA_BASE_SLOT - 7_000_000
+        assert b2["result"] == SOLANA_BASE_SLOT
+
+    def test_offset_and_gap_are_independent_knobs(self, sim):
+        """Setting offset and gap together: slot shifts by the offset, and the
+        slot ↔ lastValidBlockHeight distance equals the gap — the two knobs
+        compose without interfering."""
+        offset = -4_000_000
+        gap    = 25
+        _set_solana(sim, "1", solana_slot_offset=offset, solana_slot_block_gap=gap)
+        _, bh_body = _rpc(sim["provider1"], "getLatestBlockhash")
+        result = bh_body["result"]
+        assert result["context"]["slot"] == SOLANA_BASE_SLOT + offset
+        assert (
+            result["context"]["slot"] - result["value"]["lastValidBlockHeight"] == gap
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # getSlot / getHealth / getVersion — the supporting spec-verification methods
 # ─────────────────────────────────────────────────────────────────────────────
 
