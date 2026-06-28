@@ -231,6 +231,12 @@ class WsHandler(BaseHTTPRequestHandler):
         state = self.server.state
         snap = state.snapshot()
 
+        # Listener identity for /history stamping (MAG-2236). WS listeners
+        # don't set handler_chain_family in the bootstrap, so fall back to the
+        # transport name "ws"; the bound port is unique per WS listener.
+        listener_chain = getattr(self.server, "handler_chain_family", "ws")
+        listener_port  = self.server.server_address[1]
+
         # Cross-transport isolation — mirrors MAG-1838's jsonrpc_owns_snap
         # gate. ``ProviderState`` is shared across all transports for the
         # same provider id, so a fault authored for one transport leaks
@@ -256,14 +262,16 @@ class WsHandler(BaseHTTPRequestHandler):
         if ws_mode == "down":
             state.push_call_to_buffer("*", "down", 0,
                                       request_id=None,
-                                      lava_headers=lava_headers)
+                                      lava_headers=lava_headers,
+                                      chain=listener_chain, port=listener_port)
             self._send_simple_error(503, "provider down")
             return
 
         if ws_mode == "rate_limit":
             state.push_call_to_buffer("ws_upgrade", "rate_limit", 0,
                                       request_id=None,
-                                      lava_headers=lava_headers)
+                                      lava_headers=lava_headers,
+                                      chain=listener_chain, port=listener_port)
             self._send_simple_error(429, "rate limited")
             return
 
@@ -273,14 +281,16 @@ class WsHandler(BaseHTTPRequestHandler):
             # signal a client can read.
             state.push_call_to_buffer("ws_upgrade", "error", 0,
                                       request_id=None,
-                                      lava_headers=lava_headers)
+                                      lava_headers=lava_headers,
+                                      chain=listener_chain, port=listener_port)
             self._send_simple_error(400, snap["error_message"])
             return
 
         if ws_mode == "hang":
             state.push_call_to_buffer("ws_upgrade", "hang", 0,
                                       request_id=None,
-                                      lava_headers=lava_headers)
+                                      lava_headers=lava_headers,
+                                      chain=listener_chain, port=listener_port)
             time.sleep(30)
             try:
                 self.connection.close()
@@ -292,7 +302,8 @@ class WsHandler(BaseHTTPRequestHandler):
             drop_at = snap.get("drop_at", "before_headers")
             state.push_call_to_buffer("ws_upgrade", "drop_connection", 0,
                                       request_id=None,
-                                      lava_headers=lava_headers)
+                                      lava_headers=lava_headers,
+                                      chain=listener_chain, port=listener_port)
             try:
                 if drop_at == "after_headers":
                     # Complete the 101 (with Lava-Provider-Address) then close.
@@ -349,6 +360,11 @@ class WsHandler(BaseHTTPRequestHandler):
     def _reader_loop(self, out_queue: "queue.Queue", lava_headers: Dict[str, str]) -> None:
         state = self.server.state
         provider_id = self.server.provider_id
+        # Listener identity for /history stamping (MAG-2236). WS listeners
+        # don't set handler_chain_family, so fall back to "ws"; the bound port
+        # is unique per WS listener.
+        listener_chain = getattr(self.server, "handler_chain_family", "ws")
+        listener_port  = self.server.server_address[1]
         apply_fault, elapsed_ms, resolve_method_config, corruption_for, missing_field_for = _server_helpers()
 
         connection_subs: Set[str] = set()
@@ -413,7 +429,9 @@ class WsHandler(BaseHTTPRequestHandler):
                 # any cancel window opens. Fault path sleeps AFTER the
                 # record but before the wire emit so timing is unchanged.
                 fault = apply_fault(state, method_snap, method, req_id,
-                                    lava_headers, t_start) if run_fault_ladder else None
+                                    lava_headers, t_start,
+                                    chain=listener_chain, port=listener_port) \
+                    if run_fault_ladder else None
                 if fault is not None:
                     if method_snap["latency_ms"] > 0:
                         time.sleep(method_snap["latency_ms"] / 1000.0)
@@ -445,6 +463,8 @@ class WsHandler(BaseHTTPRequestHandler):
                         method_snap["latency_ms"],
                         request_id=req_id,
                         lava_headers=lava_headers,
+                        chain=listener_chain,
+                        port=listener_port,
                     )
                     if method_snap["latency_ms"] > 0:
                         time.sleep(method_snap["latency_ms"] / 1000.0)
@@ -472,6 +492,8 @@ class WsHandler(BaseHTTPRequestHandler):
                         method_snap["latency_ms"],
                         request_id=req_id,
                         lava_headers=lava_headers,
+                        chain=listener_chain,
+                        port=listener_port,
                     )
                     if method_snap["latency_ms"] > 0:
                         time.sleep(method_snap["latency_ms"] / 1000.0)
@@ -495,6 +517,8 @@ class WsHandler(BaseHTTPRequestHandler):
                     method_snap["latency_ms"],
                     request_id=req_id,
                     lava_headers=lava_headers,
+                    chain=listener_chain,
+                    port=listener_port,
                 )
                 if method_snap["latency_ms"] > 0:
                     time.sleep(method_snap["latency_ms"] / 1000.0)

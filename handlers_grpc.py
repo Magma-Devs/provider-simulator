@@ -82,7 +82,7 @@ import asyncio
 import datetime
 import random
 import time
-from typing import Any
+from typing import Any, Optional
 
 import grpc
 
@@ -128,13 +128,19 @@ def _capture_grpc_metadata(context: grpc.aio.ServicerContext) -> dict:
 
 
 def _record_history(state, method: str, status: str, latency_ms: int,
-                    lava_headers: dict, request_id: Any = None) -> None:
+                    lava_headers: dict, request_id: Any = None,
+                    chain: Optional[str] = None,
+                    port: Optional[int] = None) -> None:
     """Append one entry to the ProviderState ring-buffer.
 
     Same shape as ``ProviderState.push_call_to_buffer`` so /history queries
     don't have to special-case the chain family. ``request_id`` is always
     ``None`` for gRPC since the protocol carries no equivalent — the field
     is optional in the history entry already.
+
+    ``chain`` / ``port`` (MAG-2236) carry the serving gRPC listener's chain
+    family and bound port so /history can be filtered per listener instead
+    of per shared provider pid.
     """
     state.push_call_to_buffer(
         method=method,
@@ -142,11 +148,15 @@ def _record_history(state, method: str, status: str, latency_ms: int,
         latency_ms=latency_ms,
         request_id=request_id,
         lava_headers=lava_headers,
+        chain=chain,
+        port=port,
     )
 
 
 async def _apply_grpc_fault(state, snap: dict, context: grpc.aio.ServicerContext,
-                             method: str, lava_headers: dict, t_start: float) -> bool:
+                             method: str, lava_headers: dict, t_start: float,
+                             chain: Optional[str] = None,
+                             port: Optional[int] = None) -> bool:
     """Run the fault-injection ladder against an incoming gRPC request.
 
     Evaluation order mirrors ``JSONRPCHandler.do_POST`` so the two chain
@@ -196,7 +206,8 @@ async def _apply_grpc_fault(state, snap: dict, context: grpc.aio.ServicerContext
     # 1. Outage — no latency on the down path (provider drops the request
     #    immediately, mirroring JSON-RPC ``down`` semantics).
     if snap["mode"] == "down":
-        _record_history(state, method, "down", 0, lava_headers)
+        _record_history(state, method, "down", 0, lava_headers,
+                        chain=chain, port=port)
         await context.abort(grpc.StatusCode.UNAVAILABLE, "provider down")
         return True  # unreachable — abort raises, but keep type-checkers happy
 
@@ -205,7 +216,8 @@ async def _apply_grpc_fault(state, snap: dict, context: grpc.aio.ServicerContext
     #    eventually unwinds and the asyncio task doesn't leak. Already
     #    write-before-sleep; left untouched per Avi's review.
     if snap["mode"] == "hang":
-        _record_history(state, method, "hang", 0, lava_headers)
+        _record_history(state, method, "hang", 0, lava_headers,
+                        chain=chain, port=port)
         await asyncio.sleep(30)
         await context.abort(grpc.StatusCode.CANCELLED, "hang timeout")
         return True
@@ -217,7 +229,7 @@ async def _apply_grpc_fault(state, snap: dict, context: grpc.aio.ServicerContext
     if snap["mode"] == "drop_connection":
         drop_at = snap.get("drop_at", "before_headers")
         _record_history(state, method, "drop_connection", snap["latency_ms"],
-                        lava_headers)
+                        lava_headers, chain=chain, port=port)
         if snap["latency_ms"] > 0:
             await asyncio.sleep(snap["latency_ms"] / 1000.0)
         if drop_at in ("after_headers", "mid_body"):
@@ -234,7 +246,7 @@ async def _apply_grpc_fault(state, snap: dict, context: grpc.aio.ServicerContext
     # 4. Rate limit
     if snap["mode"] == "rate_limit":
         _record_history(state, method, "rate_limit", snap["latency_ms"],
-                        lava_headers)
+                        lava_headers, chain=chain, port=port)
         if snap["latency_ms"] > 0:
             await asyncio.sleep(snap["latency_ms"] / 1000.0)
         await context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "Too many requests")
@@ -251,7 +263,8 @@ async def _apply_grpc_fault(state, snap: dict, context: grpc.aio.ServicerContext
             or _GRPC_STATUS_BY_VALUE.get(err_code)
             or grpc.StatusCode.UNKNOWN
         )
-        _record_history(state, method, "error", snap["latency_ms"], lava_headers)
+        _record_history(state, method, "error", snap["latency_ms"], lava_headers,
+                        chain=chain, port=port)
         if snap["latency_ms"] > 0:
             await asyncio.sleep(snap["latency_ms"] / 1000.0)
         await context.abort(status_code, err_msg)
@@ -325,8 +338,14 @@ class CosmosBaseTendermintServicer(query_pb2_grpc.ServiceServicer):
     coverage is stable.
     """
 
-    def __init__(self, state):
+    def __init__(self, state, port: Optional[int] = None, chain: str = "grpc"):
         self._state = state
+        # Listener identity for /history stamping (MAG-2236). A gRPC servicer
+        # has no ``self.server`` like the HTTP handlers, so the bound port is
+        # passed in from ``serve_grpc``; the chain family is fixed to "grpc"
+        # (the value the fault ladder gates on).
+        self._port = port
+        self._chain = chain
 
     async def GetLatestBlock(self, request: query_pb2.GetLatestBlockRequest,
                               context: grpc.aio.ServicerContext) -> query_pb2.GetLatestBlockResponse:
@@ -360,6 +379,7 @@ class CosmosBaseTendermintServicer(query_pb2_grpc.ServiceServicer):
 
         aborted = await _apply_grpc_fault(
             self._state, snap, context, method, lava_headers, t_start,
+            chain=self._chain, port=self._port,
         )
         if aborted:
             return  # unreachable — abort always raises
@@ -375,7 +395,7 @@ class CosmosBaseTendermintServicer(query_pb2_grpc.ServiceServicer):
             status_code = _GRPC_STATUS_BY_NAME.get(method_cfg["error_stub"],
                                                     grpc.StatusCode.UNKNOWN)
             _record_history(self._state, method, "error", snap["latency_ms"],
-                            lava_headers)
+                            lava_headers, chain=self._chain, port=self._port)
             if snap["latency_ms"] > 0:
                 await asyncio.sleep(snap["latency_ms"] / 1000.0)
             await context.abort(status_code, method_cfg.get("message", method_cfg["error_stub"]))
@@ -389,7 +409,7 @@ class CosmosBaseTendermintServicer(query_pb2_grpc.ServiceServicer):
                 or grpc.StatusCode.UNKNOWN
             )
             _record_history(self._state, method, "error", snap["latency_ms"],
-                            lava_headers)
+                            lava_headers, chain=self._chain, port=self._port)
             if snap["latency_ms"] > 0:
                 await asyncio.sleep(snap["latency_ms"] / 1000.0)
             await context.abort(status_code, err.get("message", "override"))
@@ -425,7 +445,7 @@ class CosmosBaseTendermintServicer(query_pb2_grpc.ServiceServicer):
             # corruption as an INTERNAL status so the client sees a
             # well-defined failure rather than a partial parse.
             _record_history(self._state, method, "error", snap["latency_ms"],
-                            lava_headers)
+                            lava_headers, chain=self._chain, port=self._port)
             if snap["latency_ms"] > 0:
                 await asyncio.sleep(snap["latency_ms"] / 1000.0)
             await context.abort(grpc.StatusCode.INTERNAL,
@@ -437,7 +457,7 @@ class CosmosBaseTendermintServicer(query_pb2_grpc.ServiceServicer):
             # parse error on the client. Surface as UNKNOWN so the client
             # sees a generic parse-failure surface.
             _record_history(self._state, method, "error", snap["latency_ms"],
-                            lava_headers)
+                            lava_headers, chain=self._chain, port=self._port)
             if snap["latency_ms"] > 0:
                 await asyncio.sleep(snap["latency_ms"] / 1000.0)
             await context.abort(grpc.StatusCode.UNKNOWN, f"corruption: {cm}")
@@ -446,7 +466,7 @@ class CosmosBaseTendermintServicer(query_pb2_grpc.ServiceServicer):
         # Success — record history with the configured latency BEFORE the
         # sleep so a router-side cancel mid-sleep still leaves a trace.
         _record_history(self._state, method, "success", snap["latency_ms"],
-                        lava_headers)
+                        lava_headers, chain=self._chain, port=self._port)
         if snap["latency_ms"] > 0:
             await asyncio.sleep(snap["latency_ms"] / 1000.0)
         return response
