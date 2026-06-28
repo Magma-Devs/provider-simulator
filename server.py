@@ -407,7 +407,9 @@ class ProviderState:
             self.calls_by_status   = {}
             self._reset_generation += 1
 
-    def record_arrival(self, lava_headers: dict = None) -> dict:
+    def record_arrival(self, lava_headers: dict = None,
+                       chain: Optional[str] = None,
+                       port: Optional[int] = None) -> dict:
         """Push an in-flight stub entry the moment a request arrives and return the
         dict so the caller can update it once method / status / latency are known.
 
@@ -445,6 +447,14 @@ class ProviderState:
             "status":       "in_flight",
             "latency_ms":   0,
             "lava_headers": lava_headers or {},
+            # Listener identity (MAG-2236). ProviderState is shared across every
+            # chain/transport that maps to one provider pid, so it can't know
+            # which listener served the request. The handler passes its own
+            # chain_family and bound port so /history can be filtered by
+            # listener instead of by the shared pid. None when the caller
+            # doesn't supply them (backward-compatible).
+            "chain":        chain,
+            "port":         port,
         }
         with self.lock:
             self.history.append(entry)
@@ -458,7 +468,9 @@ class ProviderState:
 
     def push_call_to_buffer(self, method: str, status: str, latency_ms: int,
                              request_id: object = None, lava_headers: dict = None,
-                             entry: Optional[dict] = None) -> None:
+                             entry: Optional[dict] = None,
+                             chain: Optional[str] = None,
+                             port: Optional[int] = None) -> None:
         """Push one call record into the in-memory ring-buffer and update all-time counters.
 
         Storage is entirely in RAM — nothing is written to disk or any logging framework.
@@ -487,6 +499,14 @@ class ProviderState:
                           passes a non-None value, so stages that don't know one of them yet
                           (e.g. a body-parse failure that knows req_id stays None) don't wipe
                           a value an earlier stage already filled in.
+            chain:        MAG-2236. The serving listener's chain_family (e.g. "eth" /
+                          "solana" / "btc" / "rest"). Stamped onto the history entry so
+                          /history can be filtered per listener instead of per shared pid.
+                          On the ``entry`` update paths it overwrites only when non-None,
+                          matching request_id / lava_headers — the value ``record_arrival``
+                          already stamped is preserved when the caller passes None.
+            port:         MAG-2236. The serving listener's bound TCP port. Same stamping
+                          rules as ``chain``.
         """
         now = time.time()
         if entry is not None:
@@ -504,6 +524,10 @@ class ProviderState:
                         entry["request_id"] = request_id
                     if lava_headers is not None:
                         entry["lava_headers"] = lava_headers
+                    if chain is not None:
+                        entry["chain"] = chain
+                    if port is not None:
+                        entry["port"] = port
                     entry["_reset_gen"] = self._reset_generation
                     self.history.append(entry)
                     self.total_calls += 1
@@ -516,6 +540,10 @@ class ProviderState:
                     entry["request_id"] = request_id
                 if lava_headers is not None:
                     entry["lava_headers"] = lava_headers
+                if chain is not None:
+                    entry["chain"] = chain
+                if port is not None:
+                    entry["port"] = port
                 if old_status != status:
                     self.calls_by_status[old_status] = max(
                         0, self.calls_by_status.get(old_status, 0) - 1
@@ -532,6 +560,8 @@ class ProviderState:
                 "status":        status,
                 "latency_ms":    latency_ms,
                 "lava_headers":  lava_headers or {},
+                "chain":         chain,
+                "port":          port,
             })
             self.total_calls += 1
             self.calls_by_status[status] = self.calls_by_status.get(status, 0) + 1
@@ -581,6 +611,8 @@ def _apply_fault(
     lava_headers: Dict[str, str],
     t_start: float,
     entry: Optional[Dict[str, Any]] = None,
+    chain: Optional[str] = None,
+    port: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
     """Evaluate post-parse fault primitives and emit history.
 
@@ -649,7 +681,7 @@ def _apply_fault(
     if snap["mode"] == "down":
         state.push_call_to_buffer(method, "down", recorded_latency_ms,
                                   request_id=req_id, lava_headers=lava_headers,
-                                  entry=entry)
+                                  entry=entry, chain=chain, port=port)
         return {"kind": "down"}
 
     # 2. Hang — accept request, sleep "forever". 30s is long enough for any
@@ -658,7 +690,7 @@ def _apply_fault(
     if snap["mode"] == "hang":
         state.push_call_to_buffer(method, "hang", 0,
                                   request_id=req_id, lava_headers=lava_headers,
-                                  entry=entry)
+                                  entry=entry, chain=chain, port=port)
         return {"kind": "hang"}
 
     # 3. Drop connection — close socket at one of three points.
@@ -667,14 +699,14 @@ def _apply_fault(
         state.push_call_to_buffer(method, "drop_connection",
                                   recorded_latency_ms,
                                   request_id=req_id, lava_headers=lava_headers,
-                                  entry=entry)
+                                  entry=entry, chain=chain, port=port)
         return {"kind": "drop", "drop_at": drop_at}
 
     # 4. Rate limit — HTTP 429.
     if snap["mode"] == "rate_limit":
         state.push_call_to_buffer(method, "rate_limit", recorded_latency_ms,
                                   request_id=req_id, lava_headers=lava_headers,
-                                  entry=entry)
+                                  entry=entry, chain=chain, port=port)
         return {
             "kind": "rate_limit",
             "status": 429,
@@ -686,7 +718,7 @@ def _apply_fault(
     if snap["mode"] == "error" or random.random() < snap["error_probability"]:
         state.push_call_to_buffer(method, "error", recorded_latency_ms,
                                   request_id=req_id, lava_headers=lava_headers,
-                                  entry=entry)
+                                  entry=entry, chain=chain, port=port)
         return {
             "kind": "error",
             "status": snap.get("http_status", 200),
@@ -821,6 +853,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # an ETH listener using the same shared ProviderState).
         listener_family = getattr(self.server, "handler_chain_family", "eth")
         handler_module  = getattr(self.server, "handler_module", handlers_eth)
+        listener_port   = self.server.server_address[1]
 
         # Capture all lava-* headers from the router
         lava_headers = {
@@ -843,7 +876,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # ``push_call_to_buffer(..., entry=arrival)``. If a cancellation lands
         # before any of those updates fire, the entry stays as ``in_flight``
         # which is strictly better than no entry for the invariant.
-        arrival = state.record_arrival(lava_headers=lava_headers)
+        arrival = state.record_arrival(lava_headers=lava_headers,
+                                       chain=listener_family, port=listener_port)
 
         # Cross-transport isolation (MAG-1838 → MAG-2089).
         # ``ProviderState`` is shared across JSON-RPC, REST, gRPC, WS, and
@@ -876,7 +910,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # path below and applies on the post-parse branch.
         if jsonrpc_run_fault and snap["mode"] == "down":
             fault = _apply_fault(state, snap, "*", None, lava_headers, t_start,
-                                 entry=arrival)
+                                 entry=arrival, chain=listener_family,
+                                 port=listener_port)
             self._emit_jsonrpc_fault(fault, req_id=None,
                                      corruption_mode=_corruption_for(snap, listener_family),
                                      missing_field=_missing_field_for(snap, listener_family))
@@ -929,7 +964,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             # leaves an entry for the invariant.
             state.push_call_to_buffer(method, "success", method_snap["latency_ms"],
                                       request_id=req_id, lava_headers=lava_headers,
-                                      entry=arrival)
+                                      entry=arrival, chain=listener_family,
+                                      port=listener_port)
             if method_snap["latency_ms"] > 0:
                 time.sleep(method_snap["latency_ms"] / 1000.0)
             self._reply(override_status, override_body,
@@ -951,7 +987,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # chain_family because reachability is provider-wide.
         if jsonrpc_owns_snap or method_snap["mode"] == "down":
             fault = _apply_fault(state, method_snap, method, req_id, lava_headers,
-                                 t_start, entry=arrival)
+                                 t_start, entry=arrival, chain=listener_family,
+                                 port=listener_port)
         else:
             fault = None
         if fault is not None:
@@ -988,7 +1025,8 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # update — the cancel-during-response race is closed.
         state.push_call_to_buffer(method, emit_status, method_snap["latency_ms"],
                                   request_id=req_id, lava_headers=lava_headers,
-                                  entry=arrival)
+                                  entry=arrival, chain=listener_family,
+                                  port=listener_port)
         if method_snap["latency_ms"] > 0:
             time.sleep(method_snap["latency_ms"] / 1000.0)
         self._reply(status, response_body,
@@ -1329,6 +1367,12 @@ class RestHandler(BaseHTTPRequestHandler):
         state: ProviderState = self.server.state
         snap = state.snapshot()
 
+        # Listener identity for /history stamping (MAG-2236). REST listeners
+        # don't set handler_chain_family in the bootstrap, so fall back to the
+        # transport name "rest"; the bound port is unique per REST listener.
+        listener_chain = getattr(self.server, "handler_chain_family", "rest")
+        listener_port  = self.server.server_address[1]
+
         # Lava-* request headers — used for /history filtering and threaded
         # through to handlers_rest so a future test can assert on header
         # propagation.
@@ -1373,7 +1417,8 @@ class RestHandler(BaseHTTPRequestHandler):
         # set on any chain_family 503s the REST port (MAG-2092), while
         # non-down content faults still only fire when chain_family="rest".
         if rest_run_fault and snap["mode"] == "down":
-            fault = _apply_fault(state, snap, "*", None, lava_headers, t_start)
+            fault = _apply_fault(state, snap, "*", None, lava_headers, t_start,
+                                 chain=listener_chain, port=listener_port)
             self._emit_rest_fault(fault)
             return
 
@@ -1408,7 +1453,9 @@ class RestHandler(BaseHTTPRequestHandler):
             # of chain_family so an unmatched URI still 503s a downed
             # provider before the 404 path runs.
             fault = _apply_fault(state, snap, method_label, req_id,
-                                 lava_headers, t_start) if rest_run_fault else None
+                                 lava_headers, t_start,
+                                 chain=listener_chain, port=listener_port) \
+                if rest_run_fault else None
             if fault is not None:
                 if snap["latency_ms"] > 0:
                     time.sleep(snap["latency_ms"] / 1000.0)
@@ -1419,7 +1466,8 @@ class RestHandler(BaseHTTPRequestHandler):
             # 404 (MAG-1832). Recorded latency_ms is the configured value.
             state.push_call_to_buffer(method_label, "not_found",
                                       snap["latency_ms"],
-                                      request_id=req_id, lava_headers=lava_headers)
+                                      request_id=req_id, lava_headers=lava_headers,
+                                      chain=listener_chain, port=listener_port)
             if snap["latency_ms"] > 0:
                 time.sleep(snap["latency_ms"] / 1000.0)
             self._reply(404, {"code": "not_found", "method": verb, "path": path})
@@ -1448,7 +1496,9 @@ class RestHandler(BaseHTTPRequestHandler):
         # provider-wide.
         run_fault_ladder = rest_owns_snap or method_snap["mode"] == "down"
         fault = _apply_fault(state, method_snap, method_label, req_id,
-                             lava_headers, t_start) if run_fault_ladder else None
+                             lava_headers, t_start,
+                             chain=listener_chain, port=listener_port) \
+            if run_fault_ladder else None
         if fault is not None:
             if method_snap["latency_ms"] > 0:
                 time.sleep(method_snap["latency_ms"] / 1000.0)
@@ -1464,7 +1514,8 @@ class RestHandler(BaseHTTPRequestHandler):
         # cancel mid-sleep still records the call. latency_ms recorded is
         # the configured post-MAG-1821-override value.
         state.push_call_to_buffer(method_label, emit_status, method_snap["latency_ms"],
-                                  request_id=req_id, lava_headers=lava_headers)
+                                  request_id=req_id, lava_headers=lava_headers,
+                                  chain=listener_chain, port=listener_port)
         if method_snap["latency_ms"] > 0:
             time.sleep(method_snap["latency_ms"] / 1000.0)
         # MAG-1837 — only apply corruption_mode if the snap was authored for
@@ -1722,6 +1773,13 @@ class TendermintHandler(BaseHTTPRequestHandler):
         state: ProviderState = self.server.state
         snap = state.snapshot()
 
+        # Listener identity for /history stamping (MAG-2236). Tendermint
+        # listeners don't set handler_chain_family in the bootstrap, so fall
+        # back to the chain_family value this handler gates on; the bound port
+        # is unique per Tendermint listener.
+        listener_chain = getattr(self.server, "handler_chain_family", "tendermintrpc")
+        listener_port  = self.server.server_address[1]
+
         # Lava-* request headers — used for /history filtering, threaded
         # through to handlers_tendermintrpc for symmetry with other handlers.
         lava_headers = {
@@ -1753,7 +1811,8 @@ class TendermintHandler(BaseHTTPRequestHandler):
         #    503s the Tendermint port (MAG-2092), while non-down content
         #    faults still only fire when chain_family="tendermintrpc".
         if tm_run_fault and snap["mode"] == "down":
-            fault = _apply_fault(state, snap, "*", None, lava_headers, t_start)
+            fault = _apply_fault(state, snap, "*", None, lava_headers, t_start,
+                                 chain=listener_chain, port=listener_port)
             self._emit_tm_fault(fault, request_id=None)
             return
 
@@ -1773,6 +1832,8 @@ class TendermintHandler(BaseHTTPRequestHandler):
                 0,
                 request_id=None,
                 lava_headers=lava_headers,
+                chain=listener_chain,
+                port=listener_port,
             )
             err_body = {
                 "jsonrpc": "2.0",
@@ -1792,7 +1853,8 @@ class TendermintHandler(BaseHTTPRequestHandler):
         #    pass through to the success-path below. MAG-2092: but always
         #    honor mode="down" regardless of chain_family.
         run_fault_ladder = tm_owns_snap or snap["mode"] == "down"
-        fault = _apply_fault(state, snap, method_label, request_id, lava_headers, t_start) \
+        fault = _apply_fault(state, snap, method_label, request_id, lava_headers, t_start,
+                             chain=listener_chain, port=listener_port) \
             if run_fault_ladder else None
         if fault is not None:
             if snap["latency_ms"] > 0:
@@ -1833,6 +1895,8 @@ class TendermintHandler(BaseHTTPRequestHandler):
             snap["latency_ms"],
             request_id=request_id,
             lava_headers=lava_headers,
+            chain=listener_chain,
+            port=listener_port,
         )
         if snap["latency_ms"] > 0:
             time.sleep(snap["latency_ms"] / 1000.0)
@@ -2139,11 +2203,17 @@ class ControlHandler(BaseHTTPRequestHandler):
                 return
 
             # Record the push in history so /history reflects pushed events.
+            # MAG-2236: this is a control-plane injection, not a request served
+            # by a chain listener, so there's no bound listener port to record
+            # (port=None). chain="ws" because the event is delivered over the
+            # WS transport, matching how the WS listener stamps its own
+            # /history entries.
             state = self.server.provider_states.get(handle.provider_id)
             if state is not None:
                 state.push_call_to_buffer(
                     f"{handle.envelope} push", "success", 0,
                     request_id=sub_id, lava_headers={},
+                    chain="ws", port=None,
                 )
 
             self._reply(200, {"status": "emitted", "subscription_id": sub_id})

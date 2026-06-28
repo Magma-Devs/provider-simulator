@@ -766,7 +766,7 @@ class TestHistory:
         _, body = _get(_ctrl(sim, "/history"))
         entry = body["history"][0]
         for field in ("ts", "time", "request_id", "method", "status", "latency_ms",
-                      "provider", "call_order"):
+                      "provider", "call_order", "chain", "port"):
             assert field in entry, f"missing field: {field}"
 
     def test_request_id_echoed_in_history(self, sim):

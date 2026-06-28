@@ -51,7 +51,7 @@ async def serve_grpc(port: int, state: "ProviderState") -> None:
     """
     server = grpc.aio.server()
     query_pb2_grpc.add_ServiceServicer_to_server(
-        CosmosBaseTendermintServicer(state), server
+        CosmosBaseTendermintServicer(state, port=port), server
     )
     # Register the gRPC server-reflection API so tools like ``grpcurl`` can
     # discover services without being handed a -proto/-import-path bundle.
