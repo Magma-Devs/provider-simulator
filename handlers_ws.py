@@ -197,6 +197,12 @@ class WsHandler(BaseHTTPRequestHandler):
     self.server.provider_id is the string "1" / "2" / "3".
     """
 
+    # Socket timeout (seconds) honoured by BaseHTTPRequestHandler. Caps the
+    # blocking WebSocket recv loop so a client that opens a connection and then
+    # goes silent can't hold this worker thread + file descriptor forever under
+    # sustained load.
+    timeout = 30
+
     def do_GET(self):
         # Path enforcement: only /ws accepts the upgrade. Everything else
         # (root, /metrics, /health, etc.) returns 404 to make wrong-path

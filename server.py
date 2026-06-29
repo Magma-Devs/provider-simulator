@@ -823,6 +823,12 @@ def _mode_for(snap: Dict[str, Any], *chain_families: str) -> Optional[str]:
 
 class JSONRPCHandler(BaseHTTPRequestHandler):
 
+    # Socket timeout (seconds) honoured by BaseHTTPRequestHandler. It caps the
+    # otherwise-unbounded rfile.read(Content-Length) so a client that opens a
+    # connection and stalls mid-body can't pin this worker thread + file
+    # descriptor forever under sustained load.
+    timeout = 30
+
     def do_POST(self):
         """Handle every incoming JSON-RPC POST request for one simulated provider.
 
@@ -1323,6 +1329,11 @@ class RestHandler(BaseHTTPRequestHandler):
     and matches the URL against the compiled route table.
     """
 
+    # Socket timeout (seconds) honoured by BaseHTTPRequestHandler. Caps the
+    # otherwise-unbounded request-body read so a stalled client can't hold a
+    # worker thread + file descriptor indefinitely under sustained load.
+    timeout = 30
+
     # ── Verb dispatch ─────────────────────────────────────────────────────────
 
     def do_GET(self):      self._handle("GET")
@@ -1768,6 +1779,11 @@ class TendermintHandler(BaseHTTPRequestHandler):
     History accounting mirrors the JSON-RPC handler: success / error / rate_limit
     are recorded post-fault; down is recorded pre-body-parse with method="*".
     """
+
+    # Socket timeout (seconds) honoured by BaseHTTPRequestHandler. Caps the
+    # otherwise-unbounded request-body read so a stalled client can't hold a
+    # worker thread + file descriptor indefinitely under sustained load.
+    timeout = 30
 
     # ── Verb dispatch ─────────────────────────────────────────────────────────
 
@@ -2507,6 +2523,24 @@ def _scenario_ttl_sweep(states: Dict[str, ProviderState], ttl_s: int, interval_s
                 print(f"[ttl-sweep] reverted provider {pid} (idle {age:.0f}s > {ttl_s}s TTL)")
 
 
+class _SimThreadingHTTPServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer for every provider listener.
+
+    request_queue_size is the OS listen() backlog — how many freshly-arrived
+    connections the kernel holds before a worker thread accepts them. The
+    stdlib default is 5, which is far too shallow for the burst of concurrent
+    relays the router can fan out under load: once the queue fills, new
+    connections are refused or stall, which presents as the simulator
+    "hanging". 128 gives ample headroom for those bursts.
+
+    daemon_threads=True keeps the per-request worker threads from blocking
+    interpreter shutdown — same behaviour every listener set explicitly before.
+    """
+
+    request_queue_size = 128
+    daemon_threads = True
+
+
 def main():
     """Start all simulator servers and block until interrupted.
 
@@ -2603,8 +2637,7 @@ def main():
         # ``handler_module`` defaults to ``handlers_eth`` inside JSONRPCHandler,
         # so the ETH listeners don't need to set them explicitly — leaving the
         # defaults documents intent on read.
-        srv = ThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
-        srv.daemon_threads = True
+        srv = _SimThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
         srv.state                = states[pid]
         srv.provider_id          = pid    # available as self.server.provider_id in handler
         srv.handler_chain_family = "eth"
@@ -2620,8 +2653,7 @@ def main():
     # sets ``chain_family="btc"`` on pid "1" reconfigures both the ETH port
     # (which will ignore the BTC fault) and the BTC port (which acts on it).
     for pid, port in BTC_PRIMARY_PORTS.items():
-        btc_srv = ThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
-        btc_srv.daemon_threads = True
+        btc_srv = _SimThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
         btc_srv.state                = states[pid]
         btc_srv.provider_id          = pid
         btc_srv.handler_chain_family = "btc"
@@ -2634,8 +2666,7 @@ def main():
     # primary pid (1-3) so a mixed-chain scenario can independently faulted
     # the ETH and LN listeners that share a pid.
     for pid, port in LN_PRIMARY_PORTS.items():
-        ln_srv = ThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
-        ln_srv.daemon_threads = True
+        ln_srv = _SimThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
         ln_srv.state                = states[pid]
         ln_srv.provider_id          = pid
         ln_srv.handler_chain_family = "ln"
@@ -2653,8 +2684,7 @@ def main():
     # handler. The dedicated loop here is what gives them handlers_solana,
     # exactly mirroring how BTC_PRIMARY_PORTS / LN_PRIMARY_PORTS are wired.
     for pid, port in SOLANA_PRIMARY_PORTS.items():
-        sol_srv = ThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
-        sol_srv.daemon_threads = True
+        sol_srv = _SimThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
         sol_srv.state                = states[pid]
         sol_srv.provider_id          = pid
         sol_srv.handler_chain_family = "solana"
@@ -2667,8 +2697,7 @@ def main():
     # port (18551) reply. Each server gets its own RestHandler instance
     # because BaseHTTPRequestHandler is per-request.
     for pid, port in REST_PORTS.items():
-        rest_srv = ThreadingHTTPServer(("0.0.0.0", port), RestHandler)
-        rest_srv.daemon_threads = True
+        rest_srv = _SimThreadingHTTPServer(("0.0.0.0", port), RestHandler)
         rest_srv.state       = states[pid]
         rest_srv.provider_id = pid
         servers.append(rest_srv)
@@ -2678,8 +2707,7 @@ def main():
     # primary REST pool is exhausted on a request (is_backup: true in
     # values_sim.yml).
     for pid, port in REST_BACKUP_PORTS.items():
-        rest_srv = ThreadingHTTPServer(("0.0.0.0", port), RestHandler)
-        rest_srv.daemon_threads = True
+        rest_srv = _SimThreadingHTTPServer(("0.0.0.0", port), RestHandler)
         rest_srv.state       = states[pid]
         rest_srv.provider_id = pid
         servers.append(rest_srv)
@@ -2688,15 +2716,13 @@ def main():
     # shares ProviderState with the JSON-RPC primary; backup tier is its
     # own pool with distinct pids 13-15.
     for pid, port in TM_PORTS.items():
-        tm_srv = ThreadingHTTPServer(("0.0.0.0", port), TendermintHandler)
-        tm_srv.daemon_threads = True
+        tm_srv = _SimThreadingHTTPServer(("0.0.0.0", port), TendermintHandler)
         tm_srv.state       = states[pid]
         tm_srv.provider_id = pid
         servers.append(tm_srv)
 
     for pid, port in TM_BACKUP_PORTS.items():
-        tm_srv = ThreadingHTTPServer(("0.0.0.0", port), TendermintHandler)
-        tm_srv.daemon_threads = True
+        tm_srv = _SimThreadingHTTPServer(("0.0.0.0", port), TendermintHandler)
         tm_srv.state       = states[pid]
         tm_srv.provider_id = pid
         servers.append(tm_srv)
@@ -2706,15 +2732,13 @@ def main():
     # pool. Each server gets its own WsHandler instance because
     # BaseHTTPRequestHandler is per-request.
     for pid, port in WS_PORTS.items():
-        ws_srv = ThreadingHTTPServer(("0.0.0.0", port), handlers_ws.WsHandler)
-        ws_srv.daemon_threads = True
+        ws_srv = _SimThreadingHTTPServer(("0.0.0.0", port), handlers_ws.WsHandler)
         ws_srv.state       = states[pid]
         ws_srv.provider_id = pid
         servers.append(ws_srv)
 
     for pid, port in WS_BACKUP_PORTS.items():
-        ws_srv = ThreadingHTTPServer(("0.0.0.0", port), handlers_ws.WsHandler)
-        ws_srv.daemon_threads = True
+        ws_srv = _SimThreadingHTTPServer(("0.0.0.0", port), handlers_ws.WsHandler)
         ws_srv.state       = states[pid]
         ws_srv.provider_id = pid
         servers.append(ws_srv)
