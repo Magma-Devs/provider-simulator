@@ -68,11 +68,16 @@ import pytest
 from constants import (
     ALL_PROVIDER_PORTS,
     BACKUP_PROVIDER_PORTS,
+    BTC_PRIMARY_PORTS,
     GRPC_BACKUP_PORTS,
     GRPC_PROVIDER_PORTS,
+    LN_PRIMARY_PORTS,
     PROVIDER_PORTS,
     REST_BACKUP_PORTS,
     REST_PORTS,
+    SOLANA_PRIMARY_PORTS,
+    SOLO_PROVIDER_PORTS,
+    SOLO_SOLANA_PROVIDER_PORTS,
     TM_BACKUP_PORTS,
     TM_PORTS,
     WS_BACKUP_PORTS,
@@ -421,6 +426,78 @@ def test_each_surface_has_three_primary_and_three_backup(
     )
     assert len(backup_dict) == 3, (
         f"{surface} backup pool has {len(backup_dict)} entries, expected 3"
+    )
+
+
+def test_solo_solana_provider_ports_shape_and_uniqueness():
+    """The Solana solo listener constant (MAG-2239) is exactly pid 20 on
+    port 18585, and neither the pid nor the port collides with any other
+    listener pool.
+
+    Why hermetic: this is the registration-shape guard for the solo Solana
+    listener. The listener itself is bound by a dedicated loop in
+    ``server.main()`` (handler_module=handlers_solana, its own ProviderState).
+    If pid "20" or port 18585 ever drifts to overlap another pool — e.g.
+    someone reuses 18585, or re-points the solo pool at the Solana primary pid
+    "1" — two listeners would fight for one port at startup (only one binds),
+    or a /scenario POST would cross-talk between the solo router and the
+    solana-sim-router primary pool. Both failures are silent at deploy time and
+    only surface as a flaky downstream test. This catches them at import.
+    """
+    # 1) Exact shape — the value MAG-2239 specifies.
+    assert SOLO_SOLANA_PROVIDER_PORTS == {"20": 18585}, (
+        f"SOLO_SOLANA_PROVIDER_PORTS must be exactly {{'20': 18585}}; "
+        f"got {SOLO_SOLANA_PROVIDER_PORTS}"
+    )
+
+    # 2) Pid "20" is unique across every pid namespace. (Primary pids 1-3 are
+    #    shared across surfaces by design; the solo Solana pid must NOT clash
+    #    with any of them, with the ETH solo pid 19, or with any backup pid.)
+    other_pid_sources = [
+        ("PROVIDER_PORTS",         PROVIDER_PORTS),
+        ("BACKUP_PROVIDER_PORTS",  BACKUP_PROVIDER_PORTS),
+        ("SOLO_PROVIDER_PORTS",    SOLO_PROVIDER_PORTS),
+        ("BTC_PRIMARY_PORTS",      BTC_PRIMARY_PORTS),
+        ("LN_PRIMARY_PORTS",       LN_PRIMARY_PORTS),
+        ("SOLANA_PRIMARY_PORTS",   SOLANA_PRIMARY_PORTS),
+        ("GRPC_PROVIDER_PORTS",    GRPC_PROVIDER_PORTS),
+        ("GRPC_BACKUP_PORTS",      GRPC_BACKUP_PORTS),
+        ("REST_PORTS",             REST_PORTS),
+        ("REST_BACKUP_PORTS",      REST_BACKUP_PORTS),
+        ("TM_PORTS",               TM_PORTS),
+        ("TM_BACKUP_PORTS",        TM_BACKUP_PORTS),
+        ("WS_PORTS",               WS_PORTS),
+        ("WS_BACKUP_PORTS",        WS_BACKUP_PORTS),
+    ]
+    solo_pid = "20"
+    for source_name, port_dict in other_pid_sources:
+        assert solo_pid not in port_dict, (
+            f"Solana solo pid {solo_pid!r} also appears in {source_name} — "
+            f"the solo Solana provider must own a distinct pid so /scenario "
+            f"on the solo router can't reconfigure another pool"
+        )
+
+    # 3) Port 18585 is unique across every listener pool. Two listeners on one
+    #    port means only one binds at startup; the other dies silently.
+    solo_port = 18585
+    for source_name, port_dict in other_pid_sources:
+        assert solo_port not in port_dict.values(), (
+            f"Solana solo port {solo_port} also bound by {source_name} — "
+            f"two listeners cannot share a port"
+        )
+
+    # 4) The solo Solana port is deliberately NOT in ALL_PROVIDER_PORTS — that
+    #    union is bound by the ETH-default loop in main(); the solo Solana
+    #    listener has its own loop (handlers_solana). If it leaked into the
+    #    union it would double-bind 18585 AND route it to the ETH handler.
+    assert solo_port not in ALL_PROVIDER_PORTS.values(), (
+        f"Port {solo_port} must NOT be in ALL_PROVIDER_PORTS — that union is "
+        f"bound by the ETH-default loop, which would double-bind the port and "
+        f"dispatch it to handlers_eth instead of handlers_solana"
+    )
+    assert solo_pid not in ALL_PROVIDER_PORTS, (
+        f"Pid {solo_pid!r} must NOT be in ALL_PROVIDER_PORTS — the solo Solana "
+        f"listener gets its own ProviderState, set separately in main()"
     )
 
 

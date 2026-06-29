@@ -68,6 +68,7 @@ from constants import (
     REST_PORTS,
     SOLANA_PRIMARY_PORTS,
     SOLO_PROVIDER_PORTS,
+    SOLO_SOLANA_PROVIDER_PORTS,
     TM_BACKUP_PORTS,
     TM_PORTS,
     WS_BACKUP_PORTS,
@@ -2275,6 +2276,7 @@ class ControlHandler(BaseHTTPRequestHandler):
             from constants import (
                 PROVIDER_PORTS, BACKUP_PROVIDER_PORTS, SOLO_PROVIDER_PORTS,
                 BTC_PRIMARY_PORTS, LN_PRIMARY_PORTS, SOLANA_PRIMARY_PORTS,
+                SOLO_SOLANA_PROVIDER_PORTS,
                 GRPC_PROVIDER_PORTS, GRPC_BACKUP_PORTS,
                 REST_PORTS, REST_BACKUP_PORTS,
                 TM_PORTS, TM_BACKUP_PORTS,
@@ -2285,6 +2287,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                 *SOLO_PROVIDER_PORTS.values(),
                 *BTC_PRIMARY_PORTS.values(), *LN_PRIMARY_PORTS.values(),
                 *SOLANA_PRIMARY_PORTS.values(),
+                *SOLO_SOLANA_PROVIDER_PORTS.values(),
                 *GRPC_PROVIDER_PORTS.values(), *GRPC_BACKUP_PORTS.values(),
                 *REST_PORTS.values(), *REST_BACKUP_PORTS.values(),
                 *TM_PORTS.values(), *TM_BACKUP_PORTS.values(),
@@ -2541,6 +2544,13 @@ def main():
           result.value.lastValidBlockHeight separated by solana_slot_block_gap
           (default 21_900_000) to reproduce the MAG-1591 consistency-filter bug.
 
+      JSON-RPC Solana solo (one listener — no backup) — MAG-2239
+        - Solo     : port 18585 (pid 20, handler=solana)
+        - Distinct ProviderState (NOT shared with the Solana primary pool).
+          The Solana analogue of the ETH solo listener (port 18581, pid 19) —
+          the single-Solana-endpoint customer-outage shape. Isolated so a
+          /scenario POST on the solo router can't disturb the primary pool.
+
       gRPC (six listeners — three primary + three backup)
         - Primary  : ports 18548 / 18549 / 18550 (pids 1-3, shared state
                      with the matching JSON-RPC primary)
@@ -2593,6 +2603,12 @@ def main():
     for pid in TM_BACKUP_PORTS:
         states[pid] = ProviderState()
     for pid in WS_BACKUP_PORTS:
+        states[pid] = ProviderState()
+    # Solana solo pid (20) is NOT in ALL_PROVIDER_PORTS — it gets its own
+    # ProviderState, the same way each backup pool above does. A dedicated
+    # state keeps the solo Solana listener's /scenario config independent of
+    # the Solana primary pool (pids 1-3).
+    for pid in SOLO_SOLANA_PROVIDER_PORTS:
         states[pid] = ProviderState()
 
     servers = []
@@ -2660,6 +2676,24 @@ def main():
         sol_srv.handler_chain_family = "solana"
         sol_srv.handler_module       = handlers_solana
         servers.append(sol_srv)
+
+    # Solana JSON-RPC solo listener (MAG-2239). Same shape as the Solana
+    # primary pool — JSONRPCHandler with ``handler_chain_family="solana"`` and
+    # ``handler_module=handlers_solana`` — but a single provider (pid 20) on a
+    # dedicated port (18585) with its OWN ProviderState (set above), NOT shared
+    # with the primary pool. This isolation is the point: a /scenario POST on
+    # the solo Solana router reconfigures only pid 20, so it can't disturb the
+    # solana-sim-router's primary pool (pids 1-3). Like the primary pool, this
+    # port is deliberately NOT in ALL_PROVIDER_PORTS (which the ETH-default loop
+    # owns) — the dedicated loop here is what binds it to handlers_solana.
+    for pid, port in SOLO_SOLANA_PROVIDER_PORTS.items():
+        sol_solo_srv = ThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
+        sol_solo_srv.daemon_threads = True
+        sol_solo_srv.state                = states[pid]
+        sol_solo_srv.provider_id          = pid
+        sol_solo_srv.handler_chain_family = "solana"
+        sol_solo_srv.handler_module       = handlers_solana
+        servers.append(sol_solo_srv)
 
     # REST servers (MAG-1777). Primary tier shares ProviderState with the
     # matching JSON-RPC primary (pids 1-3), so a /scenario update on
@@ -2756,6 +2790,8 @@ def main():
         print(f"  provider {pid:>2} (jsonrpc-ln,     primary) → :{port}")
     for pid, port in SOLANA_PRIMARY_PORTS.items():
         print(f"  provider {pid:>2} (jsonrpc-solana, primary) → :{port}")
+    for pid, port in SOLO_SOLANA_PROVIDER_PORTS.items():
+        print(f"  provider {pid:>2} (jsonrpc-solana, solo)    → :{port}")
     for pid, port in GRPC_PROVIDER_PORTS.items():
         print(f"  provider {pid:>2} (grpc,           primary) → :{port}")
     for pid, port in GRPC_BACKUP_PORTS.items():
