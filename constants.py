@@ -88,6 +88,18 @@ LN_PRIMARY_PORTS  = {"1": 18578, "2": 18579, "3": 18580}
 # threshold.
 SOLANA_PRIMARY_PORTS = {"1": 18582, "2": 18583, "3": 18584}
 
+# Solana JSON-RPC solo listener (MAG-2239). One provider, no backup — the
+# Solana analogue of the ETH solo pool (SOLO_PROVIDER_PORTS, pid 19 / 18581),
+# the customer-outage deployment shape for a single Solana endpoint. Pid 20
+# (next free after the ETH solo pid 19) keeps the global pid namespace
+# contiguous; port 18585 sits one above the Solana primary range
+# (18582-18584). Handler dispatch is Solana (handler_module=handlers_solana),
+# matching SOLANA_PRIMARY_PORTS — bound by a dedicated bootstrap loop, NOT via
+# ALL_PROVIDER_PORTS (that union is owned by the ETH-default loop). This pool
+# is deliberately separate from SOLANA_PRIMARY_PORTS so a /scenario call on the
+# solo router can't collide with the solana-sim-router's primary-pool state.
+SOLO_SOLANA_PROVIDER_PORTS = {"20": 18585}
+
 # Control API (scenario config, reset, stats, history)
 CONTROL_PORT = 19000
 
