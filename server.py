@@ -2139,6 +2139,10 @@ class ControlHandler(BaseHTTPRequestHandler):
           POST /history/clear  — wipe call history and counters only.
                                  Does NOT touch scenario config.
           POST /reset/all      — reset scenario config AND clear history.
+          POST /advance        — (MAG-1897) advance the simulated eth head so a stale
+                                 provider's sync lag stays visible to the router optimizer.
+                                 Body: {"per_second": R} (continuous) | {"blocks": N} (one-time).
+                                 Opt-in; default head static. Reset by /reset and /reset/all.
 
         Returns 404 for any unrecognised path.
         """
@@ -2180,6 +2184,8 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._reply(200, {"status": "ok"})
 
         elif self.path == "/reset":
+            import handlers_eth
+            handlers_eth.reset_eth_head()  # MAG-1897: reset advancing eth head
             for state in self.server.provider_states.values():
                 state.reset_scenario()
             self._reply(200, {"status": "scenario reset"})
@@ -2190,10 +2196,25 @@ class ControlHandler(BaseHTTPRequestHandler):
             self._reply(200, {"status": "history cleared"})
 
         elif self.path == "/reset/all":
+            import handlers_eth
+            handlers_eth.reset_eth_head()  # MAG-1897: reset advancing eth head
             for state in self.server.provider_states.values():
                 state.reset_scenario()
                 state.clear_history()
             self._reply(200, {"status": "scenario reset and history cleared"})
+
+        elif self.path == "/advance":
+            # MAG-1897: advance the simulated eth head so a stale provider's sync
+            # lag stays visible to the router's optimizer (its forward-only sync
+            # ratchet only releases as the head moves). Opt-in; default head static.
+            #   {"per_second": R}  -> enable (R>0) / freeze (R<=0) continuous advance
+            #   {"blocks": N}      -> one-time bump of the head by N blocks
+            import handlers_eth
+            if "per_second" in body:
+                handlers_eth.set_eth_advance(float(body.get("per_second") or 0))
+            if "blocks" in body:
+                handlers_eth.bump_eth_head(int(body.get("blocks") or 0))
+            self._reply(200, {"status": "ok", "eth_head": handlers_eth.current_eth_head()})
 
         elif self.path == "/ws/emit":
             sub_id = body.get("subscription_id")

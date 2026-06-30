@@ -12,7 +12,7 @@ It runs many listeners in a single pod:
 - **3 Tendermint-RPC providers** on ports `18554` / `18555` / `18556` (MAG-1841).
 - **3 WebSocket providers** on ports `18557` / `18558` / `18559` (MAG-1801).
 - **3 JSON-RPC backup providers** on `18560` / `18561` / `18562`, plus per-surface backup ranges in `18563`–`18574`.
-- **1 control API** on port `19000` — `POST /scenario`, `POST /reset[/all]`, `GET /scenario`, `GET /stats`, `GET /history`, `GET /health`, `GET /ready`.
+- **1 control API** on port `19000` — `POST /scenario`, `POST /reset[/all]`, `POST /advance` (MAG-1897 — opt-in advancing eth head), `GET /scenario`, `GET /stats`, `GET /history`, `GET /health`, `GET /ready`.
 
 For each pid (1-3), the ETH / BTC / LN / REST / gRPC / TM / WS primary listeners all share **the same `ProviderState`**, so one `POST /scenario` call reconfigures every transport for the same logical provider.
 
