@@ -43,7 +43,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
 
@@ -187,6 +187,98 @@ def _normalise_responses(raw: Any) -> Dict[Any, Any]:
         return raw
     # Unknown shape — clear responses rather than crash.
     return {}
+
+
+# ── Scenario input validation (strict) ────────────────────────────────────────
+#
+# A POST /scenario used to silently ignore anything it didn't recognise: an
+# unknown provider id was skipped, an unknown field was dropped, an invalid
+# ``mode`` fell through to the success path, and an out-of-range
+# ``error_probability`` or a negative ``latency_ms`` was applied as-is. A typo'd
+# scenario therefore "succeeded" (HTTP 200) while configuring nothing, and the
+# test ran green against an unconfigured provider. The constants + validator
+# below make /scenario reject bad input with HTTP 400 so a typo fails loudly.
+
+# The fields a provider config may set. Mirrors the keys read in
+# ProviderState.update(); anything else is a typo.
+_SCENARIO_FIELDS = frozenset({
+    "mode", "latency_ms", "error_probability", "error_code", "error_message",
+    "http_status", "responses", "corruption_mode", "missing_field",
+    "blocks_behind", "solana_slot_block_gap", "solana_slot_offset",
+    "drop_at", "chain_family", "logs_indexed_up_to", "logs_lag_mode",
+})
+_SCENARIO_MODES = frozenset({
+    "success", "error", "rate_limit", "down", "hang", "drop_connection",
+})
+_SCENARIO_CORRUPTION_MODES = frozenset({
+    "truncated", "missing_field", "invalid_json", "empty_response", "wrong_type",
+})
+_SCENARIO_DROP_AT = frozenset({"before_headers", "after_headers", "mid_body"})
+_SCENARIO_CHAIN_FAMILIES = frozenset({
+    "eth", "btc", "ln", "solana", "grpc", "rest", "tendermintrpc", "ws",
+})
+_SCENARIO_LOGS_LAG_MODES = frozenset({"empty", "partial"})
+
+
+def _validate_scenario_cfg(pid: Any, cfg: Any) -> None:
+    """Validate one provider's POST /scenario config; raise ValueError (→ 400)
+    on any unknown field, invalid enum value, or out-of-range number.
+
+    Only shape / enum / range are checked here. Per-method ``responses`` entries
+    keep their own validation in _normalise_responses.
+    """
+    if not isinstance(cfg, dict):
+        raise ValueError(
+            f"provider {pid!r} config must be an object, got {type(cfg).__name__}"
+        )
+    unknown = set(cfg) - _SCENARIO_FIELDS
+    if unknown:
+        raise ValueError(
+            f"provider {pid!r}: unknown scenario field(s) {sorted(unknown)}; "
+            f"allowed fields are {sorted(_SCENARIO_FIELDS)}"
+        )
+    if "mode" in cfg and cfg["mode"] not in _SCENARIO_MODES:
+        raise ValueError(
+            f"provider {pid!r}: invalid mode {cfg['mode']!r}; "
+            f"allowed: {sorted(_SCENARIO_MODES)}"
+        )
+    if (cfg.get("corruption_mode") is not None
+            and cfg["corruption_mode"] not in _SCENARIO_CORRUPTION_MODES):
+        raise ValueError(
+            f"provider {pid!r}: invalid corruption_mode {cfg['corruption_mode']!r}; "
+            f"allowed: {sorted(_SCENARIO_CORRUPTION_MODES)} (or null)"
+        )
+    if "drop_at" in cfg and cfg["drop_at"] not in _SCENARIO_DROP_AT:
+        raise ValueError(
+            f"provider {pid!r}: invalid drop_at {cfg['drop_at']!r}; "
+            f"allowed: {sorted(_SCENARIO_DROP_AT)}"
+        )
+    if "chain_family" in cfg and cfg["chain_family"] not in _SCENARIO_CHAIN_FAMILIES:
+        raise ValueError(
+            f"provider {pid!r}: invalid chain_family {cfg['chain_family']!r}; "
+            f"allowed: {sorted(_SCENARIO_CHAIN_FAMILIES)}"
+        )
+    if "logs_lag_mode" in cfg and cfg["logs_lag_mode"] not in _SCENARIO_LOGS_LAG_MODES:
+        raise ValueError(
+            f"provider {pid!r}: invalid logs_lag_mode {cfg['logs_lag_mode']!r}; "
+            f"allowed: {sorted(_SCENARIO_LOGS_LAG_MODES)}"
+        )
+    if "error_probability" in cfg:
+        ep = cfg["error_probability"]
+        # bool is a subclass of int — reject it so True/False can't masquerade
+        # as a probability.
+        if isinstance(ep, bool) or not isinstance(ep, (int, float)) or not (0.0 <= ep <= 1.0):
+            raise ValueError(
+                f"provider {pid!r}: error_probability must be a number in "
+                f"[0.0, 1.0], got {ep!r}"
+            )
+    if "latency_ms" in cfg:
+        lm = cfg["latency_ms"]
+        if isinstance(lm, bool) or not isinstance(lm, int) or lm < 0:
+            raise ValueError(
+                f"provider {pid!r}: latency_ms must be a non-negative integer, "
+                f"got {lm!r}"
+            )
 
 
 # ── Per-method config resolution (MAG-1821) ───────────────────────────────────
@@ -950,6 +1042,21 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # provider config.
         length = int(self.headers.get("Content-Length", 0))
         body   = json.loads(self.rfile.read(length)) if length else {}
+
+        # A JSON-RPC batch is a top-level array. We do not support batch, but we
+        # must not call dict methods on a list (``body.get(...)`` below) — that
+        # raises AttributeError and breaks the socket mid-response. Answer with a
+        # single Invalid-Request error and record the attempt so the arrival stub
+        # in /history reaches a terminal status instead of staying in_flight.
+        if isinstance(body, list):
+            state.push_call_to_buffer("batch", "error", 0, request_id=None,
+                                      lava_headers=lava_headers, entry=arrival,
+                                      chain=listener_family, port=listener_port)
+            self._reply(200, {"jsonrpc": "2.0", "id": None,
+                              "error": {"code": -32600,
+                                        "message": "batch requests are not supported"}})
+            return
+
         req_id = body.get("id", 1)
         method = body.get("method", "unknown")
 
@@ -2145,6 +2252,12 @@ class _TmParseError(ValueError):
 
 class ControlHandler(BaseHTTPRequestHandler):
 
+    # Socket timeout for a single request read. Without it, a client that
+    # connects and stalls mid-request holds the handler open indefinitely.
+    # Paired with the threaded control server in main(), a stalled client no
+    # longer blocks other /scenario / /reset / /history calls.
+    timeout = 30
+
     def do_POST(self):
         """Handle POST requests on the control API.
 
@@ -2173,12 +2286,22 @@ class ControlHandler(BaseHTTPRequestHandler):
             # 1..N-1 with partially-applied scalar fields. Only after the
             # full validation pass succeeds do we mutate any state.
             providers_payload = body.get("providers", {})
+            if not isinstance(providers_payload, dict):
+                self._reply(400, {"error": (
+                    "'providers' must be an object mapping provider id -> config, "
+                    f"got {type(providers_payload).__name__}"
+                )})
+                return
             staged: list = []
             try:
                 for pid, cfg in providers_payload.items():
                     state = self.server.provider_states.get(str(pid))
                     if state is None:
-                        continue
+                        raise ValueError(
+                            f"unknown provider id {pid!r}; this simulator has "
+                            f"providers {sorted(self.server.provider_states)}"
+                        )
+                    _validate_scenario_cfg(pid, cfg)
                     staged_cfg = dict(cfg)
                     if "responses" in staged_cfg:
                         # Pre-normalise so ValueError fires here, before any
@@ -2426,8 +2549,8 @@ class ControlHandler(BaseHTTPRequestHandler):
                 if f_provider and pid != f_provider:
                     continue
                 for entry in s.get_history():
-                    if t_from        and entry["ts"] < t_from:                      continue
-                    if t_to          and entry["ts"] > t_to:                        continue
+                    if t_from is not None and entry["ts"] < t_from:                 continue
+                    if t_to   is not None and entry["ts"] > t_to:                   continue
                     if f_method      and entry["method"] != f_method:               continue
                     if f_status      and entry["status"] != f_status:               continue
                     if f_request_id  and str(entry.get("request_id")) != f_request_id: continue
@@ -2717,8 +2840,11 @@ def main():
     # port is deliberately NOT in ALL_PROVIDER_PORTS (which the ETH-default loop
     # owns) — the dedicated loop here is what binds it to handlers_solana.
     for pid, port in SOLO_SOLANA_PROVIDER_PORTS.items():
-        sol_solo_srv = ThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
-        sol_solo_srv.daemon_threads = True
+        # _SimThreadingHTTPServer (not bare ThreadingHTTPServer) so this solo
+        # listener gets the same 128-deep listen backlog as every other pool —
+        # the bare server defaults to a backlog of 5, which drops connections
+        # under burst.
+        sol_solo_srv = _SimThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
         sol_solo_srv.state                = states[pid]
         sol_solo_srv.provider_id          = pid
         sol_solo_srv.handler_chain_family = "solana"
@@ -2777,7 +2903,11 @@ def main():
         ws_srv.provider_id = pid
         servers.append(ws_srv)
 
-    ctrl = HTTPServer(("0.0.0.0", CONTROL_PORT), ControlHandler)
+    # Threaded (not single-threaded HTTPServer) so one stalled or slow control
+    # client can't block every other /scenario / /reset / /history / /ws/emit
+    # call. Paired with ControlHandler.timeout, a hung client's socket read is
+    # also bounded so its worker thread frees.
+    ctrl = _SimThreadingHTTPServer(("0.0.0.0", CONTROL_PORT), ControlHandler)
     ctrl.provider_states = states
     servers.append(ctrl)
 

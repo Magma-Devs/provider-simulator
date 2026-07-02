@@ -58,7 +58,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import deque
-from http.server import HTTPServer, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from urllib.parse import urlparse
 
 import pytest
@@ -148,7 +148,10 @@ def sim():
         srv.provider_id = pid
         servers.append(srv)
 
-    ctrl                  = HTTPServer(("127.0.0.1", _CONTROL_PORT), ControlHandler)
+    # Threaded control server, matching production main() — so a slow/stalled
+    # control client can't serialize every other control request.
+    ctrl                  = ThreadingHTTPServer(("127.0.0.1", _CONTROL_PORT), ControlHandler)
+    ctrl.daemon_threads   = True
     ctrl.provider_states  = states
     servers.append(ctrl)
 
@@ -938,6 +941,16 @@ class TestHistory:
         _, body = _get(_ctrl(sim, f"/history?to={t_past}"))
         assert body["count"] == 0
 
+    def test_filter_to_zero_excludes_all(self, sim):
+        """?to=0 means 'at or before the epoch' — every real call is newer, so
+        the window is empty. Guards the truthiness bug where a 0 boundary was
+        treated as 'no filter' (0 is falsy) and wrongly returned everything."""
+        _rpc(sim["provider1"], "eth_blockNumber")
+        status, body = _get(_ctrl(sim, "/history?to=0"))
+        assert status == 200
+        assert body["count"] == 0, \
+            f"?to=0 must exclude all calls (none predate the epoch), got count={body['count']}"
+
     # ── combined filters ──────────────────────────────────────────────────────
 
     def test_combined_last_provider_status(self, sim):
@@ -1103,6 +1116,112 @@ class TestJSONRPCProtocol:
             f"got {last_entry['method']!r}"
         )
 
+    def test_batch_array_request_returns_invalid_request_not_crash(self, sim):
+        """A JSON-RPC batch is a top-level array. The sim does not support
+        batch, but it must answer with a single Invalid-Request error
+        (-32600) — not crash the handler by calling dict methods on a list,
+        which would break the socket mid-response."""
+        batch = [
+            {"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []},
+            {"jsonrpc": "2.0", "id": 2, "method": "eth_chainId", "params": []},
+        ]
+        req = urllib.request.Request(
+            sim["provider1"],
+            data=json.dumps(batch).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                status, body = resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            status, body = e.code, json.loads(e.read() or b"{}")
+        except (urllib.error.URLError, ConnectionError, OSError) as e:
+            pytest.fail(f"sim crashed / dropped the connection on a batch request: {e!r}")
+        assert status == 200, f"batch must be answered, not HTTP-errored, got {status}"
+        assert body.get("error", {}).get("code") == -32600, \
+            f"batch must return JSON-RPC Invalid Request (-32600), got {body!r}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Scenario input validation — a typo'd /scenario must 400, not silently no-op
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestScenarioValidation:
+
+    def test_valid_scenario_still_returns_200(self, sim):
+        """A well-formed scenario is unaffected by the new validation."""
+        status, body = _post(_ctrl(sim, "/scenario"),
+                             {"providers": {"1": {"mode": "error", "latency_ms": 10}}})
+        assert status == 200
+        assert body["status"] == "ok"
+
+    def test_unknown_field_returns_400(self, sim):
+        """A misspelled field (e.g. 'latencyms') is a typo — reject it so the
+        test doesn't pass green against an unconfigured provider."""
+        status, body = _post(_ctrl(sim, "/scenario"),
+                             {"providers": {"1": {"latencyms": 500}}})
+        assert status == 400
+        assert "latencyms" in body["error"]
+
+    def test_invalid_mode_returns_400(self, sim):
+        status, body = _post(_ctrl(sim, "/scenario"),
+                             {"providers": {"1": {"mode": "boom"}}})
+        assert status == 400
+        assert "mode" in body["error"]
+
+    def test_invalid_chain_family_returns_400(self, sim):
+        status, body = _post(_ctrl(sim, "/scenario"),
+                             {"providers": {"1": {"chain_family": "dogecoin"}}})
+        assert status == 400
+        assert "chain_family" in body["error"]
+
+    def test_invalid_corruption_mode_returns_400(self, sim):
+        status, body = _post(_ctrl(sim, "/scenario"),
+                             {"providers": {"1": {"corruption_mode": "shred"}}})
+        assert status == 400
+        assert "corruption_mode" in body["error"]
+
+    def test_error_probability_out_of_range_returns_400(self, sim):
+        status, body = _post(_ctrl(sim, "/scenario"),
+                             {"providers": {"1": {"error_probability": 2.0}}})
+        assert status == 400
+        assert "error_probability" in body["error"]
+
+    def test_negative_latency_returns_400(self, sim):
+        """A negative latency reaches time.sleep(-x) → ValueError at request
+        time. Reject it up front so the fault primitive stays clean."""
+        status, body = _post(_ctrl(sim, "/scenario"),
+                             {"providers": {"1": {"latency_ms": -5}}})
+        assert status == 400
+        assert "latency_ms" in body["error"]
+
+    def test_invalid_scenario_does_not_mutate_other_providers(self, sim):
+        """All-or-nothing: if provider 2's config is invalid, provider 1's
+        valid config in the same call is not applied."""
+        status, _ = _post(_ctrl(sim, "/scenario"),
+                          {"providers": {"1": {"mode": "error"}, "2": {"mode": "boom"}}})
+        assert status == 400
+        _, snap = _get(_ctrl(sim, "/scenario"))
+        assert snap["providers"]["1"]["mode"] == "success", \
+            "provider 1 must not be mutated when provider 2's config is rejected"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Control-server robustness — a stalled client must not wedge the control API
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestControlServerRobustness:
+
+    def test_control_handler_has_socket_timeout(self):
+        """The control handler sets a socket timeout so one stalled client
+        can't hold a control thread open forever. Paired with a threaded
+        control server, a single slow/hung client no longer blocks every
+        /scenario, /reset, and /history call."""
+        assert ControlHandler.timeout == 30, (
+            "ControlHandler must set timeout=30 so a stalled client's socket "
+            f"read is bounded; got {ControlHandler.timeout!r}"
+        )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Mode priority — down / rate_limit / error take full priority
@@ -1160,11 +1279,15 @@ class TestScenarioEdgeCases:
         for pid in ("1", "2", "3"):
             assert scenario["providers"][pid]["mode"] == "success"
 
-    def test_unknown_provider_id_gracefully_ignored(self, sim):
-        """Posting to a non-existent provider id (e.g. '99') must not crash."""
+    def test_unknown_provider_id_returns_400(self, sim):
+        """Posting to a provider id this sim doesn't have (e.g. '99') is a typo.
+        Reject it with a clean 400 — not a crash, and not a silent 200 that
+        would let a test run green against an unconfigured provider — and leave
+        the real providers untouched, so the rejection is atomic."""
         status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"99": {"mode": "error"}}})
-        assert status == 200
-        # real providers unchanged
+        assert status == 400
+        assert "99" in body["error"]
+        # real providers unchanged — the whole call was rejected, not partially applied
         _, scenario = _get(_ctrl(sim, "/scenario"))
         for pid in ("1", "2", "3"):
             assert scenario["providers"][pid]["mode"] == "success"
