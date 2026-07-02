@@ -255,6 +255,17 @@ class TestSolanaPortDispatch:
         assert "error" not in body
         assert body["result"] is None
 
+    def test_solana_unknown_method_mode_error_returns_minus_32601(self, sim):
+        """Opt-in: with solana_unknown_method_mode="error", an unknown method
+        returns a real -32601 method-not-found instead of the default null
+        result — so the router's Solana error classifier can be exercised on a
+        bad method. The default stays "null" (see the test above)."""
+        _set_solana(sim, "1", solana_unknown_method_mode="error")
+        status, body = _rpc(sim["provider1"], "not_a_real_solana_method")
+        assert status == 200
+        assert "error" in body, f"expected a -32601 error envelope, got {body}"
+        assert body["error"]["code"] == -32601
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # getLatestBlockhash — the slot ↔ lastValidBlockHeight gap (the bug carrier)
@@ -465,14 +476,24 @@ class TestSolanaPerMethodOverrides:
         assert body["result"] == {"solana-core": "9.9.9"}
 
     def test_solana_error_override_raw_envelope(self, sim):
-        """responses[method] = {"error": {...}} emits the JSON-RPC error envelope.
-        Solana has no named error-stub catalogue yet (handlers_solana only
-        honours a raw error dict)."""
+        """responses[method] = {"error": {...}} emits the JSON-RPC error envelope
+        directly — the raw escape-hatch, alongside the named error_stub path."""
         _set_solana(sim, "1", responses={"getSlot": {"error": {"code": -32007, "message": "Slot skipped"}}})
         _, body = _rpc(sim["provider1"], "getSlot")
         assert "error" in body
         assert body["error"]["code"] == -32007
         assert body["error"]["message"] == "Slot skipped"
+
+    def test_solana_error_stub_named_catalogue(self, sim):
+        """responses[method] = {"error_stub": "<name>"} resolves against the
+        named SOLANA_ERROR_STUBS catalogue (mirrors the ETH error_stub path), so
+        tests inject a canonical Solana error by name instead of hand-typing the
+        envelope."""
+        _set_solana(sim, "1", responses={"getSlot": {"error_stub": "min_context_slot_not_reached"}})
+        _, body = _rpc(sim["provider1"], "getSlot")
+        assert "error" in body, f"expected an error envelope, got {body}"
+        assert body["error"]["code"] == -32016, f"got {body['error']}"
+        assert "Minimum context slot" in body["error"]["message"]
 
     def test_solana_method_unaffected_by_other_method_override(self, sim):
         """Per-method overrides scope strictly to that method — an override on

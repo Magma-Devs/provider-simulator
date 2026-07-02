@@ -206,6 +206,7 @@ _SCENARIO_FIELDS = frozenset({
     "http_status", "responses", "corruption_mode", "missing_field",
     "blocks_behind", "solana_slot_block_gap", "solana_slot_offset",
     "drop_at", "chain_family", "logs_indexed_up_to", "logs_lag_mode",
+    "solana_unknown_method_mode", "fail_first_n", "then_mode",
 })
 _SCENARIO_MODES = frozenset({
     "success", "error", "rate_limit", "down", "hang", "drop_connection",
@@ -278,6 +279,24 @@ def _validate_scenario_cfg(pid: Any, cfg: Any) -> None:
             raise ValueError(
                 f"provider {pid!r}: latency_ms must be a non-negative integer, "
                 f"got {lm!r}"
+            )
+    if ("solana_unknown_method_mode" in cfg
+            and cfg["solana_unknown_method_mode"] not in ("error", "null")):
+        raise ValueError(
+            f"provider {pid!r}: invalid solana_unknown_method_mode "
+            f"{cfg['solana_unknown_method_mode']!r}; allowed: ['error', 'null']"
+        )
+    if "then_mode" in cfg and cfg["then_mode"] not in _SCENARIO_MODES:
+        raise ValueError(
+            f"provider {pid!r}: invalid then_mode {cfg['then_mode']!r}; "
+            f"allowed: {sorted(_SCENARIO_MODES)}"
+        )
+    if "fail_first_n" in cfg:
+        fn = cfg["fail_first_n"]
+        if isinstance(fn, bool) or not isinstance(fn, int) or fn < 0:
+            raise ValueError(
+                f"provider {pid!r}: fail_first_n must be a non-negative integer, "
+                f"got {fn!r}"
             )
 
 
@@ -380,6 +399,19 @@ class ProviderState:
     # ones. Negative = behind the base slot, positive = ahead. Only read by the
     # Solana listener pool (18582-18584); ignored by every other handler.
     solana_slot_offset: int = 0
+    # Opt-in unknown-method behaviour on Solana. "null" (default) keeps the
+    # parse-friendly {"result": null} for an unrecognised method (backward-
+    # compat); "error" makes handlers_solana return a real -32601 method-not-
+    # found so the router's Solana error classifier can be exercised.
+    solana_unknown_method_mode: str = "null"
+    # Deterministic "fail the first N calls, then recover" fault. When
+    # fail_first_n > 0, the first N JSON-RPC requests to this provider use the
+    # configured ``mode`` (the fault); every request after uses ``then_mode``
+    # (default "success"). Makes retry-then-recover / circuit-breaker paths
+    # repeatable without relying on random error_probability.
+    fail_first_n: int = 0
+    then_mode: str = "success"
+    _fail_counter: int = field(default=0, repr=False)   # consumed by fail_first_n
     drop_at: str = "before_headers"   # one of: "before_headers", "after_headers", "mid_body"; only applies when mode="drop_connection"
     chain_family: str = "eth"   # one of: "eth", "btc", "ln", "solana", "grpc", "rest", "tendermintrpc", "ws"; gates the per-listener FAULT primitives (the success-path handler is selected by LISTENER PORT, not by this field — MAG-2089). Default "eth" preserves backward-compat. "btc" → handlers_btc on the dedicated BTC JSON-RPC ports 18575-77 (MAG-1716). "ln" → handlers_lnd on the dedicated LN JSON-RPC ports 18578-80 (MAG-1726). "solana" → handlers_solana on the dedicated Solana JSON-RPC ports 18582-84 (MAG-2231) — same port-derived dispatch as BTC/LN; the success handler emits result.context.slot vs result.value.lastValidBlockHeight separated by solana_slot_block_gap. "grpc" → handlers_grpc on ports 18548-50. "rest" → handlers_rest on ports 18551-53 (MAG-1777). "tendermintrpc" → handlers_tendermintrpc on ports 18554-56 (MAG-1841). "ws" → handlers_ws on ports 18557-59 (MAG-1801) for WebSocket-style providers with subscription lifecycle — the handler delegates non-subscription methods back to handlers_eth.handle / handlers_btc.handle so request/response semantics are identical to HTTP JSON-RPC; subscription frames are wrapped in chain-specific envelopes from stubs_ws.
     # MAG-1791: provider-stale-on-getLogs primitive — head-fresh but logs-indexing-lagged.
@@ -430,6 +462,9 @@ class ProviderState:
                 "blocks_behind":     self.blocks_behind,
                 "solana_slot_block_gap": self.solana_slot_block_gap,
                 "solana_slot_offset":    self.solana_slot_offset,
+                "solana_unknown_method_mode": self.solana_unknown_method_mode,
+                "fail_first_n":          self.fail_first_n,
+                "then_mode":             self.then_mode,
                 "drop_at":           self.drop_at,
                 "chain_family":      self.chain_family,
                 "logs_indexed_up_to": self.logs_indexed_up_to,
@@ -459,6 +494,12 @@ class ProviderState:
             # solana_slot_offset leaves the existing per-provider value untouched
             # (the field default at construction is 0 = base slot, no divergence).
             self.solana_slot_offset = cfg.get("solana_slot_offset", self.solana_slot_offset)
+            self.solana_unknown_method_mode = cfg.get("solana_unknown_method_mode", self.solana_unknown_method_mode)
+            self.then_mode = cfg.get("then_mode", self.then_mode)
+            if "fail_first_n" in cfg:
+                # A fresh fail_first_n scenario restarts the count from zero.
+                self.fail_first_n = cfg["fail_first_n"]
+                self._fail_counter = 0
             self.drop_at           = cfg.get("drop_at",           self.drop_at)
             self.chain_family      = cfg.get("chain_family",      self.chain_family)
             # MAG-1791: backward-compat — missing keys keep current value, so
@@ -494,12 +535,24 @@ class ProviderState:
             # MAG-2233 #1: reset restores offset 0 so a /reset between tests clears
             # any per-test slot divergence and returns every provider to the base slot.
             self.solana_slot_offset = 0
+            self.solana_unknown_method_mode = "null"
+            self.fail_first_n = 0
+            self.then_mode = "success"
+            self._fail_counter = 0
             self.drop_at           = "before_headers"
             self.chain_family      = "eth"
             # MAG-1791: reset clears the eth_getLogs stale-indexing primitive
             # so a /reset between tests restores full logs availability.
             self.logs_indexed_up_to = None
             self.logs_lag_mode      = "empty"
+
+    def consume_fail_counter(self) -> int:
+        """Atomically increment and return this provider's request counter for
+        the fail_first_n sequenced fault. Called once per JSON-RPC request to
+        decide whether this call is still within the first-N failing window."""
+        with self.lock:
+            self._fail_counter += 1
+            return self._fail_counter
 
     def clear_history(self) -> None:
         """Wipe the in-memory call buffer and reset all-time counters to zero.
@@ -943,6 +996,15 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         t_start = time.monotonic()
         state: ProviderState = self.server.state
         snap = state.snapshot()
+
+        # Sequenced fault (fail_first_n): the first N JSON-RPC requests to this
+        # provider use the configured mode; every request after switches to
+        # then_mode (default "success"). Consume the per-provider counter once
+        # per request so retry-then-recover is deterministic instead of relying
+        # on random error_probability.
+        if snap.get("fail_first_n", 0) > 0:
+            if state.consume_fail_counter() > snap["fail_first_n"]:
+                snap["mode"] = snap.get("then_mode", "success")
 
         # MAG-2089 — handler dispatch is now PORT-DERIVED on JSON-RPC.
         # Each listener server is attached at startup with two attributes:
