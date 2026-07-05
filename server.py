@@ -997,15 +997,6 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         state: ProviderState = self.server.state
         snap = state.snapshot()
 
-        # Sequenced fault (fail_first_n): the first N JSON-RPC requests to this
-        # provider use the configured mode; every request after switches to
-        # then_mode (default "success"). Consume the per-provider counter once
-        # per request so retry-then-recover is deterministic instead of relying
-        # on random error_probability.
-        if snap.get("fail_first_n", 0) > 0:
-            if state.consume_fail_counter() > snap["fail_first_n"]:
-                snap["mode"] = snap.get("then_mode", "success")
-
         # MAG-2089 — handler dispatch is now PORT-DERIVED on JSON-RPC.
         # Each listener server is attached at startup with two attributes:
         #
@@ -1080,6 +1071,16 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # JSON-RPC port — consistent with the universal "down means
         # unreachable" semantic shipped for WS / gRPC / REST / TM.
         jsonrpc_owns_snap = snap.get("chain_family") == listener_family
+
+        # Sequenced fault (fail_first_n): ONLY the listener that owns this snap's
+        # chain_family consumes the counter + applies the sequence, so a request
+        # on a different transport's listener (gated out below) does not burn the
+        # provider's first-N budget. The first N owned requests use the configured
+        # mode; every owned request after switches to then_mode (default success).
+        if jsonrpc_owns_snap and snap.get("fail_first_n", 0) > 0:
+            if state.consume_fail_counter() > snap["fail_first_n"]:
+                snap["mode"] = snap.get("then_mode", "success")
+
         jsonrpc_run_fault = jsonrpc_owns_snap or snap["mode"] == "down"
 
         # Pre-parse fault check: provider-wide down mode doesn't read the body.

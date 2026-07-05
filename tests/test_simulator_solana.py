@@ -559,6 +559,24 @@ class TestMixedChainScenario:
         assert isinstance(sol_body["result"], int)
         assert sol_body["result"] == SOLANA_BASE_SLOT
 
+    def test_fail_first_n_counts_only_owning_transport(self, sim):
+        """fail_first_n's counter is consumed ONLY on the listener that owns the
+        provider's chain_family. Requests to a different transport's listener
+        (gated out) must not burn the first-N budget — so the owning listener
+        still sees the first N calls as failures."""
+        _set_solana(sim, "1", mode="error", error_code=-32077,
+                    error_message="boom", chain_family="solana", fail_first_n=2)
+        # Hit the ETH listener (chain_family mismatch) — must NOT consume the budget.
+        for _ in range(3):
+            _rpc(sim["eth_provider1"], "eth_blockNumber")
+        # The Solana listener (owning) still sees the first 2 calls as failures.
+        _, b1 = _rpc(sim["provider1"], "getSlot")
+        _, b2 = _rpc(sim["provider1"], "getSlot")
+        _, b3 = _rpc(sim["provider1"], "getSlot")
+        assert b1.get("error", {}).get("code") == -32077, f"solana call 1 should fail: {b1}"
+        assert b2.get("error", {}).get("code") == -32077, f"solana call 2 should fail: {b2}"
+        assert "error" not in b3, f"solana call 3 should recover: {b3}"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Cross-transport fault isolation — mode=down is universal across chain_family
