@@ -1,6 +1,8 @@
 # Stdlib carries the JSON-RPC / HTTP simulator (http.server, json, threading).
 # gRPC support (MAG-1780) needs the wire-format implementation and protobuf
 # runtime — both are C-extension packages and not part of stdlib.
-grpcio>=1.62,<2.0
-grpcio-reflection>=1.62,<2.0
+# 1.80 floor: the vendored cosmos_pb2 generated gRPC stubs raise at import on
+# grpcio<1.80, which aborts the whole `pytest tests/` collection.
+grpcio>=1.80,<2.0
+grpcio-reflection>=1.80,<2.0
 protobuf>=5.27,<7
