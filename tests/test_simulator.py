@@ -1195,6 +1195,25 @@ class TestScenarioValidation:
         assert status == 400
         assert "latency_ms" in body["error"]
 
+    def test_non_dict_control_body_returns_400(self, sim):
+        """A non-object JSON body (list/scalar) to the control API must return
+        400, not crash on body.get() — the control-handler sibling of the
+        JSON-RPC batch guard."""
+        req = urllib.request.Request(
+            _ctrl(sim, "/scenario"),
+            data=json.dumps([1, 2, 3]).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                status, body = resp.status, json.loads(resp.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            status, body = e.code, json.loads(e.read() or b"{}")
+        except (urllib.error.URLError, ConnectionError, OSError) as e:
+            pytest.fail(f"control API crashed on a non-object body: {e!r}")
+        assert status == 400, f"non-object body must be 400, got {status}"
+        assert "error" in body
+
     def test_invalid_scenario_does_not_mutate_other_providers(self, sim):
         """All-or-nothing: if provider 2's config is invalid, provider 1's
         valid config in the same call is not applied."""

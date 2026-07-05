@@ -2275,6 +2275,15 @@ class ControlHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body   = json.loads(self.rfile.read(length)) if length else {}
 
+        # The control routes below read body.get(...); a non-object JSON body
+        # (list / scalar) would raise AttributeError and break the socket. Guard
+        # it with a clear 400 — the same way JSONRPCHandler guards a batch body.
+        if not isinstance(body, dict):
+            self._reply(400, {"error": (
+                f"request body must be a JSON object, got {type(body).__name__}"
+            )})
+            return
+
         if self.path == "/scenario":
             # MAG-1821 — validation errors raised inside state.update (via
             # _normalise_responses) come back as ValueError. Surface them
