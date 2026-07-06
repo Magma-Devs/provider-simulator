@@ -1214,6 +1214,24 @@ class TestScenarioValidation:
         assert status == 400, f"non-object body must be 400, got {status}"
         assert "error" in body
 
+    def test_invalid_then_mode_returns_400(self, sim):
+        status, body = _post(_ctrl(sim, "/scenario"),
+                             {"providers": {"1": {"then_mode": "sucess"}}})
+        assert status == 400
+        assert "then_mode" in body["error"]
+
+    def test_negative_fail_first_n_returns_400(self, sim):
+        status, body = _post(_ctrl(sim, "/scenario"),
+                             {"providers": {"1": {"fail_first_n": -1}}})
+        assert status == 400
+        assert "fail_first_n" in body["error"]
+
+    def test_invalid_solana_unknown_method_mode_returns_400(self, sim):
+        status, body = _post(_ctrl(sim, "/scenario"),
+                             {"providers": {"1": {"solana_unknown_method_mode": "bogus"}}})
+        assert status == 400
+        assert "solana_unknown_method_mode" in body["error"]
+
     def test_invalid_scenario_does_not_mutate_other_providers(self, sim):
         """All-or-nothing: if provider 2's config is invalid, provider 1's
         valid config in the same call is not applied."""
@@ -1240,6 +1258,49 @@ class TestControlServerRobustness:
             "ControlHandler must set timeout=30 so a stalled client's socket "
             f"read is bounded; got {ControlHandler.timeout!r}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sequenced faults — fail the first N calls, then recover (deterministic)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSequencedFaults:
+
+    def test_fail_first_n_then_recovers(self, sim):
+        """fail_first_n=N makes the first N calls use the configured fault mode,
+        then every call after switches to then_mode (default success) — a
+        deterministic retry-then-recover, no random error_probability."""
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {
+            "mode": "error", "error_code": -32050, "error_message": "boom",
+            "fail_first_n": 2,
+        }}})
+        _, b1 = _rpc(sim["provider1"], "eth_blockNumber")
+        _, b2 = _rpc(sim["provider1"], "eth_blockNumber")
+        _, b3 = _rpc(sim["provider1"], "eth_blockNumber")
+        assert b1.get("error", {}).get("code") == -32050, f"call 1 should fail: {b1}"
+        assert b2.get("error", {}).get("code") == -32050, f"call 2 should fail: {b2}"
+        assert "error" not in b3 and "result" in b3, f"call 3 should recover: {b3}"
+
+    def test_fail_first_n_zero_is_disabled(self, sim):
+        """fail_first_n=0 (default) means the sequenced fault is off — the
+        configured mode applies to every call, as before."""
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {
+            "mode": "error", "error_code": -32051, "fail_first_n": 0,
+        }}})
+        _, b1 = _rpc(sim["provider1"], "eth_blockNumber")
+        _, b2 = _rpc(sim["provider1"], "eth_blockNumber")
+        assert b1.get("error", {}).get("code") == -32051
+        assert b2.get("error", {}).get("code") == -32051, "fail_first_n=0 must not recover"
+
+    def test_then_mode_honored_after_window(self, sim):
+        """then_mode can be any mode — succeed for the first call, then go down."""
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {
+            "mode": "success", "fail_first_n": 1, "then_mode": "down",
+        }}})
+        s1, _ = _rpc(sim["provider1"], "eth_blockNumber")
+        s2, _ = _rpc(sim["provider1"], "eth_blockNumber")
+        assert s1 == 200, "first call is in the mode=success window"
+        assert s2 == 503, "after the window, then_mode=down returns 503"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
