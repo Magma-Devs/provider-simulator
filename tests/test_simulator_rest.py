@@ -539,7 +539,7 @@ class TestRestPerPathOverrides:
         assert body["error"]["message"] == "boom"
 
     def test_http_status_wins_over_status_on_body_override(self, sim):
-        """"http_status" is the primary status key; "status" is the deprecated
+        """http_status is the primary status key; status is the deprecated
         REST-only fallback. When both are present on a body override, the
         handler must emit http_status."""
         _post(_ctrl(sim, "/scenario"), {
