@@ -267,6 +267,39 @@ class TestScenario:
         assert status == 404
         assert "error" in body
 
+    def test_post_response_includes_applied_chain_family_two_providers(self, sim):
+        # Two-provider scenario with distinct chain families; the response must
+        # echo the exact family that was validated and applied for each pid.
+        status, body = _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {"chain_family": "eth"},
+                "2": {"chain_family": "btc"},
+            }
+        })
+        assert status == 200
+        assert "applied" in body
+        assert body["applied"]["1"]["chain_family"] == "eth"
+        assert body["applied"]["2"]["chain_family"] == "btc"
+
+    def test_post_response_applied_shows_default_family_when_field_omitted(self, sim):
+        # A scenario posted without chain_family must echo the effective value
+        # ("eth" by default) in the applied receipt, not absent or null.
+        status, body = _post(_ctrl(sim, "/scenario"), {
+            "providers": {"3": {"mode": "success"}}
+        })
+        assert status == 200
+        assert "applied" in body
+        assert body["applied"]["3"]["chain_family"] == "eth"
+
+    def test_post_response_old_keys_unchanged(self, sim):
+        # Regression pin: the pre-existing response keys keep their exact
+        # content and semantics after the applied key was added.
+        status, body = _post(_ctrl(sim, "/scenario"), {
+            "providers": {"1": {"mode": "error"}}
+        })
+        assert status == 200
+        assert body["status"] == "ok"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Provider modes
