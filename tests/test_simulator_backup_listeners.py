@@ -194,19 +194,26 @@ def clean_state(sim):
 
 
 def test_all_provider_ports_is_union_of_primary_and_backup():
-    """ALL_PROVIDER_PORTS must contain every PROVIDER_PORTS *and* every
-    BACKUP_PROVIDER_PORTS entry.
+    """ALL_PROVIDER_PORTS must equal the union of PROVIDER_PORTS,
+    BACKUP_PROVIDER_PORTS, and SOLO_PROVIDER_PORTS.
 
-    Catches the headline regression: someone extends BACKUP_PROVIDER_PORTS
-    but forgets to keep ALL_PROVIDER_PORTS in sync. If ALL_PROVIDER_PORTS
-    is wrong, main() iterates the wrong set, and the new port never binds.
+    Catches the headline regression: someone extends one of the three source
+    dicts but forgets to keep ALL_PROVIDER_PORTS in sync. If ALL_PROVIDER_PORTS
+    is wrong, main() iterates the wrong set and the new port never binds.
+
+    Note: SOLO_SOLANA_PROVIDER_PORTS (pid "20", port 18585) is deliberately
+    excluded from ALL_PROVIDER_PORTS — the Solana solo listener is bound by
+    its own loop in main() using a separate handler. Adding it here would make
+    main()'s ETH loop bind port 18585 a second time (the dedicated Solana-solo
+    loop already binds it), so startup fails with "address already in use".
     """
-    expected = {**PROVIDER_PORTS, **BACKUP_PROVIDER_PORTS}
+    expected = {**PROVIDER_PORTS, **BACKUP_PROVIDER_PORTS, **SOLO_PROVIDER_PORTS}
     assert ALL_PROVIDER_PORTS == expected, (
         f"ALL_PROVIDER_PORTS must equal "
-        f"PROVIDER_PORTS ∪ BACKUP_PROVIDER_PORTS.\n"
+        f"PROVIDER_PORTS ∪ BACKUP_PROVIDER_PORTS ∪ SOLO_PROVIDER_PORTS.\n"
         f"  PROVIDER_PORTS        : {PROVIDER_PORTS}\n"
         f"  BACKUP_PROVIDER_PORTS : {BACKUP_PROVIDER_PORTS}\n"
+        f"  SOLO_PROVIDER_PORTS   : {SOLO_PROVIDER_PORTS}\n"
         f"  expected union        : {expected}\n"
         f"  ALL_PROVIDER_PORTS    : {dict(ALL_PROVIDER_PORTS)}"
     )
@@ -924,16 +931,212 @@ class TestGrpcBackupListenersWired:
         )
 
 
+# ── JSON-RPC backup listener fault behaviour ─────────────────────────────────
+#
+# The parametrised wiring tests above (TestBackupListenersWired) only exercise
+# mode="down" because that is the cheapest observable (HTTP 503, no body).
+# The six tests below confirm that each remaining fault mode fires correctly
+# when applied to a backup pid. Each test POSTs the scenario, sends a real
+# JSON-RPC request to the bound backup port, and asserts a fault-specific
+# observable that would FAIL if the provider were in success mode.
+#
+# Uses pid "4" (port _TEST_BACKUP_PORTS["4"] = 58554) and the `sim` fixture
+# which is already module-scoped and wires all six test ports.
+
+
+class TestBackupListenerFaults:
+    """Fault modes on a JSON-RPC backup listener produce the correct
+    observable HTTP responses and transport behaviours.
+
+    Template: TestBackupListenersWired.test_backup_port_wired_through_control_and_listener
+    which confirms down→503. These tests cover the remaining six modes.
+    """
+
+    _PID = "4"
+
+    def _backup_url(self) -> str:
+        port = _TEST_BACKUP_PORTS[self._PID]
+        return f"http://127.0.0.1:{port}"
+
+    def _set_scenario(self, sim, scenario: dict) -> None:
+        status, body = _post(
+            f"{sim['control']}/scenario",
+            {"providers": {self._PID: scenario}},
+        )
+        assert status == 200, (
+            f"Control API rejected /scenario for backup pid={self._PID!r}: "
+            f"status={status} body={body}"
+        )
+
+    # ------------------------------------------------------------------
+    # error mode
+    # ------------------------------------------------------------------
+
+    def test_error_mode_returns_jsonrpc_error(self, sim):
+        """mode='error' returns HTTP 200 with a JSON-RPC error envelope.
+
+        In success mode the response would contain 'result', not 'error'.
+        Asserting body['error']['code'] == -32000 is the fault-specific
+        observable: success mode never sets 'error'.
+        """
+        self._set_scenario(sim, {"mode": "error"})
+        status, body = _rpc(self._backup_url(), "eth_blockNumber")
+        assert status == 200, (
+            f"error mode: expected HTTP 200, got {status}. "
+            f"body={body}"
+        )
+        assert "error" in body, (
+            f"error mode: response body has no 'error' key. "
+            f"expected={{'error': {{'code': -32000, ...}}}}, actual={body}"
+        )
+        assert body["error"]["code"] == -32000, (
+            f"error mode: expected error code -32000, "
+            f"got {body['error']['code']!r}. full body={body}"
+        )
+
+    # ------------------------------------------------------------------
+    # rate_limit mode
+    # ------------------------------------------------------------------
+
+    def test_rate_limit_returns_429(self, sim):
+        """mode='rate_limit' returns HTTP 429 with error code 429 in body.
+
+        In success mode the response is HTTP 200 with 'result'. Asserting
+        status==429 AND body['error']['code']==429 is fault-specific:
+        success mode returns 200.
+        """
+        self._set_scenario(sim, {"mode": "rate_limit"})
+        status, body = _rpc(self._backup_url(), "eth_blockNumber")
+        assert status == 429, (
+            f"rate_limit mode: expected HTTP 429, got {status}. "
+            f"body={body}"
+        )
+        assert body.get("error", {}).get("code") == 429, (
+            f"rate_limit mode: expected error code 429 in body, "
+            f"got {body.get('error')}. full body={body}"
+        )
+
+    # ------------------------------------------------------------------
+    # hang mode
+    # ------------------------------------------------------------------
+
+    def test_hang_blocks_until_client_timeout(self, sim):
+        """mode='hang' accepts the connection but never sends a response.
+
+        The test uses a 1-second client timeout so it doesn't block for the
+        full server-side hang period. It asserts the client timed out AND
+        that at least ~1s elapsed — proving the server held the connection
+        open rather than responding immediately (as success mode would).
+        """
+        self._set_scenario(sim, {"mode": "hang"})
+        url = self._backup_url()
+        req = urllib.request.Request(
+            url,
+            data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}',
+            headers={"Content-Type": "application/json"},
+        )
+        t0 = time.monotonic()
+        with pytest.raises(
+            (urllib.error.URLError, TimeoutError),
+        ):
+            urllib.request.urlopen(req, timeout=1.0)
+        elapsed = time.monotonic() - t0
+        assert elapsed >= 0.9, (
+            f"hang mode: expected client timeout after ~1s, "
+            f"but elapsed={elapsed:.2f}s. Server may have responded "
+            f"immediately instead of holding the connection."
+        )
+        assert elapsed < 3.0, (
+            f"hang mode: client waited {elapsed:.2f}s — longer than the "
+            f"1s client timeout; check pytest-timeout backstop."
+        )
+
+    # ------------------------------------------------------------------
+    # drop_connection mode
+    # ------------------------------------------------------------------
+
+    def test_drop_connection_raises_transport_error(self, sim):
+        """mode='drop_connection' with drop_at='before_headers' closes the
+        TCP connection before sending any HTTP response.
+
+        In success mode urlopen returns a valid response. Here we assert
+        that urlopen raises a transport-level exception — the fault-specific
+        observable that distinguishes drop_connection from all other modes.
+        """
+        self._set_scenario(
+            sim, {"mode": "drop_connection", "drop_at": "before_headers"}
+        )
+        url = self._backup_url()
+        req = urllib.request.Request(
+            url,
+            data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}',
+            headers={"Content-Type": "application/json"},
+        )
+        # The connection is dropped before any HTTP response arrives, so any
+        # transport-level exception is the valid observable here.
+        with pytest.raises(
+            (urllib.error.URLError, ConnectionResetError, OSError)
+        ):
+            urllib.request.urlopen(req, timeout=3.0)
+
+    # ------------------------------------------------------------------
+    # corruption mode
+    # ------------------------------------------------------------------
+
+    def test_corruption_invalid_json_is_unparseable(self, sim):
+        """corruption_mode='invalid_json' makes the response body
+        unparseable as JSON.
+
+        In success mode json.loads(raw) succeeds. Here we assert it raises
+        json.JSONDecodeError — the fault-specific observable.
+        """
+        self._set_scenario(sim, {"corruption_mode": "invalid_json"})
+        url = self._backup_url()
+        req = urllib.request.Request(
+            url,
+            data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}',
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            raw = resp.read()
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(raw)
+
+    # ------------------------------------------------------------------
+    # latency mode
+    # ------------------------------------------------------------------
+
+    def test_latency_ms_delays_response(self, sim):
+        """latency_ms=200 delays the response by at least ~200ms.
+
+        In success mode the response arrives in under 50ms on loopback.
+        Asserting elapsed_ms >= 180 (with a small slack) is fault-specific:
+        a success-mode response would never approach that threshold.
+        """
+        self._set_scenario(sim, {"latency_ms": 200})
+        t0 = time.monotonic()
+        _rpc(self._backup_url(), "eth_blockNumber")
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        assert elapsed_ms >= 180, (
+            f"latency mode: expected >= 180ms elapsed, got {elapsed_ms:.1f}ms. "
+            f"Either the latency scenario was not applied to backup pid={self._PID!r}, "
+            f"or the listener is not wired to the correct ProviderState."
+        )
+
+
 # ── Cross-surface mixed /scenario ────────────────────────────────────────────
 
 
-def test_one_scenario_mixes_primary_and_every_surface_backup():
-    """The control API can configure a primary pid AND one backup pid
-    from every surface in a single /scenario POST.
+def test_scenario_merges_pids_from_every_surface_into_control_map():
+    """The control API can accept a single /scenario POST that sets pids
+    from every surface's backup pool plus a primary pid, and the control
+    map stores all of them correctly.
 
-    Catches a regression where the control map iteration short-circuits
-    on the first unknown pid — common when a new surface's pids are
-    added to the dicts but not to the main() bootstrap.
+    This is a control-map dict-merge test: it verifies that one POST can
+    configure pids from every surface without short-circuiting on an
+    unknown pid, and that GET /scenario echoes all of them back. It does
+    NOT verify that any fault actually fires — that is covered by
+    TestBackupListenerFaults above.
 
     Uses the constants module's actual pids (1, 4, 7, 10, 13, 16) so
     the test fails if the production iteration misses any of them.

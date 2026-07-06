@@ -561,3 +561,132 @@ class TestSolanaCrossTransportFaultIsolation:
         assert status == 503, (
             f"Solana port should refuse with 503 under universal-down; got {status}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fault injection on the Solana listener — six fault primitives
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSolanaFaultInjection:
+    """Fault primitives gated to the Solana listener via chain_family="solana".
+
+    Every test uses ``_set_solana_with_fault`` (not ``_set_solana``) so the
+    snap's chain_family matches the listener's handler_chain_family and the
+    fault gate fires. A plain ``_set_solana`` call without chain_family leaves
+    jsonrpc_owns_snap=False, which silently bypasses fault evaluation for all
+    content-mode faults (error / rate_limit / hang / drop_connection /
+    corruption) — those tests would pass even if the fault never fired,
+    producing false-greens identical to the class of bug described in the
+    mode=down cross-transport isolation tests above. The latency test also uses
+    ``_set_solana_with_fault`` for consistency, but ``latency_ms`` fires on the
+    success path regardless of chain_family — its test is non-vacuous because it
+    fails when latency_ms=0, not because of the chain_family gate."""
+
+    def test_error_mode_returns_json_rpc_error(self, sim):
+        """mode=error on a Solana-gated scenario returns HTTP 200 with a
+        JSON-RPC error envelope. The default error_code is -32000 (the
+        ProviderState default when no error_code override is provided)."""
+        _set_solana_with_fault(sim, "1", mode="error")
+        status, body = _rpc(sim["provider1"], "getSlot")
+        assert status == 200, (
+            f"mode=error returns HTTP 200 with a JSON-RPC error body; got {status}"
+        )
+        assert "error" in body, (
+            f"expected a JSON-RPC error envelope in the response body; got {body}"
+        )
+        assert body["error"]["code"] == -32000, (
+            f"default error_code is -32000; got {body['error']['code']}"
+        )
+
+    def test_rate_limit_mode_returns_429(self, sim):
+        """mode=rate_limit on a Solana-gated scenario returns HTTP 429 with a
+        JSON-RPC error envelope whose code is 429."""
+        _set_solana_with_fault(sim, "1", mode="rate_limit")
+        status, body = _rpc(sim["provider1"], "getSlot")
+        assert status == 429, (
+            f"mode=rate_limit must return HTTP 429; got {status}"
+        )
+        assert "error" in body, (
+            f"expected a JSON-RPC error envelope in the 429 response; got {body}"
+        )
+        assert body["error"]["code"] == 429, (
+            f"rate_limit error_code is 429; got {body['error'].get('code')}"
+        )
+
+    def test_hang_mode_times_out_client(self, sim):
+        """mode=hang on a Solana-gated scenario holds the TCP connection open
+        without sending a response. A client with a 1s read timeout must hit
+        that timeout; elapsed time must be at least 0.9s — ruling out the
+        fast success path where the handler returns immediately."""
+        _set_solana_with_fault(sim, "1", mode="hang")
+        req = urllib.request.Request(
+            sim["provider1"],
+            data=json.dumps(
+                {"jsonrpc": "2.0", "id": 1, "method": "getSlot", "params": []}
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        t0 = time.monotonic()
+        timed_out = False
+        try:
+            urllib.request.urlopen(req, timeout=1.0)
+        except (urllib.error.URLError, TimeoutError, OSError):
+            timed_out = True
+        elapsed = time.monotonic() - t0
+        assert timed_out, (
+            "mode=hang should cause a client timeout rather than a successful response"
+        )
+        assert elapsed >= 0.9, (
+            f"hang must block for at least the client timeout (~1s); got {elapsed:.2f}s"
+        )
+        assert elapsed < 3.0, (
+            f"hang must exit at the ~1s client timeout, not a delayed success; got {elapsed:.2f}s"
+        )
+
+    def test_drop_connection_before_headers_on_solana(self, sim):
+        """mode=drop_connection with drop_at=before_headers on a Solana-gated
+        scenario closes the TCP connection before sending any response bytes.
+        The client must observe a connection error — not a JSON-RPC response."""
+        _set_solana_with_fault(
+            sim, "1", mode="drop_connection", drop_at="before_headers"
+        )
+        # The connection is dropped before any HTTP response arrives, so any
+        # transport-level error is the valid observable (no specific exception value to match).
+        with pytest.raises(
+            (urllib.error.URLError, OSError)
+        ):
+            _rpc(sim["provider1"], "getSlot")
+
+    def test_corrupt_response_invalid_json_on_solana(self, sim):
+        """corruption_mode=invalid_json on a Solana-gated scenario returns
+        bytes that cannot be parsed as JSON. The request is built manually
+        so that json.loads is not auto-called — _rpc would swallow the parse
+        error. Under success mode without corruption the same path returns a
+        valid JSON-RPC result envelope."""
+        _set_solana_with_fault(sim, "1", corruption_mode="invalid_json")
+        req = urllib.request.Request(
+            sim["provider1"],
+            data=json.dumps(
+                {"jsonrpc": "2.0", "id": 1, "method": "getSlot", "params": []}
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            raw = resp.read()
+        # The corruption path returns deliberately unparseable bytes, so json.loads must
+        # fail; a success response would parse cleanly.
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(raw)
+
+    def test_latency_mode_delays_response_on_solana(self, sim):
+        """latency_ms=200 on a Solana-gated scenario delays the response by at
+        least 180ms (allowing clock slack). Under success mode with no latency
+        the same getSlot call returns in under 20ms on loopback — the 180ms
+        lower bound proves the delay fires."""
+        _set_solana_with_fault(sim, "1", latency_ms=200)
+        t0 = time.monotonic()
+        _rpc(sim["provider1"], "getSlot")
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        assert elapsed_ms >= 180, (
+            f"latency_ms=200 must delay the response by at least 180ms; got {elapsed_ms:.1f}ms"
+        )
