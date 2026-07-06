@@ -108,6 +108,44 @@ SOLANA_ERROR_STUBS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+# Named Solana JSON-RPC error catalogue — the inner ``error`` objects a test can
+# inject by name via ``responses[method] = {"error_stub": "<name>"}`` (mirrors
+# stubs.ERROR_STUBS for ETH). Single source of truth for the error envelope the
+# router's Solana classifier is tested against. Codes follow Solana's documented
+# JSON-RPC errors: -32005 / -32007 / -32009 are node/ledger transients the router
+# should RETRY; -32016 / -32002 are client/tx errors it should fast-fail;
+# -32601 / -32602 are the JSON-RPC standard method / params errors.
+SOLANA_ERROR_STUBS: Dict[str, Dict[str, Any]] = {
+    "method_not_found": {"code": -32601, "message": "Method not found"},
+    "invalid_params": {"code": -32602, "message": "Invalid params"},
+    "node_behind": {
+        "code": -32005,
+        "message": "Node is behind by 100 slots",
+        "data": {"numSlotsBehind": 100},
+    },
+    "slot_skipped": {
+        "code": -32007,
+        "message": "Slot 123456789 was skipped, or missing due to ledger jump to recent snapshot",
+    },
+    "long_term_storage_slot_skipped": {
+        "code": -32009,
+        "message": "Slot 123456789 was skipped, or missing in long-term storage",
+    },
+    "min_context_slot_not_reached": {
+        "code": -32016,
+        "message": "Minimum context slot has not been reached",
+    },
+    "transaction_simulation_failed": {
+        "code": -32002,
+        "message": "Transaction simulation failed",
+    },
+    "blockhash_not_found": {
+        "code": -32002,
+        "message": "Transaction simulation failed: Blockhash not found",
+        "data": {"err": "BlockhashNotFound"},
+    },
+}
+
 
 def handle(state, request: dict, snap: dict, lava_headers: dict) -> Tuple[int, Dict[str, Any]]:
     """Resolve the Solana success-path response for one JSON-RPC request.
