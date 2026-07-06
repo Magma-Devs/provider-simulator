@@ -292,12 +292,13 @@ class TestScenario:
         assert body["applied"]["3"]["chain_family"] == "eth"
 
     def test_post_response_old_keys_unchanged(self, sim):
-        # Regression pin: the pre-existing response keys keep their exact
-        # content and semantics after the applied key was added.
+        # Regression pin: the complete response shape must stay unchanged.
+        # The /scenario POST response is always exactly {"status": "ok", "applied": {...}}.
         status, body = _post(_ctrl(sim, "/scenario"), {
             "providers": {"1": {"mode": "error"}}
         })
         assert status == 200
+        assert set(body.keys()) == {"status", "applied"}
         assert body["status"] == "ok"
 
 

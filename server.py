@@ -2393,7 +2393,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                 return
             for pid, state, staged_cfg in staged:
                 state.update(staged_cfg)
-            applied = {pid: {"chain_family": state.chain_family} for pid, state, _ in staged}
+            applied = {applied_pid: {"chain_family": state.chain_family} for applied_pid, state, _ in staged}
             self._reply(200, {"status": "ok", "applied": applied})
 
         elif self.path == "/reset":
