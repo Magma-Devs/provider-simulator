@@ -16,6 +16,12 @@ Supported modes per provider:
   down              — returns HTTP 503 (router treats provider as unavailable)
   error_probability — randomly returns error on X% of requests (0.0–1.0)
 
+chain_family (per provider) tags which surface's faults the scenario owns:
+one word — a blockchain (eth / btc / ln / solana) or a connection type
+(grpc / rest / tendermintrpc / ws), never both at once. The listener port
+picks the response handler; chain_family only gates content-fault firing.
+mode="down" fires on every surface regardless. Unknown values → HTTP 400.
+
 Control API:
   POST /scenario   {"providers": {"1": {"mode": "error", "error_code": -32601,
                      "error_message": "Method not found", "http_status": 200}}}
@@ -381,7 +387,29 @@ class ProviderState:
     # Solana listener pool (18582-18584); ignored by every other handler.
     solana_slot_offset: int = 0
     drop_at: str = "before_headers"   # one of: "before_headers", "after_headers", "mid_body"; only applies when mode="drop_connection"
-    chain_family: str = "eth"   # one of: "eth", "btc", "ln", "solana", "grpc", "rest", "tendermintrpc", "ws"; gates the per-listener FAULT primitives (the success-path handler is selected by LISTENER PORT, not by this field — MAG-2089). Default "eth" preserves backward-compat. "btc" → handlers_btc on the dedicated BTC JSON-RPC ports 18575-77 (MAG-1716). "ln" → handlers_lnd on the dedicated LN JSON-RPC ports 18578-80 (MAG-1726). "solana" → handlers_solana on the dedicated Solana JSON-RPC ports 18582-84 (MAG-2231) — same port-derived dispatch as BTC/LN; the success handler emits result.context.slot vs result.value.lastValidBlockHeight separated by solana_slot_block_gap. "grpc" → handlers_grpc on ports 18548-50. "rest" → handlers_rest on ports 18551-53 (MAG-1777). "tendermintrpc" → handlers_tendermintrpc on ports 18554-56 (MAG-1841). "ws" → handlers_ws on ports 18557-59 (MAG-1801) for WebSocket-style providers with subscription lifecycle — the handler delegates non-subscription methods back to handlers_eth.handle / handlers_btc.handle so request/response semantics are identical to HTTP JSON-RPC; subscription frames are wrapped in chain-specific envelopes from stubs_ws.
+    # chain_family — which surface's faults this provider's scenario owns. ONE
+    # word: either a blockchain ("eth", "btc", "ln", "solana") or a connection
+    # type ("grpc", "rest", "tendermintrpc", "ws"). The two groups share this
+    # single field, so a scenario cannot express a blockchain AND a connection
+    # type together — e.g. "Solana over WebSocket" is not expressible today.
+    #
+    # What it does NOT do: pick the response handler. The success-path handler
+    # is selected by LISTENER PORT at startup (MAG-2089); this field only gates
+    # the CONTENT fault primitives (error / rate_limit / hang / drop_connection
+    # / corruption / latency) — each listener fires them only when the snap's
+    # chain_family matches its own. Exception: mode="down" fires on every
+    # surface regardless (MAG-2092), because reachability is provider-wide.
+    # Values are validated against _SCENARIO_CHAIN_FAMILIES; unknown → HTTP 400.
+    #
+    # Per-value breadcrumbs: "btc" → handlers_btc, ports 18575-77 (MAG-1716);
+    # "ln" → handlers_lnd, 18578-80 (MAG-1726); "solana" → handlers_solana,
+    # 18582-84 (MAG-2231; slot vs lastValidBlockHeight separated by
+    # solana_slot_block_gap); "grpc" → handlers_grpc, 18548-50; "rest" →
+    # handlers_rest, 18551-53 (MAG-1777); "tendermintrpc" → 18554-56
+    # (MAG-1841); "ws" → handlers_ws, 18557-59 (MAG-1801) — WS delegates
+    # non-subscription calls back to handlers_eth / handlers_btc. Default
+    # "eth" preserves backward-compat.
+    chain_family: str = "eth"
     # MAG-1791: provider-stale-on-getLogs primitive — head-fresh but logs-indexing-lagged.
     # Models the real production failure mode where providers update eth_blockNumber
     # immediately but index logs in a separate pipeline that can fall behind seconds-to-minutes.
