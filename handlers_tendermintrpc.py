@@ -54,6 +54,7 @@ from copy import deepcopy
 from typing import Any, Dict, List, Tuple
 
 from stubs_tendermintrpc import (
+    TENDERMINT_ERROR_STUBS,
     TENDERMINT_METHOD_DEFAULTS,
     _abci_query_response,
     _block_response,
@@ -171,13 +172,28 @@ def handle(
         method_cfg = state.responses.get(method) or state.responses.get("default", {})
 
     if isinstance(method_cfg, dict):
-        # Error envelope override — surfaces in the JSON-RPC envelope's
-        # ``error`` field rather than ``result``. The caller wraps.
-        # Shape: {"status": 200, "error": {"code": -32603, "message": "..."}}
-        # The caller branch on the presence of "error" key in the returned dict.
-        if "error" in method_cfg:
+        # Per-method error override — mirrors handlers_eth's error path,
+        # two flavours. Surfaces in the JSON-RPC envelope's ``error`` field
+        # rather than ``result``; the caller wraps (it branches on the
+        # presence of the "error" key in the returned dict).
+        #
+        #   1. Named catalogue (primary):
+        #          responses[method] = {"error_stub": "internal"}
+        #      Resolved against TENDERMINT_ERROR_STUBS — single source of
+        #      truth for envelope content. Unknown stub name raises KeyError
+        #      so a typo fails loudly rather than falling back silently.
+        #
+        #   2. Raw envelope (escape-hatch for ad-hoc shapes):
+        #          responses[method] =
+        #              {"status": 200, "error": {"code": -32603, "message": "..."}}
+        err = None
+        if "error_stub" in method_cfg:
+            err = TENDERMINT_ERROR_STUBS[method_cfg["error_stub"]]
+        elif "error" in method_cfg:
+            err = method_cfg["error"]
+        if err is not None:
             http_st = method_cfg.get("status", method_cfg.get("http_status", 200))
-            return http_st, {"error": method_cfg["error"]}
+            return http_st, {"error": err}
 
         # Custom body override — replaces the stub's result entirely.
         # Shape: {"status": 200, "body": {<arbitrary result>}}

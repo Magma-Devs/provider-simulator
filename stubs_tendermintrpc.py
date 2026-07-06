@@ -283,3 +283,36 @@ TENDERMINT_METHOD_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "abci_query": _abci_query_response(),
     "net_info": _net_info_response(),
 }
+
+
+# ── Tendermint-RPC error stubs ─────────────────────────────────────────────
+#
+# TENDERMINT_ERROR_STUBS mirrors stubs.py::ERROR_STUBS (ETH) and
+# stubs_btc.py::BTC_ERROR_STUBS with CometBFT's JSON-RPC error convention.
+# Stubs are the *inner* error object; ``handlers_tendermintrpc.handle``
+# returns ``{"error": <stub>}`` and the caller (``TendermintHandler`` in
+# ``server.py``) wraps it into the JSON-RPC envelope at emission time —
+# the same flow as the raw ``{"error": {...}}`` override path.
+#
+# Usage via the per-method override path:
+#     POST /scenario {"providers": {"1": {"chain_family": "tendermintrpc",
+#                                          "responses": {"status":
+#                                              {"error_stub": "internal"}}}}}
+
+TENDERMINT_ERROR_STUBS: Dict[str, Dict[str, Any]] = {
+
+    # Method not found — JSON-RPC 2.0 -32601, the code CometBFT emits for
+    # an unknown RPC endpoint. Same code the handler's own unknown-method
+    # fallback uses.
+    "method_not_found": {
+        "code":    -32601,
+        "message": "Method not found",
+    },
+
+    # Internal error — JSON-RPC 2.0 -32603. CometBFT's generic node-side
+    # failure shape (e.g. an ABCI query that panicked).
+    "internal": {
+        "code":    -32603,
+        "message": "Internal error",
+    },
+}
