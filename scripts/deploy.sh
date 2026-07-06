@@ -10,20 +10,20 @@
 # 1. Builds and imports the Docker image (always — image tag is :latest).
 # 2. Renders Gateway-API route templates from $BASE_DOMAIN.
 # 3. Applies k8s/deployment.yml + k8s/service.yml as one declarative command.
-#    The rollout-restart that follows is gated on a `kubectl diff` against
-#    the live cluster state: if nothing changed, no restart fires.
+#    A rollout restart follows when a fresh image was built this run, when the
+#    manifests changed, or when FORCE_RESTART=true. A build always restarts so
+#    new code behind the :latest tag actually runs; manifests-only runs
+#    (SKIP_BUILD=true) restart only on a real manifest diff.
 # 4. Applies the rendered HTTPRoute / GRPCRoute manifests.
 # 5. Waits for rollout completion with --timeout=180s. Fails loud on timeout.
 #
 # Idempotency contract (MAG-1808 requirement 4)
 # ---------------------------------------------
-# Running this script twice back-to-back must not produce a second restart
-# cycle if the manifests haven't changed. The gate is observable: the script
-# prints either
-#     "[deploy] manifest diff detected — applying + restarting"
-# or  "[deploy] manifests unchanged — skipping rollout restart"
-# and `kubectl get events -n lava-infra` will only show one rollout-restart
-# event after both runs.
+# A build produces a new image behind the :latest tag, so the DEFAULT path
+# (which builds) restarts every run by design — that is what makes new code
+# take effect. For an idempotent manifests-only run, pass SKIP_BUILD=true:
+# then two runs back-to-back produce at most one restart, and only when the
+# manifests actually changed (observable in `kubectl get events -n lava-infra`).
 #
 # Env overrides
 # -------------
@@ -31,7 +31,9 @@
 #                          (use to pick up a fresh :latest image without
 #                          touching manifests)
 #   SKIP_BUILD=true      — skip docker build + microk8s import (faster
-#                          re-runs when iterating on manifests only)
+#                          re-runs when iterating on manifests only). Also the
+#                          idempotent path: with no build, a restart fires only
+#                          on a real manifest diff (or FORCE_RESTART=true).
 #   ROLLOUT_TIMEOUT=180s — override the rollout-status timeout
 #
 # Verify (paste-ready)
@@ -107,6 +109,13 @@ echo "Force restart       : $FORCE_RESTART"
 echo "Skip build          : $SKIP_BUILD"
 echo "Rollout timeout     : $ROLLOUT_TIMEOUT"
 
+# BUILT records whether a fresh :latest image was produced this run. A rebuilt
+# image is a NEW image behind the same :latest tag; with imagePullPolicy
+# IfNotPresent the running pod keeps the old code until it is restarted, so a
+# build must force a rollout restart below. This is the fix for the "edit code,
+# run deploy.sh, pod still runs old code" trap. Manifests-only runs use
+# SKIP_BUILD=true and stay idempotent (they restart only on a real manifest diff).
+BUILT="false"
 if [ "$SKIP_BUILD" = "true" ]; then
 	echo "=== Skipping Docker build (SKIP_BUILD=true) ==="
 else
@@ -115,6 +124,7 @@ else
 
 	echo "=== Importing image into MicroK8s ==="
 	docker save provider-simulator:latest | microk8s ctr image import -
+	BUILT="true"
 fi
 
 # MAG-1808 requirement 4 — idempotency gate.
@@ -165,10 +175,13 @@ kubectl apply -f "$RENDERED_WS_HTTPROUTE"
 
 # MAG-1808 requirement 2 + 3 — rollout restart after apply, then wait with
 # a hard timeout. The restart is gated by either a real manifest diff or
-# the explicit FORCE_RESTART override (e.g. to pick up a fresh :latest
-# image when only the build content changed).
-if [ "$MANIFESTS_CHANGED" = "true" ] || [ "$FORCE_RESTART" = "true" ]; then
-	if [ "$MANIFESTS_CHANGED" = "true" ]; then
+# the explicit FORCE_RESTART override, OR whenever a fresh :latest image was
+# built this run (BUILT=true) — a rebuilt image needs a restart to take effect
+# under imagePullPolicy IfNotPresent, otherwise the pod keeps running old code.
+if [ "$MANIFESTS_CHANGED" = "true" ] || [ "$FORCE_RESTART" = "true" ] || [ "$BUILT" = "true" ]; then
+	if [ "$BUILT" = "true" ]; then
+		echo "=== Restarting deployment (fresh :latest image built) ==="
+	elif [ "$MANIFESTS_CHANGED" = "true" ]; then
 		echo "=== Restarting deployment (manifest change) ==="
 	else
 		echo "=== Restarting deployment (FORCE_RESTART=true) ==="
@@ -176,7 +189,7 @@ if [ "$MANIFESTS_CHANGED" = "true" ] || [ "$FORCE_RESTART" = "true" ]; then
 	kubectl rollout restart -n "$NAMESPACE" "deployment/$DEPLOYMENT"
 	kubectl rollout status -n "$NAMESPACE" "deployment/$DEPLOYMENT" --timeout="$ROLLOUT_TIMEOUT"
 else
-	echo "=== Skipping rollout restart (manifests unchanged, FORCE_RESTART=false) ==="
+	echo "=== Skipping rollout restart (no build, manifests unchanged, FORCE_RESTART=false) ==="
 	# Still confirm the existing deployment is healthy. If a previous deploy
 	# left it in a bad state, fail loudly here rather than pretend everything
 	# is fine.

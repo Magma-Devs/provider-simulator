@@ -55,6 +55,14 @@ spec:
             - name: provider-solo
               containerPort: 18581
               protocol: TCP
+            # Solana solo JSON-RPC listener — pid 20 / port 18585. A single
+            # Solana provider serving the solana-solo router; peer to
+            # provider-solo (18581) on the ETH side. Declared here and in the
+            # Service so the solo router can reach it via Service DNS (until now
+            # the port was bound in-process but had no Service entry).
+            - name: provider-solana-solo
+              containerPort: 18585
+              protocol: TCP
             # REST sim listeners (MAG-1777) — peer to provider-1/2/3, one per
             # simulated provider, sharing ProviderState so a /scenario update
             # is visible from both the JSON-RPC and REST ports.
@@ -157,13 +165,21 @@ spec:
             limits:
               cpu: "500m"
               memory: "256Mi"
+          # Readiness uses /ready (not /health): /ready confirms every listener
+          # port is actually bound and accepting connections, so kube-proxy
+          # won't send Service traffic to a pod that is still binding ports. A
+          # router relaying to a half-bound sim gets connection-refused, which
+          # its classifier turns into a 503, and the providers land on the
+          # blocked list — poisoning the pairing pool from the start.
+          # timeoutSeconds covers the worst case where many ports are still
+          # unbound (each unbound port costs ~0.1s in the /ready check).
           readinessProbe:
             httpGet:
-              path: /health
+              path: /ready
               port: control
             initialDelaySeconds: 3
-            periodSeconds: 5
-            timeoutSeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 5
           livenessProbe:
             httpGet:
               path: /health
