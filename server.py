@@ -392,8 +392,9 @@ class ProviderState:
     # exceeds the router's 50-block consistency threshold, reproducing the
     # "No pairings available" filter (MAG-1591). Sourced from the Solana
     # handler's own default so the field, the handler fallback, and /reset all
-    # share one number. Only read by the Solana listener pool (18582-18584);
-    # ignored by every other handler.
+    # share one number. Only read by handlers_solana.handle — i.e. the Solana
+    # listeners (18582-18584 primary, 18585 solo); every other handler ignores
+    # this field.
     solana_slot_block_gap: int = handlers_solana.SOLANA_DEFAULT_SLOT_BLOCK_GAP
     # MAG-2233 #1: per-provider Solana slot offset for multi-slot divergence.
     # handlers_solana reports slot = SOLANA_BASE_SLOT + solana_slot_offset for
@@ -402,8 +403,9 @@ class ProviderState:
     # shared base slot (identical to pre-MAG-2233 behaviour). A test sets distinct
     # offsets per provider (e.g. one current, two stale-behind) so the router's
     # Solana consistency filter can keep the current provider and drop the stale
-    # ones. Negative = behind the base slot, positive = ahead. Only read by the
-    # Solana listener pool (18582-18584); ignored by every other handler.
+    # ones. Negative = behind the base slot, positive = ahead. Only read by
+    # handlers_solana.handle — i.e. the Solana listeners (18582-18584 primary,
+    # 18585 solo); every other handler ignores this field.
     solana_slot_offset: int = 0
     # Opt-in unknown-method behaviour on Solana. "null" (default) keeps the
     # parse-friendly {"result": null} for an unrecognised method (backward-
@@ -450,8 +452,13 @@ class ProviderState:
     # empty array (logs_lag_mode="empty") or only logs with blockNumber <= N (mode="partial").
     # eth_blockNumber is unaffected: it keeps reporting current head — that's the whole point
     # of this primitive (head-fresh + logs-lagged is the divergence we want to expose).
+    # Only read by handlers_eth.handle's eth_getLogs branch (the ETH JSON-RPC listeners;
+    # a WS eth_getLogs reaches the same branch because handlers_ws delegates non-subscription
+    # methods to handlers_eth); every other handler ignores this field.
     logs_indexed_up_to: Optional[int] = None
     # logs_lag_mode: one of "empty" / "partial". Only consulted when logs_indexed_up_to is set.
+    # Read in the same handlers_eth.handle eth_getLogs branch as logs_indexed_up_to;
+    # every other handler ignores this field.
     logs_lag_mode: str = "empty"
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # call history — each entry: {ts, method, status, latency_ms}
