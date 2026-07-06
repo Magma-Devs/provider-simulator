@@ -367,8 +367,9 @@ class ProviderState:
     # exceeds the router's 50-block consistency threshold, reproducing the
     # "No pairings available" filter (MAG-1591). Sourced from the Solana
     # handler's own default so the field, the handler fallback, and /reset all
-    # share one number. Only read by the Solana listener pool (18582-18584);
-    # ignored by every other handler.
+    # share one number. Only read by handlers_solana.handle — i.e. the Solana
+    # listeners (18582-18584 primary, 18585 solo); every other handler ignores
+    # this field.
     solana_slot_block_gap: int = handlers_solana.SOLANA_DEFAULT_SLOT_BLOCK_GAP
     # MAG-2233 #1: per-provider Solana slot offset for multi-slot divergence.
     # handlers_solana reports slot = SOLANA_BASE_SLOT + solana_slot_offset for
@@ -377,8 +378,9 @@ class ProviderState:
     # shared base slot (identical to pre-MAG-2233 behaviour). A test sets distinct
     # offsets per provider (e.g. one current, two stale-behind) so the router's
     # Solana consistency filter can keep the current provider and drop the stale
-    # ones. Negative = behind the base slot, positive = ahead. Only read by the
-    # Solana listener pool (18582-18584); ignored by every other handler.
+    # ones. Negative = behind the base slot, positive = ahead. Only read by
+    # handlers_solana.handle — i.e. the Solana listeners (18582-18584 primary,
+    # 18585 solo); every other handler ignores this field.
     solana_slot_offset: int = 0
     drop_at: str = "before_headers"   # one of: "before_headers", "after_headers", "mid_body"; only applies when mode="drop_connection"
     chain_family: str = "eth"   # one of: "eth", "btc", "ln", "solana", "grpc", "rest", "tendermintrpc", "ws"; gates the per-listener FAULT primitives (the success-path handler is selected by LISTENER PORT, not by this field — MAG-2089). Default "eth" preserves backward-compat. "btc" → handlers_btc on the dedicated BTC JSON-RPC ports 18575-77 (MAG-1716). "ln" → handlers_lnd on the dedicated LN JSON-RPC ports 18578-80 (MAG-1726). "solana" → handlers_solana on the dedicated Solana JSON-RPC ports 18582-84 (MAG-2231) — same port-derived dispatch as BTC/LN; the success handler emits result.context.slot vs result.value.lastValidBlockHeight separated by solana_slot_block_gap. "grpc" → handlers_grpc on ports 18548-50. "rest" → handlers_rest on ports 18551-53 (MAG-1777). "tendermintrpc" → handlers_tendermintrpc on ports 18554-56 (MAG-1841). "ws" → handlers_ws on ports 18557-59 (MAG-1801) for WebSocket-style providers with subscription lifecycle — the handler delegates non-subscription methods back to handlers_eth.handle / handlers_btc.handle so request/response semantics are identical to HTTP JSON-RPC; subscription frames are wrapped in chain-specific envelopes from stubs_ws.
@@ -390,8 +392,13 @@ class ProviderState:
     # empty array (logs_lag_mode="empty") or only logs with blockNumber <= N (mode="partial").
     # eth_blockNumber is unaffected: it keeps reporting current head — that's the whole point
     # of this primitive (head-fresh + logs-lagged is the divergence we want to expose).
+    # Only read by handlers_eth.handle's eth_getLogs branch (the ETH JSON-RPC listeners;
+    # a WS eth_getLogs reaches the same branch because handlers_ws delegates non-subscription
+    # methods to handlers_eth); every other handler ignores this field.
     logs_indexed_up_to: Optional[int] = None
     # logs_lag_mode: one of "empty" / "partial". Only consulted when logs_indexed_up_to is set.
+    # Read in the same handlers_eth.handle eth_getLogs branch as logs_indexed_up_to;
+    # every other handler ignores this field.
     logs_lag_mode: str = "empty"
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # call history — each entry: {ts, method, status, latency_ms}

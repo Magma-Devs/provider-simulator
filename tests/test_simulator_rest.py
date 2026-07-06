@@ -538,6 +538,50 @@ class TestRestPerPathOverrides:
         assert body["error"]["code"] == "internal_error"
         assert body["error"]["message"] == "boom"
 
+    def test_http_status_wins_over_status_on_body_override(self, sim):
+        """"http_status" is the primary status key; "status" is the deprecated
+        REST-only fallback. When both are present on a body override, the
+        handler must emit http_status."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "chain_family": "rest",
+                    "responses": [
+                        [
+                            ["GET", "/cosmos/staking/v1beta1/validators"],
+                            {"http_status": 503, "status": 418,
+                             "body": {"code": "unavailable"}},
+                        ]
+                    ],
+                }
+            }
+        })
+        status, body, _ = _get(sim["rest1"] + "/cosmos/staking/v1beta1/validators")
+        assert status == 503, f"http_status must win over status; got {status}"
+        assert body == {"code": "unavailable"}
+
+    def test_http_status_wins_over_status_on_error_override(self, sim):
+        """Same http_status-over-status primacy on the error-envelope branch."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "chain_family": "rest",
+                    "responses": [
+                        [
+                            ["GET", "/cosmos/staking/v1beta1/validators"],
+                            {"http_status": 502, "status": 500,
+                             "error": {"code": "internal_error",
+                                       "message": "boom"}},
+                        ]
+                    ],
+                }
+            }
+        })
+        status, body, _ = _get(sim["rest1"] + "/cosmos/staking/v1beta1/validators")
+        assert status == 502, f"http_status must win over status; got {status}"
+        assert body["error"]["code"] == "internal_error"
+        assert body["error"]["message"] == "boom"
+
     def test_other_paths_unaffected_by_override(self, sim):
         """Per-path overrides scope strictly to that (verb, template)."""
         _post(_ctrl(sim, "/scenario"), {

@@ -23,7 +23,8 @@ What the handler does, in order
 2. If the override carries an error envelope, return it with the configured
    HTTP status.
 3. If the override carries a ``body`` key, return that body with the
-   configured ``status`` (default 200).
+   configured ``http_status`` (default 200; ``status`` is accepted as a
+   deprecated fallback — ``http_status`` wins when both are present).
 4. Otherwise resolve the stub from ``REST_METHOD_DEFAULTS`` (deep-copied so
    per-request mutations don't leak), apply path-specific echo / shift /
    blocks_behind logic, and return it.
@@ -90,16 +91,22 @@ def handle(
         method_cfg = state.responses.get(key) or state.responses.get("default", {})
 
     if isinstance(method_cfg, dict):
+        # Both override branches below resolve their HTTP status the same
+        # way: "http_status" is the primary key (the name every other
+        # handler and the provider-wide snap use); "status" is the
+        # deprecated REST-only fallback — migrate callers, then remove.
+        # When both are present, http_status wins.
+
         # Error envelope override — mirrors handlers_eth's per-method error path.
-        # Shape: {"status": 503, "error": {"code": "internal", "message": "..."}}
+        # Shape: {"http_status": 503, "error": {"code": "internal", "message": "..."}}
         if "error" in method_cfg:
-            http_st = method_cfg.get("status", method_cfg.get("http_status", 500))
+            http_st = method_cfg.get("http_status", method_cfg.get("status", 500))
             return http_st, {"error": method_cfg["error"]}
 
         # Custom body override — replaces the stub entirely.
-        # Shape: {"status": 200, "body": {"balances": [...], "pagination": {...}}}
+        # Shape: {"http_status": 200, "body": {"balances": [...], "pagination": {...}}}
         if "body" in method_cfg:
-            http_st = method_cfg.get("status", method_cfg.get("http_status", 200))
+            http_st = method_cfg.get("http_status", method_cfg.get("status", 200))
             return http_st, method_cfg["body"]
 
     # 2. Stub lookup with deep-copy guard.
