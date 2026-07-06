@@ -60,6 +60,7 @@ import handlers_rest
 import handlers_solana
 import handlers_tendermintrpc
 import handlers_ws
+import stubs_solana
 from constants import (
     BTC_PRIMARY_PORTS,
     CONTROL_PORT,
@@ -390,12 +391,11 @@ class ProviderState:
     # from context.slot, the endpoint chain-tracker value from
     # lastValidBlockHeight. The default mirrors the ~22M real-mainnet gap and
     # exceeds the router's 50-block consistency threshold, reproducing the
-    # "No pairings available" filter (MAG-1591). Sourced from the Solana
-    # handler's own default so the field, the handler fallback, and /reset all
-    # share one number. Only read by handlers_solana.handle — i.e. the Solana
-    # listeners (18582-18584 primary, 18585 solo); every other handler ignores
-    # this field.
-    solana_slot_block_gap: int = handlers_solana.SOLANA_DEFAULT_SLOT_BLOCK_GAP
+    # "No pairings available" filter (MAG-1591). Sourced from stubs_solana so
+    # the field, the handler fallback, and /reset all share one number. Only
+    # read by handlers_solana.handle — i.e. the Solana listeners (18582-18584
+    # primary, 18585 solo); every other handler ignores this field.
+    solana_slot_block_gap: int = stubs_solana.SOLANA_DEFAULT_SLOT_BLOCK_GAP
     # MAG-2233 #1: per-provider Solana slot offset for multi-slot divergence.
     # handlers_solana reports slot = SOLANA_BASE_SLOT + solana_slot_offset for
     # this provider; lastValidBlockHeight stays slot - solana_slot_block_gap, so
@@ -522,8 +522,8 @@ class ProviderState:
             self.blocks_behind     = cfg.get("blocks_behind",     self.blocks_behind)
             # MAG-2231: backward-compat — a /scenario payload that omits
             # solana_slot_block_gap leaves the existing per-provider value
-            # untouched (the field default at construction is the Solana
-            # handler's SOLANA_DEFAULT_SLOT_BLOCK_GAP).
+            # untouched (the field default at construction is
+            # stubs_solana.SOLANA_DEFAULT_SLOT_BLOCK_GAP).
             self.solana_slot_block_gap = cfg.get("solana_slot_block_gap", self.solana_slot_block_gap)
             # MAG-2233 #1: backward-compat — a /scenario payload that omits
             # solana_slot_offset leaves the existing per-provider value untouched
@@ -565,8 +565,8 @@ class ProviderState:
             self.blocks_behind     = 0
             # MAG-2231: reset restores the default Solana slot/blockHeight gap
             # so a /reset between tests clears any per-test override. Same source
-            # as the field default — the Solana handler's own constant.
-            self.solana_slot_block_gap = handlers_solana.SOLANA_DEFAULT_SLOT_BLOCK_GAP
+            # as the field default — the shared stubs_solana constant.
+            self.solana_slot_block_gap = stubs_solana.SOLANA_DEFAULT_SLOT_BLOCK_GAP
             # MAG-2233 #1: reset restores offset 0 so a /reset between tests clears
             # any per-test slot divergence and returns every provider to the base slot.
             self.solana_slot_offset = 0
