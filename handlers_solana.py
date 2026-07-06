@@ -58,31 +58,17 @@ this module owns; per-method error overrides (``responses[method] =
 
 from typing import Any, Dict, Tuple
 
-# Base mainnet slot — a realistic post-2024 Solana slot number. _solana_slot()
-# returns this plus the provider's solana_slot_offset (default 0), so with no
-# offset every provider reports exactly this value and tests can pin exact
-# equality on the default getSlot / getLatestBlockhash slot. A non-zero offset
-# shifts a single provider off this base for multi-slot divergence tests; the
-# slot stays fixed per request either way (the simulator does not step it off
-# the wall clock), so the offset and the slot ↔ lastValidBlockHeight gap are the
-# only moving parts.
-SOLANA_BASE_SLOT = 419_709_627
+import stubs_solana
 
-# Default distance between context.slot and value.lastValidBlockHeight.
-# Mirrors the ~22M real-mainnet gap and exceeds the router's 50-block
-# consistency threshold so the default scenario reproduces MAG-1591. Overridable
-# per provider via the /scenario field ``solana_slot_block_gap``.
-SOLANA_DEFAULT_SLOT_BLOCK_GAP = 21_900_000
-
-# A blockhash is base58, 32 bytes → 43-44 chars. The stub doesn't need to be a
-# real hash — the router reads the numeric fields, not the hash bytes — so a
-# fixed 44-char base58-alphabet string is enough for shape verification.
-SOLANA_BLOCKHASH = "SiMu1atorBLockhash1111111111111111111111111"  # 44 base58 chars
-
-# Reported Solana core version for getVersion. Shape mirrors a real
-# getVersion reply: {"solana-core": "<semver>", "feature-set": <u32>}.
-SOLANA_CORE_VERSION = "1.18.22"
-SOLANA_FEATURE_SET = 3469865029
+# The Solana chain constants live in stubs_solana — the Solana member of the
+# stubs_* family, next to stubs_btc / stubs_lnd. Re-exported here so existing
+# ``from handlers_solana import SOLANA_...`` importers keep working; new code
+# should import them from stubs_solana directly.
+SOLANA_BASE_SLOT              = stubs_solana.SOLANA_BASE_SLOT
+SOLANA_DEFAULT_SLOT_BLOCK_GAP = stubs_solana.SOLANA_DEFAULT_SLOT_BLOCK_GAP
+SOLANA_BLOCKHASH              = stubs_solana.SOLANA_BLOCKHASH
+SOLANA_CORE_VERSION           = stubs_solana.SOLANA_CORE_VERSION
+SOLANA_FEATURE_SET            = stubs_solana.SOLANA_FEATURE_SET
 
 
 def handle(state, request: dict, snap: dict, lava_headers: dict) -> Tuple[int, Dict[str, Any]]:
