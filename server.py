@@ -212,7 +212,7 @@ _SCENARIO_MODES = frozenset({
     "success", "error", "rate_limit", "down", "hang", "drop_connection",
 })
 _SCENARIO_CORRUPTION_MODES = frozenset({
-    "truncated", "missing_field", "invalid_json", "empty_response", "wrong_type",
+    "truncated", "missing_field", "invalid_json", "empty_response", "wrong_type", "invalid_proto",
 })
 _SCENARIO_DROP_AT = frozenset({"before_headers", "after_headers", "mid_body"})
 _SCENARIO_CHAIN_FAMILIES = frozenset({
@@ -374,7 +374,7 @@ class ProviderState:
     error_message: str = "Internal error"  # JSON-RPC error message when mode="error"
     http_status: int = 200              # HTTP status code for error responses (200 = JSON-RPC body error)
     responses: Dict[str, Any] = field(default_factory=dict)
-    corruption_mode: Optional[str] = None     # one of: None, "truncated", "missing_field", "invalid_json", "empty_response", "wrong_type"
+    corruption_mode: Optional[str] = None     # one of: None, "truncated", "missing_field", "invalid_json", "empty_response", "wrong_type", "invalid_proto" (invalid_proto is implemented by the gRPC listener only)
     missing_field: Optional[str] = None       # field-name slot — which top-level field to target when corruption_mode is "missing_field" (omit it) or "wrong_type" (swap its type). Defaults to "result" for wrong_type when unset.
     blocks_behind: int = 0    # 0 = current head; positive = behind; negative = ahead
     # MAG-2231: Solana getLatestBlockhash slot ↔ lastValidBlockHeight gap.
