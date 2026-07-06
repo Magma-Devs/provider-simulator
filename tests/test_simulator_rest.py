@@ -36,7 +36,7 @@ from typing import Any, Dict, Optional, Tuple
 import pytest
 
 from server import ControlHandler, JSONRPCHandler, ProviderState, RestHandler
-from stubs_rest import REST_METHOD_DEFAULTS, REST_LATEST_HEIGHT
+from stubs_rest import REST_ERROR_STUBS, REST_METHOD_DEFAULTS, REST_LATEST_HEIGHT
 
 
 # ── Test ports (distinct from ETH suite's 28545-28547 / 29000 and BTC suite's
@@ -557,6 +557,107 @@ class TestRestPerPathOverrides:
         status, body, _ = _get(sim["rest1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
         assert status == 200
         assert "block" in body
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Named error-stub catalogue — REST_ERROR_STUBS
+#
+# Primary: responses[(verb, template)] = {"error_stub": "<name>"} — the
+# simulator resolves the name against REST_ERROR_STUBS and emits the same
+# {"error": {...}} body as the raw-envelope path. Mirrors TestErrorStubs
+# (ETH, test_simulator.py) and TestBTCErrorStubs (test_simulator_btc.py).
+# The raw {"error": {...}} escape hatch stays covered by
+# TestRestPerPathOverrides.test_error_envelope_override above.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestRestErrorStubs:
+
+    @pytest.mark.parametrize("stub_name", sorted(REST_ERROR_STUBS.keys()))
+    def test_each_stub_emits_matching_envelope(self, sim, stub_name):
+        """Each REST_ERROR_STUBS entry round-trips through the wire unchanged.
+
+        Client sends just the name; the simulator resolves it to the
+        catalogue entry. Default HTTP status is 500 — the same default the
+        raw {"error": {...}} path uses when no "status" is configured.
+        """
+        stub = REST_ERROR_STUBS[stub_name]
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "chain_family": "rest",
+                    "responses": [
+                        [["GET", "/cosmos/staking/v1beta1/validators"],
+                         {"error_stub": stub_name}],
+                    ],
+                }
+            }
+        })
+        status, body, _ = _get(sim["rest1"] + "/cosmos/staking/v1beta1/validators")
+        assert status == 500, f"{stub_name}: default error status should be 500, got {status}"
+        assert body["error"] == stub
+
+    def test_error_stub_honours_status_override(self, sim):
+        """A "status" key next to "error_stub" sets the HTTP status."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "chain_family": "rest",
+                    "responses": [
+                        [["GET", "/cosmos/staking/v1beta1/validators"],
+                         {"error_stub": "not_found", "status": 404}],
+                    ],
+                }
+            }
+        })
+        status, body, _ = _get(sim["rest1"] + "/cosmos/staking/v1beta1/validators")
+        assert status == 404
+        assert body["error"] == REST_ERROR_STUBS["not_found"]
+
+    def test_error_stub_scopes_to_named_route(self, sim):
+        """An error_stub on one (verb, template) leaves other routes healthy."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "chain_family": "rest",
+                    "responses": [
+                        [["GET", "/cosmos/staking/v1beta1/validators"],
+                         {"error_stub": "internal"}],
+                    ],
+                }
+            }
+        })
+        err_status, err_body, _ = _get(sim["rest1"] + "/cosmos/staking/v1beta1/validators")
+        assert err_status == 500
+        assert "error" in err_body
+
+        ok_status, ok_body, _ = _get(
+            sim["rest1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest"
+        )
+        assert ok_status == 200
+        assert "block" in ok_body
+        assert "error" not in ok_body
+
+    def test_error_stub_records_error_status_in_history(self, sim):
+        """The named-stub error path records status='error' in /history."""
+        _post(_ctrl(sim, "/scenario"), {
+            "providers": {
+                "1": {
+                    "chain_family": "rest",
+                    "responses": [
+                        [["GET", "/cosmos/staking/v1beta1/validators"],
+                         {"error_stub": "internal"}],
+                    ],
+                }
+            }
+        })
+        _get(sim["rest1"] + "/cosmos/staking/v1beta1/validators")
+        _, hist, _ = _get(_ctrl(sim, "/history?provider=1"))
+        entries = [
+            e for e in hist["history"]
+            if e["method"] == "GET /cosmos/staking/v1beta1/validators"
+        ]
+        assert len(entries) == 1
+        assert entries[0]["status"] == "error"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

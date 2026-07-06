@@ -42,7 +42,7 @@ from server import (
     ProviderState,
     TendermintHandler,
 )
-from stubs_tendermintrpc import TENDERMINT_METHOD_DEFAULTS
+from stubs_tendermintrpc import TENDERMINT_ERROR_STUBS, TENDERMINT_METHOD_DEFAULTS
 
 
 # Test ports — distinct from the other suites' ranges so all four can co-exist
@@ -423,6 +423,58 @@ class TestTmFaults:
         status, body, _ = _tm_post(sim, "1", "status")
         assert status == 200
         assert isinstance(body, (bytes, str)), f"expected raw garbage, got {body!r}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-method error overrides — named error-stub catalogue + raw envelope
+#
+# Primary: responses[method] = {"error_stub": "<name>"} — the simulator
+# resolves the name against TENDERMINT_ERROR_STUBS and the caller wraps the
+# error into the JSON-RPC envelope. Escape hatch: responses[method] =
+# {"error": {...}} for ad-hoc shapes. Mirrors TestErrorStubs (ETH,
+# test_simulator.py) and TestBTCErrorStubs (test_simulator_btc.py).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTmErrorStubs:
+
+    @pytest.mark.parametrize("stub_name", sorted(TENDERMINT_ERROR_STUBS.keys()))
+    def test_each_stub_emits_matching_envelope(self, sim, stub_name):
+        """Each TENDERMINT_ERROR_STUBS entry round-trips through the wire unchanged."""
+        stub = TENDERMINT_ERROR_STUBS[stub_name]
+        _set_tm(sim, "1", responses={"status": {"error_stub": stub_name}})
+        status, body, _ = _tm_post(sim, "1", "status")
+        assert status == 200  # JSON-RPC errors ride on HTTP 200 by default.
+        assert body["error"] == stub
+        assert "result" not in body, "error envelope must not also carry result"
+
+    def test_error_stub_scopes_to_named_method(self, sim):
+        """An error_stub on one method leaves the other methods healthy."""
+        _set_tm(sim, "1", responses={"status": {"error_stub": "internal"}})
+        _, err_body, _ = _tm_post(sim, "1", "status")
+        assert "error" in err_body
+
+        _, ok_body, _ = _tm_post(sim, "1", "health")
+        assert "result" in ok_body
+        assert "error" not in ok_body
+
+    def test_raw_error_envelope_escape_hatch(self, sim):
+        """responses[method] = {"error": {...}} emits ad-hoc shapes not in the catalogue."""
+        ad_hoc = {"code": -32099, "message": "synthetic test error"}
+        _set_tm(sim, "1", responses={"status": {"error": ad_hoc}})
+        status, body, _ = _tm_post(sim, "1", "status")
+        assert status == 200
+        assert body["error"] == ad_hoc
+        assert "result" not in body
+
+    def test_error_stub_records_error_status_in_history(self, sim):
+        """The per-method error path records status='error' in /history."""
+        _set_tm(sim, "1", responses={"status": {"error_stub": "internal"}})
+        _tm_post(sim, "1", "status")
+        _, hist, _ = _request("GET", _ctrl(sim, "/history?provider=1"))
+        entries = [e for e in hist["history"] if e["method"] == "status"]
+        assert len(entries) == 1
+        assert entries[0]["status"] == "error"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
