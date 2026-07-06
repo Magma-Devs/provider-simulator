@@ -255,6 +255,17 @@ class TestSolanaPortDispatch:
         assert "error" not in body
         assert body["result"] is None
 
+    def test_solana_unknown_method_mode_error_returns_minus_32601(self, sim):
+        """Opt-in: with solana_unknown_method_mode="error", an unknown method
+        returns a real -32601 method-not-found instead of the default null
+        result — so the router's Solana error classifier can be exercised on a
+        bad method. The default stays "null" (see the test above)."""
+        _set_solana(sim, "1", solana_unknown_method_mode="error")
+        status, body = _rpc(sim["provider1"], "not_a_real_solana_method")
+        assert status == 200
+        assert "error" in body, f"expected a -32601 error envelope, got {body}"
+        assert body["error"]["code"] == -32601
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # getLatestBlockhash — the slot ↔ lastValidBlockHeight gap (the bug carrier)
@@ -465,14 +476,24 @@ class TestSolanaPerMethodOverrides:
         assert body["result"] == {"solana-core": "9.9.9"}
 
     def test_solana_error_override_raw_envelope(self, sim):
-        """responses[method] = {"error": {...}} emits the JSON-RPC error envelope.
-        Solana has no named error-stub catalogue yet (handlers_solana only
-        honours a raw error dict)."""
+        """responses[method] = {"error": {...}} emits the JSON-RPC error envelope
+        directly — the raw escape-hatch, alongside the named error_stub path."""
         _set_solana(sim, "1", responses={"getSlot": {"error": {"code": -32007, "message": "Slot skipped"}}})
         _, body = _rpc(sim["provider1"], "getSlot")
         assert "error" in body
         assert body["error"]["code"] == -32007
         assert body["error"]["message"] == "Slot skipped"
+
+    def test_solana_error_stub_named_catalogue(self, sim):
+        """responses[method] = {"error_stub": "<name>"} resolves against the
+        named SOLANA_ERROR_STUBS catalogue (mirrors the ETH error_stub path), so
+        tests inject a canonical Solana error by name instead of hand-typing the
+        envelope."""
+        _set_solana(sim, "1", responses={"getSlot": {"error_stub": "min_context_slot_not_reached"}})
+        _, body = _rpc(sim["provider1"], "getSlot")
+        assert "error" in body, f"expected an error envelope, got {body}"
+        assert body["error"]["code"] == -32016, f"got {body['error']}"
+        assert "Minimum context slot" in body["error"]["message"]
 
     def test_solana_method_unaffected_by_other_method_override(self, sim):
         """Per-method overrides scope strictly to that method — an override on
@@ -537,6 +558,24 @@ class TestMixedChainScenario:
         # Solana side: decimal slot integer.
         assert isinstance(sol_body["result"], int)
         assert sol_body["result"] == SOLANA_BASE_SLOT
+
+    def test_fail_first_n_counts_only_owning_transport(self, sim):
+        """fail_first_n's counter is consumed ONLY on the listener that owns the
+        provider's chain_family. Requests to a different transport's listener
+        (gated out) must not burn the first-N budget — so the owning listener
+        still sees the first N calls as failures."""
+        _set_solana(sim, "1", mode="error", error_code=-32077,
+                    error_message="boom", chain_family="solana", fail_first_n=2)
+        # Hit the ETH listener (chain_family mismatch) — must NOT consume the budget.
+        for _ in range(3):
+            _rpc(sim["eth_provider1"], "eth_blockNumber")
+        # The Solana listener (owning) still sees the first 2 calls as failures.
+        _, b1 = _rpc(sim["provider1"], "getSlot")
+        _, b2 = _rpc(sim["provider1"], "getSlot")
+        _, b3 = _rpc(sim["provider1"], "getSlot")
+        assert b1.get("error", {}).get("code") == -32077, f"solana call 1 should fail: {b1}"
+        assert b2.get("error", {}).get("code") == -32077, f"solana call 2 should fail: {b2}"
+        assert "error" not in b3, f"solana call 3 should recover: {b3}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
