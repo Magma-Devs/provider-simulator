@@ -60,9 +60,69 @@ path — read this when reasoning about a test that's not behaving as expected:
       exercises both paths.
 """
 
+import threading
+import time
 from typing import Any, Dict, Tuple
 
 from stubs import ERROR_STUBS, METHOD_DEFAULTS
+
+
+# --- MAG-1897: optional advancing eth head ---------------------------------
+# The simulated eth head is normally a STATIC constant
+# (METHOD_DEFAULTS["eth_blockNumber"] = "0x1312D00"). A test that needs the
+# router's per-endpoint sync optimizer to actually DEMOTE a stale provider must
+# let the head MOVE: the optimizer's forward-only sync ratchet only releases a
+# provider's lag as the cluster head advances past it, so on a static head a
+# stale provider's internal SyncBlock stays pinned at the head and never earns a
+# sync penalty (it scores normalized_sync == 1, same as healthy peers).
+#
+# This clock is OPT-IN (default static => byte-identical to the old behaviour)
+# and driven via the control API:
+#   POST /advance {"per_second": R}  -> enable (R>0) / freeze (R<=0) continuous advance
+#   POST /advance {"blocks": N}      -> one-time bump of the head by N blocks
+#   POST /reset and /reset/all       -> reset the head to its static base
+# current_eth_head() is the single source the eth success-path reads for the head.
+_HEAD_LOCK = threading.Lock()
+_head_base = int(METHOD_DEFAULTS["eth_blockNumber"], 16)  # 20_000_000
+_head_extra = 0      # manual bumps + folded continuous advance (blocks above base)
+_head_rate = 0.0     # continuous advance, blocks/sec (0.0 = off => static head)
+_head_anchor = 0.0   # time.monotonic() when the current rate took effect
+
+
+def current_eth_head() -> int:
+    """Current simulated eth head (int). Equals the static base unless advancing
+    has been enabled via POST /advance (MAG-1897)."""
+    with _HEAD_LOCK:
+        extra = _head_extra
+        if _head_rate > 0.0:
+            extra += int((time.monotonic() - _head_anchor) * _head_rate)
+        return _head_base + extra
+
+
+def set_eth_advance(rate_per_sec: float) -> None:
+    """Enable (rate>0) or freeze (rate<=0) continuous head advance. Folds elapsed
+    advance into the static offset so toggling never moves the head backward."""
+    global _head_extra, _head_rate, _head_anchor
+    with _HEAD_LOCK:
+        if _head_rate > 0.0:
+            _head_extra += int((time.monotonic() - _head_anchor) * _head_rate)
+        _head_rate = float(rate_per_sec) if rate_per_sec and rate_per_sec > 0.0 else 0.0
+        _head_anchor = time.monotonic()
+
+
+def bump_eth_head(blocks: int) -> None:
+    """One-time advance of the head by ``blocks`` (independent of the continuous rate)."""
+    global _head_extra
+    with _HEAD_LOCK:
+        _head_extra += int(blocks)
+
+
+def reset_eth_head() -> None:
+    """Reset the head to its static base and disable advancing (POST /reset[/all])."""
+    global _head_extra, _head_rate
+    with _HEAD_LOCK:
+        _head_extra = 0
+        _head_rate = 0.0
 
 
 def _hex_upper(n: int) -> str:
@@ -133,17 +193,19 @@ def handle(state, request: dict, snap: dict, lava_headers: dict) -> Tuple[int, D
 
     blocks_behind = snap.get("blocks_behind", 0)
 
-    # eth_blockNumber: shift head by blocks_behind unless overridden via responses
-    if method == "eth_blockNumber" and method not in state.responses and blocks_behind != 0:
-        head = int(METHOD_DEFAULTS["eth_blockNumber"], 16)
-        result = _hex_upper(head - blocks_behind)
+    # eth_blockNumber: report the (optionally advancing — MAG-1897) head shifted by
+    # blocks_behind. Skipped only when a response result is explicitly configured
+    # (specific or via "default"), preserving the response-override path. With a
+    # static head and blocks_behind=0 this yields the same "0x1312D00" as before.
+    if method == "eth_blockNumber" and "result" not in method_cfg:
+        result = _hex_upper(current_eth_head() - blocks_behind)
 
     # eth_getBlockByNumber: echo the requested block number so the router's
     # pruning verification sees the correct block number in the response.
     # Named tags ("latest"/"safe"/"pending"/"finalized") shift by blocks_behind.
     if method == "eth_getBlockByNumber" and isinstance(result, dict):
         if params:
-            head = int("0x1312D00", 16)
+            head = current_eth_head()
             effective_latest = _hex_upper(head - blocks_behind)
             named = {
                 "latest":    effective_latest,
@@ -178,7 +240,7 @@ def handle(state, request: dict, snap: dict, lava_headers: dict) -> Tuple[int, D
     if method == "eth_getLogs":
         logs_indexed = snap.get("logs_indexed_up_to")
         if logs_indexed is not None:
-            head_int = int(METHOD_DEFAULTS["eth_blockNumber"], 16) - blocks_behind
+            head_int = current_eth_head() - blocks_behind
             # Resolve toBlock — the upper bound of the query range
             to_block = _resolve_block_tag(params, "toBlock", head_int)
             if to_block is not None and to_block > logs_indexed:
