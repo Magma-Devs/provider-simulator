@@ -405,10 +405,17 @@ class ProviderState:
     # found so the router's Solana error classifier can be exercised.
     solana_unknown_method_mode: str = "null"
     # Deterministic "fail the first N calls, then recover" fault. When
-    # fail_first_n > 0, the first N JSON-RPC requests to this provider use the
-    # configured ``mode`` (the fault); every request after uses ``then_mode``
-    # (default "success"). Makes retry-then-recover / circuit-breaker paths
-    # repeatable without relying on random error_probability.
+    # fail_first_n > 0, the first N requests on the OWNING JSON-RPC listener
+    # (the one whose handler_chain_family matches this snap's chain_family)
+    # use the configured ``mode`` (the fault); every request after uses
+    # ``then_mode`` (default "success"). The window counts owning-listener
+    # calls only — every other surface (REST / Tendermint-RPC / WS / gRPC /
+    # non-owning JSON-RPC pools) observes the elapsed window via
+    # _effective_mode without advancing it, so cross-transport traffic can't
+    # burn the first-N budget, yet a provider-wide mode="down" still clears
+    # on every surface once the owning listener has consumed the window.
+    # Makes retry-then-recover / circuit-breaker paths repeatable without
+    # relying on random error_probability.
     fail_first_n: int = 0
     then_mode: str = "success"
     _fail_counter: int = field(default=0, repr=False)   # consumed by fail_first_n
@@ -548,10 +555,20 @@ class ProviderState:
 
     def consume_fail_counter(self) -> int:
         """Atomically increment and return this provider's request counter for
-        the fail_first_n sequenced fault. Called once per JSON-RPC request to
-        decide whether this call is still within the first-N failing window."""
+        the fail_first_n sequenced fault. Called once per OWNING-listener
+        JSON-RPC request to decide whether this call is still within the
+        first-N failing window. Non-owning transports never consume — they
+        observe the window via peek_fail_counter instead."""
         with self.lock:
             self._fail_counter += 1
+            return self._fail_counter
+
+    def peek_fail_counter(self) -> int:
+        """Return this provider's sequenced-fault request counter WITHOUT
+        incrementing it. Non-owning transports use this to observe how far the
+        owning listener has advanced the fail_first_n window while leaving the
+        count untouched (only owning-listener requests may burn the budget)."""
+        with self.lock:
             return self._fail_counter
 
     def clear_history(self) -> None:
@@ -965,6 +982,37 @@ def _mode_for(snap: Dict[str, Any], *chain_families: str) -> Optional[str]:
     return None
 
 
+def _effective_mode(state: "ProviderState", snap: Dict[str, Any]) -> str:
+    """Return the ``mode`` a NON-OWNING surface should act on, with the
+    sequenced fault (``fail_first_n`` / ``then_mode``) taken into account.
+
+    The fail_first_n window is measured in OWNING-listener requests: only the
+    JSON-RPC listener whose ``handler_chain_family`` matches the snap's
+    ``chain_family`` advances the counter (via consume_fail_counter). Every
+    other surface — REST, Tendermint-RPC, WS, gRPC, and JSON-RPC listeners of
+    other chain families — never advances the window; it only observes it
+    here, by peeking the counter without incrementing.
+
+    Once the owning listener has consumed the whole window (peeked counter has
+    reached fail_first_n), ``then_mode`` (default "success") is in effect for
+    observers; until then the configured ``mode`` is. Without this
+    read-through, a sequenced provider-wide fault such as mode="down" (honored
+    on every transport because reachability is provider-wide) would pin every
+    non-owning surface at 503 forever: they read the raw ``snap["mode"]`` and
+    would never see the recovery the owning listener already reached.
+
+    The observer threshold is ``peek >= fail_first_n`` on purpose: the owning
+    consumer recovers on its (N+1)-th call (``consume() > N``), so the moment
+    N owning calls have happened, the NEXT request on ANY surface belongs to
+    the recovered phase — observer and owner may never disagree about which
+    phase the provider is in.
+    """
+    fail_first_n = snap.get("fail_first_n", 0)
+    if fail_first_n > 0 and state.peek_fail_counter() >= fail_first_n:
+        return snap.get("then_mode", "success")
+    return snap["mode"]
+
+
 # ── JSON-RPC handler ──────────────────────────────────────────────────────────
 
 class JSONRPCHandler(BaseHTTPRequestHandler):
@@ -1080,6 +1128,12 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         if jsonrpc_owns_snap and snap.get("fail_first_n", 0) > 0:
             if state.consume_fail_counter() > snap["fail_first_n"]:
                 snap["mode"] = snap.get("then_mode", "success")
+        elif not jsonrpc_owns_snap:
+            # Non-owning listener: observe the sequenced-fault window without
+            # advancing it. Mirrors the owning rewrite above so the universal
+            # mode="down" checks below see then_mode once the owning listener
+            # has consumed the window, instead of 503ing this port forever.
+            snap["mode"] = _effective_mode(state, snap)
 
         jsonrpc_run_fault = jsonrpc_owns_snap or snap["mode"] == "down"
 
@@ -1608,6 +1662,15 @@ class RestHandler(BaseHTTPRequestHandler):
         # port — consistent with the universal "down means unreachable"
         # semantic.
         rest_owns_snap = snap.get("chain_family") == "rest"
+        if not rest_owns_snap:
+            # Non-owning surface: observe the sequenced-fault window
+            # (fail_first_n) without advancing it — only the owning JSON-RPC
+            # listener consumes the counter. Rewriting the snapshot's mode
+            # before the gates below (and before the per-route merge) means
+            # a provider-wide down clears here once the owning listener has
+            # consumed the window, instead of pinning this port at 503
+            # forever, while an explicit per-route mode override still wins.
+            snap["mode"] = _effective_mode(state, snap)
         rest_run_fault = rest_owns_snap or snap["mode"] == "down"
 
         # Pre-route fault: provider-wide down doesn't need the (verb,
@@ -2009,6 +2072,13 @@ class TendermintHandler(BaseHTTPRequestHandler):
         # Tendermint port — consistent with the universal "down means
         # unreachable" semantic.
         tm_owns_snap = snap.get("chain_family") == "tendermintrpc"
+        if not tm_owns_snap:
+            # Non-owning surface: observe the sequenced-fault window
+            # (fail_first_n) without advancing it — only the owning JSON-RPC
+            # listener consumes the counter. Once that window has elapsed the
+            # snapshot's mode reads as then_mode, so a provider-wide down
+            # clears here instead of pinning this port at 503 forever.
+            snap["mode"] = _effective_mode(state, snap)
         tm_run_fault = tm_owns_snap or snap["mode"] == "down"
 
         # 1. Outage gate — return 503 with no body. ``method`` not yet known.

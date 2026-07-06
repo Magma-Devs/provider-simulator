@@ -728,3 +728,43 @@ class TestGrpcCrossTransportCorruptionIsolation:
         with pytest.raises(grpc.RpcError) as exc_info:
             _call_get_latest_block(sim["grpc1"])
         assert exc_info.value.code() == grpc.StatusCode.UNKNOWN
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sequenced faults across transports — the fail_first_n window is consumed on
+# the owning JSON-RPC listener and only OBSERVED (never advanced) by gRPC
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestGrpcSequencedFaultObservation:
+    """The sequenced fault (fail_first_n / then_mode) counts requests on the
+    OWNING JSON-RPC listener only. The gRPC surface never advances that
+    window — it observes it: while the window is open, a provider-wide down
+    aborts with UNAVAILABLE; once the owning listener has consumed the
+    window, the call must succeed instead of aborting forever."""
+
+    def test_grpc_down_clears_after_owning_listener_consumes_window(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {
+            "chain_family": "eth", "mode": "down",
+            "fail_first_n": 2, "then_mode": "success",
+        }}})
+
+        with pytest.raises(grpc.RpcError) as exc_info:
+            _call_get_latest_block(sim["grpc1"])
+        assert exc_info.value.code() == grpc.StatusCode.UNAVAILABLE, (
+            f"gRPC must abort while the down window is open; "
+            f"got {exc_info.value.code()}"
+        )
+
+        eth_url = f"http://127.0.0.1:{_JSONRPC_PORTS['1']}"
+        for i in (1, 2):
+            eth_status, _ = _post(eth_url, {"jsonrpc": "2.0", "id": i,
+                                            "method": "eth_blockNumber",
+                                            "params": []})
+            assert eth_status == 503, (
+                f"owning ETH call {i} is inside the down window; got {eth_status}"
+            )
+
+        resp = _call_get_latest_block(sim["grpc1"])
+        assert resp.block.header.height > 0, (
+            "gRPC must observe the consumed window and serve the success stub"
+        )

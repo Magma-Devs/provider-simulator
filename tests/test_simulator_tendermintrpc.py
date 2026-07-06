@@ -571,3 +571,46 @@ class TestTmCrossTransportFaultIsolation:
         })
         status, _, _ = _tm_get(sim, "1", "status")
         assert status == 503, f"TM should refuse with 503 under universal-down; got {status}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sequenced faults across transports — the fail_first_n window is consumed on
+# the owning JSON-RPC listener and only OBSERVED (never advanced) by TM
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTmSequencedFaultObservation:
+    """The sequenced fault (fail_first_n / then_mode) counts requests on the
+    OWNING JSON-RPC listener only. The Tendermint port never advances that
+    window — it observes it: while the window is open, a provider-wide down
+    503s the TM port; once the owning listener has consumed the window, TM
+    must see then_mode instead of staying stuck on the raw fault forever."""
+
+    def test_tm_down_clears_after_owning_listener_consumes_window(self, sim):
+        _request("POST", _ctrl(sim, "/scenario"), body={"providers": {"1": {
+            "chain_family": "eth", "mode": "down",
+            "fail_first_n": 2, "then_mode": "success",
+        }}})
+
+        status, _, _ = _tm_get(sim, "1", "status")
+        assert status == 503, (
+            f"TM must 503 while the down window is open; got {status}"
+        )
+
+        for i in (1, 2):
+            eth_status, _, _ = _request(
+                "POST",
+                sim["jsonrpc1"],
+                body={"jsonrpc": "2.0", "id": i, "method": "eth_blockNumber"},
+            )
+            assert eth_status == 503, (
+                f"owning ETH call {i} is inside the down window; got {eth_status}"
+            )
+
+        status, body, _ = _tm_get(sim, "1", "status")
+        assert status == 200, (
+            f"TM must observe the consumed window and serve then_mode=success; "
+            f"got {status}"
+        )
+        assert "result" in body
+        assert body["result"]["node_info"]["network"]

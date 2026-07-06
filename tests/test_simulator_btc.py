@@ -580,3 +580,43 @@ class TestBTCCrossTransportFaultIsolation:
         assert status == 503, (
             f"BTC port should refuse with 503 under universal-down; got {status}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sequenced faults across listener pools — the fail_first_n window is consumed
+# on the owning ETH listener and only OBSERVED (never advanced) by the BTC one
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestBTCSequencedFaultObservation:
+    """The sequenced fault (fail_first_n / then_mode) counts requests on the
+    OWNING JSON-RPC listener only — here the ETH pool, for an eth-authored
+    snap. The BTC listener shares the ProviderState but never advances the
+    window; it observes it: a provider-wide down 503s the BTC port while the
+    window is open and clears once the ETH listener has consumed it."""
+
+    def test_btc_down_clears_after_owning_eth_listener_consumes_window(self, sim):
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {
+            "chain_family": "eth", "mode": "down",
+            "fail_first_n": 2, "then_mode": "success",
+        }}})
+
+        status, _ = _rpc(sim["provider1"], "getblockcount")
+        assert status == 503, (
+            f"BTC port must 503 while the down window is open; got {status}"
+        )
+
+        for i in (1, 2):
+            eth_status, _ = _rpc(sim["eth_provider1"], "eth_blockNumber")
+            assert eth_status == 503, (
+                f"owning ETH call {i} is inside the down window; got {eth_status}"
+            )
+
+        status, body = _rpc(sim["provider1"], "getblockcount")
+        assert status == 200, (
+            f"BTC port must observe the consumed window and serve "
+            f"then_mode=success; got {status}"
+        )
+        assert isinstance(body.get("result"), int), (
+            f"expected the BTC success stub (decimal block count); got {body!r}"
+        )

@@ -1225,3 +1225,51 @@ class TestWsCrossTransportFaultIsolation:
         assert b" 503 " in data.split(b"\r\n", 1)[0], (
             f"WS upgrade should refuse with 503 under universal-down; got {data[:80]!r}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sequenced faults across transports — the fail_first_n window is consumed on
+# the owning JSON-RPC listener and only OBSERVED (never advanced) by WS
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestWsSequencedFaultObservation:
+    """The sequenced fault (fail_first_n / then_mode) counts requests on the
+    OWNING JSON-RPC listener only. The WS surface never advances that window —
+    it observes it: while the window is open, a provider-wide down refuses the
+    upgrade; once the owning listener has consumed the window, the upgrade
+    must complete instead of staying refused forever."""
+
+    def test_ws_upgrade_down_clears_after_owning_listener_consumes_window(self, sim):
+        _control(sim, "POST", "/scenario", {"providers": {"1": {
+            "chain_family": "eth", "mode": "down",
+            "fail_first_n": 2, "then_mode": "success",
+        }}})
+
+        data = _raw_ws_upgrade(sim["ws1_host"], sim["ws1_port"])
+        assert b" 503 " in data.split(b"\r\n", 1)[0], (
+            f"WS upgrade must refuse while the down window is open; got {data[:80]!r}"
+        )
+
+        for i in (1, 2):
+            req = urllib.request.Request(
+                sim["provider1"],
+                method="POST",
+                headers={"Content-Type": "application/json"},
+                data=json.dumps({"jsonrpc": "2.0", "id": i,
+                                 "method": "eth_blockNumber"}).encode(),
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    eth_code = resp.status
+            except urllib.error.HTTPError as e:
+                eth_code = e.code
+            assert eth_code == 503, (
+                f"owning ETH call {i} is inside the down window; got {eth_code}"
+            )
+
+        data = _raw_ws_upgrade(sim["ws1_host"], sim["ws1_port"])
+        assert b" 101 " in data.split(b"\r\n", 1)[0], (
+            f"WS upgrade must complete once the owning listener consumed "
+            f"the window; got {data[:80]!r}"
+        )

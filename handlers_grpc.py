@@ -198,14 +198,30 @@ async def _apply_grpc_fault(state, snap: dict, context: grpc.aio.ServicerContext
     in mode=down would still serve gRPC requests, hiding router-side
     bugs whose reproduction depends on the provider being unreachable
     across every node-url (e.g. MAG-2061).
+
+    Sequenced fault (fail_first_n / then_mode)
+    ------------------------------------------
+    The fail_first_n window is measured in OWNING-listener requests — only
+    the JSON-RPC listener whose chain_family matches the snap consumes the
+    counter. This surface never advances the window; it observes it through
+    the effective mode below, so a sequenced provider-wide down clears here
+    once the owning listener has consumed the window. For snaps authored
+    for the gRPC transport no listener consumes the counter, so the
+    effective mode always equals the raw ``snap["mode"]`` and the ladder
+    behaves exactly as before.
     """
+    # Lazy import: server.py owns the shared cross-transport helpers and
+    # imports the sibling handler modules at load time — resolving at call
+    # time keeps this module free of any load-order coupling with it.
+    from server import _effective_mode
+    mode = _effective_mode(state, snap)
     # MAG-1836: only apply faults that were authored for the gRPC transport.
     # MAG-2092: but always honor mode="down" regardless of chain_family.
-    if snap.get("chain_family") != "grpc" and snap["mode"] != "down":
+    if snap.get("chain_family") != "grpc" and mode != "down":
         return False
     # 1. Outage — no latency on the down path (provider drops the request
     #    immediately, mirroring JSON-RPC ``down`` semantics).
-    if snap["mode"] == "down":
+    if mode == "down":
         _record_history(state, method, "down", 0, lava_headers,
                         chain=chain, port=port)
         await context.abort(grpc.StatusCode.UNAVAILABLE, "provider down")
@@ -215,7 +231,7 @@ async def _apply_grpc_fault(state, snap: dict, context: grpc.aio.ServicerContext
     #    deadline. Same 30s cap as the JSON-RPC handler so a stuck request
     #    eventually unwinds and the asyncio task doesn't leak. Already
     #    write-before-sleep; left untouched per Avi's review.
-    if snap["mode"] == "hang":
+    if mode == "hang":
         _record_history(state, method, "hang", 0, lava_headers,
                         chain=chain, port=port)
         await asyncio.sleep(30)
@@ -226,7 +242,7 @@ async def _apply_grpc_fault(state, snap: dict, context: grpc.aio.ServicerContext
     #    the wire, then abort. Order matters: history must be durable before
     #    the abort surface so a router-side deadline cancel doesn't drop the
     #    entry.
-    if snap["mode"] == "drop_connection":
+    if mode == "drop_connection":
         drop_at = snap.get("drop_at", "before_headers")
         _record_history(state, method, "drop_connection", snap["latency_ms"],
                         lava_headers, chain=chain, port=port)
@@ -244,7 +260,7 @@ async def _apply_grpc_fault(state, snap: dict, context: grpc.aio.ServicerContext
         return True
 
     # 4. Rate limit
-    if snap["mode"] == "rate_limit":
+    if mode == "rate_limit":
         _record_history(state, method, "rate_limit", snap["latency_ms"],
                         lava_headers, chain=chain, port=port)
         if snap["latency_ms"] > 0:
@@ -255,7 +271,7 @@ async def _apply_grpc_fault(state, snap: dict, context: grpc.aio.ServicerContext
     # 5. Forced or probabilistic error — translate error_message / error_code
     #    to a grpc.StatusCode. Symbolic name wins; integer code is the
     #    fallback for legacy payloads. UNKNOWN is the last-resort default.
-    if snap["mode"] == "error" or random.random() < snap["error_probability"]:
+    if mode == "error" or random.random() < snap["error_probability"]:
         err_msg = snap.get("error_message", "Internal error")
         err_code = snap.get("error_code", -32000)
         status_code = (
