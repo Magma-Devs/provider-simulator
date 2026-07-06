@@ -211,7 +211,7 @@ _SCENARIO_MODES = frozenset({
     "success", "error", "rate_limit", "down", "hang", "drop_connection",
 })
 _SCENARIO_CORRUPTION_MODES = frozenset({
-    "truncated", "missing_field", "invalid_json", "empty_response", "wrong_type",
+    "truncated", "missing_field", "invalid_json", "empty_response", "wrong_type", "invalid_proto",
 })
 _SCENARIO_DROP_AT = frozenset({"before_headers", "after_headers", "mid_body"})
 _SCENARIO_CHAIN_FAMILIES = frozenset({
