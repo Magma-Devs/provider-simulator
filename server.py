@@ -16,6 +16,12 @@ Supported modes per provider:
   down              — returns HTTP 503 (router treats provider as unavailable)
   error_probability — randomly returns error on X% of requests (0.0–1.0)
 
+chain_family (per provider) tags which surface's faults the scenario owns:
+one word — a blockchain (eth / btc / ln / solana) or a connection type
+(grpc / rest / tendermintrpc / ws), never both at once. The listener port
+picks the response handler; chain_family only gates content-fault firing.
+mode="down" fires on every surface regardless. Unknown values → HTTP 400.
+
 Control API:
   POST /scenario   {"providers": {"1": {"mode": "error", "error_code": -32601,
                      "error_message": "Method not found", "http_status": 200}}}
@@ -54,25 +60,26 @@ import handlers_rest
 import handlers_solana
 import handlers_tendermintrpc
 import handlers_ws
+import stubs_solana
 from constants import (
-    ALL_PROVIDER_PORTS,
-    BACKUP_PROVIDER_PORTS,
     BTC_PRIMARY_PORTS,
     CONTROL_PORT,
+    ETH_ALL_PORTS,
+    ETH_BACKUP_PORTS,
+    ETH_PRIMARY_PORTS,
+    ETH_SOLO_PORTS,
     GRPC_BACKUP_PORTS,
-    GRPC_PROVIDER_PORTS,
+    GRPC_PRIMARY_PORTS,
     HISTORY_MAX,
     LN_PRIMARY_PORTS,
-    PROVIDER_PORTS,
     REST_BACKUP_PORTS,
-    REST_PORTS,
+    REST_PRIMARY_PORTS,
     SOLANA_PRIMARY_PORTS,
-    SOLO_PROVIDER_PORTS,
-    SOLO_SOLANA_PROVIDER_PORTS,
+    SOLANA_SOLO_PORTS,
     TM_BACKUP_PORTS,
-    TM_PORTS,
+    TM_PRIMARY_PORTS,
     WS_BACKUP_PORTS,
-    WS_PORTS,
+    WS_PRIMARY_PORTS,
 )
 from stubs_rest import REST_METHOD_DEFAULTS
 
@@ -384,11 +391,11 @@ class ProviderState:
     # from context.slot, the endpoint chain-tracker value from
     # lastValidBlockHeight. The default mirrors the ~22M real-mainnet gap and
     # exceeds the router's 50-block consistency threshold, reproducing the
-    # "No pairings available" filter (MAG-1591). Sourced from the Solana
-    # handler's own default so the field, the handler fallback, and /reset all
-    # share one number. Only read by the Solana listener pool (18582-18584);
-    # ignored by every other handler.
-    solana_slot_block_gap: int = handlers_solana.SOLANA_DEFAULT_SLOT_BLOCK_GAP
+    # "No pairings available" filter (MAG-1591). Sourced from stubs_solana so
+    # the field, the handler fallback, and /reset all share one number. Only
+    # read by handlers_solana.handle — i.e. the Solana listeners (18582-18584
+    # primary, 18585 solo); every other handler ignores this field.
+    solana_slot_block_gap: int = stubs_solana.SOLANA_DEFAULT_SLOT_BLOCK_GAP
     # MAG-2233 #1: per-provider Solana slot offset for multi-slot divergence.
     # handlers_solana reports slot = SOLANA_BASE_SLOT + solana_slot_offset for
     # this provider; lastValidBlockHeight stays slot - solana_slot_block_gap, so
@@ -396,8 +403,9 @@ class ProviderState:
     # shared base slot (identical to pre-MAG-2233 behaviour). A test sets distinct
     # offsets per provider (e.g. one current, two stale-behind) so the router's
     # Solana consistency filter can keep the current provider and drop the stale
-    # ones. Negative = behind the base slot, positive = ahead. Only read by the
-    # Solana listener pool (18582-18584); ignored by every other handler.
+    # ones. Negative = behind the base slot, positive = ahead. Only read by
+    # handlers_solana.handle — i.e. the Solana listeners (18582-18584 primary,
+    # 18585 solo); every other handler ignores this field.
     solana_slot_offset: int = 0
     # Opt-in unknown-method behaviour on Solana. "null" (default) keeps the
     # parse-friendly {"result": null} for an unrecognised method (backward-
@@ -413,7 +421,29 @@ class ProviderState:
     then_mode: str = "success"
     _fail_counter: int = field(default=0, repr=False)   # consumed by fail_first_n
     drop_at: str = "before_headers"   # one of: "before_headers", "after_headers", "mid_body"; only applies when mode="drop_connection"
-    chain_family: str = "eth"   # one of: "eth", "btc", "ln", "solana", "grpc", "rest", "tendermintrpc", "ws"; gates the per-listener FAULT primitives (the success-path handler is selected by LISTENER PORT, not by this field — MAG-2089). Default "eth" preserves backward-compat. "btc" → handlers_btc on the dedicated BTC JSON-RPC ports 18575-77 (MAG-1716). "ln" → handlers_lnd on the dedicated LN JSON-RPC ports 18578-80 (MAG-1726). "solana" → handlers_solana on the dedicated Solana JSON-RPC ports 18582-84 (MAG-2231) — same port-derived dispatch as BTC/LN; the success handler emits result.context.slot vs result.value.lastValidBlockHeight separated by solana_slot_block_gap. "grpc" → handlers_grpc on ports 18548-50. "rest" → handlers_rest on ports 18551-53 (MAG-1777). "tendermintrpc" → handlers_tendermintrpc on ports 18554-56 (MAG-1841). "ws" → handlers_ws on ports 18557-59 (MAG-1801) for WebSocket-style providers with subscription lifecycle — the handler delegates non-subscription methods back to handlers_eth.handle / handlers_btc.handle so request/response semantics are identical to HTTP JSON-RPC; subscription frames are wrapped in chain-specific envelopes from stubs_ws.
+    # chain_family — which surface's faults this provider's scenario owns. ONE
+    # word: either a blockchain ("eth", "btc", "ln", "solana") or a connection
+    # type ("grpc", "rest", "tendermintrpc", "ws"). The two groups share this
+    # single field, so a scenario cannot express a blockchain AND a connection
+    # type together — e.g. "Solana over WebSocket" is not expressible today.
+    #
+    # What it does NOT do: pick the response handler. The success-path handler
+    # is selected by LISTENER PORT at startup (MAG-2089); this field only gates
+    # the CONTENT fault primitives (error / rate_limit / hang / drop_connection
+    # / corruption / latency) — each listener fires them only when the snap's
+    # chain_family matches its own. Exception: mode="down" fires on every
+    # surface regardless (MAG-2092), because reachability is provider-wide.
+    # Values are validated against _SCENARIO_CHAIN_FAMILIES; unknown → HTTP 400.
+    #
+    # Per-value breadcrumbs: "btc" → handlers_btc, ports 18575-77 (MAG-1716);
+    # "ln" → handlers_lnd, 18578-80 (MAG-1726); "solana" → handlers_solana,
+    # 18582-84 (MAG-2231; slot vs lastValidBlockHeight separated by
+    # solana_slot_block_gap); "grpc" → handlers_grpc, 18548-50; "rest" →
+    # handlers_rest, 18551-53 (MAG-1777); "tendermintrpc" → 18554-56
+    # (MAG-1841); "ws" → handlers_ws, 18557-59 (MAG-1801) — WS delegates
+    # non-subscription calls back to handlers_eth / handlers_btc. Default
+    # "eth" preserves backward-compat.
+    chain_family: str = "eth"
     # MAG-1791: provider-stale-on-getLogs primitive — head-fresh but logs-indexing-lagged.
     # Models the real production failure mode where providers update eth_blockNumber
     # immediately but index logs in a separate pipeline that can fall behind seconds-to-minutes.
@@ -422,8 +452,13 @@ class ProviderState:
     # empty array (logs_lag_mode="empty") or only logs with blockNumber <= N (mode="partial").
     # eth_blockNumber is unaffected: it keeps reporting current head — that's the whole point
     # of this primitive (head-fresh + logs-lagged is the divergence we want to expose).
+    # Only read by handlers_eth.handle's eth_getLogs branch (the ETH JSON-RPC listeners;
+    # a WS eth_getLogs reaches the same branch because handlers_ws delegates non-subscription
+    # methods to handlers_eth); every other handler ignores this field.
     logs_indexed_up_to: Optional[int] = None
     # logs_lag_mode: one of "empty" / "partial". Only consulted when logs_indexed_up_to is set.
+    # Read in the same handlers_eth.handle eth_getLogs branch as logs_indexed_up_to;
+    # every other handler ignores this field.
     logs_lag_mode: str = "empty"
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # call history — each entry: {ts, method, status, latency_ms}
@@ -487,8 +522,8 @@ class ProviderState:
             self.blocks_behind     = cfg.get("blocks_behind",     self.blocks_behind)
             # MAG-2231: backward-compat — a /scenario payload that omits
             # solana_slot_block_gap leaves the existing per-provider value
-            # untouched (the field default at construction is the Solana
-            # handler's SOLANA_DEFAULT_SLOT_BLOCK_GAP).
+            # untouched (the field default at construction is
+            # stubs_solana.SOLANA_DEFAULT_SLOT_BLOCK_GAP).
             self.solana_slot_block_gap = cfg.get("solana_slot_block_gap", self.solana_slot_block_gap)
             # MAG-2233 #1: backward-compat — a /scenario payload that omits
             # solana_slot_offset leaves the existing per-provider value untouched
@@ -530,8 +565,8 @@ class ProviderState:
             self.blocks_behind     = 0
             # MAG-2231: reset restores the default Solana slot/blockHeight gap
             # so a /reset between tests clears any per-test override. Same source
-            # as the field default — the Solana handler's own constant.
-            self.solana_slot_block_gap = handlers_solana.SOLANA_DEFAULT_SLOT_BLOCK_GAP
+            # as the field default — the shared stubs_solana constant.
+            self.solana_slot_block_gap = stubs_solana.SOLANA_DEFAULT_SLOT_BLOCK_GAP
             # MAG-2233 #1: reset restores offset 0 so a /reset between tests clears
             # any per-test slot divergence and returns every provider to the base slot.
             self.solana_slot_offset = 0
@@ -1009,7 +1044,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # Defaults (when unset) are "eth" / handlers_eth so any direct
         # ``ThreadingHTTPServer(..., JSONRPCHandler)`` construction outside
         # ``main()`` behaves the same as before this change. ETH listeners
-        # at PROVIDER_PORTS / BACKUP_PROVIDER_PORTS leave the defaults in
+        # at ETH_PRIMARY_PORTS / ETH_BACKUP_PORTS leave the defaults in
         # place; BTC listeners (BTC_PRIMARY_PORTS) and LN listeners
         # (LN_PRIMARY_PORTS) override both attributes at bootstrap.
         #
@@ -2506,24 +2541,24 @@ class ControlHandler(BaseHTTPRequestHandler):
             # poisoned from the start.
             import socket
             from constants import (
-                PROVIDER_PORTS, BACKUP_PROVIDER_PORTS, SOLO_PROVIDER_PORTS,
+                ETH_PRIMARY_PORTS, ETH_BACKUP_PORTS, ETH_SOLO_PORTS,
                 BTC_PRIMARY_PORTS, LN_PRIMARY_PORTS, SOLANA_PRIMARY_PORTS,
-                SOLO_SOLANA_PROVIDER_PORTS,
-                GRPC_PROVIDER_PORTS, GRPC_BACKUP_PORTS,
-                REST_PORTS, REST_BACKUP_PORTS,
-                TM_PORTS, TM_BACKUP_PORTS,
-                WS_PORTS, WS_BACKUP_PORTS,
+                SOLANA_SOLO_PORTS,
+                GRPC_PRIMARY_PORTS, GRPC_BACKUP_PORTS,
+                REST_PRIMARY_PORTS, REST_BACKUP_PORTS,
+                TM_PRIMARY_PORTS, TM_BACKUP_PORTS,
+                WS_PRIMARY_PORTS, WS_BACKUP_PORTS,
             )
             all_ports = sorted({
-                *PROVIDER_PORTS.values(), *BACKUP_PROVIDER_PORTS.values(),
-                *SOLO_PROVIDER_PORTS.values(),
+                *ETH_PRIMARY_PORTS.values(), *ETH_BACKUP_PORTS.values(),
+                *ETH_SOLO_PORTS.values(),
                 *BTC_PRIMARY_PORTS.values(), *LN_PRIMARY_PORTS.values(),
                 *SOLANA_PRIMARY_PORTS.values(),
-                *SOLO_SOLANA_PROVIDER_PORTS.values(),
-                *GRPC_PROVIDER_PORTS.values(), *GRPC_BACKUP_PORTS.values(),
-                *REST_PORTS.values(), *REST_BACKUP_PORTS.values(),
-                *TM_PORTS.values(), *TM_BACKUP_PORTS.values(),
-                *WS_PORTS.values(), *WS_BACKUP_PORTS.values(),
+                *SOLANA_SOLO_PORTS.values(),
+                *GRPC_PRIMARY_PORTS.values(), *GRPC_BACKUP_PORTS.values(),
+                *REST_PRIMARY_PORTS.values(), *REST_BACKUP_PORTS.values(),
+                *TM_PRIMARY_PORTS.values(), *TM_BACKUP_PORTS.values(),
+                *WS_PRIMARY_PORTS.values(), *WS_BACKUP_PORTS.values(),
             })
             missing = []
             for port in all_ports:
@@ -2768,7 +2803,7 @@ def main():
       JSON-RPC ETH (six listeners — three primary + three backup)
         - Primary  : ports 18545 / 18546 / 18547 (pids 1-3, handler=eth)
         - Backup   : ports 18560 / 18561 / 18562 (pids 4-6, handler=eth)
-        See PROVIDER_PORTS / BACKUP_PROVIDER_PORTS / ALL_PROVIDER_PORTS in
+        See ETH_PRIMARY_PORTS / ETH_BACKUP_PORTS / ETH_ALL_PORTS in
         constants.py — the simulator process is identical across both pools,
         the only difference is the smart-router-side `is_backup: true` flag
         in values_sim.yml.
@@ -2845,7 +2880,7 @@ def main():
     # Primary-tier states are shared across surfaces (one ProviderState backs
     # JSON-RPC + REST + gRPC + TM + WS for the same pid). Backup-tier states
     # are independent per surface — distinct pids guarantee distinct state.
-    states = {pid: ProviderState() for pid in ALL_PROVIDER_PORTS}
+    states = {pid: ProviderState() for pid in ETH_ALL_PORTS}
     for pid in GRPC_BACKUP_PORTS:
         states[pid] = ProviderState()
     for pid in REST_BACKUP_PORTS:
@@ -2854,15 +2889,15 @@ def main():
         states[pid] = ProviderState()
     for pid in WS_BACKUP_PORTS:
         states[pid] = ProviderState()
-    # Solana solo pid (20) is NOT in ALL_PROVIDER_PORTS — it gets its own
+    # Solana solo pid (20) is NOT in ETH_ALL_PORTS — it gets its own
     # ProviderState, the same way each backup pool above does. A dedicated
     # state keeps the solo Solana listener's /scenario config independent of
     # the Solana primary pool (pids 1-3).
-    for pid in SOLO_SOLANA_PROVIDER_PORTS:
+    for pid in SOLANA_SOLO_PORTS:
         states[pid] = ProviderState()
 
     servers = []
-    for pid, port in ALL_PROVIDER_PORTS.items():
+    for pid, port in ETH_ALL_PORTS.items():
         # ThreadingHTTPServer so a slow/hanging request on one provider doesn't
         # block its own subsequent requests or the other providers' threads.
         # ETH listener pool: ``handler_chain_family`` defaults to "eth" and
@@ -2910,7 +2945,7 @@ def main():
     # gating on ``chain_family="solana"``. Shares ProviderState with the
     # matching ETH primary pid (1-3) so a single /scenario POST that sets
     # ``solana_slot_block_gap`` on pid "1" is visible from the Solana port.
-    # These ports are deliberately NOT in ALL_PROVIDER_PORTS — that union is
+    # These ports are deliberately NOT in ETH_ALL_PORTS — that union is
     # bound by the ETH-default loop above (handlers_eth), so adding Solana
     # there would (a) double-bind 18582-18584 and (b) route them to the ETH
     # handler. The dedicated loop here is what gives them handlers_solana,
@@ -2930,9 +2965,9 @@ def main():
     # with the primary pool. This isolation is the point: a /scenario POST on
     # the solo Solana router reconfigures only pid 20, so it can't disturb the
     # solana-sim-router's primary pool (pids 1-3). Like the primary pool, this
-    # port is deliberately NOT in ALL_PROVIDER_PORTS (which the ETH-default loop
+    # port is deliberately NOT in ETH_ALL_PORTS (which the ETH-default loop
     # owns) — the dedicated loop here is what binds it to handlers_solana.
-    for pid, port in SOLO_SOLANA_PROVIDER_PORTS.items():
+    for pid, port in SOLANA_SOLO_PORTS.items():
         # _SimThreadingHTTPServer (not bare ThreadingHTTPServer) so this solo
         # listener gets the same 128-deep listen backlog as every other pool —
         # the bare server defaults to a backlog of 5, which drops connections
@@ -2949,7 +2984,7 @@ def main():
     # provider 1 changes how both the JSON-RPC port (18545) and the REST
     # port (18551) reply. Each server gets its own RestHandler instance
     # because BaseHTTPRequestHandler is per-request.
-    for pid, port in REST_PORTS.items():
+    for pid, port in REST_PRIMARY_PORTS.items():
         rest_srv = _SimThreadingHTTPServer(("0.0.0.0", port), RestHandler)
         rest_srv.state       = states[pid]
         rest_srv.provider_id = pid
@@ -2968,7 +3003,7 @@ def main():
     # Tendermint-RPC servers (MAG-1841). Same pattern as REST — primary tier
     # shares ProviderState with the JSON-RPC primary; backup tier is its
     # own pool with distinct pids 13-15.
-    for pid, port in TM_PORTS.items():
+    for pid, port in TM_PRIMARY_PORTS.items():
         tm_srv = _SimThreadingHTTPServer(("0.0.0.0", port), TendermintHandler)
         tm_srv.state       = states[pid]
         tm_srv.provider_id = pid
@@ -2984,7 +3019,7 @@ def main():
     # JSON-RPC primary (pids 1-3); backup tier (pids 16-18) gets its own
     # pool. Each server gets its own WsHandler instance because
     # BaseHTTPRequestHandler is per-request.
-    for pid, port in WS_PORTS.items():
+    for pid, port in WS_PRIMARY_PORTS.items():
         ws_srv = _SimThreadingHTTPServer(("0.0.0.0", port), handlers_ws.WsHandler)
         ws_srv.state       = states[pid]
         ws_srv.provider_id = pid
@@ -3025,11 +3060,11 @@ def main():
               f"(set SIM_SCENARIO_TTL_SECONDS=0 to disable)")
 
     print("Provider simulator started")
-    for pid, port in PROVIDER_PORTS.items():
+    for pid, port in ETH_PRIMARY_PORTS.items():
         print(f"  provider {pid:>2} (jsonrpc-eth,    primary) → :{port}")
-    for pid, port in BACKUP_PROVIDER_PORTS.items():
+    for pid, port in ETH_BACKUP_PORTS.items():
         print(f"  provider {pid:>2} (jsonrpc-eth,    backup)  → :{port}")
-    for pid, port in SOLO_PROVIDER_PORTS.items():
+    for pid, port in ETH_SOLO_PORTS.items():
         print(f"  provider {pid:>2} (jsonrpc-eth,    solo)    → :{port}")
     for pid, port in BTC_PRIMARY_PORTS.items():
         print(f"  provider {pid:>2} (jsonrpc-btc,    primary) → :{port}")
@@ -3037,21 +3072,21 @@ def main():
         print(f"  provider {pid:>2} (jsonrpc-ln,     primary) → :{port}")
     for pid, port in SOLANA_PRIMARY_PORTS.items():
         print(f"  provider {pid:>2} (jsonrpc-solana, primary) → :{port}")
-    for pid, port in SOLO_SOLANA_PROVIDER_PORTS.items():
+    for pid, port in SOLANA_SOLO_PORTS.items():
         print(f"  provider {pid:>2} (jsonrpc-solana, solo)    → :{port}")
-    for pid, port in GRPC_PROVIDER_PORTS.items():
+    for pid, port in GRPC_PRIMARY_PORTS.items():
         print(f"  provider {pid:>2} (grpc,           primary) → :{port}")
     for pid, port in GRPC_BACKUP_PORTS.items():
         print(f"  provider {pid:>2} (grpc,           backup)  → :{port}")
-    for pid, port in REST_PORTS.items():
+    for pid, port in REST_PRIMARY_PORTS.items():
         print(f"  provider {pid:>2} (rest,           primary) → :{port}")
     for pid, port in REST_BACKUP_PORTS.items():
         print(f"  provider {pid:>2} (rest,           backup)  → :{port}")
-    for pid, port in TM_PORTS.items():
+    for pid, port in TM_PRIMARY_PORTS.items():
         print(f"  provider {pid:>2} (tendermintrpc,  primary) → :{port}")
     for pid, port in TM_BACKUP_PORTS.items():
         print(f"  provider {pid:>2} (tendermintrpc,  backup)  → :{port}")
-    for pid, port in WS_PORTS.items():
+    for pid, port in WS_PRIMARY_PORTS.items():
         print(f"  provider {pid:>2} (ws,             primary) → :{port}")
     for pid, port in WS_BACKUP_PORTS.items():
         print(f"  provider {pid:>2} (ws,             backup)  → :{port}")
@@ -3069,7 +3104,7 @@ def main():
     # tests that don't install gRPC extras).
     try:
         import grpc_server  # local import keeps gRPC dep optional
-        for pid, port in GRPC_PROVIDER_PORTS.items():
+        for pid, port in GRPC_PRIMARY_PORTS.items():
             threads.append(threading.Thread(
                 target=grpc_server.run_grpc_in_thread,
                 args=(port, states[pid]),

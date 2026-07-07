@@ -214,6 +214,12 @@ METHOD_DEFAULTS: Dict[str, Any] = {
     "debug_getRawTransaction":  "0x",
 }
 
+# Chain-explicit alias — matches the naming of stubs_btc.BTC_METHOD_DEFAULTS /
+# stubs_lnd.LND_METHOD_DEFAULTS so ETH call sites can name the chain they stub.
+# Same dict object; the unprefixed name stays canonical until all importers
+# migrate to the ETH_-prefixed name, then the unprefixed one can be removed.
+ETH_METHOD_DEFAULTS = METHOD_DEFAULTS
+
 
 # ── Chain-domain error stubs ──────────────────────────────────────────────────
 #
@@ -322,4 +328,10 @@ ERROR_STUBS: Dict[str, Dict[str, Any]] = {
         "message": "insufficient funds for gas * price + value",
     },
 }
+
+# Chain-explicit alias — matches the naming of stubs_btc.BTC_ERROR_STUBS /
+# stubs_lnd.LND_ERROR_STUBS so ETH call sites can name the chain they stub.
+# Same dict object; the unprefixed name stays canonical until all importers
+# migrate to the ETH_-prefixed name, then the unprefixed one can be removed.
+ETH_ERROR_STUBS = ERROR_STUBS
 

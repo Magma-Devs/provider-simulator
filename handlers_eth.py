@@ -64,12 +64,12 @@ import threading
 import time
 from typing import Any, Dict, Tuple
 
-from stubs import ERROR_STUBS, METHOD_DEFAULTS
+from stubs import ETH_ERROR_STUBS, ETH_METHOD_DEFAULTS
 
 
 # --- MAG-1897: optional advancing eth head ---------------------------------
 # The simulated eth head is normally a STATIC constant
-# (METHOD_DEFAULTS["eth_blockNumber"] = "0x1312D00"). A test that needs the
+# (ETH_METHOD_DEFAULTS["eth_blockNumber"] = "0x1312D00"). A test that needs the
 # router's per-endpoint sync optimizer to actually DEMOTE a stale provider must
 # let the head MOVE: the optimizer's forward-only sync ratchet only releases a
 # provider's lag as the cluster head advances past it, so on a static head a
@@ -83,7 +83,7 @@ from stubs import ERROR_STUBS, METHOD_DEFAULTS
 #   POST /reset and /reset/all       -> reset the head to its static base
 # current_eth_head() is the single source the eth success-path reads for the head.
 _HEAD_LOCK = threading.Lock()
-_head_base = int(METHOD_DEFAULTS["eth_blockNumber"], 16)  # 20_000_000
+_head_base = int(ETH_METHOD_DEFAULTS["eth_blockNumber"], 16)  # 20_000_000
 _head_extra = 0      # manual bumps + folded continuous advance (blocks above base)
 _head_rate = 0.0     # continuous advance, blocks/sec (0.0 = off => static head)
 _head_anchor = 0.0   # time.monotonic() when the current rate took effect
@@ -169,9 +169,9 @@ def handle(state, request: dict, snap: dict, lava_headers: dict) -> Tuple[int, D
     # Two ways for a test to inject an error on one method while leaving
     # other methods on their success path:
     #
-    #   1. Named catalogue (primary, mirrors how METHOD_DEFAULTS works):
+    #   1. Named catalogue (primary, mirrors how ETH_METHOD_DEFAULTS works):
     #          responses[method] = {"error_stub": "revert"}
-    #      The simulator resolves the name against its local ERROR_STUBS
+    #      The simulator resolves the name against its local ETH_ERROR_STUBS
     #      dict — single source of truth for envelope content.
     #
     #   2. Raw envelope (escape-hatch for ad-hoc shapes that don't earn
@@ -182,14 +182,14 @@ def handle(state, request: dict, snap: dict, lava_headers: dict) -> Tuple[int, D
     # rather than a silent fallback (typo visibility).
     err = None
     if "error_stub" in method_cfg:
-        err = ERROR_STUBS[method_cfg["error_stub"]]
+        err = ETH_ERROR_STUBS[method_cfg["error_stub"]]
     elif "error" in method_cfg:
         err = method_cfg["error"]
     if err is not None:
         http_st = method_cfg.get("http_status", 200)
         return http_st, {"jsonrpc": "2.0", "id": req_id, "error": err}
 
-    result = method_cfg.get("result", METHOD_DEFAULTS.get(method, "0x1"))
+    result = method_cfg.get("result", ETH_METHOD_DEFAULTS.get(method, "0x1"))
 
     blocks_behind = snap.get("blocks_behind", 0)
 

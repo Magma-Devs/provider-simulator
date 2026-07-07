@@ -20,10 +20,12 @@ for echo-style endpoints (``/balances/{address}``) and ``query`` (parsed
 What the handler does, in order
 -------------------------------
 1. Look up ``state.responses[(verb, template)]`` for a test-supplied override.
-2. If the override carries an error envelope, return it with the configured
-   HTTP status.
+2. If the override carries a named ``error_stub`` (resolved against
+   ``REST_ERROR_STUBS``) or a raw ``error`` envelope, return it with the
+   configured HTTP status.
 3. If the override carries a ``body`` key, return that body with the
-   configured ``status`` (default 200).
+   configured ``http_status`` (default 200; ``status`` is accepted as a
+   deprecated fallback — ``http_status`` wins when both are present).
 4. Otherwise resolve the stub from ``REST_METHOD_DEFAULTS`` (deep-copied so
    per-request mutations don't leak), apply path-specific echo / shift /
    blocks_behind logic, and return it.
@@ -40,7 +42,7 @@ easy to grep when gRPC sims (MAG-1780) ship their own handler.
 from copy import deepcopy
 from typing import Any, Dict, Tuple
 
-from stubs_rest import REST_METHOD_DEFAULTS, cosmos_height
+from stubs_rest import REST_ERROR_STUBS, REST_METHOD_DEFAULTS, cosmos_height
 
 
 def handle(
@@ -90,16 +92,37 @@ def handle(
         method_cfg = state.responses.get(key) or state.responses.get("default", {})
 
     if isinstance(method_cfg, dict):
-        # Error envelope override — mirrors handlers_eth's per-method error path.
-        # Shape: {"status": 503, "error": {"code": "internal", "message": "..."}}
-        if "error" in method_cfg:
-            http_st = method_cfg.get("status", method_cfg.get("http_status", 500))
-            return http_st, {"error": method_cfg["error"]}
+        # Both override branches below resolve their HTTP status the same
+        # way: "http_status" is the primary key (the name every other
+        # handler and the provider-wide snap use); "status" is the
+        # deprecated REST-only fallback — migrate callers, then remove.
+        # When both are present, http_status wins.
+
+        # Per-(verb, template) error override — mirrors handlers_eth's
+        # per-method error path, two flavours:
+        #
+        #   1. Named catalogue (primary):
+        #          responses[(verb, template)] = {"error_stub": "not_found"}
+        #      Resolved against REST_ERROR_STUBS — single source of truth
+        #      for envelope content. Unknown stub name raises KeyError so
+        #      a typo fails loudly rather than falling back silently.
+        #
+        #   2. Raw envelope (escape-hatch for ad-hoc shapes):
+        #          responses[(verb, template)] =
+        #              {"http_status": 503, "error": {"code": "internal", "message": "..."}}
+        err = None
+        if "error_stub" in method_cfg:
+            err = REST_ERROR_STUBS[method_cfg["error_stub"]]
+        elif "error" in method_cfg:
+            err = method_cfg["error"]
+        if err is not None:
+            http_st = method_cfg.get("http_status", method_cfg.get("status", 500))
+            return http_st, {"error": err}
 
         # Custom body override — replaces the stub entirely.
-        # Shape: {"status": 200, "body": {"balances": [...], "pagination": {...}}}
+        # Shape: {"http_status": 200, "body": {"balances": [...], "pagination": {...}}}
         if "body" in method_cfg:
-            http_st = method_cfg.get("status", method_cfg.get("http_status", 200))
+            http_st = method_cfg.get("http_status", method_cfg.get("status", 200))
             return http_st, method_cfg["body"]
 
     # 2. Stub lookup with deep-copy guard.

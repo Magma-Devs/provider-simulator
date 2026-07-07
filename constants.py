@@ -12,7 +12,12 @@ import os
 # (PairingListEmptyError → backup fallback in consumer_session_manager.go).
 # The simulator process is identical across both pools — tier is a router-side
 # concept, not a simulator-side one. The split here keeps intent visible at
-# import sites; ALL_PROVIDER_PORTS is the union used by server bootstrap.
+# import sites; ETH_ALL_PORTS is the union used by server bootstrap.
+#
+# Naming convention: <CHAIN-OR-TRANSPORT>_<TIER>_PORTS — e.g. ETH_PRIMARY_PORTS,
+# GRPC_BACKUP_PORTS, SOLANA_SOLO_PORTS. Pre-convention names are kept as
+# deprecated aliases next to their canonical definitions so existing importers
+# keep working; migrate callers to the new names, then remove the aliases.
 # Backups live at 18560-18562 (not contiguous with primaries) because
 # 18548-18559 are claimed by gRPC / REST / Tendermint / WebSocket surfaces.
 #
@@ -29,18 +34,27 @@ import os
 # ``handler_chain_family``; ``mode="down"`` is the universal exception
 # (MAG-2092) and fires on every listener regardless of ``chain_family``.
 # See BTC_PRIMARY_PORTS / LN_PRIMARY_PORTS below for the full allocation.
-PROVIDER_PORTS        = {"1": 18545, "2": 18546, "3": 18547}
-BACKUP_PROVIDER_PORTS = {"4": 18560, "5": 18561, "6": 18562}
+ETH_PRIMARY_PORTS = {"1": 18545, "2": 18546, "3": 18547}
+ETH_BACKUP_PORTS  = {"4": 18560, "5": 18561, "6": 18562}
 # Solo JSON-RPC primary listener (MAG-2061). One provider, no backup — the
 # customer-outage deployment shape. Pid 19 (next after the WS-backup pool's
 # pid 18) keeps the global pid namespace contiguous; port 18581 sits one
 # above the LN primary range (18578-18580). Handler dispatch is the default
 # ETH path (handlers_eth.handle) because this listener is bound by the same
-# bootstrap loop that owns PROVIDER_PORTS / BACKUP_PROVIDER_PORTS — adding
-# the entry to ALL_PROVIDER_PORTS is sufficient; no separate listener block
+# bootstrap loop that owns ETH_PRIMARY_PORTS / ETH_BACKUP_PORTS — adding
+# the entry to ETH_ALL_PORTS is sufficient; no separate listener block
 # is required.
-SOLO_PROVIDER_PORTS   = {"19": 18581}
-ALL_PROVIDER_PORTS    = {**PROVIDER_PORTS, **BACKUP_PROVIDER_PORTS, **SOLO_PROVIDER_PORTS}
+ETH_SOLO_PORTS = {"19": 18581}
+# Union of the three ETH JSON-RPC pools above (primary + backup + solo) —
+# the pid/port set the ETH-default bootstrap loop in server.py binds. The
+# other chains' pools (BTC / LN / Solana / gRPC / REST / TM / WS) are NOT
+# part of this union; each is bound by its own dedicated loop.
+ETH_ALL_PORTS = {**ETH_PRIMARY_PORTS, **ETH_BACKUP_PORTS, **ETH_SOLO_PORTS}
+
+PROVIDER_PORTS        = ETH_PRIMARY_PORTS  # deprecated alias — migrate callers, then remove
+BACKUP_PROVIDER_PORTS = ETH_BACKUP_PORTS   # deprecated alias — migrate callers, then remove
+SOLO_PROVIDER_PORTS   = ETH_SOLO_PORTS     # deprecated alias — migrate callers, then remove
+ALL_PROVIDER_PORTS    = ETH_ALL_PORTS      # deprecated alias — migrate callers, then remove
 
 # Bitcoin JSON-RPC primary pool (MAG-2089). Each listener routes the
 # success branch unconditionally through ``handlers_btc.handle(...)`` —
@@ -89,16 +103,18 @@ LN_PRIMARY_PORTS  = {"1": 18578, "2": 18579, "3": 18580}
 SOLANA_PRIMARY_PORTS = {"1": 18582, "2": 18583, "3": 18584}
 
 # Solana JSON-RPC solo listener (MAG-2239). One provider, no backup — the
-# Solana analogue of the ETH solo pool (SOLO_PROVIDER_PORTS, pid 19 / 18581),
+# Solana analogue of the ETH solo pool (ETH_SOLO_PORTS, pid 19 / 18581),
 # the customer-outage deployment shape for a single Solana endpoint. Pid 20
 # (next free after the ETH solo pid 19) keeps the global pid namespace
 # contiguous; port 18585 sits one above the Solana primary range
 # (18582-18584). Handler dispatch is Solana (handler_module=handlers_solana),
 # matching SOLANA_PRIMARY_PORTS — bound by a dedicated bootstrap loop, NOT via
-# ALL_PROVIDER_PORTS (that union is owned by the ETH-default loop). This pool
+# ETH_ALL_PORTS (that union is owned by the ETH-default loop). This pool
 # is deliberately separate from SOLANA_PRIMARY_PORTS so a /scenario call on the
 # solo router can't collide with the solana-sim-router's primary-pool state.
-SOLO_SOLANA_PROVIDER_PORTS = {"20": 18585}
+SOLANA_SOLO_PORTS = {"20": 18585}
+
+SOLO_SOLANA_PROVIDER_PORTS = SOLANA_SOLO_PORTS  # deprecated alias — migrate callers, then remove
 
 # Control API (scenario config, reset, stats, history)
 CONTROL_PORT = 19000
@@ -108,32 +124,40 @@ CONTROL_PORT = 19000
 # chain_family="grpc" reconfigures the matching gRPC servicer just like an
 # eth/btc payload reconfigures the JSON-RPC handler. REST sim (MAG-1777)
 # takes 18551 / 18552 / 18553 so the gRPC range stays compact below it.
-GRPC_PROVIDER_PORTS = {"1": 18548, "2": 18549, "3": 18550}
+GRPC_PRIMARY_PORTS = {"1": 18548, "2": 18549, "3": 18550}
+
+GRPC_PROVIDER_PORTS = GRPC_PRIMARY_PORTS  # deprecated alias — migrate callers, then remove
 
 # REST provider servers (MAG-1777). One per simulated provider, sharing the
 # same ProviderState dict the JSON-RPC servers use — a /scenario call with
 # chain_family="rest" reconfigures the matching REST handler just like an
 # eth/btc payload reconfigures the JSON-RPC handler. Pinned to 18551-18553
 # leaving 18548-18550 reserved for MAG-1780's gRPC sims.
-REST_PORTS = {"1": 18551, "2": 18552, "3": 18553}
+REST_PRIMARY_PORTS = {"1": 18551, "2": 18552, "3": 18553}
+
+REST_PORTS = REST_PRIMARY_PORTS  # deprecated alias — migrate callers, then remove
 
 # Tendermint-RPC (CometBFT) provider servers (MAG-1841). One per simulated
 # provider, sharing the same ProviderState dict the other handlers use — a
 # /scenario call with chain_family="tendermintrpc" reconfigures the matching
 # TendermintHandler. Pinned to 18554-18556 leaving the earlier ranges intact
 # (ETH 18545-7, gRPC 18548-50, REST 18551-3).
-TM_PORTS = {"1": 18554, "2": 18555, "3": 18556}
+TM_PRIMARY_PORTS = {"1": 18554, "2": 18555, "3": 18556}
+
+TM_PORTS = TM_PRIMARY_PORTS  # deprecated alias — migrate callers, then remove
 
 # WebSocket provider servers (MAG-1801). One per simulated provider, sharing
 # the same ProviderState dict that backs the JSON-RPC / REST / gRPC / TM
 # handlers. A /scenario call with chain_family="ws" reconfigures the matching
 # WS handler (latency, fault primitives, corruption). Pinned to 18557-18559
 # above the MAG-1841 TM range; 18560-18562 above WS is the backup-tier
-# JSON-RPC range (BACKUP_PROVIDER_PORTS, above).
-WS_PORTS = {"1": 18557, "2": 18558, "3": 18559}
+# JSON-RPC range (ETH_BACKUP_PORTS, above).
+WS_PRIMARY_PORTS = {"1": 18557, "2": 18558, "3": 18559}
+
+WS_PORTS = WS_PRIMARY_PORTS  # deprecated alias — migrate callers, then remove
 
 # ── Backup-tier listeners for the non-JSON-RPC surfaces (MAG-18xx) ────────────
-# Same shape contract as BACKUP_PROVIDER_PORTS above — the surface handler is
+# Same shape contract as ETH_BACKUP_PORTS above — the surface handler is
 # identical to its primary, only the router-side `is_backup: true` flag (in
 # values_sim.yml) and the dedicated port range differ. The simulator process
 # treats every pool the same; tier semantics live in the smart-router.

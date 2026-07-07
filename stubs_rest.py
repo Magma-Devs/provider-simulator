@@ -240,3 +240,38 @@ def get_default(verb: str, template: str) -> Any:
     address echo, blocks_behind shifts in ``handlers_rest``).
     """
     return deepcopy(REST_METHOD_DEFAULTS[(verb, template)])
+
+
+# ── Cosmos REST error stubs ───────────────────────────────────────────────────
+#
+# REST_ERROR_STUBS mirrors stubs.py::ERROR_STUBS (ETH) and
+# stubs_btc.py::BTC_ERROR_STUBS but uses the Cosmos SDK's grpc-gateway error
+# body: {"code": <grpc code int>, "message": <str>, "details": []}. Stubs are
+# the *inner* error object; ``handlers_rest.handle`` wraps them as
+# ``{"error": <stub>}`` at emission time — the same body shape the raw
+# ``{"error": {...}}`` override path emits.
+#
+# Usage via the per-(verb, template) override path:
+#     POST /scenario {"providers": {"1": {"chain_family": "rest",
+#                                          "responses": [[
+#                                              ["GET", "/cosmos/staking/v1beta1/validators"],
+#                                              {"error_stub": "not_found", "status": 404}]]}}}
+
+REST_ERROR_STUBS: Dict[str, Dict[str, Any]] = {
+
+    # Resource not found — grpc-gateway NotFound (code 5). Emitted when a
+    # query targets a key / height / address the node doesn't have.
+    "not_found": {
+        "code":    5,
+        "message": "rpc error: code = NotFound desc = not found",
+        "details": [],
+    },
+
+    # Internal server error — grpc-gateway Internal (code 13). The generic
+    # "something broke node-side" shape.
+    "internal": {
+        "code":    13,
+        "message": "rpc error: code = Internal desc = internal error",
+        "details": [],
+    },
+}
