@@ -291,9 +291,10 @@ class TestScenario:
         assert "applied" in body
         assert body["applied"]["3"]["chain_family"] == "eth"
 
-    def test_post_response_old_keys_unchanged(self, sim):
-        # Regression pin: the complete response shape must stay unchanged.
-        # The /scenario POST response is always exactly {"status": "ok", "applied": {...}}.
+    def test_scenario_success_response_shape_includes_applied(self, sim):
+        # Pin the full /scenario success response shape, including the new
+        # "applied" key: the body is always exactly {"status": "ok", "applied": {...}}
+        # — no key missing, no extra keys.
         status, body = _post(_ctrl(sim, "/scenario"), {
             "providers": {"1": {"mode": "error"}}
         })

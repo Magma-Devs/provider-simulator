@@ -2392,9 +2392,12 @@ class ControlHandler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self._reply(400, {"error": str(exc)})
                 return
-            for pid, state, staged_cfg, _ in staged:
+            for _pid, state, staged_cfg, _family in staged:
                 state.update(staged_cfg)
-            applied = {pid: {"chain_family": fam} for pid, state, _, fam in staged}
+            applied = {
+                pid: {"chain_family": family}
+                for pid, _state, _staged_cfg, family in staged
+            }
             self._reply(200, {"status": "ok", "applied": applied})
 
         elif self.path == "/reset":
