@@ -3,6 +3,10 @@
 # runtime — both are C-extension packages and not part of stdlib.
 # 1.80 floor: the vendored cosmos_pb2 generated gRPC stubs raise at import on
 # grpcio<1.80, which aborts the whole `pytest tests/` collection.
-grpcio>=1.80,<2.0
-grpcio-reflection>=1.80,<2.0
+# grpcio-reflection 1.82+ ships generated code that needs a protobuf 7.x runtime;
+# protobuf is capped <7 below, so a fresh resolve of 1.82 crashes at import
+# (VersionError: gencode 7.35.0, runtime 6.x). Cap both to the proven 1.81 line
+# until protobuf itself can move to 7.
+grpcio>=1.80,<1.82
+grpcio-reflection>=1.80,<1.82
 protobuf>=5.27,<7
