@@ -27,14 +27,29 @@ routers:
           - url: "YOUR_ETH_RPC_PROVIDER_URL"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
-          - url: "wss://g.w.lavanet.xyz:443/gateway/eth/rpc/YOUR_LAVA_GRPC_KEY"
+          - url: "wss://g.w.lavanet.xyz:443/gateway/eth/rpc/YOUR_LAVA_GATEWAY_KEY"
             interface: "jsonrpc"
+      - name: "QuickNode1"
+        skip_verifications: "chain-id,pruning"
+        endpoints:
+          - url: "YOUR_ETH_QUICKNODE_URL"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
   # eth-sim — simulator router (only in values_sim.yml, not in core values.yml)
   # Three sim providers wired to the in-cluster provider-simulator service.
   - id: "eth-sim"
     network: "eth1"
+    cross_validation_policies:
+      - method: "eth_getBlockByNumber"
+        enabled: true
+        agreement_threshold: 2
+        max_participants: 3
+        min_groups: 2
+      - method: "eth_chainId"
+        enabled: false
     nodes:
       - name: "SimProvider1"
+        group_label: "tier-1"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18545"
             interface: "jsonrpc"
@@ -42,6 +57,7 @@ routers:
           - url: "ws://provider-simulator.lava-infra.svc.cluster.local:18557/ws"
             interface: "jsonrpc"
       - name: "SimProvider2"
+        group_label: "tier-1"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18546"
             interface: "jsonrpc"
@@ -49,6 +65,7 @@ routers:
           - url: "ws://provider-simulator.lava-infra.svc.cluster.local:18558/ws"
             interface: "jsonrpc"
       - name: "SimProvider3"
+        group_label: "external"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18547"
             interface: "jsonrpc"
@@ -103,13 +120,37 @@ routers:
       maxReplicas: 1
       targetCPUUtilizationPercentage: 75
       targetMemoryUtilizationPercentage: 75
+  # eth-solo-sim — single-provider simulator router (MAG-2061). One
+  # primary node, zero backups — the customer-outage deployment shape
+  # used by the single-provider-no-auto-recover + single-provider-under-
+  # threshold-recovery test groups. Wired to a dedicated provider-simulator
+  # listener (pid 19 / port 18581) so a /scenario flip on pid 19 cannot
+  # collide with eth-sim primary/backup state. Mirrors eth-sim shape:
+  # addons archive/trace/debug, network eth1. WebSocket endpoint omitted
+  # because the tests only exercise the HTTP JSON-RPC path; if WS becomes
+  # needed later, allocate a dedicated WS port + listener rather than
+  # sharing the eth-sim WS pool.
+  - id: "eth-solo-sim"
+    network: "eth1"
+    nodes:
+      - name: "SimProvider19"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18581"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 1
+      targetCPUUtilizationPercentage: 75
+      targetMemoryUtilizationPercentage: 75
   # LAVA over REST
   - id: "lava-rest"
     network: "lava"
     nodes:
       - name: "LavaGateway"
         endpoints:
-          - url: "https://g.w.lavanet.xyz:443/gateway/lava/rest/YOUR_LAVA_GRPC_KEY"
+          - url: "https://g.w.lavanet.xyz:443/gateway/lava/rest/YOUR_LAVA_GATEWAY_KEY"
             interface: "rest"
             addons: []
   # lava-sim-rest — simulator router for the Cosmos REST chain (MAG-1834).
@@ -250,7 +291,7 @@ routers:
     nodes:
       - name: "LavaGateway"
         endpoints:
-          - url: "grpcs://YOUR_LAVA_GRPC_KEY-lava.g.w.lavanet.xyz:443"
+          - url: "grpcs://YOUR_LAVA_GATEWAY_KEY-lava.g.w.lavanet.xyz:443"
             interface: "grpc"
             auth-config:
               use-tls: true
@@ -261,7 +302,7 @@ routers:
     nodes:
       - name: "LavaGateway"
         endpoints:
-          - url: "https://g.w.lavanet.xyz:443/gateway/lava/rpc-http/YOUR_LAVA_GRPC_KEY"
+          - url: "https://g.w.lavanet.xyz:443/gateway/lava/rpc-http/YOUR_LAVA_GATEWAY_KEY"
             interface: "tendermintrpc"
             addons: []
   # lava-sim-tm — simulator router for the Tendermint-RPC chain (MAG-1842).
@@ -342,18 +383,58 @@ routers:
   - id: "solana"
     network: "solana"
     nodes:
+      # Pairs http + wss under one provider; interface stays "jsonrpc" — binary picks transport from URL scheme.
       - name: "LavaGateway"
         endpoints:
-          - url: "https://g.w.lavanet.xyz:443/gateway/solana/rpc-http/YOUR_LAVA_GRPC_KEY"
+          - url: "https://g.w.lavanet.xyz:443/gateway/solana/rpc-http/YOUR_LAVA_GATEWAY_KEY"
             interface: "jsonrpc"
             addons: []
+          - url: "wss://g.w.lavanet.xyz:443/gateway/solana/rpc/YOUR_LAVA_GATEWAY_KEY"
+            interface: "jsonrpc"
+      # Tatum mainnet JSON-RPC — second distinct upstream so cross-validation
+      # can fire (validateCrossValidationCapacity needs >= 2 providers). API
+      # key passed via x-api-key header (Tatum's auth model).
+      - name: "Tatum1"
+        endpoints:
+          - url: "https://solana-mainnet.gateway.tatum.io"
+            interface: "jsonrpc"
+            addons: []
+            auth_config:
+              auth_headers:
+                x-api-key: "YOUR_TATUM_API_KEY"
+  # Solana testnet JSON-RPC. Three independent testnet upstreams: PublicNode
+  # (keyless), Lava gateway solanat path, QuickNode (keyed). skip_verifications
+  # enabled on every node: the SOLANA spec's chain-id probe (getGenesisHash) is
+  # pinned to mainnet genesis, so a testnet upstream would otherwise fail
+  # startup verification and crash-loop the router.
+  - id: "solana-testnet"
+    network: "solana"
+    nodes:
+      - name: "PublicNode"
+        endpoints:
+          - url: "https://solana-testnet-rpc.publicnode.com"
+            interface: "jsonrpc"
+            addons: []
+        skip_verifications: "enabled"
+      - name: "LavaGateway"
+        endpoints:
+          - url: "https://g.w.lavanet.xyz:443/gateway/solanat/rpc-http/YOUR_LAVA_GATEWAY_KEY"
+            interface: "jsonrpc"
+            addons: []
+        skip_verifications: "enabled"
+      - name: "QuickNode1"
+        endpoints:
+          - url: "YOUR_SOLANA_TESTNET_QUICKNODE_URL"
+            interface: "jsonrpc"
+            addons: []
+        skip_verifications: "enabled"
   # Bitcoin JSON-RPC (Phase 4 bonus — unblocks Group 13 tier-2 classifier tests)
   - id: "btc"
     network: "btc"
     nodes:
       - name: "LavaGateway"
         endpoints:
-          - url: "https://g.w.lavanet.xyz:443/gateway/btc/rpc-http/YOUR_LAVA_GRPC_KEY"
+          - url: "https://g.w.lavanet.xyz:443/gateway/btc/rpc-http/YOUR_LAVA_GATEWAY_KEY"
             interface: "jsonrpc"
             addons: []
   # Bitcoin JSON-RPC simulator-backed — unblocks MAG-1744 (the BTC suite
@@ -399,29 +480,40 @@ routers:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18577"
             interface: "jsonrpc"
             addons: []
-      # Backup tier mirrors eth-sim's pattern (3+3 parity across sim routers).
-      # BTC is JSON-RPC over HTTP only — no WebSocket endpoint, since the
-      # BTC spec has no websocket api-interface. Backup ports 18560-18562
-      # are the provider-simulator's standard backup listener set.
-      - name: "SimBtcBackup1"
-        is_backup: true
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 1
+      targetCPUUtilizationPercentage: 75
+      targetMemoryUtilizationPercentage: 75
+  # Solana JSON-RPC simulator-backed (MAG-2231) — fronts the provider-simulator's
+  # dedicated Solana listeners on 18582-18584. handlers_solana.getLatestBlockhash
+  # returns result.context.slot and result.value.lastValidBlockHeight a configurable
+  # gap apart (~21.9M), reproducing the MAG-1591 consistency-filter bug so the
+  # slot-fix (smart-router 65be9f4) can be verified end-to-end. Distinct from the
+  # real ``solana`` router above (LavaGateway + Tatum). Rendered ingress
+  # (chain-interface convention): ``solana-sim-jsonrpc.<host>``. skip_verifications
+  # mirrors btc-sim — the sim's Solana stubs don't satisfy the router's startup
+  # chain-id / pruning / simulate checks.
+  - id: "solana-sim"
+    network: "solana"
+    nodes:
+      - name: "SimSolanaProvider1"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18560"
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18582"
             interface: "jsonrpc"
             addons: []
-      - name: "SimBtcBackup2"
-        is_backup: true
+      - name: "SimSolanaProvider2"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18561"
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18583"
             interface: "jsonrpc"
             addons: []
-      - name: "SimBtcBackup3"
-        is_backup: true
+      - name: "SimSolanaProvider3"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18562"
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18584"
             interface: "jsonrpc"
             addons: []
     autoscaling:
