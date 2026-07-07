@@ -2492,13 +2492,18 @@ class ControlHandler(BaseHTTPRequestHandler):
                         staged_cfg["responses"] = _normalise_responses(
                             staged_cfg["responses"]
                         )
-                    staged.append((state, staged_cfg))
+                    effective_family = staged_cfg.get("chain_family", state.chain_family)
+                    staged.append((str(pid), state, staged_cfg, effective_family))
             except ValueError as exc:
                 self._reply(400, {"error": str(exc)})
                 return
-            for state, staged_cfg in staged:
+            for _pid, state, staged_cfg, _family in staged:
                 state.update(staged_cfg)
-            self._reply(200, {"status": "ok"})
+            applied = {
+                pid: {"chain_family": family}
+                for pid, _state, _staged_cfg, family in staged
+            }
+            self._reply(200, {"status": "ok", "applied": applied})
 
         elif self.path == "/reset":
             import handlers_eth
