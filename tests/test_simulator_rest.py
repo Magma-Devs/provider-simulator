@@ -1146,6 +1146,99 @@ class TestRestCrossTransportFaultIsolation:
         assert status == 503, f"REST should refuse with 503 under universal-down; got {status}"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Sequenced faults across transports — the fail_first_n window is consumed on
+# the owning JSON-RPC listener and only OBSERVED (never advanced) by REST
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestRestSequencedFaultObservation:
+    """The sequenced fault (fail_first_n / then_mode) counts requests on the
+    OWNING JSON-RPC listener only. The REST port never advances that window —
+    it observes it: while the window is open, a provider-wide down 503s REST
+    too; once the owning listener has consumed the window, REST must see
+    then_mode instead of staying stuck on the raw fault forever."""
+
+    _LATEST = "/cosmos/base/tendermint/v1beta1/blocks/latest"
+
+    def test_rest_down_clears_after_owning_listener_consumes_window(self, sim):
+        """chain_family="eth" + mode=down + fail_first_n=2: REST 503s while
+        the window is open (down is honored on every surface), the two owning
+        ETH calls consume the window, and the SAME REST call then succeeds —
+        the recovery is visible cross-transport, not only on the owning
+        listener."""
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {
+            "chain_family": "eth", "mode": "down",
+            "fail_first_n": 2, "then_mode": "success",
+        }}})
+
+        status, _, _ = _get(sim["rest1"] + self._LATEST)
+        assert status == 503, (
+            f"REST must 503 while the down window is open; got {status}"
+        )
+
+        for i in (1, 2):
+            eth_status, _, _ = _post(sim["jsonrpc1"], body={
+                "jsonrpc": "2.0", "id": i,
+                "method": "eth_blockNumber", "params": [],
+            })
+            assert eth_status == 503, (
+                f"owning ETH call {i} is inside the down window; got {eth_status}"
+            )
+
+        status, body, _ = _get(sim["rest1"] + self._LATEST)
+        assert status == 200, (
+            f"REST must observe the consumed window and serve "
+            f"then_mode=success; got {status}"
+        )
+        assert "block" in body, f"expected REST success body; got {body!r}"
+
+    def test_rest_calls_alone_never_advance_down_window(self, sim):
+        """Non-owning surfaces observe the window but never consume it: with
+        no owning ETH call at all, the REST port keeps 503ing no matter how
+        many REST requests arrive."""
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {
+            "chain_family": "eth", "mode": "down",
+            "fail_first_n": 2, "then_mode": "success",
+        }}})
+        for attempt in range(1, 5):
+            status, _, _ = _get(sim["rest1"] + self._LATEST)
+            assert status == 503, (
+                f"REST call {attempt} must stay 503 — REST traffic never "
+                f"consumes the fail_first_n window; got {status}"
+            )
+
+    def test_rest_observes_then_mode_down_after_owning_success_window(self, sim):
+        """The observation works in both directions: mode=success with
+        then_mode=down serves REST normally while the window is open, then
+        503s REST once the owning listener has consumed the window — REST
+        follows the provider's phase even though the raw mode is success."""
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {
+            "chain_family": "eth", "mode": "success",
+            "fail_first_n": 1, "then_mode": "down",
+        }}})
+
+        status, body, _ = _get(sim["rest1"] + self._LATEST)
+        assert status == 200, (
+            f"REST is inside the mode=success window; got {status}"
+        )
+        assert "block" in body
+
+        eth_status, _, _ = _post(sim["jsonrpc1"], body={
+            "jsonrpc": "2.0", "id": 1,
+            "method": "eth_blockNumber", "params": [],
+        })
+        assert eth_status == 200, (
+            f"the single owning ETH call is inside the success window; "
+            f"got {eth_status}"
+        )
+
+        status, _, _ = _get(sim["rest1"] + self._LATEST)
+        assert status == 503, (
+            f"REST must observe then_mode=down once the owning listener "
+            f"consumed the window; got {status}"
+        )
+
+
 def http_err():
     """Lazy reference to urllib's HTTPError for parametrize tuples."""
     return urllib.error.HTTPError

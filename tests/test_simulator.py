@@ -1302,6 +1302,23 @@ class TestSequencedFaults:
         assert s1 == 200, "first call is in the mode=success window"
         assert s2 == 503, "after the window, then_mode=down returns 503"
 
+    def test_non_owning_listener_never_advances_down_window(self, sim):
+        """A sequenced down authored for another transport is OBSERVED by this
+        listener (down is honored on every surface) but never ADVANCED by it:
+        the fail_first_n window counts owning-listener requests only, and no
+        listener in this fixture owns chain_family="grpc". However many calls
+        arrive here, the window stays open and every call keeps returning 503."""
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {
+            "chain_family": "grpc", "mode": "down",
+            "fail_first_n": 2, "then_mode": "success",
+        }}})
+        for attempt in range(1, 5):
+            status, _ = _rpc(sim["provider1"], "eth_blockNumber")
+            assert status == 503, (
+                f"call {attempt} on a non-owning listener must stay 503 — "
+                f"non-owning traffic never consumes the window; got {status}"
+            )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Mode priority — down / rate_limit / error take full priority

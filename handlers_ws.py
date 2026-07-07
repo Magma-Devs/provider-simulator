@@ -262,6 +262,14 @@ class WsHandler(BaseHTTPRequestHandler):
         # provider being unreachable across every node-url (e.g.
         # MAG-2061).
         ws_owns_snap = snap.get("chain_family") == "ws"
+        if not ws_owns_snap:
+            # Non-owning surface: observe the sequenced-fault window
+            # (fail_first_n) without advancing it — only the owning JSON-RPC
+            # listener consumes the counter. Once that window has elapsed the
+            # snapshot's mode reads as then_mode, so a provider-wide down
+            # clears here instead of refusing the WS upgrade forever.
+            from server import _effective_mode
+            snap["mode"] = _effective_mode(state, snap)
         raw_mode = snap["mode"]
         ws_mode = raw_mode if (ws_owns_snap or raw_mode == "down") else "success"
 
@@ -404,6 +412,17 @@ class WsHandler(BaseHTTPRequestHandler):
                 snap = state.snapshot()
                 t_start = time.monotonic()
 
+                ws_owns_snap = snap.get("chain_family") == "ws"
+                if not ws_owns_snap:
+                    # Non-owning surface: observe the sequenced-fault window
+                    # (fail_first_n) without advancing it — only the owning
+                    # JSON-RPC listener consumes the counter. Rewriting before
+                    # the per-method merge keeps the shadowing order identical
+                    # to the owning path: an explicit per-method mode override
+                    # still wins over the observed window.
+                    from server import _effective_mode
+                    snap["mode"] = _effective_mode(state, snap)
+
                 # Merge per-method overrides into the snap (MAG-1821
                 # follow-up). When no override applies for this method,
                 # ``method_snap is snap`` and behaviour matches pre-follow-up
@@ -427,7 +446,6 @@ class WsHandler(BaseHTTPRequestHandler):
                 # drop_connection). A live WS connection whose provider
                 # is set to mode=down mid-stream still closes via the
                 # down branch in _emit_ws_fault.
-                ws_owns_snap = snap.get("chain_family") == "ws"
                 run_fault_ladder = ws_owns_snap or method_snap["mode"] == "down"
 
                 # MAG-1832 — fault evaluation BEFORE the latency sleep so
