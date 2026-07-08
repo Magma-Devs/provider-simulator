@@ -60,7 +60,7 @@ spec:
             # provider-solo (18581) on the ETH side. Declared here and in the
             # Service so the solo router can reach it via Service DNS (until now
             # the port was bound in-process but had no Service entry).
-            - name: provider-solana-solo
+            - name: solana-solo
               containerPort: 18585
               protocol: TCP
             # REST sim listeners (MAG-1777) — peer to provider-1/2/3, one per

@@ -214,25 +214,25 @@ spec:
     # separated by a configurable gap (solana_slot_block_gap) to reproduce the
     # router's Solana consistency-filter bug (MAG-1591). 18582-18584 sits above
     # the solo listener (18581), keeping the JSON-RPC chain pools contiguous.
-    - name: provider-solana-1
+    - name: solana-1
       port: 18582
       targetPort: 18582
       protocol: TCP
-    - name: provider-solana-2
+    - name: solana-2
       port: 18583
       targetPort: 18583
       protocol: TCP
-    - name: provider-solana-3
+    - name: solana-3
       port: 18584
       targetPort: 18584
       protocol: TCP
     # Solana solo JSON-RPC service port — mirrors the deployment's
-    # provider-solana-solo container port (pid 20 / 18585). A single Solana
+    # solana-solo container port (pid 20 / 18585). A single Solana
     # provider on a dedicated port with its own ProviderState, serving the
     # solana-solo router; peer to provider-solo (18581) on the ETH side. Until
     # now this port was bound in-process but had no Service entry, so a
     # solana-solo router could not reach it via Service DNS.
-    - name: provider-solana-solo
+    - name: solana-solo
       port: 18585
       targetPort: 18585
       protocol: TCP
