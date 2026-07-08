@@ -60,6 +60,8 @@ spec:
             # provider-solo (18581) on the ETH side. Declared here and in the
             # Service so the solo router can reach it via Service DNS (until now
             # the port was bound in-process but had no Service entry).
+            # Name is deliberately short: Kubernetes caps container port names
+            # at 15 characters, so the provider- prefix does not fit here.
             - name: solana-solo
               containerPort: 18585
               protocol: TCP
