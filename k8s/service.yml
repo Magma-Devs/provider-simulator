@@ -227,12 +227,14 @@ spec:
       targetPort: 18584
       protocol: TCP
     # Solana solo JSON-RPC service port — mirrors the deployment's
-    # provider-solana-solo container port (pid 20 / 18585). A single Solana
+    # solana-solo container port (pid 20 / 18585). A single Solana
     # provider on a dedicated port with its own ProviderState, serving the
     # solana-solo router; peer to provider-solo (18581) on the ETH side. Until
     # now this port was bound in-process but had no Service entry, so a
     # solana-solo router could not reach it via Service DNS.
-    - name: provider-solana-solo
+    # Named to match the container port, where the short form is required —
+    # Kubernetes caps container port names at 15 characters.
+    - name: solana-solo
       port: 18585
       targetPort: 18585
       protocol: TCP
