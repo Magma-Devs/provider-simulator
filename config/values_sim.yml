@@ -415,19 +415,19 @@ routers:
           - url: "https://solana-testnet-rpc.publicnode.com"
             interface: "jsonrpc"
             addons: []
-        skip_verifications: "enabled"
+        skip_verifications: "chain-id"
       - name: "LavaGateway"
         endpoints:
           - url: "https://g.w.lavanet.xyz:443/gateway/solanat/rpc-http/YOUR_LAVA_GATEWAY_KEY"
             interface: "jsonrpc"
             addons: []
-        skip_verifications: "enabled"
+        skip_verifications: "chain-id"
       - name: "QuickNode1"
         endpoints:
           - url: "YOUR_SOLANA_TESTNET_QUICKNODE_URL"
             interface: "jsonrpc"
             addons: []
-        skip_verifications: "enabled"
+        skip_verifications: "chain-id"
   # Bitcoin JSON-RPC (Phase 4 bonus — unblocks Group 13 tier-2 classifier tests)
   - id: "btc"
     network: "btc"
