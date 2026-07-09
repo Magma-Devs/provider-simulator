@@ -17,26 +17,20 @@ Adding a new method
 
 from typing import Any, Dict
 
-from constants import (
-    ETH_BLOCK_HASH as BLK_HASH,
-)
-from constants import (
-    ETH_BLOOM as BLOOM,
-)
-from constants import (
-    ETH_CHAIN_ID as CHAIN_ID,
-)
-from constants import (
+# ruff's import-sorter splits multiple aliased names from the same module
+# into one "from constants import (...)" statement per name instead of
+# keeping them in a single block. isort: skip keeps this consolidated —
+# a bare, single-line suppression comment does not work here: with 7
+# names, ruff still pulls most of them out into their own statements and
+# only exempts the one carrying the comment.
+from constants import (  # isort: skip
     ETH_LATEST_BLOCK as LATEST,
-)
-from constants import (
-    ETH_TX_HASH as TX_HASH,
-)
-from constants import (
+    ETH_CHAIN_ID as CHAIN_ID,
     ETH_ZERO_ADDR as ZERO_ADDR,
-)
-from constants import (
     ETH_ZERO_HASH as ZERO_HASH,
+    ETH_BLOCK_HASH as BLK_HASH,
+    ETH_TX_HASH as TX_HASH,
+    ETH_BLOOM as BLOOM,
 )
 
 # ── Object factories ──────────────────────────────────────────────────────────
