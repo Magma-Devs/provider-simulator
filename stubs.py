@@ -18,17 +18,29 @@ Adding a new method
 from typing import Any, Dict
 
 from constants import (
+    ETH_BLOCK_HASH as BLK_HASH,
+)
+from constants import (
+    ETH_BLOOM as BLOOM,
+)
+from constants import (
+    ETH_CHAIN_ID as CHAIN_ID,
+)
+from constants import (
     ETH_LATEST_BLOCK as LATEST,
-    ETH_CHAIN_ID     as CHAIN_ID,
-    ETH_ZERO_ADDR    as ZERO_ADDR,
-    ETH_ZERO_HASH    as ZERO_HASH,
-    ETH_BLOCK_HASH   as BLK_HASH,
-    ETH_TX_HASH      as TX_HASH,
-    ETH_BLOOM        as BLOOM,
+)
+from constants import (
+    ETH_TX_HASH as TX_HASH,
+)
+from constants import (
+    ETH_ZERO_ADDR as ZERO_ADDR,
+)
+from constants import (
+    ETH_ZERO_HASH as ZERO_HASH,
 )
 
-
 # ── Object factories ──────────────────────────────────────────────────────────
+
 
 def block(number: str = LATEST) -> dict:
     """
@@ -39,179 +51,179 @@ def block(number: str = LATEST) -> dict:
     ``number: "0x0"`` — required by the router's pruning verification.
     """
     return {
-        "number":           number,
-        "hash":             BLK_HASH,
-        "parentHash":       ZERO_HASH,
-        "nonce":            "0x0000000000000000",
-        "sha3Uncles":       "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
-        "logsBloom":        BLOOM,
+        "number": number,
+        "hash": BLK_HASH,
+        "parentHash": ZERO_HASH,
+        "nonce": "0x0000000000000000",
+        "sha3Uncles": "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347",
+        "logsBloom": BLOOM,
         "transactionsRoot": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
-        "stateRoot":        "0xd7f8974fb5ac78d9ac099b9ad5018bedc2ce0a72dad1827a1709da30580f0544",
-        "receiptsRoot":     "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
-        "miner":            ZERO_ADDR,
-        "difficulty":       "0x0",
-        "totalDifficulty":  "0x0",
-        "extraData":        "0x",
-        "size":             "0x1f4",
-        "gasLimit":         "0x1c9c380",
-        "gasUsed":          "0x0",
-        "timestamp":        "0x65f3d4c0",
-        "baseFeePerGas":    "0x3b9aca00",
-        "withdrawalsRoot":  ZERO_HASH,
-        "transactions":     [],
-        "uncles":           [],
-        "withdrawals":      [],
+        "stateRoot": "0xd7f8974fb5ac78d9ac099b9ad5018bedc2ce0a72dad1827a1709da30580f0544",
+        "receiptsRoot": "0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421",
+        "miner": ZERO_ADDR,
+        "difficulty": "0x0",
+        "totalDifficulty": "0x0",
+        "extraData": "0x",
+        "size": "0x1f4",
+        "gasLimit": "0x1c9c380",
+        "gasUsed": "0x0",
+        "timestamp": "0x65f3d4c0",
+        "baseFeePerGas": "0x3b9aca00",
+        "withdrawalsRoot": ZERO_HASH,
+        "transactions": [],
+        "uncles": [],
+        "withdrawals": [],
     }
 
 
 def tx() -> dict:
     """Minimal valid transaction object."""
     return {
-        "hash":                 TX_HASH,
-        "nonce":                "0x0",
-        "blockHash":            BLK_HASH,
-        "blockNumber":          LATEST,
-        "transactionIndex":     "0x0",
-        "from":                 ZERO_ADDR,
-        "to":                   ZERO_ADDR,
-        "value":                "0x0",
-        "gas":                  "0x5208",
-        "gasPrice":             "0x3b9aca00",
-        "maxFeePerGas":         "0x3b9aca00",
+        "hash": TX_HASH,
+        "nonce": "0x0",
+        "blockHash": BLK_HASH,
+        "blockNumber": LATEST,
+        "transactionIndex": "0x0",
+        "from": ZERO_ADDR,
+        "to": ZERO_ADDR,
+        "value": "0x0",
+        "gas": "0x5208",
+        "gasPrice": "0x3b9aca00",
+        "maxFeePerGas": "0x3b9aca00",
         "maxPriorityFeePerGas": "0x0",
-        "input":                "0x",
-        "v":                    "0x1",
-        "r":                    ZERO_HASH,
-        "s":                    ZERO_HASH,
-        "type":                 "0x2",
-        "accessList":           [],
-        "chainId":              CHAIN_ID,
+        "input": "0x",
+        "v": "0x1",
+        "r": ZERO_HASH,
+        "s": ZERO_HASH,
+        "type": "0x2",
+        "accessList": [],
+        "chainId": CHAIN_ID,
     }
 
 
 def receipt() -> dict:
     """Minimal valid transaction receipt."""
     return {
-        "transactionHash":   TX_HASH,
-        "transactionIndex":  "0x0",
-        "blockHash":         BLK_HASH,
-        "blockNumber":       LATEST,
-        "from":              ZERO_ADDR,
-        "to":                ZERO_ADDR,
+        "transactionHash": TX_HASH,
+        "transactionIndex": "0x0",
+        "blockHash": BLK_HASH,
+        "blockNumber": LATEST,
+        "from": ZERO_ADDR,
+        "to": ZERO_ADDR,
         "cumulativeGasUsed": "0x5208",
-        "gasUsed":           "0x5208",
+        "gasUsed": "0x5208",
         "effectiveGasPrice": "0x3b9aca00",
-        "contractAddress":   None,
-        "logs":              [],
-        "logsBloom":         BLOOM,
-        "status":            "0x1",
-        "type":              "0x2",
+        "contractAddress": None,
+        "logs": [],
+        "logsBloom": BLOOM,
+        "status": "0x1",
+        "type": "0x2",
     }
 
 
 def trace_frame() -> dict:
     """Minimal call trace frame (used by debug/trace methods)."""
     return {
-        "type":    "CALL",
-        "from":    ZERO_ADDR,
-        "to":      ZERO_ADDR,
-        "value":   "0x0",
-        "gas":     "0x5208",
+        "type": "CALL",
+        "from": ZERO_ADDR,
+        "to": ZERO_ADDR,
+        "value": "0x0",
+        "gas": "0x5208",
         "gasUsed": "0x0",
-        "input":   "0x",
-        "output":  "0x",
-        "calls":   [],
+        "input": "0x",
+        "output": "0x",
+        "calls": [],
     }
 
 
 # ── Method defaults ───────────────────────────────────────────────────────────
 
 METHOD_DEFAULTS: Dict[str, Any] = {
-
     # ── eth — chain state ─────────────────────────────────────────────────────
-    "eth_blockNumber":              LATEST,
-    "eth_chainId":                  CHAIN_ID,
-    "eth_protocolVersion":          "0x41",
-    "eth_syncing":                  False,
-    "eth_coinbase":                 ZERO_ADDR,
-    "eth_mining":                   False,
-    "eth_hashrate":                 "0x0",
-    "eth_accounts":                 [],
-
+    "eth_blockNumber": LATEST,
+    "eth_chainId": CHAIN_ID,
+    "eth_protocolVersion": "0x41",
+    "eth_syncing": False,
+    "eth_coinbase": ZERO_ADDR,
+    "eth_mining": False,
+    "eth_hashrate": "0x0",
+    "eth_accounts": [],
     # ── eth — gas / fees ──────────────────────────────────────────────────────
-    "eth_gasPrice":                 "0x3b9aca00",   # 1 gwei
-    "eth_maxPriorityFeePerGas":     "0x3b9aca00",
+    "eth_gasPrice": "0x3b9aca00",  # 1 gwei
+    "eth_maxPriorityFeePerGas": "0x3b9aca00",
     "eth_feeHistory": {
-        "oldestBlock":   "0x1312CF0",
+        "oldestBlock": "0x1312CF0",
         "baseFeePerGas": ["0x3b9aca00", "0x3b9aca00"],
-        "gasUsedRatio":  [0.0],
-        "reward":        [["0x0"]],
+        "gasUsedRatio": [0.0],
+        "reward": [["0x0"]],
     },
-
     # ── eth — state queries ───────────────────────────────────────────────────
-    "eth_getBalance":               "0x0",
-    "eth_getCode":                  "0x",
-    "eth_getStorageAt":             ZERO_HASH,
-    "eth_getTransactionCount":      "0x0",
-    "eth_call":                     "0x",
-    "eth_estimateGas":              "0x5208",
-
+    "eth_getBalance": "0x0",
+    "eth_getCode": "0x",
+    "eth_getStorageAt": ZERO_HASH,
+    "eth_getTransactionCount": "0x0",
+    "eth_call": "0x",
+    "eth_estimateGas": "0x5208",
     # ── eth — blocks ──────────────────────────────────────────────────────────
     # NOTE: "number" is overridden from params[0] at request time — see server.py
-    "eth_getBlockByNumber":                     block(LATEST),
-    "eth_getBlockByHash":                       block(LATEST),
-    "eth_getBlockTransactionCountByNumber":     "0x0",
-    "eth_getBlockTransactionCountByHash":       "0x0",
-    "eth_getUncleCountByBlockNumber":           "0x0",
-    "eth_getUncleCountByBlockHash":             "0x0",
-    "eth_getUncleByBlockNumberAndIndex":        None,
-    "eth_getUncleByBlockHashAndIndex":          None,
-
+    "eth_getBlockByNumber": block(LATEST),
+    "eth_getBlockByHash": block(LATEST),
+    "eth_getBlockTransactionCountByNumber": "0x0",
+    "eth_getBlockTransactionCountByHash": "0x0",
+    "eth_getUncleCountByBlockNumber": "0x0",
+    "eth_getUncleCountByBlockHash": "0x0",
+    "eth_getUncleByBlockNumberAndIndex": None,
+    "eth_getUncleByBlockHashAndIndex": None,
     # ── eth — transactions ────────────────────────────────────────────────────
-    "eth_getTransactionByHash":                 tx(),
-    "eth_getTransactionByBlockNumberAndIndex":  tx(),
-    "eth_getTransactionByBlockHashAndIndex":    tx(),
-    "eth_getTransactionReceipt":                receipt(),
-    "eth_sendRawTransaction":                   TX_HASH,
-
+    "eth_getTransactionByHash": tx(),
+    "eth_getTransactionByBlockNumberAndIndex": tx(),
+    "eth_getTransactionByBlockHashAndIndex": tx(),
+    "eth_getTransactionReceipt": receipt(),
+    "eth_sendRawTransaction": TX_HASH,
     # ── eth — logs / filters ──────────────────────────────────────────────────
-    "eth_getLogs":                      [],
-    "eth_newFilter":                    "0x1",
-    "eth_newBlockFilter":               "0x2",
-    "eth_newPendingTransactionFilter":  "0x3",
-    "eth_getFilterChanges":             [],
-    "eth_getFilterLogs":                [],
-    "eth_uninstallFilter":              True,
-
+    "eth_getLogs": [],
+    "eth_newFilter": "0x1",
+    "eth_newBlockFilter": "0x2",
+    "eth_newPendingTransactionFilter": "0x3",
+    "eth_getFilterChanges": [],
+    "eth_getFilterLogs": [],
+    "eth_uninstallFilter": True,
     # ── net ───────────────────────────────────────────────────────────────────
-    "net_version":      "1",
-    "net_listening":    True,
-    "net_peerCount":    "0x10",
-
+    "net_version": "1",
+    "net_listening": True,
+    "net_peerCount": "0x10",
     # ── web3 ──────────────────────────────────────────────────────────────────
-    "web3_clientVersion":   "simulator/v1.0.0",
-    "web3_sha3":            "0x" + "c" * 64,
-
+    "web3_clientVersion": "simulator/v1.0.0",
+    "web3_sha3": "0x" + "c" * 64,
     # ── trace (addon: trace) ──────────────────────────────────────────────────
-    "trace_block":                   [],
-    "trace_transaction":             [trace_frame()],
-    "trace_get":                     trace_frame(),
-    "trace_call":                    {"output": "0x", "stateDiff": None, "trace": [trace_frame()], "vmTrace": None},
-    "trace_callMany":                [],
-    "trace_rawTransaction":          {"output": "0x", "stateDiff": None, "trace": [trace_frame()], "vmTrace": None},
-    "trace_replayTransaction":       {"output": "0x", "stateDiff": None, "trace": [trace_frame()], "vmTrace": None},
+    "trace_block": [],
+    "trace_transaction": [trace_frame()],
+    "trace_get": trace_frame(),
+    "trace_call": {"output": "0x", "stateDiff": None, "trace": [trace_frame()], "vmTrace": None},
+    "trace_callMany": [],
+    "trace_rawTransaction": {
+        "output": "0x",
+        "stateDiff": None,
+        "trace": [trace_frame()],
+        "vmTrace": None,
+    },
+    "trace_replayTransaction": {
+        "output": "0x",
+        "stateDiff": None,
+        "trace": [trace_frame()],
+        "vmTrace": None,
+    },
     "trace_replayBlockTransactions": [],
-    "trace_filter":                  [],
-
+    "trace_filter": [],
     # ── debug (addon: debug) ──────────────────────────────────────────────────
-    "debug_traceTransaction":   trace_frame(),
+    "debug_traceTransaction": trace_frame(),
     "debug_traceBlockByNumber": [],
-    "debug_traceBlockByHash":   [],
-    "debug_traceCall":          trace_frame(),
-    "debug_getRawBlock":        "0x",
-    "debug_getRawHeader":       "0x",
-    "debug_getRawReceipts":     "0x",
-    "debug_getRawTransaction":  "0x",
+    "debug_traceBlockByHash": [],
+    "debug_traceCall": trace_frame(),
+    "debug_getRawBlock": "0x",
+    "debug_getRawHeader": "0x",
+    "debug_getRawReceipts": "0x",
+    "debug_getRawTransaction": "0x",
 }
 
 # Chain-explicit alias — matches the naming of stubs_btc.BTC_METHOD_DEFAULTS /
@@ -261,70 +273,63 @@ ERROR_STUBS: Dict[str, Dict[str, Any]] = {
     # "execution reverted"; the data field is for tests that want to verify
     # the revert reason propagates through the router unchanged.
     "revert": {
-        "code":    3,
+        "code": 3,
         "message": "execution reverted",
-        "data":    "0x08c379a0"
-                   "0000000000000000000000000000000000000000000000000000000000000020"
-                   "0000000000000000000000000000000000000000000000000000000000000008"
-                   "7265766572746564000000000000000000000000000000000000000000000000",
+        "data": "0x08c379a0"
+        "0000000000000000000000000000000000000000000000000000000000000020"
+        "0000000000000000000000000000000000000000000000000000000000000008"
+        "7265766572746564000000000000000000000000000000000000000000000000",
     },
-
     # Out-of-gas during execution. Classifier matches "out of gas".
     # (Geth's pre-execution variant is "gas required exceeds allowance" —
     # that's a separate condition and isn't currently classifier-matched.)
     "oog": {
-        "code":    -32000,
+        "code": -32000,
         "message": "out of gas",
     },
-
     # Mempool nonce rejections. Geth + Erigon emit the exact phrasing
     # "nonce too low" / "nonce too high"; Nethermind uses the "is too" variant.
     "nonce_too_low": {
-        "code":    -32000,
+        "code": -32000,
         "message": "nonce too low",
     },
     "nonce_too_high": {
-        "code":    -32000,
+        "code": -32000,
         "message": "nonce too high",
     },
-
     # Mempool capacity exhausted. Geth phrasing — Nethermind uses
     # "TxPool is full" with different casing; the classifier lowers before
     # matching so this works for both.
     "mempool_full": {
-        "code":    -32000,
+        "code": -32000,
         "message": "txpool is full",
     },
-
     # State pruned. Geth's classic "missing trie node" — Erigon and Reth
     # also surface this phrase when an archive node serves a historical
     # query for a block whose state was pruned.
     "pruned_state": {
-        "code":    -32000,
+        "code": -32000,
         "message": "missing trie node",
     },
-
     # Block not yet mined or never existed. Classifier matches
     # "block not found" and the regex `block #?\w+ not found`.
     "future_block": {
-        "code":    -32000,
+        "code": -32000,
         "message": "block not found",
     },
-
     # Tx already accepted into mempool. Geth + Erigon emit "already known"
     # verbatim. Treated as success by some clients; the router classifies
     # this as a retryable node-side condition.
     "already_known": {
-        "code":    -32000,
+        "code": -32000,
         "message": "already known",
     },
-
     # Insufficient balance for tx value + gas. Geth and Erigon both emit
     # the substring "insufficient funds"; Nethermind uses "insufficient
     # sender balance" (separate matcher). This stub uses the Geth phrasing
     # since it's the most common in production traces.
     "insufficient_funds": {
-        "code":    -32000,
+        "code": -32000,
         "message": "insufficient funds for gas * price + value",
     },
 }
@@ -334,4 +339,3 @@ ERROR_STUBS: Dict[str, Dict[str, Any]] = {
 # Same dict object; the unprefixed name stays canonical until all importers
 # migrate to the ETH_-prefixed name, then the unprefixed one can be removed.
 ETH_ERROR_STUBS = ERROR_STUBS
-

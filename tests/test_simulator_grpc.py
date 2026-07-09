@@ -37,33 +37,34 @@ import time
 import urllib.error
 import urllib.request
 from http.server import HTTPServer, ThreadingHTTPServer
-from typing import Any
 
 import grpc
 import pytest
 
-# Splice cosmos_pb2 onto sys.path so the generated stubs resolve.
-import cosmos_pb2  # noqa: F401
-from cosmos.base.tendermint.v1beta1 import query_pb2, query_pb2_grpc
+# Splice cosmos_pb2 onto sys.path so the generated stubs resolve. Must run
+# before the `from cosmos...` import below — isort must not reorder these
+# two (see cosmos_pb2/__init__.py's own docstring for why import order here
+# is load-bearing).
+import cosmos_pb2  # noqa: F401  isort: split
+
+from cosmos.base.tendermint.v1beta1 import query_pb2, query_pb2_grpc  # isort: skip
 
 import grpc_server
 from server import ControlHandler, JSONRPCHandler, ProviderState
 
-
 # ── Test ports (distinct from ETH 28545+ / BTC 38545+) ──────────────────────
-_GRPC_PORTS    = {"1": 49548, "2": 49549, "3": 49550}
+_GRPC_PORTS = {"1": 49548, "2": 49549, "3": 49550}
 _JSONRPC_PORTS = {"1": 49545, "2": 49546, "3": 49547}
-_CONTROL_PORT  = 49000
+_CONTROL_PORT = 49000
 
 
 # ── HTTP helpers for the control plane (no JSON-RPC over HTTP needed) ───────
 
+
 def _post(url: str, body: dict) -> tuple[int, dict]:
     """POST JSON body, return (status_code, parsed_response_body)."""
     data = json.dumps(body).encode()
-    req = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}
-    )
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
             raw = resp.read()
@@ -91,6 +92,7 @@ def _ctrl(sim: dict, path: str) -> str:
 
 
 # ── Module-scoped fixture: start all servers once ───────────────────────────
+
 
 @pytest.fixture(scope="module")
 def sim():
@@ -124,12 +126,14 @@ def sim():
 
     # gRPC servers — each on its own asyncio loop in a daemon thread.
     for pid, port in _GRPC_PORTS.items():
-        threads.append(threading.Thread(
-            target=grpc_server.run_grpc_in_thread,
-            args=(port, states[pid]),
-            daemon=True,
-            name=f"grpc-test-{pid}",
-        ))
+        threads.append(
+            threading.Thread(
+                target=grpc_server.run_grpc_in_thread,
+                args=(port, states[pid]),
+                daemon=True,
+                name=f"grpc-test-{pid}",
+            )
+        )
 
     for t in threads:
         t.start()
@@ -140,9 +144,9 @@ def sim():
 
     yield {
         "control": f"http://127.0.0.1:{_CONTROL_PORT}",
-        "grpc1":   f"127.0.0.1:{_GRPC_PORTS['1']}",
-        "grpc2":   f"127.0.0.1:{_GRPC_PORTS['2']}",
-        "grpc3":   f"127.0.0.1:{_GRPC_PORTS['3']}",
+        "grpc1": f"127.0.0.1:{_GRPC_PORTS['1']}",
+        "grpc2": f"127.0.0.1:{_GRPC_PORTS['2']}",
+        "grpc3": f"127.0.0.1:{_GRPC_PORTS['3']}",
     }
 
     for s in servers:
@@ -150,6 +154,7 @@ def sim():
 
 
 # ── Function-scoped autouse: clean slate before/after every test ────────────
+
 
 @pytest.fixture(autouse=True)
 def clean_state(sim):
@@ -161,26 +166,30 @@ def clean_state(sim):
 
 # ── gRPC client helpers ─────────────────────────────────────────────────────
 
+
 def _set_grpc(sim, pid: str = "1", **extra):
     """Convenience: POST /scenario for one provider with chain_family=grpc."""
     cfg = {"chain_family": "grpc", **extra}
     return _post(_ctrl(sim, "/scenario"), {"providers": {pid: cfg}})
 
 
-def _call_get_latest_block(address: str, timeout: float = 5.0,
-                            metadata: tuple = ()) -> query_pb2.GetLatestBlockResponse:
+def _call_get_latest_block(
+    address: str, timeout: float = 5.0, metadata: tuple = ()
+) -> query_pb2.GetLatestBlockResponse:
     """Open an insecure channel, call GetLatestBlock, return the response.
 
     ``metadata`` is forwarded as gRPC client metadata so tests can verify
     the metadata-capture path (``lava-guid`` etc.).
     """
+
     async def _do():
         channel = grpc.aio.insecure_channel(address)
         try:
             stub = query_pb2_grpc.ServiceStub(channel)
             req = query_pb2.GetLatestBlockRequest()
             resp = await asyncio.wait_for(
-                stub.GetLatestBlock(req, metadata=metadata), timeout=timeout,
+                stub.GetLatestBlock(req, metadata=metadata),
+                timeout=timeout,
             )
             return resp
         finally:
@@ -189,16 +198,19 @@ def _call_get_latest_block(address: str, timeout: float = 5.0,
     return asyncio.run(_do())
 
 
-def _call_get_node_info(address: str, timeout: float = 5.0,
-                         metadata: tuple = ()) -> query_pb2.GetNodeInfoResponse:
+def _call_get_node_info(
+    address: str, timeout: float = 5.0, metadata: tuple = ()
+) -> query_pb2.GetNodeInfoResponse:
     """Open an insecure channel, call GetNodeInfo, return the response."""
+
     async def _do():
         channel = grpc.aio.insecure_channel(address)
         try:
             stub = query_pb2_grpc.ServiceStub(channel)
             req = query_pb2.GetNodeInfoRequest()
             resp = await asyncio.wait_for(
-                stub.GetNodeInfo(req, metadata=metadata), timeout=timeout,
+                stub.GetNodeInfo(req, metadata=metadata),
+                timeout=timeout,
             )
             return resp
         finally:
@@ -210,6 +222,7 @@ def _call_get_node_info(address: str, timeout: float = 5.0,
 # ─────────────────────────────────────────────────────────────────────────────
 # Happy path
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestGrpcHappy:
     """The simulator must return a well-formed protobuf for the canonical
@@ -225,6 +238,7 @@ class TestGrpcHappy:
         """The default head is pinned to handlers_grpc.GRPC_LATEST_BLOCK
         so tests can assert exact equality."""
         from handlers_grpc import GRPC_LATEST_BLOCK
+
         _set_grpc(sim, "1")
         resp = _call_get_latest_block(sim["grpc1"])
         assert resp.block.header.height == GRPC_LATEST_BLOCK
@@ -245,6 +259,7 @@ class TestGrpcHappy:
 # Lava metadata capture
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestGrpcMetadataCapture:
     """lava-* request metadata must show up in /history under the recorded
     entry so the router's observable behaviour can be verified."""
@@ -260,11 +275,14 @@ class TestGrpcMetadataCapture:
 
     def test_multiple_lava_headers_captured(self, sim):
         _set_grpc(sim, "1")
-        _call_get_latest_block(sim["grpc1"], metadata=(
-            ("lava-guid", "g1"),
-            ("lava-stateful-api", "true"),
-            ("authorization", "bearer ignored"),  # non-lava header — should be dropped
-        ))
+        _call_get_latest_block(
+            sim["grpc1"],
+            metadata=(
+                ("lava-guid", "g1"),
+                ("lava-stateful-api", "true"),
+                ("authorization", "bearer ignored"),  # non-lava header — should be dropped
+            ),
+        )
         _, hist = _get(_ctrl(sim, "/history?provider=1"))
         headers = hist["history"][-1]["lava_headers"]
         assert headers.get("lava-guid") == "g1"
@@ -286,6 +304,7 @@ class TestGrpcMetadataCapture:
 # Fault: hang
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestGrpcFaultHang:
     """mode=hang must make the client time out — the simulator sleeps 30s
     before responding, the client's deadline fires first."""
@@ -303,6 +322,7 @@ class TestGrpcFaultHang:
 # ─────────────────────────────────────────────────────────────────────────────
 # Fault: status (mode=error → grpc.StatusCode mapping)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestGrpcFaultStatus:
     """mode=error + error_message=<StatusCode name> must abort with that
@@ -346,6 +366,7 @@ class TestGrpcFaultStatus:
 # Fault: dropped connection (3 drop points)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestGrpcFaultDropped:
     """drop_connection at all three points must surface as a gRPC error
     on the client side (UNAVAILABLE / CANCELLED depending on stage)."""
@@ -384,6 +405,7 @@ class TestGrpcFaultDropped:
 # ─────────────────────────────────────────────────────────────────────────────
 # Fault: corruption (5 variants)
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestGrpcFaultCorrupt:
     """corruption_mode applies to gRPC responses the same way it applies
@@ -438,23 +460,27 @@ class TestGrpcFaultCorrupt:
 # Fault: stale head (blocks_behind shifts height)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestGrpcFaultStale:
     """blocks_behind=N must decrement ``block.header.height`` by N."""
 
     def test_blocks_behind_shifts_height(self, sim):
         from handlers_grpc import GRPC_LATEST_BLOCK
+
         _set_grpc(sim, "1", blocks_behind=100)
         resp = _call_get_latest_block(sim["grpc1"])
         assert resp.block.header.height == GRPC_LATEST_BLOCK - 100
 
     def test_blocks_behind_zero_is_default_head(self, sim):
         from handlers_grpc import GRPC_LATEST_BLOCK
+
         _set_grpc(sim, "1", blocks_behind=0)
         resp = _call_get_latest_block(sim["grpc1"])
         assert resp.block.header.height == GRPC_LATEST_BLOCK
 
     def test_large_blocks_behind(self, sim):
         from handlers_grpc import GRPC_LATEST_BLOCK
+
         _set_grpc(sim, "1", blocks_behind=1_000_000)
         resp = _call_get_latest_block(sim["grpc1"])
         assert resp.block.header.height == GRPC_LATEST_BLOCK - 1_000_000
@@ -463,6 +489,7 @@ class TestGrpcFaultStale:
 # ─────────────────────────────────────────────────────────────────────────────
 # Chain-family routing — eth + grpc providers in the same scenario
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestGrpcChainFamily:
     """``chain_family="grpc"`` shows up in /scenario; gRPC and JSON-RPC
@@ -477,12 +504,15 @@ class TestGrpcChainFamily:
     def test_mixed_eth_and_grpc(self, sim):
         """Provider 1 = grpc, Provider 2 = eth (default) — each transport
         independently faulted in the same /scenario call."""
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {
-                "1": {"chain_family": "grpc"},
-                "2": {"chain_family": "eth", "mode": "rate_limit"},
-            }
-        })
+        _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {"chain_family": "grpc"},
+                    "2": {"chain_family": "eth", "mode": "rate_limit"},
+                }
+            },
+        )
 
         # gRPC side: GetLatestBlock returns valid proto.
         resp = _call_get_latest_block(sim["grpc1"])
@@ -490,8 +520,9 @@ class TestGrpcChainFamily:
 
         # ETH side: rate-limited HTTP/JSON-RPC request returns 429.
         eth_url = f"http://127.0.0.1:{_JSONRPC_PORTS['2']}"
-        status, _ = _post(eth_url, {"jsonrpc": "2.0", "id": 1,
-                                       "method": "eth_blockNumber", "params": []})
+        status, _ = _post(
+            eth_url, {"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []}
+        )
         assert status == 429
 
     def test_reset_clears_chain_family_grpc(self, sim):
@@ -504,6 +535,7 @@ class TestGrpcChainFamily:
 # ─────────────────────────────────────────────────────────────────────────────
 # History tracking — gRPC requests show up in /history
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestGrpcHistoryTracking:
     """gRPC requests must be recorded in /history with the same shape as
@@ -548,6 +580,7 @@ class TestGrpcHistoryTracking:
 # MAG-1836: cross-transport fault isolation
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestGrpcCrossTransportFaultIsolation:
     """``ProviderState`` is shared across JSON-RPC and gRPC for the same
     provider id. A fault primitive (``down`` / ``hang`` / ``rate_limit`` /
@@ -574,14 +607,14 @@ class TestGrpcCrossTransportFaultIsolation:
         Per-transport isolation still applies to content modes (error /
         corrupt / hang / rate_limit / drop_connection) — see sibling
         hang / rate_limit / error tests below."""
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"chain_family": "eth", "mode": "down"}}
-        })
+        _post(
+            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "down"}}}
+        )
         with pytest.raises(grpc.RpcError) as exc_info:
             _call_get_latest_block(sim["grpc1"])
-        assert exc_info.value.code() == grpc.StatusCode.UNAVAILABLE, (
-            f"gRPC should abort with UNAVAILABLE under universal-down; got {exc_info.value.code()}"
-        )
+        assert (
+            exc_info.value.code() == grpc.StatusCode.UNAVAILABLE
+        ), f"gRPC should abort with UNAVAILABLE under universal-down; got {exc_info.value.code()}"
 
     def test_grpc_unaffected_by_eth_hang_fault(self, sim):
         """JSON-RPC ``hang`` must not make the gRPC port sleep 30s.
@@ -589,9 +622,9 @@ class TestGrpcCrossTransportFaultIsolation:
         Client deadline is 5s (the helper default); the call should
         complete in well under that.
         """
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"chain_family": "eth", "mode": "hang"}}
-        })
+        _post(
+            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "hang"}}}
+        )
         t0 = time.monotonic()
         resp = _call_get_latest_block(sim["grpc1"], timeout=5.0)
         elapsed = time.monotonic() - t0
@@ -601,22 +634,28 @@ class TestGrpcCrossTransportFaultIsolation:
     def test_grpc_unaffected_by_eth_rate_limit_fault(self, sim):
         """JSON-RPC ``rate_limit`` must not abort the gRPC port with
         RESOURCE_EXHAUSTED."""
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"chain_family": "eth", "mode": "rate_limit"}}
-        })
+        _post(
+            _ctrl(sim, "/scenario"),
+            {"providers": {"1": {"chain_family": "eth", "mode": "rate_limit"}}},
+        )
         resp = _call_get_latest_block(sim["grpc1"])
         assert resp.block.header.height > 0
 
     def test_grpc_unaffected_by_eth_error_fault(self, sim):
         """JSON-RPC ``error`` must not abort the gRPC port with the
         translated grpc.StatusCode."""
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {
-                "chain_family": "eth",
-                "mode": "error",
-                "error_message": "UNAVAILABLE",
-            }}
-        })
+        _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {
+                        "chain_family": "eth",
+                        "mode": "error",
+                        "error_message": "UNAVAILABLE",
+                    }
+                }
+            },
+        )
         resp = _call_get_latest_block(sim["grpc1"])
         assert resp.block.header.height > 0
 
@@ -633,31 +672,32 @@ class TestGrpcCrossTransportFaultIsolation:
     def test_grpc_killed_by_btc_down_fault(self, sim):
         """MAG-2092 universal-down: a ``chain_family="btc"`` mode=down
         also aborts the gRPC port with UNAVAILABLE."""
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"chain_family": "btc", "mode": "down"}}
-        })
+        _post(
+            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "btc", "mode": "down"}}}
+        )
         with pytest.raises(grpc.RpcError) as exc_info:
             _call_get_latest_block(sim["grpc1"])
-        assert exc_info.value.code() == grpc.StatusCode.UNAVAILABLE, (
-            f"gRPC should abort with UNAVAILABLE under universal-down; got {exc_info.value.code()}"
-        )
+        assert (
+            exc_info.value.code() == grpc.StatusCode.UNAVAILABLE
+        ), f"gRPC should abort with UNAVAILABLE under universal-down; got {exc_info.value.code()}"
 
     def test_grpc_killed_by_rest_down_fault(self, sim):
         """MAG-2092 universal-down: a ``chain_family="rest"`` mode=down
         also aborts the gRPC port with UNAVAILABLE."""
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"chain_family": "rest", "mode": "down"}}
-        })
+        _post(
+            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "rest", "mode": "down"}}}
+        )
         with pytest.raises(grpc.RpcError) as exc_info:
             _call_get_latest_block(sim["grpc1"])
-        assert exc_info.value.code() == grpc.StatusCode.UNAVAILABLE, (
-            f"gRPC should abort with UNAVAILABLE under universal-down; got {exc_info.value.code()}"
-        )
+        assert (
+            exc_info.value.code() == grpc.StatusCode.UNAVAILABLE
+        ), f"gRPC should abort with UNAVAILABLE under universal-down; got {exc_info.value.code()}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MAG-1837: cross-transport corruption isolation
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestGrpcCrossTransportCorruptionIsolation:
     """``ProviderState`` is shared across JSON-RPC and gRPC for the same
@@ -677,12 +717,17 @@ class TestGrpcCrossTransportCorruptionIsolation:
         an RpcError with StatusCode.UNKNOWN instead of returning a valid
         proto.
         """
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {
-                "chain_family": "eth",
-                "corruption_mode": "invalid_proto",
-            }}
-        })
+        _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {
+                        "chain_family": "eth",
+                        "corruption_mode": "invalid_proto",
+                    }
+                }
+            },
+        )
         resp = _call_get_latest_block(sim["grpc1"])
         # Clean stub response — chain_id pinned, height > 0.
         assert resp.block.header.chain_id == "lava-sim"
@@ -691,13 +736,18 @@ class TestGrpcCrossTransportCorruptionIsolation:
     def test_grpc_unaffected_by_eth_corruption_missing_field(self, sim):
         """JSON-RPC ``corruption_mode="missing_field"`` must not clear the
         ``block`` field on the gRPC response."""
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {
-                "chain_family": "eth",
-                "corruption_mode": "missing_field",
-                "missing_field": "block",
-            }}
-        })
+        _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {
+                        "chain_family": "eth",
+                        "corruption_mode": "missing_field",
+                        "missing_field": "block",
+                    }
+                }
+            },
+        )
         resp = _call_get_latest_block(sim["grpc1"])
         # block field is populated normally — height should be > 0 and
         # chain_id should be the pinned simulator value.
@@ -708,13 +758,18 @@ class TestGrpcCrossTransportCorruptionIsolation:
         """JSON-RPC ``corruption_mode="wrong_type"`` must not abort the
         gRPC port with INTERNAL. Without the gate this raises an RpcError
         instead of returning a clean proto."""
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {
-                "chain_family": "eth",
-                "corruption_mode": "wrong_type",
-                "missing_field": "block",
-            }}
-        })
+        _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {
+                        "chain_family": "eth",
+                        "corruption_mode": "wrong_type",
+                        "missing_field": "block",
+                    }
+                }
+            },
+        )
         resp = _call_get_latest_block(sim["grpc1"])
         assert resp.block.header.chain_id == "lava-sim"
         assert resp.block.header.height > 0
@@ -735,6 +790,7 @@ class TestGrpcCrossTransportCorruptionIsolation:
 # the owning JSON-RPC listener and only OBSERVED (never advanced) by gRPC
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestGrpcSequencedFaultObservation:
     """The sequenced fault (fail_first_n / then_mode) counts requests on the
     OWNING JSON-RPC listener only. The gRPC surface never advances that
@@ -743,28 +799,36 @@ class TestGrpcSequencedFaultObservation:
     window, the call must succeed instead of aborting forever."""
 
     def test_grpc_down_clears_after_owning_listener_consumes_window(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {
-            "chain_family": "eth", "mode": "down",
-            "fail_first_n": 2, "then_mode": "success",
-        }}})
+        _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {
+                        "chain_family": "eth",
+                        "mode": "down",
+                        "fail_first_n": 2,
+                        "then_mode": "success",
+                    }
+                }
+            },
+        )
 
         with pytest.raises(grpc.RpcError) as exc_info:
             _call_get_latest_block(sim["grpc1"])
         assert exc_info.value.code() == grpc.StatusCode.UNAVAILABLE, (
-            f"gRPC must abort while the down window is open; "
-            f"got {exc_info.value.code()}"
+            f"gRPC must abort while the down window is open; " f"got {exc_info.value.code()}"
         )
 
         eth_url = f"http://127.0.0.1:{_JSONRPC_PORTS['1']}"
         for i in (1, 2):
-            eth_status, _ = _post(eth_url, {"jsonrpc": "2.0", "id": i,
-                                            "method": "eth_blockNumber",
-                                            "params": []})
-            assert eth_status == 503, (
-                f"owning ETH call {i} is inside the down window; got {eth_status}"
+            eth_status, _ = _post(
+                eth_url, {"jsonrpc": "2.0", "id": i, "method": "eth_blockNumber", "params": []}
             )
+            assert (
+                eth_status == 503
+            ), f"owning ETH call {i} is inside the down window; got {eth_status}"
 
         resp = _call_get_latest_block(sim["grpc1"])
-        assert resp.block.header.height > 0, (
-            "gRPC must observe the consumed window and serve the success stub"
-        )
+        assert (
+            resp.block.header.height > 0
+        ), "gRPC must observe the consumed window and serve the success stub"

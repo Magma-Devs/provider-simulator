@@ -62,7 +62,7 @@ def test_encode_text_frame_medium_payload_16bit_length():
     # 0x81 | 0x7E (126 → 16-bit length follows) | 0x00C8 (200 big-endian) | payload
     assert out[0] == 0x81
     assert out[1] == 0x7E
-    assert out[2:4] == b"\x00\xC8"
+    assert out[2:4] == b"\x00\xc8"
     assert out[4:] == payload
 
 
@@ -80,9 +80,9 @@ def test_encode_text_frame_large_payload_64bit_length():
 def test_encode_client_frame_is_masked():
     """When mask=True the MASK bit is set and a 4-byte key is inserted before payload."""
     out = ws_protocol.encode_frame(ws_protocol.OPCODE_TEXT, b"hi", mask=True)
-    assert out[0] == 0x81           # FIN=1, opcode=text
-    assert out[1] & 0x80            # MASK bit set
-    assert out[1] & 0x7F == 2       # length=2 in low 7 bits
+    assert out[0] == 0x81  # FIN=1, opcode=text
+    assert out[1] & 0x80  # MASK bit set
+    assert out[1] & 0x7F == 2  # length=2 in low 7 bits
     key = out[2:6]
     masked = out[6:]
     assert bytes(b ^ key[i % 4] for i, b in enumerate(masked)) == b"hi"
@@ -90,12 +90,14 @@ def test_encode_client_frame_is_masked():
 
 def _recv_from_bytes(buf: bytearray):
     """Build a recv-callable that returns n bytes from buf each call."""
+
     def recv(n: int) -> bytes:
         if n <= 0:
             return b""
         chunk = bytes(buf[:n])
         del buf[:n]
         return chunk
+
     return recv
 
 
@@ -164,14 +166,15 @@ import stubs_ws
 def test_subscribe_methods_table_has_four_chains():
     """All four named subscribe methods from the spec must be present."""
     assert set(stubs_ws.SUBSCRIBE_METHODS.keys()) == {
-        "eth_subscribe", "subscribe", "accountSubscribe", "logsSubscribe",
+        "eth_subscribe",
+        "subscribe",
+        "accountSubscribe",
+        "logsSubscribe",
     }
 
 
 def test_build_event_frame_eth_envelope():
-    out = stubs_ws.build_event_frame(
-        "eth_subscription", "0xdead", {"number": "0x1"}
-    )
+    out = stubs_ws.build_event_frame("eth_subscription", "0xdead", {"number": "0x1"})
     assert out == {
         "jsonrpc": "2.0",
         "method": "eth_subscription",

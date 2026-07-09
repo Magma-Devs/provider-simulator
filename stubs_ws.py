@@ -20,7 +20,6 @@ The handler imports both. No other modules should depend on stubs_ws.
 
 from typing import Any, Dict, Set
 
-
 # Maps subscribe method name → {chain, envelope, notification_method}.
 #
 # envelope: how a pushed event is wrapped for delivery over the WS frame.
@@ -33,10 +32,10 @@ from typing import Any, Dict, Set
 #   - "solana_logs":      {"jsonrpc":"2.0","method":"logsNotification",
 #                          "params":{"subscription":int(<sub_id>,16),"result":<event>}}
 SUBSCRIBE_METHODS: Dict[str, Dict[str, str]] = {
-    "eth_subscribe":     {"chain": "eth",        "envelope": "eth_subscription"},
-    "subscribe":         {"chain": "tendermint", "envelope": "tendermint_event"},
-    "accountSubscribe":  {"chain": "solana",     "envelope": "solana_account"},
-    "logsSubscribe":     {"chain": "solana",     "envelope": "solana_logs"},
+    "eth_subscribe": {"chain": "eth", "envelope": "eth_subscription"},
+    "subscribe": {"chain": "tendermint", "envelope": "tendermint_event"},
+    "accountSubscribe": {"chain": "solana", "envelope": "solana_account"},
+    "logsSubscribe": {"chain": "solana", "envelope": "solana_logs"},
 }
 
 
@@ -67,8 +66,13 @@ EVENT_DEFAULTS: Dict[tuple, Dict[str, Any]] = {
     },
     ("solana", "accountChange"): {
         "context": {"slot": 250_000_001},
-        "value": {"lamports": 1_000_000, "owner": "11111111111111111111111111111111",
-                  "data": ["", "base64"], "executable": False, "rentEpoch": 0},
+        "value": {
+            "lamports": 1_000_000,
+            "owner": "11111111111111111111111111111111",
+            "data": ["", "base64"],
+            "executable": False,
+            "rentEpoch": 0,
+        },
     },
     ("solana", "logsChange"): {
         "context": {"slot": 250_000_001},

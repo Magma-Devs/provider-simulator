@@ -42,7 +42,7 @@ easy to grep when gRPC sims (MAG-1780) ship their own handler.
 from copy import deepcopy
 from typing import Any, Dict, Tuple
 
-from stubs_rest import REST_ERROR_STUBS, REST_METHOD_DEFAULTS, cosmos_height
+from stubs_rest import REST_ERROR_STUBS, REST_METHOD_DEFAULTS
 
 
 def handle(
@@ -145,7 +145,9 @@ def handle(
     if template == "/cosmos/base/tendermint/v1beta1/blocks/latest":
         # Apply blocks_behind shift to the head height.
         if blocks_behind != 0 and isinstance(result, dict):
-            shifted = str(_int_height(REST_METHOD_DEFAULTS[key]["block"]["header"]["height"]) - blocks_behind)
+            shifted = str(
+                _int_height(REST_METHOD_DEFAULTS[key]["block"]["header"]["height"]) - blocks_behind
+            )
             result["block"]["header"]["height"] = shifted
             # last_commit.height tracks one-below-head; keep the relationship.
             try:

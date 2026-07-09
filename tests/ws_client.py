@@ -29,8 +29,7 @@ import ws_protocol
 class WsClient:
     """Minimal blocking WebSocket client used by the simulator's WS tests."""
 
-    def __init__(self, host: str, port: int, path: str = "/ws", *,
-                 timeout: float = 5.0):
+    def __init__(self, host: str, port: int, path: str = "/ws", *, timeout: float = 5.0):
         self.host = host
         self.port = port
         self.path = path
@@ -49,8 +48,7 @@ class WsClient:
 
     def connect(self) -> None:
         """Open a TCP socket and complete the WS upgrade handshake."""
-        self.sock = socket.create_connection((self.host, self.port),
-                                              timeout=self.timeout)
+        self.sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
         key = base64.b64encode(os.urandom(16)).decode("ascii")
         req = (
             f"GET {self.path} HTTP/1.1\r\n"
@@ -81,8 +79,7 @@ class WsClient:
         if self.sock is None:
             raise RuntimeError("not connected")
         payload = json.dumps(obj).encode("utf-8")
-        self.sock.sendall(ws_protocol.encode_frame(
-            ws_protocol.OPCODE_TEXT, payload, mask=True))
+        self.sock.sendall(ws_protocol.encode_frame(ws_protocol.OPCODE_TEXT, payload, mask=True))
 
     def recv_json(self, timeout: Optional[float] = None) -> Any:
         """Receive one TEXT frame and JSON-parse the payload.
@@ -117,8 +114,7 @@ class WsClient:
         if self.sock is None:
             return
         try:
-            self.sock.sendall(ws_protocol.encode_frame(
-                ws_protocol.OPCODE_CLOSE, b"", mask=True))
+            self.sock.sendall(ws_protocol.encode_frame(ws_protocol.OPCODE_CLOSE, b"", mask=True))
         except OSError:
             pass
         try:

@@ -56,17 +56,16 @@ from server import ControlHandler, JSONRPCHandler, ProviderState
 #     even a serial run can't double-bind here either.) ────────────────────
 
 _PROVIDER_PORTS = {"1": 58545, "2": 58546, "3": 58547}
-_CONTROL_PORT   = 59000
+_CONTROL_PORT = 59000
 
 
 # ── HTTP helpers (same shape as tests/test_simulator.py) ──────────────────────
 
+
 def _post(url: str, body: dict) -> tuple[int, dict]:
     """POST JSON body, return (status_code, parsed_response_body)."""
     data = json.dumps(body).encode()
-    req  = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}
-    )
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
             raw = resp.read()
@@ -90,6 +89,7 @@ def _ctrl(sim: dict, path: str) -> str:
 
 # ── Module-scoped fixture: start all servers once ─────────────────────────────
 
+
 @pytest.fixture(scope="module")
 def sim():
     """Start 3 JSON-RPC servers + 1 control server on test ports.
@@ -106,11 +106,11 @@ def sim():
     for pid, port in _PROVIDER_PORTS.items():
         srv = ThreadingHTTPServer(("127.0.0.1", port), JSONRPCHandler)
         srv.daemon_threads = True
-        srv.state       = states[pid]
+        srv.state = states[pid]
         srv.provider_id = pid
         servers.append(srv)
 
-    ctrl                 = HTTPServer(("127.0.0.1", _CONTROL_PORT), ControlHandler)
+    ctrl = HTTPServer(("127.0.0.1", _CONTROL_PORT), ControlHandler)
     ctrl.provider_states = states
     servers.append(ctrl)
 
@@ -121,7 +121,7 @@ def sim():
     time.sleep(0.15)  # allow servers to finish binding
 
     yield {
-        "control":   f"http://127.0.0.1:{_CONTROL_PORT}",
+        "control": f"http://127.0.0.1:{_CONTROL_PORT}",
         "provider1": f"http://127.0.0.1:{_PROVIDER_PORTS['1']}",
         "provider2": f"http://127.0.0.1:{_PROVIDER_PORTS['2']}",
         "provider3": f"http://127.0.0.1:{_PROVIDER_PORTS['3']}",
@@ -132,6 +132,7 @@ def sim():
 
 
 # ── Function-scoped autouse: clean slate before/after every test ──────────────
+
 
 @pytest.fixture(autouse=True)
 def clean_state(sim):
@@ -144,6 +145,7 @@ def clean_state(sim):
 # ─────────────────────────────────────────────────────────────────────────────
 # MAG-1821 — per-method override behaviour
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestPerMethodOverrides:
 
@@ -164,16 +166,19 @@ class TestPerMethodOverrides:
         overrides from provider-wide ``mode: down`` (which kills every
         method on the provider).
         """
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {
-                "1": {
-                    "mode": "success",
-                    "responses": {
-                        "eth_blockNumber": {"mode": "down"},
-                    },
+        _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {
+                        "mode": "success",
+                        "responses": {
+                            "eth_blockNumber": {"mode": "down"},
+                        },
+                    }
                 }
-            }
-        })
+            },
+        )
 
         status_down, body_down = _rpc(sim["provider1"], "eth_blockNumber")
         assert status_down == 503, f"expected 503 on overridden method, got {status_down}"
@@ -197,31 +202,34 @@ class TestPerMethodOverrides:
           * eth_blockNumber finishes well under that — no override, no
             delay.
         """
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {
-                "1": {
-                    "mode": "success",
-                    "latency_ms": 0,
-                    "responses": {
-                        "eth_getBlockByNumber": {"latency_ms": 500},
-                    },
+        _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {
+                        "mode": "success",
+                        "latency_ms": 0,
+                        "responses": {
+                            "eth_getBlockByNumber": {"latency_ms": 500},
+                        },
+                    }
                 }
-            }
-        })
+            },
+        )
 
         t0 = time.monotonic()
         _rpc(sim["provider1"], "eth_getBlockByNumber", ["latest", False])
         elapsed_overridden_ms = (time.monotonic() - t0) * 1000
-        assert elapsed_overridden_ms >= 480, (
-            f"overridden method should sleep ~500ms, elapsed={elapsed_overridden_ms:.0f}ms"
-        )
+        assert (
+            elapsed_overridden_ms >= 480
+        ), f"overridden method should sleep ~500ms, elapsed={elapsed_overridden_ms:.0f}ms"
 
         t1 = time.monotonic()
         _rpc(sim["provider1"], "eth_blockNumber")
         elapsed_other_ms = (time.monotonic() - t1) * 1000
-        assert elapsed_other_ms < 200, (
-            f"non-overridden method should not sleep, elapsed={elapsed_other_ms:.0f}ms"
-        )
+        assert (
+            elapsed_other_ms < 200
+        ), f"non-overridden method should not sleep, elapsed={elapsed_other_ms:.0f}ms"
 
     @pytest.mark.timeout(10)
     def test_per_key_fallback_inherits_provider_wide_keys(self, sim):
@@ -237,17 +245,20 @@ class TestPerMethodOverrides:
           * eth_blockNumber → 503 (mode=down wins) AND elapsed >= 100ms
             (latency_ms inherited from provider-wide config).
         """
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {
-                "1": {
-                    "mode": "success",
-                    "latency_ms": 100,
-                    "responses": {
-                        "eth_blockNumber": {"mode": "down"},
-                    },
+        _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {
+                        "mode": "success",
+                        "latency_ms": 100,
+                        "responses": {
+                            "eth_blockNumber": {"mode": "down"},
+                        },
+                    }
                 }
-            }
-        })
+            },
+        )
 
         t0 = time.monotonic()
         status, body = _rpc(sim["provider1"], "eth_blockNumber")
@@ -255,9 +266,9 @@ class TestPerMethodOverrides:
 
         assert status == 503, f"per-method mode=down should win, got {status}"
         assert body == {}, f"down emits no body, got {body!r}"
-        assert elapsed_ms >= 80, (
-            f"provider-wide latency_ms=100 should still apply, elapsed={elapsed_ms:.0f}ms"
-        )
+        assert (
+            elapsed_ms >= 80
+        ), f"provider-wide latency_ms=100 should still apply, elapsed={elapsed_ms:.0f}ms"
 
     @pytest.mark.timeout(10)
     def test_per_method_mode_error_is_rejected_with_400(self, sim):
@@ -270,20 +281,23 @@ class TestPerMethodOverrides:
         in _apply_fault runs before handlers_eth ever reads the
         error_stub. We surface the conflict at config-time with a 400.
         """
-        status, body = _post(_ctrl(sim, "/scenario"), {
-            "providers": {
-                "1": {
-                    "responses": {
-                        "eth_blockNumber": {"mode": "error"},
-                    },
+        status, body = _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {
+                        "responses": {
+                            "eth_blockNumber": {"mode": "error"},
+                        },
+                    }
                 }
-            }
-        })
+            },
+        )
         assert status == 400, f"expected 400 on mode=error override, got {status}"
         assert "error" in body, f"expected error payload, got {body!r}"
-        assert "error" in body["error"].lower() or "mode" in body["error"].lower(), (
-            f"error message should mention the offending key, got {body['error']!r}"
-        )
+        assert (
+            "error" in body["error"].lower() or "mode" in body["error"].lower()
+        ), f"error message should mention the offending key, got {body['error']!r}"
 
     @pytest.mark.timeout(10)
     def test_per_method_down_records_method_req_id_and_latency_in_history(self, sim):
@@ -366,19 +380,22 @@ class TestPerMethodOverrides:
             the filter logic in ControlHandler.do_GET (server.py:1344).
         """
         request_id = 4242
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {
-                "1": {
-                    "mode": "success",
-                    "responses": {
-                        "eth_blockNumber": {
-                            "mode": "down",
-                            "latency_ms": 50,
+        _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {
+                        "mode": "success",
+                        "responses": {
+                            "eth_blockNumber": {
+                                "mode": "down",
+                                "latency_ms": 50,
+                            },
                         },
-                    },
+                    }
                 }
-            }
-        })
+            },
+        )
 
         status, body = _post(
             sim["provider1"],
@@ -397,9 +414,9 @@ class TestPerMethodOverrides:
         # /history returns {"count": N, "history": [...]} — peel out the list.
         entries = hist["history"]
         assert isinstance(entries, list), f"unexpected /history shape: {hist!r}"
-        assert len(entries) == 1, (
-            f"expected exactly 1 history entry for provider 1, got {len(entries)}: {entries!r}"
-        )
+        assert (
+            len(entries) == 1
+        ), f"expected exactly 1 history entry for provider 1, got {len(entries)}: {entries!r}"
 
         entry = entries[0]
         assert entry["method"] == "eth_blockNumber", (
@@ -418,9 +435,7 @@ class TestPerMethodOverrides:
             f"Got latency_ms={entry['latency_ms']}. If 0: t_start or _elapsed_ms "
             f"was bypassed in the per-method down branch."
         )
-        assert entry["status"] == "down", (
-            f"status should be 'down', got {entry['status']!r}"
-        )
+        assert entry["status"] == "down", f"status should be 'down', got {entry['status']!r}"
 
         # Filter sanity: /history?method=eth_blockNumber must resolve to this
         # entry. This only works if method was labelled correctly (above);
@@ -450,19 +465,22 @@ class TestPerMethodOverrides:
         Mirrors the provider-wide order (latency injection in do_POST
         before _apply_fault evaluates the fault primitives).
         """
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {
-                "1": {
-                    "mode": "success",
-                    "responses": {
-                        "eth_blockNumber": {
-                            "latency_ms": 200,
-                            "mode": "rate_limit",
+        _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {
+                        "mode": "success",
+                        "responses": {
+                            "eth_blockNumber": {
+                                "latency_ms": 200,
+                                "mode": "rate_limit",
+                            },
                         },
-                    },
+                    }
                 }
-            }
-        })
+            },
+        )
 
         t0 = time.monotonic()
         status, body = _rpc(sim["provider1"], "eth_blockNumber")
@@ -471,14 +489,15 @@ class TestPerMethodOverrides:
         assert status == 429, f"expected rate_limit (429), got {status}"
         assert "error" in body, f"rate_limit body should carry an error envelope, got {body!r}"
         assert body["error"]["code"] == 429
-        assert elapsed_ms >= 180, (
-            f"per-method latency should fire before fault, elapsed={elapsed_ms:.0f}ms"
-        )
+        assert (
+            elapsed_ms >= 180
+        ), f"per-method latency should fire before fault, elapsed={elapsed_ms:.0f}ms"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MAG-1846 — per-method body+status override behaviour
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestPerMethodBodyOverride:
     """Per-method body+status override (MAG-1846).
@@ -541,19 +560,22 @@ class TestPerMethodBodyOverride:
             ``method_snap.get("status", 200)`` resolution.
         """
         override_body = {"success": False, "error": "oops"}
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {
-                "1": {
-                    "mode": "success",
-                    "responses": {
-                        "eth_blockNumber": {
-                            "status": 200,
-                            "body": override_body,
+        _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {
+                        "mode": "success",
+                        "responses": {
+                            "eth_blockNumber": {
+                                "status": 200,
+                                "body": override_body,
+                            },
                         },
-                    },
+                    }
                 }
-            }
-        })
+            },
+        )
 
         status, body = _rpc(sim["provider1"], "eth_blockNumber")
         assert status == 200, f"expected override status 200, got {status}"
@@ -588,16 +610,19 @@ class TestPerMethodBodyOverride:
           * Body matches the override.
         """
         override_body = {"custom": True}
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {
-                "1": {
-                    "mode": "success",
-                    "responses": {
-                        "eth_blockNumber": {"body": override_body},
-                    },
+        _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {
+                        "mode": "success",
+                        "responses": {
+                            "eth_blockNumber": {"body": override_body},
+                        },
+                    }
                 }
-            }
-        })
+            },
+        )
 
         status, body = _rpc(sim["provider1"], "eth_blockNumber")
         assert status == 200, f"expected default status 200, got {status}"
@@ -629,24 +654,27 @@ class TestPerMethodBodyOverride:
             mentions ``status`` or ``2xx``, so the test failure points at
             the right validation rule.
         """
-        status, body = _post(_ctrl(sim, "/scenario"), {
-            "providers": {
-                "1": {
-                    "responses": {
-                        "eth_blockNumber": {
-                            "status": 500,
-                            "body": {"oops": True},
+        status, body = _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {
+                        "responses": {
+                            "eth_blockNumber": {
+                                "status": 500,
+                                "body": {"oops": True},
+                            },
                         },
-                    },
+                    }
                 }
-            }
-        })
+            },
+        )
         assert status == 400, f"expected 400 for non-2xx body override status, got {status}"
         assert "error" in body, f"expected error payload, got {body!r}"
         err_msg = body["error"].lower()
-        assert "status" in err_msg or "2xx" in err_msg, (
-            f"error should mention status / 2xx, got {body['error']!r}"
-        )
+        assert (
+            "status" in err_msg or "2xx" in err_msg
+        ), f"error should mention status / 2xx, got {body['error']!r}"
 
     @pytest.mark.timeout(10)
     def test_body_override_with_latency_applies_latency_first(self, sim):
@@ -680,19 +708,22 @@ class TestPerMethodBodyOverride:
             for HTTP framing / scheduler jitter.
         """
         override_body = {"ok": True}
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {
-                "1": {
-                    "mode": "success",
-                    "responses": {
-                        "eth_blockNumber": {
-                            "latency_ms": 200,
-                            "body": override_body,
+        _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {
+                        "mode": "success",
+                        "responses": {
+                            "eth_blockNumber": {
+                                "latency_ms": 200,
+                                "body": override_body,
+                            },
                         },
-                    },
+                    }
                 }
-            }
-        })
+            },
+        )
 
         t0 = time.monotonic()
         status, body = _rpc(sim["provider1"], "eth_blockNumber")
@@ -730,22 +761,27 @@ class TestPerMethodBodyOverride:
             mentions ``body`` and ``mode`` (or "mutually exclusive"), so a
             failure surfaces the rule.
         """
-        status, body = _post(_ctrl(sim, "/scenario"), {
-            "providers": {
-                "1": {
-                    "responses": {
-                        "eth_blockNumber": {
-                            "mode": "down",
-                            "body": {"ok": True},
+        status, body = _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {
+                        "responses": {
+                            "eth_blockNumber": {
+                                "mode": "down",
+                                "body": {"ok": True},
+                            },
                         },
-                    },
+                    }
                 }
-            }
-        })
+            },
+        )
         assert status == 400, f"expected 400 for body+mode combination, got {status}"
         assert "error" in body, f"expected error payload, got {body!r}"
         err_msg = body["error"].lower()
-        assert ("body" in err_msg and "mode" in err_msg) or "mutually exclusive" in err_msg, (
+        assert (
+            "body" in err_msg and "mode" in err_msg
+        ) or "mutually exclusive" in err_msg, (
             f"error should mention body+mode conflict, got {body['error']!r}"
         )
 
@@ -783,16 +819,19 @@ class TestPerMethodBodyOverride:
             was merged in).
         """
         override_body = {"completely": "unrelated", "fields": [1, 2, 3]}
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {
-                "1": {
-                    "mode": "success",
-                    "responses": {
-                        "eth_blockNumber": {"body": override_body},
-                    },
+        _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {
+                        "mode": "success",
+                        "responses": {
+                            "eth_blockNumber": {"body": override_body},
+                        },
+                    }
                 }
-            }
-        })
+            },
+        )
 
         status, body = _rpc(sim["provider1"], "eth_blockNumber")
         assert status == 200, f"expected status 200, got {status}"
@@ -805,9 +844,9 @@ class TestPerMethodBodyOverride:
         # keys are absent. If a future refactor adds a "helpful" wrap, this
         # catches it even if the override dict accidentally collides on keys.
         for leaked_key in ("jsonrpc", "result", "id"):
-            assert leaked_key not in body, (
-                f"healthy-stub key {leaked_key!r} leaked into body override response: {body!r}"
-            )
+            assert (
+                leaked_key not in body
+            ), f"healthy-stub key {leaked_key!r} leaked into body override response: {body!r}"
 
     @pytest.mark.timeout(10)
     def test_body_override_history_status_is_success_regardless_of_body_shape(self, sim):
@@ -863,21 +902,24 @@ class TestPerMethodBodyOverride:
             filter path itself is broken, or the second request never
             recorded.
         """
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {
-                "1": {
-                    "mode": "success",
-                    "responses": {
-                        "eth_blockNumber": {
-                            "body": {"success": False, "error": "rate limit"},
+        _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {
+                        "mode": "success",
+                        "responses": {
+                            "eth_blockNumber": {
+                                "body": {"success": False, "error": "rate limit"},
+                            },
+                            "eth_chainId": {
+                                "body": {"data": {"error_count": 0}},
+                            },
                         },
-                        "eth_chainId": {
-                            "body": {"data": {"error_count": 0}},
-                        },
-                    },
+                    }
                 }
-            }
-        })
+            },
+        )
 
         status_err_shape, body_err_shape = _rpc(sim["provider1"], "eth_blockNumber")
         assert status_err_shape == 200

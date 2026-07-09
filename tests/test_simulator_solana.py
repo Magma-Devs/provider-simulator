@@ -64,9 +64,9 @@ from server import ControlHandler, JSONRPCHandler, ProviderState
 #     test to drive an ETH-only port for the same pid. Solana ports (38582-4)
 #     host Solana-configured listeners and are the focus of this suite. ───────
 
-_ETH_PROVIDER_PORTS    = {"1": 38560, "2": 38561, "3": 38562}
+_ETH_PROVIDER_PORTS = {"1": 38560, "2": 38561, "3": 38562}
 _SOLANA_PROVIDER_PORTS = {"1": 38582, "2": 38583, "3": 38584}
-_CONTROL_PORT          = 38900
+_CONTROL_PORT = 38900
 
 
 # ── HTTP helpers (kept independent of test_simulator.py to avoid cross-file
@@ -77,9 +77,7 @@ _CONTROL_PORT          = 38900
 def _post(url: str, body: dict) -> tuple[int, dict]:
     """POST JSON body, return (status_code, parsed_response_body)."""
     data = json.dumps(body).encode()
-    req  = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}
-    )
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
             raw = resp.read()
@@ -113,6 +111,7 @@ def _ctrl(sim: dict, path: str) -> str:
 
 # ── Module-scoped fixture: start all servers once ─────────────────────────────
 
+
 @pytest.fixture(scope="module")
 def sim():
     """Start 3 ETH listeners + 3 Solana listeners + 1 control server.
@@ -140,26 +139,26 @@ def sim():
     servers = []
     # ETH listener pool — default handler_chain_family / handler_module.
     for pid, port in _ETH_PROVIDER_PORTS.items():
-        srv                  = ThreadingHTTPServer(("127.0.0.1", port), JSONRPCHandler)
-        srv.daemon_threads   = True
-        srv.state                = states[pid]
-        srv.provider_id          = pid
+        srv = ThreadingHTTPServer(("127.0.0.1", port), JSONRPCHandler)
+        srv.daemon_threads = True
+        srv.state = states[pid]
+        srv.provider_id = pid
         srv.handler_chain_family = "eth"
-        srv.handler_module       = handlers_eth
+        srv.handler_module = handlers_eth
         servers.append(srv)
 
     # Solana listener pool — port-derived dispatch to handlers_solana.
     for pid, port in _SOLANA_PROVIDER_PORTS.items():
-        srv                  = ThreadingHTTPServer(("127.0.0.1", port), JSONRPCHandler)
-        srv.daemon_threads   = True
-        srv.state                = states[pid]
-        srv.provider_id          = pid
+        srv = ThreadingHTTPServer(("127.0.0.1", port), JSONRPCHandler)
+        srv.daemon_threads = True
+        srv.state = states[pid]
+        srv.provider_id = pid
         srv.handler_chain_family = "solana"
-        srv.handler_module       = handlers_solana
+        srv.handler_module = handlers_solana
         servers.append(srv)
 
-    ctrl                  = HTTPServer(("127.0.0.1", _CONTROL_PORT), ControlHandler)
-    ctrl.provider_states  = states
+    ctrl = HTTPServer(("127.0.0.1", _CONTROL_PORT), ControlHandler)
+    ctrl.provider_states = states
     servers.append(ctrl)
 
     threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in servers]
@@ -169,10 +168,10 @@ def sim():
     time.sleep(0.15)
 
     yield {
-        "control":       f"http://127.0.0.1:{_CONTROL_PORT}",
-        "provider1":     f"http://127.0.0.1:{_SOLANA_PROVIDER_PORTS['1']}",
-        "provider2":     f"http://127.0.0.1:{_SOLANA_PROVIDER_PORTS['2']}",
-        "provider3":     f"http://127.0.0.1:{_SOLANA_PROVIDER_PORTS['3']}",
+        "control": f"http://127.0.0.1:{_CONTROL_PORT}",
+        "provider1": f"http://127.0.0.1:{_SOLANA_PROVIDER_PORTS['1']}",
+        "provider2": f"http://127.0.0.1:{_SOLANA_PROVIDER_PORTS['2']}",
+        "provider3": f"http://127.0.0.1:{_SOLANA_PROVIDER_PORTS['3']}",
         "eth_provider1": f"http://127.0.0.1:{_ETH_PROVIDER_PORTS['1']}",
         "eth_provider2": f"http://127.0.0.1:{_ETH_PROVIDER_PORTS['2']}",
         "eth_provider3": f"http://127.0.0.1:{_ETH_PROVIDER_PORTS['3']}",
@@ -183,6 +182,7 @@ def sim():
 
 
 # ── Helper to apply per-provider scenario config ──────────────────────────────
+
 
 def _set_solana(sim, pid: str = "1", **extra):
     """Convenience: POST /scenario for a single provider.
@@ -210,6 +210,7 @@ def _set_solana_with_fault(sim, pid: str = "1", **extra):
 
 # ── Function-scoped autouse: clean slate before/after every test ──────────────
 
+
 @pytest.fixture(autouse=True)
 def clean_state(sim):
     """Reset scenario config AND clear history before and after every test."""
@@ -223,6 +224,7 @@ def clean_state(sim):
 # Solana methods with no /scenario call at all, because dispatch is keyed on the
 # listener port, not on chain_family.
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestSolanaPortDispatch:
 
@@ -271,6 +273,7 @@ class TestSolanaPortDispatch:
 # getLatestBlockhash — the slot ↔ lastValidBlockHeight gap (the bug carrier)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestGetLatestBlockhashGap:
 
     def test_default_gap_between_slot_and_last_valid_block_height(self, sim):
@@ -281,7 +284,7 @@ class TestGetLatestBlockhashGap:
         assert status == 200
         assert "error" not in body
         result = body["result"]
-        slot     = result["context"]["slot"]
+        slot = result["context"]["slot"]
         last_vbh = result["value"]["lastValidBlockHeight"]
         assert slot - last_vbh == SOLANA_DEFAULT_SLOT_BLOCK_GAP
         assert SOLANA_DEFAULT_SLOT_BLOCK_GAP == 21_900_000
@@ -338,6 +341,7 @@ class TestGetLatestBlockhashGap:
 # rest. lastValidBlockHeight stays slot - gap, so the gap applies on top.
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestSolanaSlotOffset:
 
     def test_default_offset_zero_reports_base_slot(self, sim):
@@ -345,7 +349,7 @@ class TestSolanaSlotOffset:
         getLatestBlockhash.context.slot both report exactly SOLANA_BASE_SLOT
         (no regression from pre-MAG-2233 behaviour)."""
         _, slot_body = _rpc(sim["provider1"], "getSlot")
-        _, bh_body   = _rpc(sim["provider1"], "getLatestBlockhash")
+        _, bh_body = _rpc(sim["provider1"], "getLatestBlockhash")
         assert slot_body["result"] == SOLANA_BASE_SLOT
         assert bh_body["result"]["context"]["slot"] == SOLANA_BASE_SLOT
 
@@ -361,8 +365,8 @@ class TestSolanaSlotOffset:
         assert slot_body["result"] == SOLANA_BASE_SLOT + offset
 
         _, bh_body = _rpc(sim["provider1"], "getLatestBlockhash")
-        result   = bh_body["result"]
-        slot     = result["context"]["slot"]
+        result = bh_body["result"]
+        slot = result["context"]["slot"]
         last_vbh = result["value"]["lastValidBlockHeight"]
         assert slot == SOLANA_BASE_SLOT + offset
         # Gap stacks on top of the offset: lastValidBlockHeight == slot - gap.
@@ -418,19 +422,18 @@ class TestSolanaSlotOffset:
         slot ↔ lastValidBlockHeight distance equals the gap — the two knobs
         compose without interfering."""
         offset = -4_000_000
-        gap    = 25
+        gap = 25
         _set_solana(sim, "1", solana_slot_offset=offset, solana_slot_block_gap=gap)
         _, bh_body = _rpc(sim["provider1"], "getLatestBlockhash")
         result = bh_body["result"]
         assert result["context"]["slot"] == SOLANA_BASE_SLOT + offset
-        assert (
-            result["context"]["slot"] - result["value"]["lastValidBlockHeight"] == gap
-        )
+        assert result["context"]["slot"] - result["value"]["lastValidBlockHeight"] == gap
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # getSlot / getHealth / getVersion — the supporting spec-verification methods
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestSolanaSupportingMethods:
 
@@ -467,6 +470,7 @@ class TestSolanaSupportingMethods:
 # short-circuit before the fault gate, so they don't need chain_family="solana".
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestSolanaPerMethodOverrides:
 
     def test_solana_result_override(self, sim):
@@ -478,7 +482,9 @@ class TestSolanaPerMethodOverrides:
     def test_solana_error_override_raw_envelope(self, sim):
         """responses[method] = {"error": {...}} emits the JSON-RPC error envelope
         directly — the raw escape-hatch, alongside the named error_stub path."""
-        _set_solana(sim, "1", responses={"getSlot": {"error": {"code": -32007, "message": "Slot skipped"}}})
+        _set_solana(
+            sim, "1", responses={"getSlot": {"error": {"code": -32007, "message": "Slot skipped"}}}
+        )
         _, body = _rpc(sim["provider1"], "getSlot")
         assert "error" in body
         assert body["error"]["code"] == -32007
@@ -498,7 +504,9 @@ class TestSolanaPerMethodOverrides:
     def test_solana_method_unaffected_by_other_method_override(self, sim):
         """Per-method overrides scope strictly to that method — an override on
         getSlot must not change getHealth."""
-        _set_solana(sim, "1", responses={"getSlot": {"error": {"code": -32007, "message": "Slot skipped"}}})
+        _set_solana(
+            sim, "1", responses={"getSlot": {"error": {"code": -32007, "message": "Slot skipped"}}}
+        )
         _, body = _rpc(sim["provider1"], "getHealth")
         assert "error" not in body
         assert body["result"] == "ok"
@@ -507,6 +515,7 @@ class TestSolanaPerMethodOverrides:
 # ─────────────────────────────────────────────────────────────────────────────
 # History tracking — Solana requests must show up in /history like ETH/BTC ones
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestSolanaHistoryTracking:
 
@@ -529,7 +538,9 @@ class TestSolanaHistoryTracking:
     def test_solana_error_status_recorded(self, sim):
         """A per-method error override on a Solana method produces status=error
         in history."""
-        _set_solana(sim, "1", responses={"getSlot": {"error": {"code": -32007, "message": "Slot skipped"}}})
+        _set_solana(
+            sim, "1", responses={"getSlot": {"error": {"code": -32007, "message": "Slot skipped"}}}
+        )
         _rpc(sim["provider1"], "getSlot")
         _, hist = _get(_ctrl(sim, "/history?provider=1&status=error"))
         assert hist["count"] >= 1
@@ -539,6 +550,7 @@ class TestSolanaHistoryTracking:
 # ─────────────────────────────────────────────────────────────────────────────
 # Mixed-chain scenario — one ETH + one Solana listener on the same pid
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestMixedChainScenario:
     """Each pid has both an ETH listener (38560-2) and a Solana listener
@@ -550,7 +562,7 @@ class TestMixedChainScenario:
         """No scenario at all — the same pid answers ETH on the ETH port and
         Solana on the Solana port, decided by the listener ports themselves."""
         _, eth_body = _rpc(sim["eth_provider1"], "eth_blockNumber")
-        _, sol_body = _rpc(sim["provider1"],     "getSlot")
+        _, sol_body = _rpc(sim["provider1"], "getSlot")
 
         # ETH side: hex string with "0x" prefix.
         assert isinstance(eth_body["result"], str)
@@ -564,8 +576,15 @@ class TestMixedChainScenario:
         provider's chain_family. Requests to a different transport's listener
         (gated out) must not burn the first-N budget — so the owning listener
         still sees the first N calls as failures."""
-        _set_solana(sim, "1", mode="error", error_code=-32077,
-                    error_message="boom", chain_family="solana", fail_first_n=2)
+        _set_solana(
+            sim,
+            "1",
+            mode="error",
+            error_code=-32077,
+            error_message="boom",
+            chain_family="solana",
+            fail_first_n=2,
+        )
         # Hit the ETH listener (chain_family mismatch) — must NOT consume the budget.
         for _ in range(3):
             _rpc(sim["eth_provider1"], "eth_blockNumber")
@@ -582,6 +601,7 @@ class TestMixedChainScenario:
 # Cross-transport fault isolation — mode=down is universal across chain_family
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestSolanaCrossTransportFaultIsolation:
     """Solana port must honor mode=down regardless of chain_family (the same
     universal-down contract the BTC suite locks for its dedicated port)."""
@@ -595,16 +615,19 @@ class TestSolanaCrossTransportFaultIsolation:
         responses, hiding router-side bugs that depend on the provider being
         unreachable across every node-url.
         """
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "down"}}})
-        status, _ = _rpc(sim["provider1"], "getSlot")
-        assert status == 503, (
-            f"Solana port should refuse with 503 under universal-down; got {status}"
+        _post(
+            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "down"}}}
         )
+        status, _ = _rpc(sim["provider1"], "getSlot")
+        assert (
+            status == 503
+        ), f"Solana port should refuse with 503 under universal-down; got {status}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fault injection on the Solana listener — six fault primitives
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestSolanaFaultInjection:
     """Fault primitives gated to the Solana listener via chain_family="solana".
@@ -627,30 +650,28 @@ class TestSolanaFaultInjection:
         ProviderState default when no error_code override is provided)."""
         _set_solana_with_fault(sim, "1", mode="error")
         status, body = _rpc(sim["provider1"], "getSlot")
-        assert status == 200, (
-            f"mode=error returns HTTP 200 with a JSON-RPC error body; got {status}"
-        )
-        assert "error" in body, (
-            f"expected a JSON-RPC error envelope in the response body; got {body}"
-        )
-        assert body["error"]["code"] == -32000, (
-            f"default error_code is -32000; got {body['error']['code']}"
-        )
+        assert (
+            status == 200
+        ), f"mode=error returns HTTP 200 with a JSON-RPC error body; got {status}"
+        assert (
+            "error" in body
+        ), f"expected a JSON-RPC error envelope in the response body; got {body}"
+        assert (
+            body["error"]["code"] == -32000
+        ), f"default error_code is -32000; got {body['error']['code']}"
 
     def test_rate_limit_mode_returns_429(self, sim):
         """mode=rate_limit on a Solana-gated scenario returns HTTP 429 with a
         JSON-RPC error envelope whose code is 429."""
         _set_solana_with_fault(sim, "1", mode="rate_limit")
         status, body = _rpc(sim["provider1"], "getSlot")
-        assert status == 429, (
-            f"mode=rate_limit must return HTTP 429; got {status}"
-        )
-        assert "error" in body, (
-            f"expected a JSON-RPC error envelope in the 429 response; got {body}"
-        )
-        assert body["error"]["code"] == 429, (
-            f"rate_limit error_code is 429; got {body['error'].get('code')}"
-        )
+        assert status == 429, f"mode=rate_limit must return HTTP 429; got {status}"
+        assert (
+            "error" in body
+        ), f"expected a JSON-RPC error envelope in the 429 response; got {body}"
+        assert (
+            body["error"]["code"] == 429
+        ), f"rate_limit error_code is 429; got {body['error'].get('code')}"
 
     def test_hang_mode_times_out_client(self, sim):
         """mode=hang on a Solana-gated scenario holds the TCP connection open
@@ -672,28 +693,24 @@ class TestSolanaFaultInjection:
         except (urllib.error.URLError, TimeoutError, OSError):
             timed_out = True
         elapsed = time.monotonic() - t0
-        assert timed_out, (
-            "mode=hang should cause a client timeout rather than a successful response"
-        )
-        assert elapsed >= 0.9, (
-            f"hang must block for at least the client timeout (~1s); got {elapsed:.2f}s"
-        )
-        assert elapsed < 3.0, (
-            f"hang must exit at the ~1s client timeout, not a delayed success; got {elapsed:.2f}s"
-        )
+        assert (
+            timed_out
+        ), "mode=hang should cause a client timeout rather than a successful response"
+        assert (
+            elapsed >= 0.9
+        ), f"hang must block for at least the client timeout (~1s); got {elapsed:.2f}s"
+        assert (
+            elapsed < 3.0
+        ), f"hang must exit at the ~1s client timeout, not a delayed success; got {elapsed:.2f}s"
 
     def test_drop_connection_before_headers_on_solana(self, sim):
         """mode=drop_connection with drop_at=before_headers on a Solana-gated
         scenario closes the TCP connection before sending any response bytes.
         The client must observe a connection error — not a JSON-RPC response."""
-        _set_solana_with_fault(
-            sim, "1", mode="drop_connection", drop_at="before_headers"
-        )
+        _set_solana_with_fault(sim, "1", mode="drop_connection", drop_at="before_headers")
         # The connection is dropped before any HTTP response arrives, so any
         # transport-level error is the valid observable (no specific exception value to match).
-        with pytest.raises(
-            (urllib.error.URLError, OSError)
-        ):
+        with pytest.raises((urllib.error.URLError, OSError)):
             _rpc(sim["provider1"], "getSlot")
 
     def test_corrupt_response_invalid_json_on_solana(self, sim):
@@ -726,6 +743,6 @@ class TestSolanaFaultInjection:
         t0 = time.monotonic()
         _rpc(sim["provider1"], "getSlot")
         elapsed_ms = (time.monotonic() - t0) * 1000
-        assert elapsed_ms >= 180, (
-            f"latency_ms=200 must delay the response by at least 180ms; got {elapsed_ms:.1f}ms"
-        )
+        assert (
+            elapsed_ms >= 180
+        ), f"latency_ms=200 must delay the response by at least 180ms; got {elapsed_ms:.1f}ms"
