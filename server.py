@@ -42,6 +42,7 @@ Control API:
 
 import datetime
 import json
+import logging
 import os
 import random
 import re
@@ -82,6 +83,8 @@ from constants import (
     WS_PRIMARY_PORTS,
 )
 from stubs_rest import REST_METHOD_DEFAULTS
+
+_log = logging.getLogger(__name__)
 
 # ── Wire-payload normalisation ────────────────────────────────────────────────
 
@@ -3128,7 +3131,7 @@ def _scenario_ttl_sweep(
                 non_default = state.mode != "success"
             if age > ttl_s and non_default:
                 state.reset_scenario()
-                print(f"[ttl-sweep] reverted provider {pid} (idle {age:.0f}s > {ttl_s}s TTL)")
+                _log.info(f"[ttl-sweep] reverted provider {pid} (idle {age:.0f}s > {ttl_s}s TTL)")
 
 
 class _SimThreadingHTTPServer(ThreadingHTTPServer):
@@ -3231,6 +3234,13 @@ def main():
     Blocks on thread.join() and shuts all servers down cleanly on
     KeyboardInterrupt.
     """
+    # format="%(message)s" keeps output identical to a bare print() — no
+    # timestamp/level/logger-name prefix — since the simulator's stdout is
+    # scraped by tests and `kubectl logs` in its current bare-text shape.
+    # Level defaults to INFO (same visibility as the print() calls this
+    # replaces); set SIM_LOG_LEVEL=DEBUG/WARNING/ERROR to change it.
+    logging.basicConfig(level=os.environ.get("SIM_LOG_LEVEL", "INFO"), format="%(message)s")
+
     # Primary-tier states are shared across surfaces (one ProviderState backs
     # JSON-RPC + REST + gRPC + TM + WS for the same pid). Backup-tier states
     # are independent per surface — distinct pids guarantee distinct state.
@@ -3410,45 +3420,45 @@ def main():
             name="scenario-ttl-sweep",
         )
         sweep_thread.start()
-        print(
+        _log.info(
             f"[ttl-sweep] started — scenario TTL = {scenario_ttl_s}s "
             f"(set SIM_SCENARIO_TTL_SECONDS=0 to disable)"
         )
 
-    print("Provider simulator started")
+    _log.info("Provider simulator started")
     for pid, port in ETH_PRIMARY_PORTS.items():
-        print(f"  provider {pid:>2} (jsonrpc-eth,    primary) → :{port}")
+        _log.info(f"  provider {pid:>2} (jsonrpc-eth,    primary) → :{port}")
     for pid, port in ETH_BACKUP_PORTS.items():
-        print(f"  provider {pid:>2} (jsonrpc-eth,    backup)  → :{port}")
+        _log.info(f"  provider {pid:>2} (jsonrpc-eth,    backup)  → :{port}")
     for pid, port in ETH_SOLO_PORTS.items():
-        print(f"  provider {pid:>2} (jsonrpc-eth,    solo)    → :{port}")
+        _log.info(f"  provider {pid:>2} (jsonrpc-eth,    solo)    → :{port}")
     for pid, port in BTC_PRIMARY_PORTS.items():
-        print(f"  provider {pid:>2} (jsonrpc-btc,    primary) → :{port}")
+        _log.info(f"  provider {pid:>2} (jsonrpc-btc,    primary) → :{port}")
     for pid, port in LN_PRIMARY_PORTS.items():
-        print(f"  provider {pid:>2} (jsonrpc-ln,     primary) → :{port}")
+        _log.info(f"  provider {pid:>2} (jsonrpc-ln,     primary) → :{port}")
     for pid, port in SOLANA_PRIMARY_PORTS.items():
-        print(f"  provider {pid:>2} (jsonrpc-solana, primary) → :{port}")
+        _log.info(f"  provider {pid:>2} (jsonrpc-solana, primary) → :{port}")
     for pid, port in SOLANA_SOLO_PORTS.items():
-        print(f"  provider {pid:>2} (jsonrpc-solana, solo)    → :{port}")
+        _log.info(f"  provider {pid:>2} (jsonrpc-solana, solo)    → :{port}")
     for pid, port in GRPC_PRIMARY_PORTS.items():
-        print(f"  provider {pid:>2} (grpc,           primary) → :{port}")
+        _log.info(f"  provider {pid:>2} (grpc,           primary) → :{port}")
     for pid, port in GRPC_BACKUP_PORTS.items():
-        print(f"  provider {pid:>2} (grpc,           backup)  → :{port}")
+        _log.info(f"  provider {pid:>2} (grpc,           backup)  → :{port}")
     for pid, port in REST_PRIMARY_PORTS.items():
-        print(f"  provider {pid:>2} (rest,           primary) → :{port}")
+        _log.info(f"  provider {pid:>2} (rest,           primary) → :{port}")
     for pid, port in REST_BACKUP_PORTS.items():
-        print(f"  provider {pid:>2} (rest,           backup)  → :{port}")
+        _log.info(f"  provider {pid:>2} (rest,           backup)  → :{port}")
     for pid, port in TM_PRIMARY_PORTS.items():
-        print(f"  provider {pid:>2} (tendermintrpc,  primary) → :{port}")
+        _log.info(f"  provider {pid:>2} (tendermintrpc,  primary) → :{port}")
     for pid, port in TM_BACKUP_PORTS.items():
-        print(f"  provider {pid:>2} (tendermintrpc,  backup)  → :{port}")
+        _log.info(f"  provider {pid:>2} (tendermintrpc,  backup)  → :{port}")
     for pid, port in WS_PRIMARY_PORTS.items():
-        print(f"  provider {pid:>2} (ws,             primary) → :{port}")
+        _log.info(f"  provider {pid:>2} (ws,             primary) → :{port}")
     for pid, port in WS_BACKUP_PORTS.items():
-        print(f"  provider {pid:>2} (ws,             backup)  → :{port}")
-    print(f"  control API  → :{CONTROL_PORT}")
-    print("  GET /stats   → call counts per provider")
-    print("  GET /history → ordered call log (who was tried first)")
+        _log.info(f"  provider {pid:>2} (ws,             backup)  → :{port}")
+    _log.info(f"  control API  → :{CONTROL_PORT}")
+    _log.info("  GET /stats   → call counts per provider")
+    _log.info("  GET /history → ordered call log (who was tried first)")
 
     threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in servers]
 
@@ -3480,7 +3490,7 @@ def main():
                 )
             )
     except ImportError as exc:
-        print(f"  gRPC servers DISABLED — grpcio import failed: {exc}")
+        _log.warning(f"  gRPC servers DISABLED — grpcio import failed: {exc}")
 
     for t in threads:
         t.start()
