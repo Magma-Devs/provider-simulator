@@ -1,0 +1,69 @@
+[tool.black]
+line-length = 100
+target-version = ['py312']
+# Vendored, generated protobuf stubs (MAG-1780) — regenerated, never edited.
+extend-exclude = '''
+/(
+    cosmos_pb2
+)/
+'''
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["cosmos_pb2"]
+
+[tool.ruff.lint]
+# Default ruff rule set (E/F) plus isort (I) so import ordering is checked
+# in the same tool instead of adding a second one.
+select = ["E", "F", "I"]
+# E402 (module import not at top of file) is a real, deliberate pattern in
+# this repo's test modules: sys.path.insert(...) must run before the local
+# imports it enables, so the imports cannot be at the physical top of the
+# file. Enforced per-line via existing `# noqa: E402` comments instead of a
+# blanket ignore would be preferable, but several files rely on the same
+# sys.path-then-import shape without individual noqa tags; ignoring the rule
+# repo-wide avoids churning every test file to add them.
+#
+# E501 (line too long) is black's job for code; ruff's E501 also flags
+# comments/docstrings, and this repo has several deliberately wide comment
+# blocks (e.g. constants.py's BTC method-shape table) that would be broken,
+# not fixed, by force-wrapping. black still enforces line-length on actual
+# code statements.
+ignore = ["E402", "E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# server.py:2757-2759 hand-aligns a chain of `if ...: continue` filters in
+# ControlHandler's /history filtering for readability (columns line up).
+# E701 (multiple statements on one line) would otherwise flag the intentional
+# style; black's reformat pass already collapses the alignment, so this
+# ignore only matters for anyone running ruff before applying black.
+"server.py" = ["E701"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+skip = ["cosmos_pb2"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+disallow_untyped_defs = false
+warn_unused_configs = true
+exclude = [
+    "cosmos_pb2/",  # vendored, generated protobuf stubs
+]
+
+# Permissive baseline (MAG-2318): this is the first mypy config the repo has
+# had. A full run against current `main` finds 34 pre-existing errors across
+# 6 files (server.py: 21, handlers_ws.py: 4, handlers_solana.py: 4,
+# handlers_rest.py: 2, handlers_tendermintrpc.py: 2, ws_protocol.py: 1) —
+# mostly dynamic attributes attached to stdlib HTTPServer instances at
+# bootstrap (self.server.provider_id / self.server.state), which the stdlib
+# stubs type as plain BaseServer with no such attributes, plus a handful of
+# real but minor return-type mismatches. Fixing those is a typing pass on
+# its own, not part of adding the tool. CI runs `mypy` informationally
+# (non-blocking) until that pass happens — see .github/workflows/lint-and-test.yml.
+[[tool.mypy.overrides]]
+module = ["server", "handlers_ws", "handlers_solana", "handlers_rest", "handlers_tendermintrpc", "ws_protocol"]
+disable_error_code = ["attr-defined", "arg-type", "assignment", "index", "return-value", "dict-item"]
