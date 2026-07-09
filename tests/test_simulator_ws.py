@@ -6,9 +6,12 @@ ports and exercises the WS handler. The module-scoped `sim` fixture boots
 once per test module. The autouse clean_state fixture calls /reset/all
 before and after every test so scenarios don't leak between tests.
 
-Test ports are 48xxx (offset +30000 from production) so this file can run in
-the same pytest invocation as test_simulator.py / test_simulator_rest.py
-without collision.
+Test ports are 51045-51047 for the JSON-RPC pool / 48557-48559 for the WS
+pool so this file can run in the same pytest invocation as test_simulator.py
+/ test_simulator_rest.py without collision. The JSON-RPC pool and control
+port were moved off 48545-48547/49000, which collided with
+test_simulator_rest.py's and test_simulator_logs_lag.py's identical
+literals (silent locally, surfaced on GitHub Actions' Linux runner).
 """
 
 from __future__ import annotations
@@ -39,9 +42,9 @@ from server import (
     ProviderState,
 )
 
-_PROVIDER_PORTS = {"1": 48545, "2": 48546, "3": 48547}
+_PROVIDER_PORTS = {"1": 51045, "2": 51046, "3": 51047}
 _WS_PORTS = {"1": 48557, "2": 48558, "3": 48559}
-_CONTROL_PORT = 49000
+_CONTROL_PORT = 50400
 
 
 @pytest.fixture(scope="module")

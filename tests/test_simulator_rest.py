@@ -40,12 +40,15 @@ from stubs_rest import REST_ERROR_STUBS, REST_LATEST_HEIGHT, REST_METHOD_DEFAULT
 
 # ── Test ports (distinct from ETH suite's 28545-28547 / 29000 and BTC suite's
 #     38545-38547 / 39000 so the three suites can co-exist if run in parallel).
-#     REST sim uses 48545-48547 for JSON-RPC echoes (helpful for mixed-chain
-#     tests) plus 48551-48553 for the REST handler itself. ──────────────────
+#     REST sim uses 50945-50947 for JSON-RPC echoes (helpful for mixed-chain
+#     tests; moved off 48545-48547, which collided with test_simulator_ws.py
+#     and test_simulator_logs_lag.py's identical literals) plus 48551-48553
+#     for the REST handler itself (unique, unchanged). Control moved off
+#     49000 (shared with logs_lag/ws/grpc) to 50300. ──────────────────
 
-_PROVIDER_PORTS = {"1": 48545, "2": 48546, "3": 48547}
+_PROVIDER_PORTS = {"1": 50945, "2": 50946, "3": 50947}
 _REST_PORTS = {"1": 48551, "2": 48552, "3": 48553}
-_CONTROL_PORT = 49000
+_CONTROL_PORT = 50300
 
 # All (verb, template) pairs covered by the seed stub set.
 ALL_REST_ROUTES = sorted(REST_METHOD_DEFAULTS.keys())
@@ -113,11 +116,11 @@ def sim():
     """Start 3 JSON-RPC + 3 REST + 1 control server on dedicated test ports.
 
     Yields a dict with base URLs:
-      sim["control"]  → http://127.0.0.1:49000
+      sim["control"]  → http://127.0.0.1:50300
       sim["rest1"]    → http://127.0.0.1:48551
       sim["rest2"]    → http://127.0.0.1:48552
       sim["rest3"]    → http://127.0.0.1:48553
-      sim["jsonrpc1"] → http://127.0.0.1:48545
+      sim["jsonrpc1"] → http://127.0.0.1:50945
     """
     states = {pid: ProviderState() for pid in _PROVIDER_PORTS}
 
@@ -958,7 +961,7 @@ class TestRestPerPathFaultOverrides:
     def test_rest_tuple_keys_do_not_affect_jsonrpc_string_lookups(self, sim):
         """Cross-transport isolation: a tuple-keyed REST override does not
         accidentally shadow a string-keyed JSON-RPC method lookup on the
-        same provider. The JSON-RPC handler on port 48545 stays healthy
+        same provider. The JSON-RPC handler on port 50945 stays healthy
         even though the REST handler on 48551 is faulted.
         """
         _post(

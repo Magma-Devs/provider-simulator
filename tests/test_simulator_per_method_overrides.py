@@ -46,17 +46,21 @@ import pytest
 
 from server import ControlHandler, JSONRPCHandler, ProviderState
 
-# ── Test ports (58xxx range — distinct from every other test module's port
+# ── Test ports (50xxx range — distinct from every other test module's port
 #     selection: 28xxx/29000 for test_simulator, 38xxx/39000 for the BTC
-#     suite, 48xxx/49000 for rest / ws / logs_lag, 49545+ for grpc). The
-#     other modules occasionally reuse port ranges across each other and
-#     rely on serial execution; this one picks an isolated band so a
-#     parallel pytest run (e.g. -p xdist) doesn't collide with any of
-#     them. The module-scoped sim fixture only binds the ports once, so
-#     even a serial run can't double-bind here either.) ────────────────────
+#     suite, 48xxx/49000 for rest / ws / logs_lag, 49545+ for grpc, 58xxx/59000
+#     for test_simulator_backup_listeners.py). This file previously claimed
+#     58545-58547/59000 believing it was an isolated band, but that range was
+#     already bound by test_simulator_backup_listeners.py (and, independently,
+#     test_simulator_tendermintrpc.py) — the collision was silent on macOS
+#     (fast enough teardown-then-bind) and only surfaced once the suite ran on
+#     GitHub Actions' Linux runner. Moved to 50745-50747/50100, a range
+#     verified clear of every other test file's literals. The module-scoped
+#     sim fixture only binds the ports once, so even a serial run can't
+#     double-bind here either.) ────────────────────
 
-_PROVIDER_PORTS = {"1": 58545, "2": 58546, "3": 58547}
-_CONTROL_PORT = 59000
+_PROVIDER_PORTS = {"1": 50745, "2": 50746, "3": 50747}
+_CONTROL_PORT = 50100
 
 
 # ── HTTP helpers (same shape as tests/test_simulator.py) ──────────────────────
@@ -95,10 +99,10 @@ def sim():
     """Start 3 JSON-RPC servers + 1 control server on test ports.
 
     Yields a dict with base URLs:
-      sim["control"]   → http://127.0.0.1:59000
-      sim["provider1"] → http://127.0.0.1:58545
-      sim["provider2"] → http://127.0.0.1:58546
-      sim["provider3"] → http://127.0.0.1:58547
+      sim["control"]   → http://127.0.0.1:50100
+      sim["provider1"] → http://127.0.0.1:50745
+      sim["provider2"] → http://127.0.0.1:50746
+      sim["provider3"] → http://127.0.0.1:50747
     """
     states = {pid: ProviderState() for pid in _PROVIDER_PORTS}
 

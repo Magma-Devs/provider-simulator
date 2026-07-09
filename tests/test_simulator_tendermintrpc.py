@@ -45,10 +45,15 @@ from server import (
 from stubs_tendermintrpc import TENDERMINT_ERROR_STUBS, TENDERMINT_METHOD_DEFAULTS
 
 # Test ports — distinct from the other suites' ranges so all four can co-exist
-# if run in parallel. ETH uses 28xxx, BTC uses 38xxx, REST uses 48xxx; TM gets 58xxx.
-_PROVIDER_PORTS = {"1": 58545, "2": 58546, "3": 58547}
-_TM_PORTS = {"1": 58554, "2": 58555, "3": 58556}
-_CONTROL_PORT = 59000
+# if run in parallel. ETH uses 28xxx, BTC uses 38xxx, REST uses 48xxx; TM gets
+# 50545-50547/50554-50556/50000 (58xxx was already claimed by
+# test_simulator_backup_listeners.py, which collided with this file's
+# identical 58545-58547/58554-58556/59000 literals — GitHub Actions' Linux
+# runner exposed the collision that macOS's faster teardown-then-bind timing
+# never surfaced locally).
+_PROVIDER_PORTS = {"1": 50545, "2": 50546, "3": 50547}
+_TM_PORTS = {"1": 50554, "2": 50555, "3": 50556}
+_CONTROL_PORT = 50000
 
 
 # ── HTTP helpers (independent of the other test files — duplication intentional) ──

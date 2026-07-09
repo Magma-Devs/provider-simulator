@@ -41,10 +41,13 @@ from server import ControlHandler, JSONRPCHandler, ProviderState
 
 # ── Test ports (distinct from ETH suite 28545-28547 / 29000, BTC suite
 #     38545-38547 / 39000, and the production ports 18545-18547 / 19000 so
-#     all four suites can co-exist if run in parallel). ───────────────────────
+#     all four suites can co-exist if run in parallel). 50845-50847/50200 —
+#     moved off 48545-48547/49000, which collided with test_simulator_rest.py
+#     and test_simulator_ws.py's identical literals (silent locally, surfaced
+#     on GitHub Actions' Linux runner). ───────────────────────
 
-_PROVIDER_PORTS = {"1": 48545, "2": 48546, "3": 48547}
-_CONTROL_PORT = 49000
+_PROVIDER_PORTS = {"1": 50845, "2": 50846, "3": 50847}
+_CONTROL_PORT = 50200
 
 
 # ── HTTP helpers (kept self-contained, mirrors test_simulator_btc.py) ─────────

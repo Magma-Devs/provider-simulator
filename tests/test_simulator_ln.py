@@ -28,7 +28,7 @@ shared ETH JSON-RPC listener pool (18545-18547) to a dedicated LN listener
 pool at 18578-18580. This suite mirrors the move: a dedicated LN test port
 range at 58578-58580 (parallel to prod 18578-18580) hosts JSONRPCHandler
 listeners with ``handler_chain_family="ln"`` + ``handler_module=
-handlers_lnd``. A second ETH listener pool at 58545-58547 hosts default-ETH
+handlers_lnd``. A second ETH listener pool at 50645-50647 hosts default-ETH
 listeners, used by the mixed-chain tests. Both pools share ProviderState per
 pid so a single ``/scenario`` POST reconfigures both listeners for the same
 logical provider — exactly mirroring prod.
@@ -55,13 +55,21 @@ from stubs_lnd import LND_METHOD_DEFAULTS
 #     in any order in a single pytest invocation):
 #       ETH base suite                 28545-28547 / 29000
 #       BTC suite                       38545-38547 / 38575-38577 / 39000
-#       REST / WS / logs_lag            48545-48547 / 49000
+#       REST / WS / logs_lag            48545-48547 / 49000 (as originally
+#                                        documented — see their own files for
+#                                        the fix that moved them off this)
 #       gRPC                            49545-49547 / 49000
-#       per_method / tendermintrpc      58545-58547 / 59000
+#       backup_listeners                58545-58547 / 58554-58556 / 59000
+#       per_method / tendermintrpc      50xxx (moved off 58545-58547/59000,
+#                                        which collided with
+#                                        test_simulator_backup_listeners.py)
 #     LN picks 58578-58580 (parallel to prod 18578-18580) for the LN listener
-#     pool and 58545-58547 for the ETH companion pool. Control on 59100. ─────
+#     pool — unique, unchanged — and 50645-50647 for the ETH companion pool
+#     (moved off 58545-58547, which collided with
+#     test_simulator_backup_listeners.py's identical literals). Control on
+#     59100, unique, unchanged. ─────
 
-_ETH_PROVIDER_PORTS = {"1": 58545, "2": 58546, "3": 58547}
+_ETH_PROVIDER_PORTS = {"1": 50645, "2": 50646, "3": 50647}
 _LN_PROVIDER_PORTS = {"1": 58578, "2": 58579, "3": 58580}
 _CONTROL_PORT = 59100
 
@@ -119,7 +127,7 @@ def sim():
     The LN listeners (58578-58580) are the focus of this suite — they run
     JSONRPCHandler with ``handler_chain_family="ln"`` + ``handler_module=
     handlers_lnd`` so the success path always dispatches to LN regardless of
-    the snap's ``chain_family``. The ETH listeners (58545-58547) are bound on
+    the snap's ``chain_family``. The ETH listeners (50645-50647) are bound on
     the same ProviderState per pid; they exist for mixed-chain tests that
     drive an ETH-only port on a shared logical provider.
 
@@ -128,9 +136,9 @@ def sim():
       sim["provider1"]    → http://127.0.0.1:58578    # primary LN URL per pid
       sim["provider2"]    → http://127.0.0.1:58579
       sim["provider3"]    → http://127.0.0.1:58580
-      sim["eth_provider1"]→ http://127.0.0.1:58545    # ETH companion per pid
-      sim["eth_provider2"]→ http://127.0.0.1:58546
-      sim["eth_provider3"]→ http://127.0.0.1:58547
+      sim["eth_provider1"]→ http://127.0.0.1:50645    # ETH companion per pid
+      sim["eth_provider2"]→ http://127.0.0.1:50646
+      sim["eth_provider3"]→ http://127.0.0.1:50647
     """
     # One ProviderState per pid, shared between the ETH and LN listeners
     # for that pid — mirrors prod's shared-state model.
@@ -514,7 +522,7 @@ class TestLNErrorStubs:
 
 
 class TestMixedChainScenario:
-    """Each pid has both an ETH listener (58545-7) and an LN listener (58578-80)
+    """Each pid has both an ETH listener (50645-7) and an LN listener (58578-80)
     bound on the same ProviderState — mirrors prod's per-pid shared-state
     model. The ETH listener and LN listener for the same pid can serve
     different responses simultaneously because dispatch is port-derived."""
