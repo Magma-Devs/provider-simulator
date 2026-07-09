@@ -312,8 +312,9 @@ class TestScenario:
 
     def test_scenario_success_response_shape_includes_applied(self, sim):
         # Pin the exact /scenario success response body, including the
-        # "applied" receipt content — the whole body, byte for byte, so a
-        # change to any key or value fails here first.
+        # "applied" receipt content, so a change to any key or value fails
+        # here first. This compares the parsed JSON body (key/value
+        # equality), not the raw response bytes.
         status, body = _post(
             _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "error"}}}
         )

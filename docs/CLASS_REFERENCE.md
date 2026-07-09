@@ -641,8 +641,19 @@ state["2"].update({"chain_family": "eth", "mode": "down"})
 state["3"].update({"chain_family": "eth", "mode": "success", "latency_ms": 100})
 
 # Returns:
-{"status": "ok"}
+{
+  "status": "ok",
+  "applied": {
+    "1": {"chain_family": "eth"},
+    "2": {"chain_family": "eth"},
+    "3": {"chain_family": "eth"}
+  }
+}
 ```
+
+`applied` is a receipt: one entry per provider ID in the request, each
+echoing back the `chain_family` the caller sent (never a filled-in
+default — chain_family is required on every block, see validation above).
 
 **Case 2: POST /reset**
 - Calls `reset_scenario()` on all provider states
