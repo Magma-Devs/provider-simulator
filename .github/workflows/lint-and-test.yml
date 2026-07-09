@@ -32,10 +32,15 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pytest
-      # The suite boots real HTTP/gRPC listeners on isolated 28xxx/29xxx/48xxx+
-      # test ports (see tests/test_simulator.py, tests/test_simulator_ws.py,
-      # tests/test_simulator_grpc.py docstrings) — no mocking, so it needs an
-      # actual runner, not just import checks.
+          pip install pytest pytest-timeout
+      # pytest-timeout backs the @pytest.mark.timeout(10) markers on the
+      # hang-mode tests; without the plugin those markers silently no-op and
+      # a hung test would stall the job until the runner's 6h kill.
+      #
+      # The suite boots real HTTP/gRPC listeners on isolated test ports —
+      # each test file owns a unique block in 22xxx-29xxx, all below 32768
+      # to stay out of the kernel's ephemeral client-port range (see the
+      # port-block comments in tests/test_simulator*.py) — no mocking, so
+      # it needs an actual runner, not just import checks.
       - name: pytest
         run: pytest tests/ -v
