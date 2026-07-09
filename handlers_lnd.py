@@ -39,7 +39,6 @@ from typing import Any, Dict, Tuple
 
 from stubs_lnd import LND_ERROR_STUBS, LND_METHOD_DEFAULTS
 
-
 # Methods whose default carries a block_height field tracking the underlying
 # BTC chain. blocks_behind shifts these the same way it shifts BTC's getblockcount.
 _HEIGHT_METHODS = {"getinfo"}
@@ -101,6 +100,7 @@ def handle(state, request: dict, snap: dict, lava_headers: dict) -> Tuple[int, D
             # getinfo carries block_height — the BTC chain head as the LN node
             # sees it. Shift it the same way BTC's getblockcount is shifted.
             from constants import LN_BLOCK_HEIGHT
+
             result["block_height"] = LN_BLOCK_HEIGHT - blocks_behind
             # synced_to_chain flips to False when the node is meaningfully
             # behind — real LND reports this when its underlying btcd/bitcoind
@@ -114,8 +114,12 @@ def handle(state, request: dict, snap: dict, lava_headers: dict) -> Tuple[int, D
     # bolt11 string and emits derived fields; we keep it round-trip-friendly
     # by stashing the input in `payment_request` (LND's canonical name for the
     # echoed invoice string).
-    if method == "decodepayreq" and params and method not in state.responses \
-            and isinstance(result, dict):
+    if (
+        method == "decodepayreq"
+        and params
+        and method not in state.responses
+        and isinstance(result, dict)
+    ):
         invoice = params[0] if params else ""
         if isinstance(invoice, str) and invoice:
             result = dict(result)
@@ -125,8 +129,12 @@ def handle(state, request: dict, snap: dict, lava_headers: dict) -> Tuple[int, D
     # back so the channel-point response is associated with the right peer.
     # LND's wire shape is positional (params[0]=node_pubkey, params[1]=amount),
     # so we read params[0] when present.
-    if method == "openchannel" and params and method not in state.responses \
-            and isinstance(result, dict):
+    if (
+        method == "openchannel"
+        and params
+        and method not in state.responses
+        and isinstance(result, dict)
+    ):
         node_pubkey = params[0] if params else ""
         if isinstance(node_pubkey, str) and node_pubkey:
             result = dict(result)
@@ -135,8 +143,12 @@ def handle(state, request: dict, snap: dict, lava_headers: dict) -> Tuple[int, D
     # payinvoice: echo the requested invoice string so tests can correlate the
     # request with the response in /history without parsing the body. Stored
     # under `payment_request` (same convention as decodepayreq).
-    if method == "payinvoice" and params and method not in state.responses \
-            and isinstance(result, dict):
+    if (
+        method == "payinvoice"
+        and params
+        and method not in state.responses
+        and isinstance(result, dict)
+    ):
         invoice = params[0] if params else ""
         if isinstance(invoice, str) and invoice:
             result = dict(result)

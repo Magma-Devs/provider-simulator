@@ -28,7 +28,7 @@ kubectl port-forward -n lava-infra svc/provider-simulator 18545:18545 18546:1854
 `scripts/deploy.sh` creates a `GRPCRoute` for hostname `lava-sim-grpc.<BASE_DOMAIN>` (see `k8s/grpcroute-lava-sim-grpc.yml`). The Gateway load-balances across the three backend ports. Drop `-plaintext` to keep TLS:
 
 ```bash
-grpcurl lava-sim-grpc.victoria.magmadevs.com:443 list
+grpcurl lava-sim-grpc.<BASE_DOMAIN>:443 list
 ```
 
 ## Quickstart commands
@@ -57,11 +57,11 @@ grpcurl -plaintext -d '{}' localhost:18548 cosmos.base.tendermint.v1beta1.Servic
 grpcurl -plaintext -d '{}' localhost:18548 cosmos.base.tendermint.v1beta1.Service/GetNodeInfo
 ```
 
-Public-hostname equivalents — same commands, just swap the target and drop `-plaintext`:
+Public-hostname equivalents — same commands, just swap `<BASE_DOMAIN>` for your server's actual domain (`config/base-domain.env`) and drop `-plaintext`:
 
 ```bash
-grpcurl lava-sim-grpc.victoria.magmadevs.com:443 list
-grpcurl -d '{}' lava-sim-grpc.victoria.magmadevs.com:443 cosmos.base.tendermint.v1beta1.Service/GetLatestBlock
+grpcurl lava-sim-grpc.<BASE_DOMAIN>:443 list
+grpcurl -d '{}' lava-sim-grpc.<BASE_DOMAIN>:443 cosmos.base.tendermint.v1beta1.Service/GetLatestBlock
 ```
 
 ## Fault injection on gRPC providers
@@ -69,7 +69,7 @@ grpcurl -d '{}' lava-sim-grpc.victoria.magmadevs.com:443 cosmos.base.tendermint.
 Mark the provider as `chain_family="grpc"` and apply any of the standard fault primitives — the gRPC handler translates them into `grpc.StatusCode` aborts (see `handlers_grpc.py::_apply_grpc_fault`):
 
 ```bash
-curl -s -X POST "https://sim-control.victoria.magmadevs.com/scenario" -H "Content-Type: application/json" -d '{"providers":{"1":{"chain_family":"grpc","mode":"rate_limit"}}}'
+curl -s -X POST "https://sim-control.<BASE_DOMAIN>/scenario" -H "Content-Type: application/json" -d '{"providers":{"1":{"chain_family":"grpc","mode":"rate_limit"}}}'
 
 grpcurl -plaintext -d '{}' localhost:18548 cosmos.base.tendermint.v1beta1.Service/GetLatestBlock
 # → ERROR: Code: ResourceExhausted, Message: Too many requests

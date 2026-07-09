@@ -1,0 +1,129 @@
+name: "Jira: Move ticket to Testing on PR merge"
+
+# Triggers when a PR is merged. Parses the PR body for #Closes MAG-XXXX
+# patterns and transitions each matched Jira ticket to "Testing" via the
+# Jira REST API. Move to Done manually after verifying the fix on cluster.
+#
+# Rationale: at PR-merge time the code lands but isn't yet verified on the
+# deploy; "Testing" captures that gap. "Done" is a stronger claim that
+# should require human sign-off after cluster verification.
+#
+# Requires two GitHub org secrets:
+#   JIRA_USER_EMAIL  — the Atlassian account email that owns the API token
+#   JIRA_API_TOKEN   — Atlassian API token (Atlassian → Settings → Security → API tokens)
+#
+# Replaces a Jira Automation rule that previously handled this — the rule
+# disappeared at some point and yesterday's bulk merge wave didn't auto-close.
+# Living in the repo means it can't silently vanish.
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  transition-jira-ticket:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      JIRA_BASE_URL: https://magmadevs.atlassian.net
+      JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+      JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+      PR_BODY: ${{ github.event.pull_request.body }}
+      PR_URL: ${{ github.event.pull_request.html_url }}
+    steps:
+      - name: Verify secrets are configured
+        run: |
+          if [ -z "$JIRA_USER_EMAIL" ]; then
+            echo "::error::JIRA_USER_EMAIL secret is not set — auto-close cannot fire. Add it at Magma-Devs → Settings → Secrets."
+            exit 1
+          fi
+          if [ -z "$JIRA_API_TOKEN" ]; then
+            echo "::error::JIRA_API_TOKEN secret is not set."
+            exit 1
+          fi
+
+      - name: Extract MAG ticket keys from PR body
+        id: parse
+        run: |
+          KEYS=$(printf '%s' "$PR_BODY" | grep -oE '#(Closes|Resolves|Fixes) MAG-[0-9]+' | grep -oE 'MAG-[0-9]+' | sort -u | tr '\n' ' ')
+          if [ -z "$KEYS" ]; then
+            echo "No '#Closes MAG-XXXX' patterns found in PR body — skipping auto-transition."
+            echo "keys=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Found keys: $KEYS"
+          echo "keys=$KEYS" >> "$GITHUB_OUTPUT"
+
+      - name: Transition matched tickets to Testing
+        if: steps.parse.outputs.keys != ''
+        run: |
+          AUTH=$(printf '%s' "${JIRA_USER_EMAIL}:${JIRA_API_TOKEN}" | base64 -w 0)
+          KEYS="${{ steps.parse.outputs.keys }}"
+          # Counters — a green run must mean tickets ACTUALLY moved. If keys were
+          # found but every API call errored (e.g. a broken/expired Jira token
+          # returns 404 for all issues), the run FAILS at the end instead of
+          # silently going green. A legitimate skip (a ticket already past Testing
+          # has no Testing transition) stays non-fatal.
+          TRANSITIONED=0
+          GET_ERRORS=0
+          POST_ERRORS=0
+          SKIPPED=0
+          # Note on curl flags: we use -sS (silent progress, but show errors) and
+          # explicitly capture HTTP status via -w '%{http_code}'. We deliberately
+          # avoid -f (--fail) because -f makes curl exit non-zero on 4xx/5xx AND
+          # suppresses the -w output AND swallows the response body — that combo
+          # previously hid Jira API errors and made the loop silently no-op on
+          # all but the first key (see PR #160 merge: only MAG-1970 transitioned,
+          # MAG-1972/1885/1927/1928 had to be moved manually).
+          for KEY in $KEYS; do
+            echo "::group::Processing $KEY"
+            # --- Step 1: fetch available transitions for this ticket ---
+            HTTP_CODE=$(curl -sS -o /tmp/transitions_body.json -w '%{http_code}' \
+              -H "Authorization: Basic $AUTH" \
+              "${JIRA_BASE_URL}/rest/api/3/issue/${KEY}/transitions" || echo "000")
+            if [ "$HTTP_CODE" != "200" ]; then
+              echo "::warning::GET transitions for $KEY returned HTTP $HTTP_CODE — body: $(cat /tmp/transitions_body.json 2>/dev/null || echo '<no body>')"
+              GET_ERRORS=$((GET_ERRORS + 1))
+              echo "::endgroup::"
+              continue
+            fi
+            # Pick the transition whose name (lowercased) is "testing"; empty string if no match
+            TESTING_ID=$(jq -r '[.transitions[]? | select((.name // "" | ascii_downcase) == "testing")][0].id // ""' /tmp/transitions_body.json)
+            if [ -z "$TESTING_ID" ]; then
+              AVAILABLE=$(jq -r '[.transitions[]?.name] | join(", ")' /tmp/transitions_body.json)
+              echo "::warning::No 'Testing' transition available for $KEY — available: $AVAILABLE — skipping (ticket already past Testing, or this issue type's workflow has no 'Testing' transition)"
+              SKIPPED=$((SKIPPED + 1))
+              echo "::endgroup::"
+              continue
+            fi
+            # --- Step 2: POST the transition ---
+            HTTP_CODE=$(curl -sS -o /tmp/transition_response.txt -w '%{http_code}' -X POST \
+              -H "Authorization: Basic $AUTH" \
+              -H "Content-Type: application/json" \
+              "${JIRA_BASE_URL}/rest/api/3/issue/${KEY}/transitions" \
+              -d "{\"transition\":{\"id\":\"${TESTING_ID}\"}}" || echo "000")
+            if [ "$HTTP_CODE" = "204" ]; then
+              echo "Transitioned $KEY to Testing (transition_id=$TESTING_ID)"
+              TRANSITIONED=$((TRANSITIONED + 1))
+            else
+              echo "::warning::POST transition for $KEY returned HTTP $HTTP_CODE — body: $(cat /tmp/transition_response.txt 2>/dev/null || echo '<no body>')"
+              POST_ERRORS=$((POST_ERRORS + 1))
+            fi
+            echo "::endgroup::"
+          done
+
+          # --- Fail loud if the transitions didn't actually happen ---
+          # A green run that transitioned nothing (because the token 404'd on
+          # every issue) is worse than a red one — nobody notices the tickets are
+          # stuck. Fail on any GET/POST API error; a genuine "no Testing
+          # transition" skip does not count.
+          echo "Summary: transitioned=$TRANSITIONED skipped(no Testing transition)=$SKIPPED get-errors=$GET_ERRORS post-errors=$POST_ERRORS"
+          if [ "$GET_ERRORS" -gt 0 ] || [ "$POST_ERRORS" -gt 0 ]; then
+            echo "::error::$((GET_ERRORS + POST_ERRORS)) ticket(s) hit a Jira API error and were NOT transitioned. A 404 for every ticket usually means the JIRA_USER_EMAIL / JIRA_API_TOKEN secret is expired or lacks Browse + Transition permission on the project. Failing so this does not silently no-op."
+            exit 1
+          fi

@@ -37,7 +37,6 @@ import handlers_eth
 import stubs_ws
 import ws_protocol
 
-
 # Sentinel placed on out_queue to tell the writer thread to exit cleanly.
 _SENTINEL_CLOSE = object()
 
@@ -65,6 +64,7 @@ def _server_helpers():
     transports.
     """
     import server
+
     return (
         server._apply_fault,
         server._elapsed_ms,
@@ -91,9 +91,11 @@ def _writer_loop(connection, out_queue: "queue.Queue") -> None:
             return
 
 
-def _text_frame(payload_obj: Dict[str, Any],
-                corruption_mode: Optional[str] = None,
-                missing_field: Optional[str] = None) -> bytes:
+def _text_frame(
+    payload_obj: Dict[str, Any],
+    corruption_mode: Optional[str] = None,
+    missing_field: Optional[str] = None,
+) -> bytes:
     """Encode a Python dict as a WS TEXT frame, applying corruption per snap.
 
     Corruption modes mirror JSONRPCHandler._reply (server.py):
@@ -128,11 +130,14 @@ def _text_frame(payload_obj: Dict[str, Any],
     return ws_protocol.encode_frame(ws_protocol.OPCODE_TEXT, raw, mask=False)
 
 
-def _emit_ws_fault(fault: Dict[str, Any], req_id: Any,
-                   out_queue: "queue.Queue",
-                   connection,
-                   corruption_mode: Optional[str] = None,
-                   missing_field: Optional[str] = None) -> str:
+def _emit_ws_fault(
+    fault: Dict[str, Any],
+    req_id: Any,
+    out_queue: "queue.Queue",
+    connection,
+    corruption_mode: Optional[str] = None,
+    missing_field: Optional[str] = None,
+) -> str:
     """Translate a fault dict (from server._apply_fault) into a WS wire action.
 
     Returns one of:
@@ -172,18 +177,20 @@ def _emit_ws_fault(fault: Dict[str, Any], req_id: Any,
     # rate_limit / error: encode JSON-RPC error frame, stay open. Corruption
     # hooks apply to the error envelope just like they do to success replies.
     try:
-        out_queue.put_nowait(_text_frame(
-            {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "error": {
-                    "code": fault["error_code"],
-                    "message": fault["error_message"],
+        out_queue.put_nowait(
+            _text_frame(
+                {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {
+                        "code": fault["error_code"],
+                        "message": fault["error_message"],
+                    },
                 },
-            },
-            corruption_mode=corruption_mode,
-            missing_field=missing_field,
-        ))
+                corruption_mode=corruption_mode,
+                missing_field=missing_field,
+            )
+        )
     except queue.Full:
         return "close"
     return "continue"
@@ -213,10 +220,12 @@ class WsHandler(BaseHTTPRequestHandler):
             return
 
         # Validate the canonical WS upgrade headers.
-        if (self.headers.get("Upgrade", "").lower() != "websocket"
+        if (
+            self.headers.get("Upgrade", "").lower() != "websocket"
             or "upgrade" not in self.headers.get("Connection", "").lower()
             or self.headers.get("Sec-WebSocket-Version") != "13"
-            or not self.headers.get("Sec-WebSocket-Key")):
+            or not self.headers.get("Sec-WebSocket-Key")
+        ):
             self._send_simple_error(400, "bad WS upgrade request")
             return
 
@@ -224,10 +233,7 @@ class WsHandler(BaseHTTPRequestHandler):
 
         # Capture lava-* request headers from the upgrade request — recorded
         # in /history for every frame that arrives on this connection.
-        lava_headers = {
-            k: v for k, v in self.headers.items()
-            if k.lower().startswith("lava-")
-        }
+        lava_headers = {k: v for k, v in self.headers.items() if k.lower().startswith("lava-")}
 
         # Pre-handshake fault evaluation. We do this before completing the
         # handshake so down / rate_limit / error / hang prevent the upgrade
@@ -241,7 +247,7 @@ class WsHandler(BaseHTTPRequestHandler):
         # don't set handler_chain_family in the bootstrap, so fall back to the
         # transport name "ws"; the bound port is unique per WS listener.
         listener_chain = getattr(self.server, "handler_chain_family", "ws")
-        listener_port  = self.server.server_address[1]
+        listener_port = self.server.server_address[1]
 
         # Cross-transport isolation — mirrors MAG-1838's jsonrpc_owns_snap
         # gate. ``ProviderState`` is shared across all transports for the
@@ -269,23 +275,34 @@ class WsHandler(BaseHTTPRequestHandler):
             # snapshot's mode reads as then_mode, so a provider-wide down
             # clears here instead of refusing the WS upgrade forever.
             from server import _effective_mode
+
             snap["mode"] = _effective_mode(state, snap)
         raw_mode = snap["mode"]
         ws_mode = raw_mode if (ws_owns_snap or raw_mode == "down") else "success"
 
         if ws_mode == "down":
-            state.push_call_to_buffer("*", "down", 0,
-                                      request_id=None,
-                                      lava_headers=lava_headers,
-                                      chain=listener_chain, port=listener_port)
+            state.push_call_to_buffer(
+                "*",
+                "down",
+                0,
+                request_id=None,
+                lava_headers=lava_headers,
+                chain=listener_chain,
+                port=listener_port,
+            )
             self._send_simple_error(503, "provider down")
             return
 
         if ws_mode == "rate_limit":
-            state.push_call_to_buffer("ws_upgrade", "rate_limit", 0,
-                                      request_id=None,
-                                      lava_headers=lava_headers,
-                                      chain=listener_chain, port=listener_port)
+            state.push_call_to_buffer(
+                "ws_upgrade",
+                "rate_limit",
+                0,
+                request_id=None,
+                lava_headers=lava_headers,
+                chain=listener_chain,
+                port=listener_port,
+            )
             self._send_simple_error(429, "rate limited")
             return
 
@@ -293,18 +310,28 @@ class WsHandler(BaseHTTPRequestHandler):
             # Override http_status 200 -> 400 here because 200-without-101 is
             # non-spec for WS upgrades. 4xx is the cleanest "upgrade refused"
             # signal a client can read.
-            state.push_call_to_buffer("ws_upgrade", "error", 0,
-                                      request_id=None,
-                                      lava_headers=lava_headers,
-                                      chain=listener_chain, port=listener_port)
+            state.push_call_to_buffer(
+                "ws_upgrade",
+                "error",
+                0,
+                request_id=None,
+                lava_headers=lava_headers,
+                chain=listener_chain,
+                port=listener_port,
+            )
             self._send_simple_error(400, snap["error_message"])
             return
 
         if ws_mode == "hang":
-            state.push_call_to_buffer("ws_upgrade", "hang", 0,
-                                      request_id=None,
-                                      lava_headers=lava_headers,
-                                      chain=listener_chain, port=listener_port)
+            state.push_call_to_buffer(
+                "ws_upgrade",
+                "hang",
+                0,
+                request_id=None,
+                lava_headers=lava_headers,
+                chain=listener_chain,
+                port=listener_port,
+            )
             time.sleep(30)
             try:
                 self.connection.close()
@@ -314,22 +341,30 @@ class WsHandler(BaseHTTPRequestHandler):
 
         if ws_mode == "drop_connection":
             drop_at = snap.get("drop_at", "before_headers")
-            state.push_call_to_buffer("ws_upgrade", "drop_connection", 0,
-                                      request_id=None,
-                                      lava_headers=lava_headers,
-                                      chain=listener_chain, port=listener_port)
+            state.push_call_to_buffer(
+                "ws_upgrade",
+                "drop_connection",
+                0,
+                request_id=None,
+                lava_headers=lava_headers,
+                chain=listener_chain,
+                port=listener_port,
+            )
             try:
                 if drop_at == "after_headers":
                     # Complete the 101 (with Lava-Provider-Address) then close.
                     self.connection.sendall(
                         ws_protocol.build_handshake_response(
-                            client_key, extra_headers=self._lava_extra_headers()))
+                            client_key, extra_headers=self._lava_extra_headers()
+                        )
+                    )
                 elif drop_at == "mid_body":
                     # Send just the status line + truncate before the headers
                     # finish. The 101 reply has no body — "mid_body" maps to
                     # mid-header here.
-                    self.connection.sendall(b"HTTP/1.1 101 Switching Protocols\r\n"
-                                            b"Upgrade: webso")  # truncated
+                    self.connection.sendall(
+                        b"HTTP/1.1 101 Switching Protocols\r\n" b"Upgrade: webso"
+                    )  # truncated
                 # before_headers (default): silent close, no bytes.
             except OSError:
                 pass
@@ -343,7 +378,9 @@ class WsHandler(BaseHTTPRequestHandler):
         try:
             self.connection.sendall(
                 ws_protocol.build_handshake_response(
-                    client_key, extra_headers=self._lava_extra_headers()))
+                    client_key, extra_headers=self._lava_extra_headers()
+                )
+            )
         except OSError:
             return
 
@@ -378,8 +415,10 @@ class WsHandler(BaseHTTPRequestHandler):
         # don't set handler_chain_family, so fall back to "ws"; the bound port
         # is unique per WS listener.
         listener_chain = getattr(self.server, "handler_chain_family", "ws")
-        listener_port  = self.server.server_address[1]
-        apply_fault, elapsed_ms, resolve_method_config, corruption_for, missing_field_for = _server_helpers()
+        listener_port = self.server.server_address[1]
+        apply_fault, elapsed_ms, resolve_method_config, corruption_for, missing_field_for = (
+            _server_helpers()
+        )
 
         connection_subs: Set[str] = set()
 
@@ -394,8 +433,11 @@ class WsHandler(BaseHTTPRequestHandler):
                     return
                 if frame.opcode == ws_protocol.OPCODE_PING:
                     try:
-                        out_queue.put_nowait(ws_protocol.encode_frame(
-                            ws_protocol.OPCODE_PONG, frame.payload, mask=False))
+                        out_queue.put_nowait(
+                            ws_protocol.encode_frame(
+                                ws_protocol.OPCODE_PONG, frame.payload, mask=False
+                            )
+                        )
                     except queue.Full:
                         return
                     continue
@@ -421,6 +463,7 @@ class WsHandler(BaseHTTPRequestHandler):
                     # to the owning path: an explicit per-method mode override
                     # still wins over the observed window.
                     from server import _effective_mode
+
                     snap["mode"] = _effective_mode(state, snap)
 
                 # Merge per-method overrides into the snap (MAG-1821
@@ -452,10 +495,20 @@ class WsHandler(BaseHTTPRequestHandler):
                 # apply_fault's internal push_call_to_buffer fires before
                 # any cancel window opens. Fault path sleeps AFTER the
                 # record but before the wire emit so timing is unchanged.
-                fault = apply_fault(state, method_snap, method, req_id,
-                                    lava_headers, t_start,
-                                    chain=listener_chain, port=listener_port) \
-                    if run_fault_ladder else None
+                fault = (
+                    apply_fault(
+                        state,
+                        method_snap,
+                        method,
+                        req_id,
+                        lava_headers,
+                        t_start,
+                        chain=listener_chain,
+                        port=listener_port,
+                    )
+                    if run_fault_ladder
+                    else None
+                )
                 if fault is not None:
                     if method_snap["latency_ms"] > 0:
                         time.sleep(method_snap["latency_ms"] / 1000.0)
@@ -463,7 +516,10 @@ class WsHandler(BaseHTTPRequestHandler):
                     # so a corruption authored for JSON-RPC / REST / etc.
                     # doesn't reach the WS frame encoder.
                     action = _emit_ws_fault(
-                        fault, req_id, out_queue, self.connection,
+                        fault,
+                        req_id,
+                        out_queue,
+                        self.connection,
                         corruption_mode=corruption_for(snap, "ws"),
                         missing_field=missing_field_for(snap, "ws"),
                     )
@@ -501,6 +557,7 @@ class WsHandler(BaseHTTPRequestHandler):
                 # Unsubscribe request — remove from registry and return bool result.
                 if method in stubs_ws.UNSUBSCRIBE_METHODS:
                     from server import _unregister_ws_subscription
+
                     params = body.get("params") or []
                     target_id = params[0] if params else None
                     removed = False
@@ -547,24 +604,29 @@ class WsHandler(BaseHTTPRequestHandler):
                 if method_snap["latency_ms"] > 0:
                     time.sleep(method_snap["latency_ms"] / 1000.0)
                 try:
-                    out_queue.put_nowait(_text_frame(
-                        response,
-                        corruption_mode=corruption_for(snap, "ws"),
-                        missing_field=missing_field_for(snap, "ws"),
-                    ))
+                    out_queue.put_nowait(
+                        _text_frame(
+                            response,
+                            corruption_mode=corruption_for(snap, "ws"),
+                            missing_field=missing_field_for(snap, "ws"),
+                        )
+                    )
                 except queue.Full:
                     return
         finally:
             # Clean up all subscriptions still active for this connection.
             from server import _unregister_ws_subscription
+
             for sub_id in list(connection_subs):
                 handle = _unregister_ws_subscription(sub_id)
                 if handle is not None:
                     handle.closed.set()
 
-    def _register_subscription(self, provider_id: str, method: str,
-                                out_queue: "queue.Queue") -> str:
+    def _register_subscription(
+        self, provider_id: str, method: str, out_queue: "queue.Queue"
+    ) -> str:
         from server import SubscriptionHandle, _register_ws_subscription
+
         sub_id = "0x" + secrets.token_hex(16)
         meta = stubs_ws.SUBSCRIBE_METHODS[method]
         handle = SubscriptionHandle(

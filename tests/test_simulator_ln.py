@@ -26,9 +26,9 @@ Port layout
 MAG-2089 moved LN dispatch from a per-provider ``chain_family`` flag on the
 shared ETH JSON-RPC listener pool (18545-18547) to a dedicated LN listener
 pool at 18578-18580. This suite mirrors the move: a dedicated LN test port
-range at 58578-58580 (parallel to prod 18578-18580) hosts JSONRPCHandler
+range at 23578-23580 (tail digits mirror prod 18578-18580) hosts JSONRPCHandler
 listeners with ``handler_chain_family="ln"`` + ``handler_module=
-handlers_lnd``. A second ETH listener pool at 58545-58547 hosts default-ETH
+handlers_lnd``. A second ETH listener pool at 23545-23547 hosts default-ETH
 listeners, used by the mixed-chain tests. Both pools share ProviderState per
 pid so a single ``/scenario`` POST reconfigures both listeners for the same
 logical provider — exactly mirroring prod.
@@ -51,19 +51,19 @@ import handlers_lnd
 from server import ControlHandler, JSONRPCHandler, ProviderState
 from stubs_lnd import LND_METHOD_DEFAULTS
 
-# ── Test ports (distinct from every other test module so all suites can run
-#     in any order in a single pytest invocation):
-#       ETH base suite                 28545-28547 / 29000
-#       BTC suite                       38545-38547 / 38575-38577 / 39000
-#       REST / WS / logs_lag            48545-48547 / 49000
-#       gRPC                            49545-49547 / 49000
-#       per_method / tendermintrpc      58545-58547 / 59000
-#     LN picks 58578-58580 (parallel to prod 18578-18580) for the LN listener
-#     pool and 58545-58547 for the ETH companion pool. Control on 59100. ─────
+# ── Test ports. Two rules keep binds reliable across the whole suite:
+#    1. Stay below 32768. Ports from 32768 up are the kernel's ephemeral
+#       client-port range (Linux default 32768-60999, macOS 49152-65535):
+#       every outgoing HTTP call an earlier test module makes grabs a random
+#       source port there, and a lingering one makes this module's bind fail
+#       with "Address already in use" at fixture setup.
+#    2. Each test file owns a unique port block (this file: 235xx) so all
+#       modules can run in one pytest invocation.
+#     The LN pool's tail digits (578-580) mirror prod 18578-18580. ─────
 
-_ETH_PROVIDER_PORTS = {"1": 58545, "2": 58546, "3": 58547}
-_LN_PROVIDER_PORTS  = {"1": 58578, "2": 58579, "3": 58580}
-_CONTROL_PORT       = 59100
+_ETH_PROVIDER_PORTS = {"1": 23545, "2": 23546, "3": 23547}
+_LN_PROVIDER_PORTS = {"1": 23578, "2": 23579, "3": 23580}
+_CONTROL_PORT = 23500
 
 # 6 LN methods covered by the stub set. Source of truth: stubs_lnd.py.
 ALL_LND_METHODS = sorted(LND_METHOD_DEFAULTS.keys())
@@ -77,9 +77,7 @@ ALL_LND_METHODS = sorted(LND_METHOD_DEFAULTS.keys())
 def _post(url: str, body: dict) -> tuple[int, dict]:
     """POST JSON body, return (status_code, parsed_response_body)."""
     data = json.dumps(body).encode()
-    req  = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}
-    )
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
             raw = resp.read()
@@ -113,25 +111,26 @@ def _ctrl(sim: dict, path: str) -> str:
 
 # ── Module-scoped fixture: start all servers once ─────────────────────────────
 
+
 @pytest.fixture(scope="module")
 def sim():
     """Start 3 ETH listeners + 3 LN listeners + 1 control server.
 
-    The LN listeners (58578-58580) are the focus of this suite — they run
+    The LN listeners (23578-23580) are the focus of this suite — they run
     JSONRPCHandler with ``handler_chain_family="ln"`` + ``handler_module=
     handlers_lnd`` so the success path always dispatches to LN regardless of
-    the snap's ``chain_family``. The ETH listeners (58545-58547) are bound on
+    the snap's ``chain_family``. The ETH listeners (23545-23547) are bound on
     the same ProviderState per pid; they exist for mixed-chain tests that
     drive an ETH-only port on a shared logical provider.
 
     Yields a dict with base URLs:
-      sim["control"]      → http://127.0.0.1:59100
-      sim["provider1"]    → http://127.0.0.1:58578    # primary LN URL per pid
-      sim["provider2"]    → http://127.0.0.1:58579
-      sim["provider3"]    → http://127.0.0.1:58580
-      sim["eth_provider1"]→ http://127.0.0.1:58545    # ETH companion per pid
-      sim["eth_provider2"]→ http://127.0.0.1:58546
-      sim["eth_provider3"]→ http://127.0.0.1:58547
+      sim["control"]      → http://127.0.0.1:23500
+      sim["provider1"]    → http://127.0.0.1:23578    # primary LN URL per pid
+      sim["provider2"]    → http://127.0.0.1:23579
+      sim["provider3"]    → http://127.0.0.1:23580
+      sim["eth_provider1"]→ http://127.0.0.1:23545    # ETH companion per pid
+      sim["eth_provider2"]→ http://127.0.0.1:23546
+      sim["eth_provider3"]→ http://127.0.0.1:23547
     """
     # One ProviderState per pid, shared between the ETH and LN listeners
     # for that pid — mirrors prod's shared-state model.
@@ -140,26 +139,26 @@ def sim():
     servers = []
     # ETH listener pool — default handler_chain_family / handler_module.
     for pid, port in _ETH_PROVIDER_PORTS.items():
-        srv                  = ThreadingHTTPServer(("127.0.0.1", port), JSONRPCHandler)
-        srv.daemon_threads   = True
-        srv.state                = states[pid]
-        srv.provider_id          = pid
+        srv = ThreadingHTTPServer(("127.0.0.1", port), JSONRPCHandler)
+        srv.daemon_threads = True
+        srv.state = states[pid]
+        srv.provider_id = pid
         srv.handler_chain_family = "eth"
-        srv.handler_module       = handlers_eth
+        srv.handler_module = handlers_eth
         servers.append(srv)
 
     # LN listener pool — port-derived dispatch to handlers_lnd.
     for pid, port in _LN_PROVIDER_PORTS.items():
-        srv                  = ThreadingHTTPServer(("127.0.0.1", port), JSONRPCHandler)
-        srv.daemon_threads   = True
-        srv.state                = states[pid]
-        srv.provider_id          = pid
+        srv = ThreadingHTTPServer(("127.0.0.1", port), JSONRPCHandler)
+        srv.daemon_threads = True
+        srv.state = states[pid]
+        srv.provider_id = pid
         srv.handler_chain_family = "ln"
-        srv.handler_module       = handlers_lnd
+        srv.handler_module = handlers_lnd
         servers.append(srv)
 
-    ctrl                  = HTTPServer(("127.0.0.1", _CONTROL_PORT), ControlHandler)
-    ctrl.provider_states  = states
+    ctrl = HTTPServer(("127.0.0.1", _CONTROL_PORT), ControlHandler)
+    ctrl.provider_states = states
     servers.append(ctrl)
 
     threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in servers]
@@ -169,10 +168,10 @@ def sim():
     time.sleep(0.15)
 
     yield {
-        "control":       f"http://127.0.0.1:{_CONTROL_PORT}",
-        "provider1":     f"http://127.0.0.1:{_LN_PROVIDER_PORTS['1']}",
-        "provider2":     f"http://127.0.0.1:{_LN_PROVIDER_PORTS['2']}",
-        "provider3":     f"http://127.0.0.1:{_LN_PROVIDER_PORTS['3']}",
+        "control": f"http://127.0.0.1:{_CONTROL_PORT}",
+        "provider1": f"http://127.0.0.1:{_LN_PROVIDER_PORTS['1']}",
+        "provider2": f"http://127.0.0.1:{_LN_PROVIDER_PORTS['2']}",
+        "provider3": f"http://127.0.0.1:{_LN_PROVIDER_PORTS['3']}",
         "eth_provider1": f"http://127.0.0.1:{_ETH_PROVIDER_PORTS['1']}",
         "eth_provider2": f"http://127.0.0.1:{_ETH_PROVIDER_PORTS['2']}",
         "eth_provider3": f"http://127.0.0.1:{_ETH_PROVIDER_PORTS['3']}",
@@ -183,6 +182,7 @@ def sim():
 
 
 # ── Helper to apply per-provider scenario config ──────────────────────────────
+
 
 def _set_ln(sim, pid: str = "1", **extra):
     """Convenience: POST /scenario for a single provider.
@@ -209,6 +209,7 @@ def _set_ln_with_fault(sim, pid: str = "1", **extra):
 
 # ── Function-scoped autouse: clean slate before/after every test ──────────────
 
+
 @pytest.fixture(autouse=True)
 def clean_state(sim):
     """Reset scenario config AND clear history before and after every test."""
@@ -223,6 +224,7 @@ def clean_state(sim):
 # port selects the handler. These tests now verify the PORT-based contract.
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestLNPortDispatch:
 
     def test_default_chain_family_is_eth(self, sim):
@@ -234,7 +236,7 @@ class TestLNPortDispatch:
             assert body["providers"][pid]["chain_family"] == "eth"
 
     def test_ln_port_dispatches_to_handlers_lnd_with_default_chain_family(self, sim):
-        """No /scenario call at all — the LN port (58578) must still answer
+        """No /scenario call at all — the LN port (23578) must still answer
         LN methods because dispatch is port-derived, not chain_family-derived."""
         status, body = _rpc(sim["provider1"], "getinfo")
         assert status == 200
@@ -247,18 +249,14 @@ class TestLNPortDispatch:
         dispatch — port-derived dispatch is the contract MAG-2089 introduced.
         This is the original symptom: a leftover chain_family from a sister
         test must not contaminate the LN port's response."""
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"chain_family": "eth"}}
-        })
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth"}}})
         status, body = _rpc(sim["provider1"], "getinfo")
         assert status == 200
         # LN-shaped response, not an ETH stub.
         assert "identity_pubkey" in body["result"]
 
     def test_reset_clears_chain_family(self, sim):
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"chain_family": "ln"}}
-        })
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "ln"}}})
         _post(_ctrl(sim, "/reset"), {})
         _, body = _get(_ctrl(sim, "/scenario"))
         assert body["providers"]["1"]["chain_family"] == "eth"
@@ -291,6 +289,7 @@ class TestLNPortDispatch:
 # Happy-path stubs per LN method (covers all 6 ticket-scoped methods)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestLNDMethodDefaults:
 
     @pytest.mark.parametrize("method", ALL_LND_METHODS)
@@ -307,9 +306,16 @@ class TestLNDMethodDefaults:
         """getinfo carries the 8 ticket-required fields."""
         _, body = _rpc(sim["provider1"], "getinfo")
         r = body["result"]
-        for key in ("identity_pubkey", "alias", "num_peers",
-                     "num_active_channels", "block_height",
-                     "synced_to_chain", "synced_to_graph", "chains"):
+        for key in (
+            "identity_pubkey",
+            "alias",
+            "num_peers",
+            "num_active_channels",
+            "block_height",
+            "synced_to_chain",
+            "synced_to_graph",
+            "chains",
+        ):
             assert key in r, f"getinfo missing required field: {key}"
 
     def test_listchannels_wraps_in_channels_key(self, sim):
@@ -330,6 +336,7 @@ class TestLNDMethodDefaults:
 # ─────────────────────────────────────────────────────────────────────────────
 # block_height shift on getinfo — mirrors BTC's getblockcount shift
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestGetInfoBlockHeight:
 
@@ -359,6 +366,7 @@ class TestGetInfoBlockHeight:
 # ─────────────────────────────────────────────────────────────────────────────
 # Param echo behaviour — decodepayreq / payinvoice / openchannel
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestParamEcho:
 
@@ -393,6 +401,7 @@ class TestParamEcho:
 # (set_hang, set_dropped, set_corrupt, set_status) per ticket requirement.
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestLNFaultInjection:
     """All fault tests in this class set ``chain_family="ln"`` so the LN
     listener's fault gate (``handler_chain_family="ln"``) matches the snap
@@ -422,8 +431,9 @@ class TestLNFaultInjection:
         are written — the client sees a URLError or ConnectionResetError.
         """
         _set_ln_with_fault(sim, "2", mode="drop_connection", drop_at="before_headers")
-        with pytest.raises((urllib.error.URLError, ConnectionResetError,
-                            OSError, urllib.error.HTTPError)):
+        with pytest.raises(
+            (urllib.error.URLError, ConnectionResetError, OSError, urllib.error.HTTPError)
+        ):
             _rpc(sim["provider2"], "getinfo")
 
     def test_corrupt_response_on_ln(self, sim):
@@ -435,8 +445,9 @@ class TestLNFaultInjection:
         # Build the request manually so we read raw bytes without json.loads.
         req = urllib.request.Request(
             f"{sim['provider3']}/",
-            data=json.dumps({"jsonrpc": "2.0", "id": 1,
-                              "method": "getinfo", "params": []}).encode(),
+            data=json.dumps(
+                {"jsonrpc": "2.0", "id": 1, "method": "getinfo", "params": []}
+            ).encode(),
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -449,9 +460,14 @@ class TestLNFaultInjection:
 
         mode=error + http_status=502 must propagate the custom HTTP status.
         """
-        _set_ln_with_fault(sim, "1", mode="error", http_status=502,
-                           error_code=-32000,
-                           error_message="upstream unavailable")
+        _set_ln_with_fault(
+            sim,
+            "1",
+            mode="error",
+            http_status=502,
+            error_code=-32000,
+            error_message="upstream unavailable",
+        )
         status, body = _rpc(sim["provider1"], "getinfo")
         assert status == 502
         assert body["error"]["code"] == -32000
@@ -461,6 +477,7 @@ class TestLNFaultInjection:
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-method error overrides on an LN provider — error_stub catalogue
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestLNErrorStubs:
     """Per-method ``responses`` overrides don't go through the fault ladder —
@@ -476,9 +493,11 @@ class TestLNErrorStubs:
 
     def test_ln_error_stub_raw_envelope(self, sim):
         """Escape hatch: responses[method] = {"error": {...}} bypasses the catalogue."""
-        _set_ln(sim, "1", responses={"openchannel": {
-            "error": {"code": -99, "message": "Custom LN error"}
-        }})
+        _set_ln(
+            sim,
+            "1",
+            responses={"openchannel": {"error": {"code": -99, "message": "Custom LN error"}}},
+        )
         _, body = _rpc(sim["provider1"], "openchannel", ["02deadbeef" + "00" * 28, 100_000])
         assert body["error"]["code"] == -99
         assert body["error"]["message"] == "Custom LN error"
@@ -498,8 +517,9 @@ class TestLNErrorStubs:
 # BTC. The LN suite focuses on ETH-vs-LN isolation.)
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestMixedChainScenario:
-    """Each pid has both an ETH listener (58545-7) and an LN listener (58578-80)
+    """Each pid has both an ETH listener (23545-7) and an LN listener (23578-80)
     bound on the same ProviderState — mirrors prod's per-pid shared-state
     model. The ETH listener and LN listener for the same pid can serve
     different responses simultaneously because dispatch is port-derived."""
@@ -509,7 +529,7 @@ class TestMixedChainScenario:
         LN on the LN port. Pre-MAG-2089 this required setting chain_family
         per-pid; under the new model the ports themselves decide."""
         _, eth_body = _rpc(sim["eth_provider1"], "eth_blockNumber")
-        _, ln_body  = _rpc(sim["provider1"],     "getinfo")
+        _, ln_body = _rpc(sim["provider1"], "getinfo")
 
         # ETH: hex string with "0x" prefix.
         assert isinstance(eth_body["result"], str)
@@ -522,13 +542,16 @@ class TestMixedChainScenario:
         """MAG-2089's core promise for LN: a fault tagged chain_family="ln"
         on a shared ProviderState fires on the LN listener (gate matches)
         but passes through on the ETH listener (gate is "eth")."""
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {
-                "1": {"chain_family": "ln", "mode": "rate_limit"},
-            }
-        })
+        _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {"chain_family": "ln", "mode": "rate_limit"},
+                }
+            },
+        )
         eth_status, eth_body = _rpc(sim["eth_provider1"], "eth_blockNumber")
-        ln_status,  _        = _rpc(sim["provider1"],     "getinfo")
+        ln_status, _ = _rpc(sim["provider1"], "getinfo")
 
         # ETH listener gate is exact-match "eth" — LN fault is ignored.
         assert eth_status == 200, f"ETH listener should ignore LN-tagged fault; got {eth_status}"
@@ -540,11 +563,14 @@ class TestMixedChainScenario:
         """blocks_behind on an LN-tagged snap shifts the LN block_height
         reported by getinfo. The ETH listener serving the same pid is
         unaffected because its dispatch is to handlers_eth."""
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {
-                "1": {"chain_family": "ln", "blocks_behind": 50},
-            }
-        })
+        _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {"chain_family": "ln", "blocks_behind": 50},
+                }
+            },
+        )
         _, ln_body = _rpc(sim["provider1"], "getinfo")
         assert ln_body["result"]["block_height"] == 850_000 - 50
 
@@ -552,6 +578,7 @@ class TestMixedChainScenario:
 # ─────────────────────────────────────────────────────────────────────────────
 # History tracking — LN requests must show up in /history like ETH/BTC ones
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestLNHistoryTracking:
 

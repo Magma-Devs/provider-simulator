@@ -52,7 +52,7 @@ class ProviderState:
 | `http_status` | int | `200` | HTTP status of error responses (200 = JSON-RPC body error; 400/500 = HTTP-level) |
 | `responses` | dict | `{}` | Per-method custom result overrides (`{method_name: {result: ...}}`) |
 | `lock` | Lock | new Lock() | Field-level lock used by every accessor method |
-| `history` | deque | `deque(maxlen=HISTORY_MAX)` | Per-provider ring buffer of recent calls; oldest is dropped at 200 entries |
+| `history` | deque | `deque(maxlen=HISTORY_MAX)` | Per-provider ring buffer of recent calls; oldest is dropped past `HISTORY_MAX` entries (2000 by default, `SIM_HISTORY_MAX` env var overrides) |
 | `total_calls` | int | `0` | All-time call count; never reset by ring rollover, only by `clear_history()` |
 | `calls_by_status` | dict | `{}` | All-time per-status counters (`success`/`error`/`rate_limit`/`down`) |
 
@@ -213,7 +213,7 @@ def push_call_to_buffer(self, method: str, status: str, latency_ms: int,
 ```
 
 **What it does:**
-- Appends one entry to the per-provider ring buffer (capped at `HISTORY_MAX = 200`; oldest is dropped on overflow)
+- Appends one entry to the per-provider ring buffer (capped at `HISTORY_MAX`, 2000 by default; oldest is dropped on overflow)
 - Increments the all-time `total_calls` counter (never reset by ring rollover)
 - Bumps the per-status counter in `calls_by_status`
 

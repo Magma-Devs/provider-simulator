@@ -66,7 +66,6 @@ from typing import Any, Dict, Tuple
 
 from stubs import ETH_ERROR_STUBS, ETH_METHOD_DEFAULTS
 
-
 # --- MAG-1897: optional advancing eth head ---------------------------------
 # The simulated eth head is normally a STATIC constant
 # (ETH_METHOD_DEFAULTS["eth_blockNumber"] = "0x1312D00"). A test that needs the
@@ -84,9 +83,9 @@ from stubs import ETH_ERROR_STUBS, ETH_METHOD_DEFAULTS
 # current_eth_head() is the single source the eth success-path reads for the head.
 _HEAD_LOCK = threading.Lock()
 _head_base = int(ETH_METHOD_DEFAULTS["eth_blockNumber"], 16)  # 20_000_000
-_head_extra = 0      # manual bumps + folded continuous advance (blocks above base)
-_head_rate = 0.0     # continuous advance, blocks/sec (0.0 = off => static head)
-_head_anchor = 0.0   # time.monotonic() when the current rate took effect
+_head_extra = 0  # manual bumps + folded continuous advance (blocks above base)
+_head_rate = 0.0  # continuous advance, blocks/sec (0.0 = off => static head)
+_head_anchor = 0.0  # time.monotonic() when the current rate took effect
 
 
 def current_eth_head() -> int:
@@ -208,10 +207,10 @@ def handle(state, request: dict, snap: dict, lava_headers: dict) -> Tuple[int, D
             head = current_eth_head()
             effective_latest = _hex_upper(head - blocks_behind)
             named = {
-                "latest":    effective_latest,
-                "earliest":  "0x0",
-                "pending":   _hex_upper(head - blocks_behind + 1),
-                "safe":      effective_latest,
+                "latest": effective_latest,
+                "earliest": "0x0",
+                "pending": _hex_upper(head - blocks_behind + 1),
+                "safe": effective_latest,
                 "finalized": _hex_upper(head - blocks_behind - 1),
             }
             result = dict(result)
@@ -246,10 +245,7 @@ def handle(state, request: dict, snap: dict, lava_headers: dict) -> Tuple[int, D
             if to_block is not None and to_block > logs_indexed:
                 mode = snap.get("logs_lag_mode", "empty")
                 if mode == "partial" and isinstance(result, list):
-                    result = [
-                        entry for entry in result
-                        if _entry_blocknum_le(entry, logs_indexed)
-                    ]
+                    result = [entry for entry in result if _entry_blocknum_le(entry, logs_indexed)]
                 else:
                     # "empty" (default) — or any non-list result on partial mode
                     result = []

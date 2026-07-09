@@ -35,7 +35,7 @@ import os
 # (MAG-2092) and fires on every listener regardless of ``chain_family``.
 # See BTC_PRIMARY_PORTS / LN_PRIMARY_PORTS below for the full allocation.
 ETH_PRIMARY_PORTS = {"1": 18545, "2": 18546, "3": 18547}
-ETH_BACKUP_PORTS  = {"4": 18560, "5": 18561, "6": 18562}
+ETH_BACKUP_PORTS = {"4": 18560, "5": 18561, "6": 18562}
 # Solo JSON-RPC primary listener (MAG-2061). One provider, no backup — the
 # customer-outage deployment shape. Pid 19 (next after the WS-backup pool's
 # pid 18) keeps the global pid namespace contiguous; port 18581 sits one
@@ -51,10 +51,10 @@ ETH_SOLO_PORTS = {"19": 18581}
 # part of this union; each is bound by its own dedicated loop.
 ETH_ALL_PORTS = {**ETH_PRIMARY_PORTS, **ETH_BACKUP_PORTS, **ETH_SOLO_PORTS}
 
-PROVIDER_PORTS        = ETH_PRIMARY_PORTS  # deprecated alias — migrate callers, then remove
-BACKUP_PROVIDER_PORTS = ETH_BACKUP_PORTS   # deprecated alias — migrate callers, then remove
-SOLO_PROVIDER_PORTS   = ETH_SOLO_PORTS     # deprecated alias — migrate callers, then remove
-ALL_PROVIDER_PORTS    = ETH_ALL_PORTS      # deprecated alias — migrate callers, then remove
+PROVIDER_PORTS = ETH_PRIMARY_PORTS  # deprecated alias — migrate callers, then remove
+BACKUP_PROVIDER_PORTS = ETH_BACKUP_PORTS  # deprecated alias — migrate callers, then remove
+SOLO_PROVIDER_PORTS = ETH_SOLO_PORTS  # deprecated alias — migrate callers, then remove
+ALL_PROVIDER_PORTS = ETH_ALL_PORTS  # deprecated alias — migrate callers, then remove
 
 # Bitcoin JSON-RPC primary pool (MAG-2089). Each listener routes the
 # success branch unconditionally through ``handlers_btc.handle(...)`` —
@@ -82,7 +82,7 @@ BTC_PRIMARY_PORTS = {"1": 18575, "2": 18576, "3": 18577}
 # upstream tracking ticket); allocating dedicated ports here keeps the
 # port-allocation pattern symmetric for when the router-side wire-up
 # lands.
-LN_PRIMARY_PORTS  = {"1": 18578, "2": 18579, "3": 18580}
+LN_PRIMARY_PORTS = {"1": 18578, "2": 18579, "3": 18580}
 
 # Solana JSON-RPC primary pool (MAG-2231). Each listener routes the success
 # branch unconditionally through ``handlers_solana.handle(...)`` — success-path
@@ -176,10 +176,10 @@ WS_PORTS = WS_PRIMARY_PORTS  # deprecated alias — migrate callers, then remove
 #   REST          : pids 10-12 → 18566-18568
 #   Tendermint-RPC: pids 13-15 → 18569-18571
 #   WebSocket     : pids 16-18 → 18572-18574
-GRPC_BACKUP_PORTS = {"7":  18563, "8":  18564, "9":  18565}
+GRPC_BACKUP_PORTS = {"7": 18563, "8": 18564, "9": 18565}
 REST_BACKUP_PORTS = {"10": 18566, "11": 18567, "12": 18568}
-TM_BACKUP_PORTS   = {"13": 18569, "14": 18570, "15": 18571}
-WS_BACKUP_PORTS   = {"16": 18572, "17": 18573, "18": 18574}
+TM_BACKUP_PORTS = {"13": 18569, "14": 18570, "15": 18571}
+WS_BACKUP_PORTS = {"16": 18572, "17": 18573, "18": 18574}
 
 # ── Provider history — call-log ring-buffer ───────────────────────────────────
 # Each provider keeps the last N calls in memory.
@@ -201,26 +201,26 @@ HISTORY_MAX = int(os.getenv("SIM_HISTORY_MAX", "2000"))
 
 
 # ── Ethereum — chain identity ─────────────────────────────────────────────────
-ETH_CHAIN_ID     = "0x1"        # Ethereum mainnet chain ID
+ETH_CHAIN_ID = "0x1"  # Ethereum mainnet chain ID
 ETH_LATEST_BLOCK = "0x1312D00"  # 20 000 000 — realistic mainnet block height used in stubs
 
 
 # ── Ethereum — stub primitives (fake but correctly-formatted on-chain values) ──
 # Used by stubs.py to build valid-shaped RPC responses without real chain data.
 
-ETH_ZERO_ADDR  = "0x" + "0" * 40    # zero address   — 20 bytes, e.g. 0x0000...0000
-ETH_ZERO_HASH  = "0x" + "0" * 64    # zero hash       — 32 bytes, e.g. 0x0000...0000
+ETH_ZERO_ADDR = "0x" + "0" * 40  # zero address   — 20 bytes, e.g. 0x0000...0000
+ETH_ZERO_HASH = "0x" + "0" * 64  # zero hash       — 32 bytes, e.g. 0x0000...0000
 ETH_BLOCK_HASH = "0xaaaa" + "a" * 60  # fake block hash — 32 bytes, distinct from zero
-ETH_TX_HASH    = "0xbbbb" + "b" * 60  # fake tx hash    — 32 bytes, distinct from block hash
-ETH_BLOOM      = "0x" + "0" * 512     # empty logs bloom filter — 256 bytes
+ETH_TX_HASH = "0xbbbb" + "b" * 60  # fake tx hash    — 32 bytes, distinct from block hash
+ETH_BLOOM = "0x" + "0" * 512  # empty logs bloom filter — 256 bytes
 
 
 # ── Bitcoin — chain identity (MAG-1716) ───────────────────────────────────────
 # Block height chosen as a realistic post-2024 mainnet number. Tests that
 # assert exact equality on the default getblockcount response can pin against
 # this value.
-BTC_LATEST_BLOCK = 850_000            # decimal int; bitcoind returns block heights as JSON numbers, not hex
-BTC_CHAIN        = "main"             # one of bitcoind's chain names: "main" | "test" | "signet" | "regtest"
+BTC_LATEST_BLOCK = 850_000  # decimal int; bitcoind returns block heights as JSON numbers, not hex
+BTC_CHAIN = "main"  # one of bitcoind's chain names: "main" | "test" | "signet" | "regtest"
 
 
 # ── Bitcoin — stub primitives ─────────────────────────────────────────────────
@@ -229,8 +229,8 @@ BTC_CHAIN        = "main"             # one of bitcoind's chain names: "main" | 
 # We synthesise them deterministically from BTC_LATEST_BLOCK so tests can pin
 # exact equality without lifting real blockchain data.
 
-BTC_BLOCK_HASH = f"{BTC_LATEST_BLOCK:064x}"       # 64 lower-hex chars, no 0x prefix
-BTC_TX_HASH    = "ab" * 32                         # 64 hex chars, distinct from block hash
+BTC_BLOCK_HASH = f"{BTC_LATEST_BLOCK:064x}"  # 64 lower-hex chars, no 0x prefix
+BTC_TX_HASH = "ab" * 32  # 64 hex chars, distinct from block hash
 
 
 # ── Tendermint RPC — chain identity + stub primitives (MAG-1841) ──────────────
@@ -239,16 +239,16 @@ BTC_TX_HASH    = "ab" * 32                         # 64 hex chars, distinct from
 # ``skip_verifications: chain-id`` in values_sim.yml is for). Keeping the
 # network name distinct from ``lava-mainnet-1`` prevents accidental cross-talk
 # in tests that compare sim vs live envelopes.
-TM_NETWORK_ID    = "lava-sim-tm"
-TM_LATEST_HEIGHT = 5_000_000           # decimal int; Tendermint serialises heights as string-ints
+TM_NETWORK_ID = "lava-sim-tm"
+TM_LATEST_HEIGHT = 5_000_000  # decimal int; Tendermint serialises heights as string-ints
 
 # CometBFT serialises hashes as upper-hex 64-char strings (no 0x prefix).
 # Synthesised from the latest-height so tests can pin exact equality without
 # pulling real chain bytes.
-TM_BLOCK_HASH    = f"{TM_LATEST_HEIGHT:064X}"
-TM_APP_HASH      = "AB" * 32                          # 64-char hex, distinct from block hash
-TM_VALIDATOR_ADDR = "C" * 40                          # 40-char hex, validator addr shape
-TM_PROPOSER_ADDR = "D" * 40                           # 40-char hex, proposer addr shape
+TM_BLOCK_HASH = f"{TM_LATEST_HEIGHT:064X}"
+TM_APP_HASH = "AB" * 32  # 64-char hex, distinct from block hash
+TM_VALIDATOR_ADDR = "C" * 40  # 40-char hex, validator addr shape
+TM_PROPOSER_ADDR = "D" * 40  # 40-char hex, proposer addr shape
 
 
 # ── Lightning Network (LND) — chain identity + stub primitives (MAG-1726) ─────
@@ -261,16 +261,17 @@ TM_PROPOSER_ADDR = "D" * 40                           # 40-char hex, proposer ad
 # The ``chain_family`` field is still attached to ``/scenario`` payloads
 # so REST / gRPC / TM / WS fault-primitive gating keeps working — it just
 # stops being load-bearing for BTC / LN JSON-RPC handler selection (MAG-2089).
-LN_NETWORK            = "regtest"   # LND's network field — "mainnet" | "testnet" | "regtest" | "signet"
-LN_IDENTITY_PUBKEY    = "02" + "ab" * 32      # 33-byte secp256k1 compressed pubkey: 0x02-prefix + 32-byte X coord
-LN_PEER_PUBKEY        = "02" + "cd" * 32      # distinct peer pubkey for listpeers / openchannel responses
-LN_BLOCK_HEIGHT       = 850_000               # LN nodes track the underlying BTC chain head
-LN_NUM_PEERS          = 1
+LN_NETWORK = "regtest"  # LND's network field — "mainnet" | "testnet" | "regtest" | "signet"
+LN_IDENTITY_PUBKEY = (
+    "02" + "ab" * 32
+)  # 33-byte secp256k1 compressed pubkey: 0x02-prefix + 32-byte X coord
+LN_PEER_PUBKEY = "02" + "cd" * 32  # distinct peer pubkey for listpeers / openchannel responses
+LN_BLOCK_HEIGHT = 850_000  # LN nodes track the underlying BTC chain head
+LN_NUM_PEERS = 1
 LN_NUM_ACTIVE_CHANNELS = 1
-LN_CHAN_POINT          = f"{'ab' * 32}:0"     # funding_txid_str:funding_output_index — LND's channel identifier
-LN_PAYMENT_HASH        = "ef" * 32            # 32-byte payment hash, hex-encoded (no 0x prefix)
-LN_PAYMENT_PREIMAGE    = "12" * 32            # 32-byte preimage; LND returns this on successful payinvoice
+LN_CHAN_POINT = f"{'ab' * 32}:0"  # funding_txid_str:funding_output_index — LND's channel identifier
+LN_PAYMENT_HASH = "ef" * 32  # 32-byte payment hash, hex-encoded (no 0x prefix)
+LN_PAYMENT_PREIMAGE = "12" * 32  # 32-byte preimage; LND returns this on successful payinvoice
 # bech32 invoice prefix is hrp + version, signed and tag-encoded. The stub doesn't
 # need to be cryptographically valid — tests assert on shape, not signature.
-LN_BOLT11_INVOICE      = "lnbcrt1u1psim000000000000000000000000000000000000000000000000000000000000000"
-
+LN_BOLT11_INVOICE = "lnbcrt1u1psim000000000000000000000000000000000000000000000000000000000000000"

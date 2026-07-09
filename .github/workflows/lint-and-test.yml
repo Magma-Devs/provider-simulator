@@ -1,0 +1,46 @@
+name: Lint and test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install lint tools
+        run: pip install 'black==26.5.1' 'ruff==0.15.20' 'mypy==2.2.0'
+      - name: black --check
+        run: black --check .
+      - name: ruff check
+        run: ruff check .
+      - name: mypy
+        run: mypy .
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-timeout
+      # pytest-timeout backs the @pytest.mark.timeout(10) markers on the
+      # hang-mode tests; without the plugin those markers silently no-op and
+      # a hung test would stall the job until the runner's 6h kill.
+      #
+      # The suite boots real HTTP/gRPC listeners on isolated test ports —
+      # each test file owns a unique block in 22xxx-29xxx, all below 32768
+      # to stay out of the kernel's ephemeral client-port range (see the
+      # port-block comments in tests/test_simulator*.py) — no mocking, so
+      # it needs an actual runner, not just import checks.
+      - name: pytest
+        run: pytest tests/ -v

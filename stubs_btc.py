@@ -64,14 +64,13 @@ Adding a new method
 from typing import Any, Dict
 
 from constants import (
-    BTC_BLOCK_HASH,
     BTC_CHAIN,
     BTC_LATEST_BLOCK,
     BTC_TX_HASH,
 )
 
-
 # ── Block-hash helper ─────────────────────────────────────────────────────────
+
 
 def btc_block_hash(height: int) -> str:
     """Return a deterministic synthetic Bitcoin block hash for a given height.
@@ -86,6 +85,7 @@ def btc_block_hash(height: int) -> str:
 
 # ── Object factories ──────────────────────────────────────────────────────────
 
+
 def block_stub(height: int = BTC_LATEST_BLOCK) -> Dict[str, Any]:
     """Minimal valid getblock response.
 
@@ -94,13 +94,13 @@ def block_stub(height: int = BTC_LATEST_BLOCK) -> Dict[str, Any]:
     the echoed height (mirrors the ETH ``eth_getBlockByNumber`` echo).
     """
     return {
-        "hash":          btc_block_hash(height),
+        "hash": btc_block_hash(height),
         "confirmations": 1,
-        "height":        height,
-        "version":       0x20000000,
-        "merkleroot":    "ab" * 32,
-        "time":          1700000000,
-        "nonce":         0,
+        "height": height,
+        "version": 0x20000000,
+        "merkleroot": "ab" * 32,
+        "time": 1700000000,
+        "nonce": 0,
         "previousblockhash": btc_block_hash(height - 1) if height > 0 else "0" * 64,
     }
 
@@ -108,169 +108,147 @@ def block_stub(height: int = BTC_LATEST_BLOCK) -> Dict[str, Any]:
 def blockheader_stub(height: int = BTC_LATEST_BLOCK) -> Dict[str, Any]:
     """Minimal valid getblockheader response (subset of block_stub)."""
     return {
-        "hash":          btc_block_hash(height),
+        "hash": btc_block_hash(height),
         "confirmations": 1,
-        "height":        height,
-        "version":       0x20000000,
-        "time":          1700000000,
-        "nonce":         0,
-        "bits":          "1d00ffff",
+        "height": height,
+        "version": 0x20000000,
+        "time": 1700000000,
+        "nonce": 0,
+        "bits": "1d00ffff",
     }
 
 
 # ── Method defaults ───────────────────────────────────────────────────────────
 
 BTC_METHOD_DEFAULTS: Dict[str, Any] = {
-
     # ── Block / chain queries ─────────────────────────────────────────────────
     # NOTE: getblockcount and getblockhash are special — handlers_btc rewrites
     # the result from blocks_behind / params at request time. The values here
     # are the at-head defaults.
-    "getblockcount":      BTC_LATEST_BLOCK,                # int, decimal — not hex
-    "getblockhash":       btc_block_hash(BTC_LATEST_BLOCK),
-    "getbestblockhash":   btc_block_hash(BTC_LATEST_BLOCK),
-    "getblock":           block_stub(BTC_LATEST_BLOCK),
-    "getblockheader":     blockheader_stub(BTC_LATEST_BLOCK),
-
+    "getblockcount": BTC_LATEST_BLOCK,  # int, decimal — not hex
+    "getblockhash": btc_block_hash(BTC_LATEST_BLOCK),
+    "getbestblockhash": btc_block_hash(BTC_LATEST_BLOCK),
+    "getblock": block_stub(BTC_LATEST_BLOCK),
+    "getblockheader": blockheader_stub(BTC_LATEST_BLOCK),
     "getblockchaininfo": {
-        "chain":                  BTC_CHAIN,
-        "blocks":                 BTC_LATEST_BLOCK,
-        "headers":                BTC_LATEST_BLOCK,
-        "bestblockhash":          btc_block_hash(BTC_LATEST_BLOCK),
-        "difficulty":             1.0,
-        "mediantime":             1700000000,
-        "verificationprogress":   1.0,
-        "initialblockdownload":   False,
-        "pruned":                 False,
-        "chainwork":              "00" * 32,
+        "chain": BTC_CHAIN,
+        "blocks": BTC_LATEST_BLOCK,
+        "headers": BTC_LATEST_BLOCK,
+        "bestblockhash": btc_block_hash(BTC_LATEST_BLOCK),
+        "difficulty": 1.0,
+        "mediantime": 1700000000,
+        "verificationprogress": 1.0,
+        "initialblockdownload": False,
+        "pruned": False,
+        "chainwork": "00" * 32,
     },
-
     "getblockstats": {
-        "height":       BTC_LATEST_BLOCK,
-        "blockhash":    btc_block_hash(BTC_LATEST_BLOCK),
-        "txs":          1,
-        "total_size":   285,
+        "height": BTC_LATEST_BLOCK,
+        "blockhash": btc_block_hash(BTC_LATEST_BLOCK),
+        "txs": 1,
+        "total_size": 285,
     },
-
     "getchaintips": [
         {
-            "height":      BTC_LATEST_BLOCK,
-            "hash":        btc_block_hash(BTC_LATEST_BLOCK),
-            "branchlen":   0,
-            "status":      "active",
+            "height": BTC_LATEST_BLOCK,
+            "hash": btc_block_hash(BTC_LATEST_BLOCK),
+            "branchlen": 0,
+            "status": "active",
         }
     ],
-
     "getchaintxstats": {
-        "window_block_count":  144,
-        "txcount":             1_000_000,
-        "window_tx_count":     150_000,
+        "window_block_count": 144,
+        "txcount": 1_000_000,
+        "window_tx_count": 150_000,
     },
-
-    "getdifficulty":         1.0,
-
+    "getdifficulty": 1.0,
     # ── Node / network info ───────────────────────────────────────────────────
     "getconnectioncount": 8,
-
     "getindexinfo": {
         "txindex": {
-            "synced":      True,
+            "synced": True,
             "best_block_height": BTC_LATEST_BLOCK,
         }
     },
-
     "getmemoryinfo": {
         "locked": {
-            "used":          0,
-            "free":          0,
-            "total":         0,
-            "locked":        0,
-            "chunks_used":   0,
-            "chunks_free":   0,
+            "used": 0,
+            "free": 0,
+            "total": 0,
+            "locked": 0,
+            "chunks_used": 0,
+            "chunks_free": 0,
         }
     },
-
     # ── Mempool ───────────────────────────────────────────────────────────────
-    "getmempoolancestors":   [],
+    "getmempoolancestors": [],
     "getmempooldescendants": [],
     "getmempoolinfo": {
-        "size":             0,
-        "bytes":            0,
-        "usage":            0,
-        "maxmempool":       300_000_000,
-        "mempoolminfee":    0.00001,
+        "size": 0,
+        "bytes": 0,
+        "usage": 0,
+        "maxmempool": 300_000_000,
+        "mempoolminfee": 0.00001,
     },
-    "getrawmempool":         [],
-
+    "getrawmempool": [],
     # ── Transactions ──────────────────────────────────────────────────────────
     # getrawtransaction: default returns the hex-serialised tx (verbose=false).
     # Tests requesting verbose=true receive this string back too — switch via
     # /scenario responses[method] = {"result": {...}} if a richer shape is needed.
-    "getrawtransaction":     "0100000001" + "00" * 32 + "00000000" + "00ffffffff",
-
-    "gettxoutproof":         "",  # hex-encoded merkle proof; empty = no proof emitted
-
+    "getrawtransaction": "0100000001" + "00" * 32 + "00000000" + "00ffffffff",
+    "gettxoutproof": "",  # hex-encoded merkle proof; empty = no proof emitted
     "gettxoutsetinfo": {
-        "height":         BTC_LATEST_BLOCK,
-        "bestblock":      btc_block_hash(BTC_LATEST_BLOCK),
-        "transactions":   1_000_000,
-        "txouts":         2_000_000,
-        "total_amount":   19_500_000.0,
+        "height": BTC_LATEST_BLOCK,
+        "bestblock": btc_block_hash(BTC_LATEST_BLOCK),
+        "transactions": 1_000_000,
+        "txouts": 2_000_000,
+        "total_amount": 19_500_000.0,
     },
-
     "gettxout": {
-        "bestblock":      btc_block_hash(BTC_LATEST_BLOCK),
-        "confirmations":  1,
-        "value":          0.0,
+        "bestblock": btc_block_hash(BTC_LATEST_BLOCK),
+        "confirmations": 1,
+        "value": 0.0,
         "scriptPubKey": {
-            "asm":     "",
-            "hex":     "",
-            "type":    "nonstandard",
+            "asm": "",
+            "hex": "",
+            "type": "nonstandard",
         },
     },
-
     # ── Send / submit ─────────────────────────────────────────────────────────
-    "sendrawtransaction":    BTC_TX_HASH,
-
+    "sendrawtransaction": BTC_TX_HASH,
     "submitpackage": {
-        "package_msg":    "success",
-        "tx-results":     [],
+        "package_msg": "success",
+        "tx-results": [],
     },
-
     "testmempoolaccept": [
         {
-            "txid":      BTC_TX_HASH,
-            "allowed":   True,
+            "txid": BTC_TX_HASH,
+            "allowed": True,
         }
     ],
-
     # ── Decode helpers (deterministic) ────────────────────────────────────────
     "decoderawtransaction": {
-        "txid":     BTC_TX_HASH,
-        "hash":     BTC_TX_HASH,
-        "version":  2,
-        "vin":      [],
-        "vout":     [],
+        "txid": BTC_TX_HASH,
+        "hash": BTC_TX_HASH,
+        "version": 2,
+        "vin": [],
+        "vout": [],
     },
-
     "decodescript": {
-        "asm":    "",
-        "type":   "nonstandard",
-        "p2sh":   "",
+        "asm": "",
+        "type": "nonstandard",
+        "p2sh": "",
     },
-
     # ── Fees / addresses / signing ────────────────────────────────────────────
     "estimatesmartfee": {
-        "feerate":  0.00001,
-        "blocks":   6,
+        "feerate": 0.00001,
+        "blocks": 6,
     },
-
     "validateaddress": {
-        "isvalid":  True,
-        "address":  "bc1qexampleaddress00000000000000000000000",
+        "isvalid": True,
+        "address": "bc1qexampleaddress00000000000000000000000",
     },
-
-    "verifymessage":  True,
+    "verifymessage": True,
 }
 
 
@@ -287,63 +265,55 @@ BTC_METHOD_DEFAULTS: Dict[str, Any] = {
 #                                              {"error_stub": "block_not_found"}}}}}
 
 BTC_ERROR_STUBS: Dict[str, Dict[str, Any]] = {
-
     # Block / tx not found — bitcoind RPC_INVALID_ADDRESS_OR_KEY (-5).
     # Emitted when getblock / getblockhash / getrawtransaction is called for
     # a block hash or txid the node doesn't have.
     "block_not_found": {
-        "code":    -5,
+        "code": -5,
         "message": "Block not found",
     },
     "tx_not_found": {
-        "code":    -5,
+        "code": -5,
         "message": "No such mempool or blockchain transaction",
     },
-
     # Invalid parameter — RPC_INVALID_PARAMETER (-8). Used when args are
     # structurally valid JSON but semantically wrong (e.g. negative height).
     "invalid_parameter": {
-        "code":    -8,
+        "code": -8,
         "message": "Invalid parameter",
     },
-
     # Verify failure — RPC_VERIFY_REJECTED (-26). Emitted when
     # sendrawtransaction is rejected (insufficient fee, conflicts, etc.).
     "verify_rejected": {
-        "code":    -26,
+        "code": -26,
         "message": "Transaction was rejected",
     },
-
     # Verify already in chain — RPC_VERIFY_ALREADY_IN_CHAIN (-27). Emitted
     # when sendrawtransaction sees the tx is already mined.
     "already_in_chain": {
-        "code":    -27,
+        "code": -27,
         "message": "Transaction already in block chain",
     },
-
     # In warmup — RPC_IN_WARMUP (-28). Returned during initial node startup
     # before the RPC interface is ready.
     "in_warmup": {
-        "code":    -28,
+        "code": -28,
         "message": "Loading block index",
     },
-
     # JSON-RPC parse error — same as ETH (-32700).
     "parse_error": {
-        "code":    -32700,
+        "code": -32700,
         "message": "Parse error",
     },
-
     # JSON-RPC invalid request — same as ETH (-32600).
     "invalid_request": {
-        "code":    -32600,
+        "code": -32600,
         "message": "Invalid Request",
     },
-
     # Method not found — same as ETH (-32601). Bitcoin Core uses the same
     # JSON-RPC 2.0 code for missing methods.
     "method_not_found": {
-        "code":    -32601,
+        "code": -32601,
         "message": "Method not found",
     },
 }

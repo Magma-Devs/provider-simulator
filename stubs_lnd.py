@@ -62,65 +62,59 @@ from constants import (
     LN_PEER_PUBKEY,
 )
 
-
 # ── Method defaults ───────────────────────────────────────────────────────────
 
 LND_METHOD_DEFAULTS: Dict[str, Any] = {
-
     # ── Node info ─────────────────────────────────────────────────────────────
     # Mirrors `lncli getinfo`. block_height is shifted by handlers_lnd when
     # blocks_behind != 0 (the LN node tracks the underlying BTC chain head).
     "getinfo": {
-        "identity_pubkey":      LN_IDENTITY_PUBKEY,
-        "alias":                "sim-lnd",
-        "num_peers":            LN_NUM_PEERS,
-        "num_active_channels":  LN_NUM_ACTIVE_CHANNELS,
-        "block_height":         LN_BLOCK_HEIGHT,
-        "synced_to_chain":      True,
-        "synced_to_graph":      True,
+        "identity_pubkey": LN_IDENTITY_PUBKEY,
+        "alias": "sim-lnd",
+        "num_peers": LN_NUM_PEERS,
+        "num_active_channels": LN_NUM_ACTIVE_CHANNELS,
+        "block_height": LN_BLOCK_HEIGHT,
+        "synced_to_chain": True,
+        "synced_to_graph": True,
         "chains": [
             {"chain": "bitcoin", "network": LN_NETWORK},
         ],
     },
-
     # ── Channel queries ───────────────────────────────────────────────────────
     # LND wraps the list in {"channels": [...]} — preserved here so callers
     # that walk body["result"]["channels"] don't need a wrapper-mode flag.
     "listchannels": {
         "channels": [
             {
-                "active":            True,
-                "remote_pubkey":     LN_PEER_PUBKEY,
-                "channel_point":     LN_CHAN_POINT,
-                "chan_id":           "0",
-                "capacity":          "1000000",          # satoshis as string — LND convention
-                "local_balance":     "500000",
-                "remote_balance":    "500000",
-                "private":           False,
+                "active": True,
+                "remote_pubkey": LN_PEER_PUBKEY,
+                "channel_point": LN_CHAN_POINT,
+                "chan_id": "0",
+                "capacity": "1000000",  # satoshis as string — LND convention
+                "local_balance": "500000",
+                "remote_balance": "500000",
+                "private": False,
             }
         ]
     },
-
     # ── Channel open ──────────────────────────────────────────────────────────
     # `openchannel` returns the funding tx handle. Real LND emits a streaming
     # response with `chan_pending` → `chan_open` updates; the sim collapses to
     # a single final-state dict so /scenario consumers see one response.
     "openchannel": {
-        "funding_txid_str":    LN_CHAN_POINT.split(":")[0],
-        "output_index":        0,
+        "funding_txid_str": LN_CHAN_POINT.split(":")[0],
+        "output_index": 0,
     },
-
     # ── Invoice decode ────────────────────────────────────────────────────────
     # Echoes back the destination + payment hash for the caller's invoice. The
     # default is at-rest; handlers_lnd echoes back the requested invoice string
     # when present so tests can pin against round-trip behaviour.
     "decodepayreq": {
-        "destination":     LN_IDENTITY_PUBKEY,
-        "payment_hash":    LN_PAYMENT_HASH,
-        "num_msat":        "100000",                # 100 sats in millisats
-        "expiry":          "3600",
+        "destination": LN_IDENTITY_PUBKEY,
+        "payment_hash": LN_PAYMENT_HASH,
+        "num_msat": "100000",  # 100 sats in millisats
+        "expiry": "3600",
     },
-
     # ── Pay ───────────────────────────────────────────────────────────────────
     # On success: preimage + hash; payment_error empty string. To simulate a
     # payment failure, override via responses[payinvoice] = {"result": {
@@ -128,22 +122,21 @@ LND_METHOD_DEFAULTS: Dict[str, Any] = {
     # doesn't model routing, so a "successful" payment is always returned by
     # default.
     "payinvoice": {
-        "payment_preimage":   LN_PAYMENT_PREIMAGE,
-        "payment_hash":       LN_PAYMENT_HASH,
-        "payment_error":      "",
+        "payment_preimage": LN_PAYMENT_PREIMAGE,
+        "payment_hash": LN_PAYMENT_HASH,
+        "payment_error": "",
     },
-
     # ── Peer list ─────────────────────────────────────────────────────────────
     # LND wraps in {"peers": [...]} like listchannels. One stub peer is enough
     # for tests that assert presence/shape; richer scenarios override.
     "listpeers": {
         "peers": [
             {
-                "pub_key":   LN_PEER_PUBKEY,
-                "address":   "127.0.0.1:9735",
-                "inbound":   False,
-                "sat_sent":  "0",
-                "sat_recv":  "0",
+                "pub_key": LN_PEER_PUBKEY,
+                "address": "127.0.0.1:9735",
+                "inbound": False,
+                "sat_sent": "0",
+                "sat_recv": "0",
             }
         ]
     },
@@ -164,54 +157,47 @@ LND_METHOD_DEFAULTS: Dict[str, Any] = {
 #                                              {"error_stub": "no_route"}}}}}
 
 LND_ERROR_STUBS: Dict[str, Dict[str, Any]] = {
-
     # No route — LND returns this when the routing graph can't find a path
     # to the destination. Common in invoice-pay flows where the peer is offline
     # or capacity is insufficient.
     "no_route": {
-        "code":    -32000,
+        "code": -32000,
         "message": "unable to find a path to destination",
     },
-
     # Invalid invoice — bolt11 decode failed (bad bech32, missing fields,
     # signature mismatch). Tests for decodepayreq error paths use this stub.
     "invalid_invoice": {
-        "code":    -32602,
+        "code": -32602,
         "message": "invalid bolt11 invoice",
     },
-
     # Channel not found — listchannels / openchannel error when the channel
     # point doesn't exist on this node.
     "channel_not_found": {
-        "code":    -32000,
+        "code": -32000,
         "message": "channel not found",
     },
-
     # Peer not connected — openchannel rejects when the remote pubkey isn't in
     # the peer list. Real LND emits a gRPC FailedPrecondition; we map to the
     # JSON-RPC -32000 server-error range so the router's classifier sees a
     # canonical "node refused" signal.
     "peer_not_connected": {
-        "code":    -32000,
+        "code": -32000,
         "message": "peer is not connected",
     },
-
     # Insufficient funds — openchannel / payinvoice failure when the local
     # balance is below the requested amount + fees.
     "insufficient_funds": {
-        "code":    -32000,
+        "code": -32000,
         "message": "insufficient local balance to open channel",
     },
-
     # Method not found — same JSON-RPC standard as ETH/BTC.
     "method_not_found": {
-        "code":    -32601,
+        "code": -32601,
         "message": "Method not found",
     },
-
     # JSON-RPC parse error — same as ETH/BTC.
     "parse_error": {
-        "code":    -32700,
+        "code": -32700,
         "message": "Parse error",
     },
 }

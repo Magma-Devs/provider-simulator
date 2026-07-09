@@ -45,6 +45,7 @@ Control API:
 
 import datetime
 import json
+import logging
 import os
 import random
 import re
@@ -54,7 +55,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlparse
 
 import handlers_btc
 import handlers_eth
@@ -86,8 +87,10 @@ from constants import (
 )
 from stubs_rest import REST_METHOD_DEFAULTS
 
+_log = logging.getLogger(__name__)
 
 # ── Wire-payload normalisation ────────────────────────────────────────────────
+
 
 def _normalise_responses(raw: Any) -> Dict[Any, Any]:
     """Normalise a ``responses`` wire payload into a dict the handlers can use.
@@ -139,7 +142,7 @@ def _normalise_responses(raw: Any) -> Dict[Any, Any]:
             # branch in _apply_fault.
             if isinstance(cfg, dict) and cfg.get("mode") == "error":
                 raise ValueError(
-                    f"per-method mode=\"error\" is not supported "
+                    f'per-method mode="error" is not supported '
                     f"(key={key!r}); use responses[{key!r}] = "
                     f"{{'error': {{...}}}} instead"
                 )
@@ -157,7 +160,7 @@ def _normalise_responses(raw: Any) -> Dict[Any, Any]:
         for method_name, cfg in raw.items():
             if isinstance(cfg, dict) and cfg.get("mode") == "error":
                 raise ValueError(
-                    f"per-method mode=\"error\" is not supported "
+                    f'per-method mode="error" is not supported '
                     f"(method={method_name!r}); use responses[{method_name!r}] = "
                     f"{{'error_stub': '<name>'}} or {{'error': {{...}}}} instead"
                 )
@@ -192,7 +195,7 @@ def _normalise_responses(raw: Any) -> Dict[Any, Any]:
                     raise ValueError(
                         f"per-method body override status must be a 2xx int "
                         f"(method={method_name!r}); got status={status_val!r}. "
-                        f"Use mode=\"error\" + http_status for non-2xx response shapes."
+                        f'Use mode="error" + http_status for non-2xx response shapes.'
                     )
         return raw
     # Unknown shape — clear responses rather than crash.
@@ -211,23 +214,62 @@ def _normalise_responses(raw: Any) -> Dict[Any, Any]:
 
 # The fields a provider config may set. Mirrors the keys read in
 # ProviderState.update(); anything else is a typo.
-_SCENARIO_FIELDS = frozenset({
-    "mode", "latency_ms", "error_probability", "error_code", "error_message",
-    "http_status", "responses", "corruption_mode", "missing_field",
-    "blocks_behind", "solana_slot_block_gap", "solana_slot_offset",
-    "drop_at", "chain_family", "logs_indexed_up_to", "logs_lag_mode",
-    "solana_unknown_method_mode", "fail_first_n", "then_mode",
-})
-_SCENARIO_MODES = frozenset({
-    "success", "error", "rate_limit", "down", "hang", "drop_connection",
-})
-_SCENARIO_CORRUPTION_MODES = frozenset({
-    "truncated", "missing_field", "invalid_json", "empty_response", "wrong_type", "invalid_proto",
-})
+_SCENARIO_FIELDS = frozenset(
+    {
+        "mode",
+        "latency_ms",
+        "error_probability",
+        "error_code",
+        "error_message",
+        "http_status",
+        "responses",
+        "corruption_mode",
+        "missing_field",
+        "blocks_behind",
+        "solana_slot_block_gap",
+        "solana_slot_offset",
+        "drop_at",
+        "chain_family",
+        "logs_indexed_up_to",
+        "logs_lag_mode",
+        "solana_unknown_method_mode",
+        "fail_first_n",
+        "then_mode",
+    }
+)
+_SCENARIO_MODES = frozenset(
+    {
+        "success",
+        "error",
+        "rate_limit",
+        "down",
+        "hang",
+        "drop_connection",
+    }
+)
+_SCENARIO_CORRUPTION_MODES = frozenset(
+    {
+        "truncated",
+        "missing_field",
+        "invalid_json",
+        "empty_response",
+        "wrong_type",
+        "invalid_proto",
+    }
+)
 _SCENARIO_DROP_AT = frozenset({"before_headers", "after_headers", "mid_body"})
-_SCENARIO_CHAIN_FAMILIES = frozenset({
-    "eth", "btc", "ln", "solana", "grpc", "rest", "tendermintrpc", "ws",
-})
+_SCENARIO_CHAIN_FAMILIES = frozenset(
+    {
+        "eth",
+        "btc",
+        "ln",
+        "solana",
+        "grpc",
+        "rest",
+        "tendermintrpc",
+        "ws",
+    }
+)
 _SCENARIO_LOGS_LAG_MODES = frozenset({"empty", "partial"})
 
 
@@ -239,9 +281,7 @@ def _validate_scenario_cfg(pid: Any, cfg: Any) -> None:
     keep their own validation in _normalise_responses.
     """
     if not isinstance(cfg, dict):
-        raise ValueError(
-            f"provider {pid!r} config must be an object, got {type(cfg).__name__}"
-        )
+        raise ValueError(f"provider {pid!r} config must be an object, got {type(cfg).__name__}")
     unknown = set(cfg) - _SCENARIO_FIELDS
     if unknown:
         raise ValueError(
@@ -270,8 +310,10 @@ def _validate_scenario_cfg(pid: Any, cfg: Any) -> None:
             f"provider {pid!r}: invalid mode {cfg['mode']!r}; "
             f"allowed: {sorted(_SCENARIO_MODES)}"
         )
-    if (cfg.get("corruption_mode") is not None
-            and cfg["corruption_mode"] not in _SCENARIO_CORRUPTION_MODES):
+    if (
+        cfg.get("corruption_mode") is not None
+        and cfg["corruption_mode"] not in _SCENARIO_CORRUPTION_MODES
+    ):
         raise ValueError(
             f"provider {pid!r}: invalid corruption_mode {cfg['corruption_mode']!r}; "
             f"allowed: {sorted(_SCENARIO_CORRUPTION_MODES)} (or null)"
@@ -299,11 +341,12 @@ def _validate_scenario_cfg(pid: Any, cfg: Any) -> None:
         lm = cfg["latency_ms"]
         if isinstance(lm, bool) or not isinstance(lm, int) or lm < 0:
             raise ValueError(
-                f"provider {pid!r}: latency_ms must be a non-negative integer, "
-                f"got {lm!r}"
+                f"provider {pid!r}: latency_ms must be a non-negative integer, " f"got {lm!r}"
             )
-    if ("solana_unknown_method_mode" in cfg
-            and cfg["solana_unknown_method_mode"] not in ("error", "null")):
+    if "solana_unknown_method_mode" in cfg and cfg["solana_unknown_method_mode"] not in (
+        "error",
+        "null",
+    ):
         raise ValueError(
             f"provider {pid!r}: invalid solana_unknown_method_mode "
             f"{cfg['solana_unknown_method_mode']!r}; allowed: ['error', 'null']"
@@ -317,8 +360,7 @@ def _validate_scenario_cfg(pid: Any, cfg: Any) -> None:
         fn = cfg["fail_first_n"]
         if isinstance(fn, bool) or not isinstance(fn, int) or fn < 0:
             raise ValueError(
-                f"provider {pid!r}: fail_first_n must be a non-negative integer, "
-                f"got {fn!r}"
+                f"provider {pid!r}: fail_first_n must be a non-negative integer, " f"got {fn!r}"
             )
 
 
@@ -386,19 +428,22 @@ def _resolve_method_config(
 # ── Provider state ────────────────────────────────────────────────────────────
 
 
-
 @dataclass
 class ProviderState:
-    mode: str = "success"               # success | error | rate_limit | down
+    mode: str = "success"  # success | error | rate_limit | down
     latency_ms: int = 0
     error_probability: float = 0.0
-    error_code: int = -32000            # JSON-RPC error code when mode="error"
+    error_code: int = -32000  # JSON-RPC error code when mode="error"
     error_message: str = "Internal error"  # JSON-RPC error message when mode="error"
-    http_status: int = 200              # HTTP status code for error responses (200 = JSON-RPC body error)
+    http_status: int = 200  # HTTP status code for error responses (200 = JSON-RPC body error)
     responses: Dict[str, Any] = field(default_factory=dict)
-    corruption_mode: Optional[str] = None     # one of: None, "truncated", "missing_field", "invalid_json", "empty_response", "wrong_type", "invalid_proto" (invalid_proto is implemented by the gRPC listener only)
-    missing_field: Optional[str] = None       # field-name slot — which top-level field to target when corruption_mode is "missing_field" (omit it) or "wrong_type" (swap its type). Defaults to "result" for wrong_type when unset.
-    blocks_behind: int = 0    # 0 = current head; positive = behind; negative = ahead
+    corruption_mode: Optional[str] = (
+        None  # one of: None, "truncated", "missing_field", "invalid_json", "empty_response", "wrong_type", "invalid_proto" (invalid_proto is implemented by the gRPC listener only)
+    )
+    missing_field: Optional[str] = (
+        None  # field-name slot — which top-level field to target when corruption_mode is "missing_field" (omit it) or "wrong_type" (swap its type). Defaults to "result" for wrong_type when unset.
+    )
+    blocks_behind: int = 0  # 0 = current head; positive = behind; negative = ahead
     # MAG-2231: Solana getLatestBlockhash slot ↔ lastValidBlockHeight gap.
     # handlers_solana emits result.context.slot = S and
     # result.value.lastValidBlockHeight = S - solana_slot_block_gap. The two
@@ -441,8 +486,10 @@ class ProviderState:
     # relying on random error_probability.
     fail_first_n: int = 0
     then_mode: str = "success"
-    _fail_counter: int = field(default=0, repr=False)   # consumed by fail_first_n
-    drop_at: str = "before_headers"   # one of: "before_headers", "after_headers", "mid_body"; only applies when mode="drop_connection"
+    _fail_counter: int = field(default=0, repr=False)  # consumed by fail_first_n
+    drop_at: str = (
+        "before_headers"  # one of: "before_headers", "after_headers", "mid_body"; only applies when mode="drop_connection"
+    )
     # chain_family — which surface's faults this provider's scenario owns. ONE
     # word: either a blockchain ("eth", "btc", "ln", "solana") or a connection
     # type ("grpc", "rest", "tendermintrpc", "ws"). The two groups share this
@@ -511,24 +558,24 @@ class ProviderState:
         on a stable snapshot even if a test updates the state mid-request."""
         with self.lock:
             return {
-                "mode":              self.mode,
-                "latency_ms":        self.latency_ms,
+                "mode": self.mode,
+                "latency_ms": self.latency_ms,
                 "error_probability": self.error_probability,
-                "error_code":        self.error_code,
-                "error_message":     self.error_message,
-                "http_status":       self.http_status,
-                "corruption_mode":   self.corruption_mode,
-                "missing_field":     self.missing_field,
-                "blocks_behind":     self.blocks_behind,
+                "error_code": self.error_code,
+                "error_message": self.error_message,
+                "http_status": self.http_status,
+                "corruption_mode": self.corruption_mode,
+                "missing_field": self.missing_field,
+                "blocks_behind": self.blocks_behind,
                 "solana_slot_block_gap": self.solana_slot_block_gap,
-                "solana_slot_offset":    self.solana_slot_offset,
+                "solana_slot_offset": self.solana_slot_offset,
                 "solana_unknown_method_mode": self.solana_unknown_method_mode,
-                "fail_first_n":          self.fail_first_n,
-                "then_mode":             self.then_mode,
-                "drop_at":           self.drop_at,
-                "chain_family":      self.chain_family,
+                "fail_first_n": self.fail_first_n,
+                "then_mode": self.then_mode,
+                "drop_at": self.drop_at,
+                "chain_family": self.chain_family,
                 "logs_indexed_up_to": self.logs_indexed_up_to,
-                "logs_lag_mode":      self.logs_lag_mode,
+                "logs_lag_mode": self.logs_lag_mode,
             }
 
     def update(self, cfg: dict) -> None:
@@ -536,37 +583,41 @@ class ProviderState:
         Only keys present in cfg are updated; omitted keys keep their current value.
         Acquires the lock so updates are atomic and safe to call from any thread."""
         with self.lock:
-            self.mode              = cfg.get("mode",              self.mode)
-            self.latency_ms        = cfg.get("latency_ms",        self.latency_ms)
+            self.mode = cfg.get("mode", self.mode)
+            self.latency_ms = cfg.get("latency_ms", self.latency_ms)
             self.error_probability = cfg.get("error_probability", self.error_probability)
-            self.error_code        = cfg.get("error_code",        self.error_code)
-            self.error_message     = cfg.get("error_message",     self.error_message)
-            self.http_status       = cfg.get("http_status",       self.http_status)
-            self.corruption_mode   = cfg.get("corruption_mode",   self.corruption_mode)
-            self.missing_field     = cfg.get("missing_field",     self.missing_field)
-            self.blocks_behind     = cfg.get("blocks_behind",     self.blocks_behind)
+            self.error_code = cfg.get("error_code", self.error_code)
+            self.error_message = cfg.get("error_message", self.error_message)
+            self.http_status = cfg.get("http_status", self.http_status)
+            self.corruption_mode = cfg.get("corruption_mode", self.corruption_mode)
+            self.missing_field = cfg.get("missing_field", self.missing_field)
+            self.blocks_behind = cfg.get("blocks_behind", self.blocks_behind)
             # MAG-2231: backward-compat — a /scenario payload that omits
             # solana_slot_block_gap leaves the existing per-provider value
             # untouched (the field default at construction is
             # stubs_solana.SOLANA_DEFAULT_SLOT_BLOCK_GAP).
-            self.solana_slot_block_gap = cfg.get("solana_slot_block_gap", self.solana_slot_block_gap)
+            self.solana_slot_block_gap = cfg.get(
+                "solana_slot_block_gap", self.solana_slot_block_gap
+            )
             # MAG-2233 #1: backward-compat — a /scenario payload that omits
             # solana_slot_offset leaves the existing per-provider value untouched
             # (the field default at construction is 0 = base slot, no divergence).
             self.solana_slot_offset = cfg.get("solana_slot_offset", self.solana_slot_offset)
-            self.solana_unknown_method_mode = cfg.get("solana_unknown_method_mode", self.solana_unknown_method_mode)
+            self.solana_unknown_method_mode = cfg.get(
+                "solana_unknown_method_mode", self.solana_unknown_method_mode
+            )
             self.then_mode = cfg.get("then_mode", self.then_mode)
             if "fail_first_n" in cfg:
                 # A fresh fail_first_n scenario restarts the count from zero.
                 self.fail_first_n = cfg["fail_first_n"]
                 self._fail_counter = 0
-            self.drop_at           = cfg.get("drop_at",           self.drop_at)
-            self.chain_family      = cfg.get("chain_family",      self.chain_family)
+            self.drop_at = cfg.get("drop_at", self.drop_at)
+            self.chain_family = cfg.get("chain_family", self.chain_family)
             # MAG-1791: backward-compat — missing keys keep current value, so
             # /scenario payloads that don't carry logs_indexed_up_to / logs_lag_mode
             # leave existing provider state untouched (defaults to None / "empty").
             self.logs_indexed_up_to = cfg.get("logs_indexed_up_to", self.logs_indexed_up_to)
-            self.logs_lag_mode      = cfg.get("logs_lag_mode",      self.logs_lag_mode)
+            self.logs_lag_mode = cfg.get("logs_lag_mode", self.logs_lag_mode)
             if "responses" in cfg:
                 self.responses = _normalise_responses(cfg["responses"])
             # MAG-2022: bump the write timestamp so the TTL sweep treats this
@@ -578,16 +629,16 @@ class ProviderState:
         Does NOT touch the call history or counters.
         Called by POST /reset — use between test scenarios to put providers back to healthy."""
         with self.lock:
-            self.mode              = "success"
-            self.latency_ms        = 0
+            self.mode = "success"
+            self.latency_ms = 0
             self.error_probability = 0.0
-            self.error_code        = -32000
-            self.error_message     = "Internal error"
-            self.http_status       = 200
-            self.responses         = {}
-            self.corruption_mode   = None
-            self.missing_field     = None
-            self.blocks_behind     = 0
+            self.error_code = -32000
+            self.error_message = "Internal error"
+            self.http_status = 200
+            self.responses = {}
+            self.corruption_mode = None
+            self.missing_field = None
+            self.blocks_behind = 0
             # MAG-2231: reset restores the default Solana slot/blockHeight gap
             # so a /reset between tests clears any per-test override. Same source
             # as the field default — the shared stubs_solana constant.
@@ -599,12 +650,12 @@ class ProviderState:
             self.fail_first_n = 0
             self.then_mode = "success"
             self._fail_counter = 0
-            self.drop_at           = "before_headers"
-            self.chain_family      = "eth"
+            self.drop_at = "before_headers"
+            self.chain_family = "eth"
             # MAG-1791: reset clears the eth_getLogs stale-indexing primitive
             # so a /reset between tests restores full logs availability.
             self.logs_indexed_up_to = None
-            self.logs_lag_mode      = "empty"
+            self.logs_lag_mode = "empty"
 
     def consume_fail_counter(self) -> int:
         """Atomically increment and return this provider's request counter for
@@ -637,13 +688,13 @@ class ProviderState:
         """
         with self.lock:
             self.history.clear()
-            self.total_calls       = 0
-            self.calls_by_status   = {}
+            self.total_calls = 0
+            self.calls_by_status = {}
             self._reset_generation += 1
 
-    def record_arrival(self, lava_headers: dict = None,
-                       chain: Optional[str] = None,
-                       port: Optional[int] = None) -> dict:
+    def record_arrival(
+        self, lava_headers: dict = None, chain: Optional[str] = None, port: Optional[int] = None
+    ) -> dict:
         """Push an in-flight stub entry the moment a request arrives and return the
         dict so the caller can update it once method / status / latency are known.
 
@@ -674,12 +725,15 @@ class ProviderState:
         """
         now = time.time()
         entry = {
-            "ts":           now,
-            "time":         datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S.") + f"{int(now % 1 * 1000):03d} UTC",
-            "request_id":   None,
-            "method":       "*",
-            "status":       "in_flight",
-            "latency_ms":   0,
+            "ts": now,
+            "time": datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime(
+                "%Y-%m-%d %H:%M:%S."
+            )
+            + f"{int(now % 1 * 1000):03d} UTC",
+            "request_id": None,
+            "method": "*",
+            "status": "in_flight",
+            "latency_ms": 0,
             "lava_headers": lava_headers or {},
             # Listener identity (MAG-2236). ProviderState is shared across every
             # chain/transport that maps to one provider pid, so it can't know
@@ -687,8 +741,8 @@ class ProviderState:
             # chain_family and bound port so /history can be filtered by
             # listener instead of by the shared pid. None when the caller
             # doesn't supply them (backward-compatible).
-            "chain":        chain,
-            "port":         port,
+            "chain": chain,
+            "port": port,
         }
         with self.lock:
             self.history.append(entry)
@@ -700,11 +754,17 @@ class ProviderState:
             entry["_reset_gen"] = self._reset_generation
         return entry
 
-    def push_call_to_buffer(self, method: str, status: str, latency_ms: int,
-                             request_id: object = None, lava_headers: dict = None,
-                             entry: Optional[dict] = None,
-                             chain: Optional[str] = None,
-                             port: Optional[int] = None) -> None:
+    def push_call_to_buffer(
+        self,
+        method: str,
+        status: str,
+        latency_ms: int,
+        request_id: object = None,
+        lava_headers: dict = None,
+        entry: Optional[dict] = None,
+        chain: Optional[str] = None,
+        port: Optional[int] = None,
+    ) -> None:
         """Push one call record into the in-memory ring-buffer and update all-time counters.
 
         Storage is entirely in RAM — nothing is written to disk or any logging framework.
@@ -751,9 +811,9 @@ class ProviderState:
                 # stale — re-append the stub and re-bump counters so total_calls
                 # and len(history) stay consistent for the now-completed request.
                 if entry.get("_reset_gen") != self._reset_generation:
-                    entry["method"]     = method
+                    entry["method"] = method
                     entry["latency_ms"] = latency_ms
-                    entry["status"]     = status
+                    entry["status"] = status
                     if request_id is not None:
                         entry["request_id"] = request_id
                     if lava_headers is not None:
@@ -768,7 +828,7 @@ class ProviderState:
                     self.calls_by_status[status] = self.calls_by_status.get(status, 0) + 1
                     return
                 old_status = entry["status"]
-                entry["method"]     = method
+                entry["method"] = method
                 entry["latency_ms"] = latency_ms
                 if request_id is not None:
                     entry["request_id"] = request_id
@@ -786,17 +846,22 @@ class ProviderState:
                     entry["status"] = status
             return
         with self.lock:
-            self.history.append({
-                "ts":            now,
-                "time":          datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S.") + f"{int(now % 1 * 1000):03d} UTC",
-                "request_id":    request_id,
-                "method":        method,
-                "status":        status,
-                "latency_ms":    latency_ms,
-                "lava_headers":  lava_headers or {},
-                "chain":         chain,
-                "port":          port,
-            })
+            self.history.append(
+                {
+                    "ts": now,
+                    "time": datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime(
+                        "%Y-%m-%d %H:%M:%S."
+                    )
+                    + f"{int(now % 1 * 1000):03d} UTC",
+                    "request_id": request_id,
+                    "method": method,
+                    "status": status,
+                    "latency_ms": latency_ms,
+                    "lava_headers": lava_headers or {},
+                    "chain": chain,
+                    "port": port,
+                }
+            )
             self.total_calls += 1
             self.calls_by_status[status] = self.calls_by_status.get(status, 0) + 1
 
@@ -806,10 +871,10 @@ class ProviderState:
         Used by GET /stats to show cumulative traffic since the pod started."""
         with self.lock:
             return {
-                "total_requests_all_time":    self.total_calls,
-                "total_calls":                self.total_calls,  # alias for convenience
+                "total_requests_all_time": self.total_calls,
+                "total_calls": self.total_calls,  # alias for convenience
                 "requests_by_status_all_time": dict(self.calls_by_status),
-                "calls_by_status":             dict(self.calls_by_status),  # alias for convenience
+                "calls_by_status": dict(self.calls_by_status),  # alias for convenience
                 "history_ring_buffer_entries": len(self.history),  # max = HISTORY_MAX
             }
 
@@ -913,34 +978,61 @@ def _apply_fault(
     #    caller passes the actual method / req_id; either way /history?method=X
     #    resolves correctly because the method label is taken from the caller.
     if snap["mode"] == "down":
-        state.push_call_to_buffer(method, "down", recorded_latency_ms,
-                                  request_id=req_id, lava_headers=lava_headers,
-                                  entry=entry, chain=chain, port=port)
+        state.push_call_to_buffer(
+            method,
+            "down",
+            recorded_latency_ms,
+            request_id=req_id,
+            lava_headers=lava_headers,
+            entry=entry,
+            chain=chain,
+            port=port,
+        )
         return {"kind": "down"}
 
     # 2. Hang — accept request, sleep "forever". 30s is long enough for any
     #    reasonable client read timeout to fire; finite so the thread eventually
     #    exits and we don't leak threads if the client disconnects.
     if snap["mode"] == "hang":
-        state.push_call_to_buffer(method, "hang", 0,
-                                  request_id=req_id, lava_headers=lava_headers,
-                                  entry=entry, chain=chain, port=port)
+        state.push_call_to_buffer(
+            method,
+            "hang",
+            0,
+            request_id=req_id,
+            lava_headers=lava_headers,
+            entry=entry,
+            chain=chain,
+            port=port,
+        )
         return {"kind": "hang"}
 
     # 3. Drop connection — close socket at one of three points.
     if snap["mode"] == "drop_connection":
         drop_at = snap.get("drop_at", "before_headers")
-        state.push_call_to_buffer(method, "drop_connection",
-                                  recorded_latency_ms,
-                                  request_id=req_id, lava_headers=lava_headers,
-                                  entry=entry, chain=chain, port=port)
+        state.push_call_to_buffer(
+            method,
+            "drop_connection",
+            recorded_latency_ms,
+            request_id=req_id,
+            lava_headers=lava_headers,
+            entry=entry,
+            chain=chain,
+            port=port,
+        )
         return {"kind": "drop", "drop_at": drop_at}
 
     # 4. Rate limit — HTTP 429.
     if snap["mode"] == "rate_limit":
-        state.push_call_to_buffer(method, "rate_limit", recorded_latency_ms,
-                                  request_id=req_id, lava_headers=lava_headers,
-                                  entry=entry, chain=chain, port=port)
+        state.push_call_to_buffer(
+            method,
+            "rate_limit",
+            recorded_latency_ms,
+            request_id=req_id,
+            lava_headers=lava_headers,
+            entry=entry,
+            chain=chain,
+            port=port,
+        )
         return {
             "kind": "rate_limit",
             "status": 429,
@@ -950,9 +1042,16 @@ def _apply_fault(
 
     # 5. Probabilistic / forced error — configurable code, message, HTTP status.
     if snap["mode"] == "error" or random.random() < snap["error_probability"]:
-        state.push_call_to_buffer(method, "error", recorded_latency_ms,
-                                  request_id=req_id, lava_headers=lava_headers,
-                                  entry=entry, chain=chain, port=port)
+        state.push_call_to_buffer(
+            method,
+            "error",
+            recorded_latency_ms,
+            request_id=req_id,
+            lava_headers=lava_headers,
+            entry=entry,
+            chain=chain,
+            port=port,
+        )
         return {
             "kind": "error",
             "status": snap.get("http_status", 200),
@@ -979,6 +1078,7 @@ def _elapsed_ms(t_start: float) -> int:
 # and gets back ``None`` whenever the snap was authored for some other
 # transport, so the surrounding logic falls through to its normal success
 # path.
+
 
 def _corruption_for(snap: Dict[str, Any], *chain_families: str) -> Optional[str]:
     """Return ``snap["corruption_mode"]`` only when the snap's
@@ -1068,6 +1168,7 @@ def _effective_mode(state: "ProviderState", snap: Dict[str, Any]) -> str:
 
 # ── JSON-RPC handler ──────────────────────────────────────────────────────────
 
+
 class JSONRPCHandler(BaseHTTPRequestHandler):
 
     # Socket timeout (seconds) honoured by BaseHTTPRequestHandler. It caps the
@@ -1123,14 +1224,11 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # so a BTC test that left mode=hang on a provider would also hang
         # an ETH listener using the same shared ProviderState).
         listener_family = getattr(self.server, "handler_chain_family", "eth")
-        handler_module  = getattr(self.server, "handler_module", handlers_eth)
-        listener_port   = self.server.server_address[1]
+        handler_module = getattr(self.server, "handler_module", handlers_eth)
+        listener_port = self.server.server_address[1]
 
         # Capture all lava-* headers from the router
-        lava_headers = {
-            k: v for k, v in self.headers.items()
-            if k.lower().startswith("lava-")
-        }
+        lava_headers = {k: v for k, v in self.headers.items() if k.lower().startswith("lava-")}
 
         # MAG-1832 — close the cancel-during-response race. Record arrival as
         # the very first state-mutating action, BEFORE the body is read off the
@@ -1147,8 +1245,9 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # ``push_call_to_buffer(..., entry=arrival)``. If a cancellation lands
         # before any of those updates fire, the entry stays as ``in_flight``
         # which is strictly better than no entry for the invariant.
-        arrival = state.record_arrival(lava_headers=lava_headers,
-                                       chain=listener_family, port=listener_port)
+        arrival = state.record_arrival(
+            lava_headers=lava_headers, chain=listener_family, port=listener_port
+        )
 
         # Cross-transport isolation (MAG-1838 → MAG-2089).
         # ``ProviderState`` is shared across JSON-RPC, REST, gRPC, WS, and
@@ -1196,12 +1295,23 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # (body unparsed). A per-method down lives behind the merged-config
         # path below and applies on the post-parse branch.
         if jsonrpc_run_fault and snap["mode"] == "down":
-            fault = _apply_fault(state, snap, "*", None, lava_headers, t_start,
-                                 entry=arrival, chain=listener_family,
-                                 port=listener_port)
-            self._emit_jsonrpc_fault(fault, req_id=None,
-                                     corruption_mode=_corruption_for(snap, listener_family),
-                                     missing_field=_missing_field_for(snap, listener_family))
+            fault = _apply_fault(
+                state,
+                snap,
+                "*",
+                None,
+                lava_headers,
+                t_start,
+                entry=arrival,
+                chain=listener_family,
+                port=listener_port,
+            )
+            self._emit_jsonrpc_fault(
+                fault,
+                req_id=None,
+                corruption_mode=_corruption_for(snap, listener_family),
+                missing_field=_missing_field_for(snap, listener_family),
+            )
             return
 
         # Parse the request body before latency/fault evaluation so the
@@ -1211,7 +1321,7 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # safe: it's a small in-memory JSON load that doesn't depend on any
         # provider config.
         length = int(self.headers.get("Content-Length", 0))
-        body   = json.loads(self.rfile.read(length)) if length else {}
+        body = json.loads(self.rfile.read(length)) if length else {}
 
         # A JSON-RPC batch is a top-level array. We do not support batch, but we
         # must not call dict methods on a list (``body.get(...)`` below) — that
@@ -1219,12 +1329,24 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # single Invalid-Request error and record the attempt so the arrival stub
         # in /history reaches a terminal status instead of staying in_flight.
         if isinstance(body, list):
-            state.push_call_to_buffer("batch", "error", 0, request_id=None,
-                                      lava_headers=lava_headers, entry=arrival,
-                                      chain=listener_family, port=listener_port)
-            self._reply(200, {"jsonrpc": "2.0", "id": None,
-                              "error": {"code": -32600,
-                                        "message": "batch requests are not supported"}})
+            state.push_call_to_buffer(
+                "batch",
+                "error",
+                0,
+                request_id=None,
+                lava_headers=lava_headers,
+                entry=arrival,
+                chain=listener_family,
+                port=listener_port,
+            )
+            self._reply(
+                200,
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32600, "message": "batch requests are not supported"},
+                },
+            )
             return
 
         req_id = body.get("id", 1)
@@ -1264,15 +1386,24 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
             # The arrival stub from record_arrival is updated in place so the
             # cancel-during-response race (cancel BEFORE this push fires) still
             # leaves an entry for the invariant.
-            state.push_call_to_buffer(method, "success", method_snap["latency_ms"],
-                                      request_id=req_id, lava_headers=lava_headers,
-                                      entry=arrival, chain=listener_family,
-                                      port=listener_port)
+            state.push_call_to_buffer(
+                method,
+                "success",
+                method_snap["latency_ms"],
+                request_id=req_id,
+                lava_headers=lava_headers,
+                entry=arrival,
+                chain=listener_family,
+                port=listener_port,
+            )
             if method_snap["latency_ms"] > 0:
                 time.sleep(method_snap["latency_ms"] / 1000.0)
-            self._reply(override_status, override_body,
-                        corruption_mode=_corruption_for(snap, listener_family),
-                        missing_field=_missing_field_for(snap, listener_family))
+            self._reply(
+                override_status,
+                override_body,
+                corruption_mode=_corruption_for(snap, listener_family),
+                missing_field=_missing_field_for(snap, listener_family),
+            )
             return
 
         # Post-parse fault evaluation. _apply_fault records history internally.
@@ -1288,17 +1419,28 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # MAG-2092 — but always honor mode="down" regardless of
         # chain_family because reachability is provider-wide.
         if jsonrpc_owns_snap or method_snap["mode"] == "down":
-            fault = _apply_fault(state, method_snap, method, req_id, lava_headers,
-                                 t_start, entry=arrival, chain=listener_family,
-                                 port=listener_port)
+            fault = _apply_fault(
+                state,
+                method_snap,
+                method,
+                req_id,
+                lava_headers,
+                t_start,
+                entry=arrival,
+                chain=listener_family,
+                port=listener_port,
+            )
         else:
             fault = None
         if fault is not None:
             if method_snap["latency_ms"] > 0:
                 time.sleep(method_snap["latency_ms"] / 1000.0)
-            self._emit_jsonrpc_fault(fault, req_id=req_id,
-                                     corruption_mode=_corruption_for(snap, listener_family),
-                                     missing_field=_missing_field_for(snap, listener_family))
+            self._emit_jsonrpc_fault(
+                fault,
+                req_id=req_id,
+                corruption_mode=_corruption_for(snap, listener_family),
+                missing_field=_missing_field_for(snap, listener_family),
+            )
             return
 
         # Success — delegate the chain-specific success path to a handler
@@ -1325,19 +1467,32 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # completion. The arrival stub is updated in place so the entry exists
         # regardless of whether the cancellation lands before or after this
         # update — the cancel-during-response race is closed.
-        state.push_call_to_buffer(method, emit_status, method_snap["latency_ms"],
-                                  request_id=req_id, lava_headers=lava_headers,
-                                  entry=arrival, chain=listener_family,
-                                  port=listener_port)
+        state.push_call_to_buffer(
+            method,
+            emit_status,
+            method_snap["latency_ms"],
+            request_id=req_id,
+            lava_headers=lava_headers,
+            entry=arrival,
+            chain=listener_family,
+            port=listener_port,
+        )
         if method_snap["latency_ms"] > 0:
             time.sleep(method_snap["latency_ms"] / 1000.0)
-        self._reply(status, response_body,
-                    corruption_mode=_corruption_for(snap, listener_family),
-                    missing_field=_missing_field_for(snap, listener_family))
+        self._reply(
+            status,
+            response_body,
+            corruption_mode=_corruption_for(snap, listener_family),
+            missing_field=_missing_field_for(snap, listener_family),
+        )
 
-    def _emit_jsonrpc_fault(self, fault: Dict[str, Any], req_id: Any,
-                             corruption_mode: Optional[str] = None,
-                             missing_field: Optional[str] = None) -> None:
+    def _emit_jsonrpc_fault(
+        self,
+        fault: Dict[str, Any],
+        req_id: Any,
+        corruption_mode: Optional[str] = None,
+        missing_field: Optional[str] = None,
+    ) -> None:
         """Translate a fault dict from ``_apply_fault`` into a JSON-RPC wire reply.
 
         Each fault "kind" maps to a specific wire action:
@@ -1396,9 +1551,11 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         # rate_limit / error — JSON-RPC error envelope.
         self._reply(
             fault["status"],
-            {"jsonrpc": "2.0", "id": req_id,
-             "error": {"code": fault["error_code"],
-                       "message": fault["error_message"]}},
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": fault["error_code"], "message": fault["error_message"]},
+            },
             corruption_mode=corruption_mode,
             missing_field=missing_field,
         )
@@ -1408,9 +1565,13 @@ class JSONRPCHandler(BaseHTTPRequestHandler):
         """Return the integer milliseconds elapsed since t_start (from time.monotonic())."""
         return _elapsed_ms(t_start)
 
-    def _reply(self, status: int, data: dict,
-               corruption_mode: Optional[str] = None,
-               missing_field: Optional[str] = None):
+    def _reply(
+        self,
+        status: int,
+        data: dict,
+        corruption_mode: Optional[str] = None,
+        missing_field: Optional[str] = None,
+    ):
         """Serialise data as JSON and write a complete HTTP response.
         If corruption_mode is set, alter the body before/after serialization."""
         # Apply structural corruption (modify the dict before serialization)
@@ -1508,13 +1669,14 @@ class SubscriptionHandle:
     accountSubscribe / logsSubscribe, removed on the matching unsubscribe or
     on connection close.
     """
-    sub_id: str               # 32-hex string handed back to the client
-    provider_id: str          # "1" | "2" | "3"
-    method: str               # e.g. "newHeads", "logs", "accountSubscribe"
-    chain: str                # "eth" | "tendermint" | "solana"
-    envelope: str             # one of stubs_ws SUBSCRIBE_METHODS envelope names
+
+    sub_id: str  # 32-hex string handed back to the client
+    provider_id: str  # "1" | "2" | "3"
+    method: str  # e.g. "newHeads", "logs", "accountSubscribe"
+    chain: str  # "eth" | "tendermint" | "solana"
+    envelope: str  # one of stubs_ws SUBSCRIBE_METHODS envelope names
     out_queue: "queue.Queue[bytes]"  # frames the writer thread will sendall()
-    closed: threading.Event   # set when the reader thread exits
+    closed: threading.Event  # set when the reader thread exits
 
 
 _WS_SUBSCRIPTIONS: Dict[str, SubscriptionHandle] = {}
@@ -1614,10 +1776,17 @@ class RestHandler(BaseHTTPRequestHandler):
 
     # ── Verb dispatch ─────────────────────────────────────────────────────────
 
-    def do_GET(self):      self._handle("GET")
-    def do_POST(self):     self._handle("POST")
-    def do_PUT(self):      self._handle("PUT")
-    def do_DELETE(self):   self._handle("DELETE")
+    def do_GET(self):
+        self._handle("GET")
+
+    def do_POST(self):
+        self._handle("POST")
+
+    def do_PUT(self):
+        self._handle("PUT")
+
+    def do_DELETE(self):
+        self._handle("DELETE")
 
     def do_HEAD(self):
         """HEAD = GET without the body. Build the GET response, then strip the body.
@@ -1678,15 +1847,12 @@ class RestHandler(BaseHTTPRequestHandler):
         # don't set handler_chain_family in the bootstrap, so fall back to the
         # transport name "rest"; the bound port is unique per REST listener.
         listener_chain = getattr(self.server, "handler_chain_family", "rest")
-        listener_port  = self.server.server_address[1]
+        listener_port = self.server.server_address[1]
 
         # Lava-* request headers — used for /history filtering and threaded
         # through to handlers_rest so a future test can assert on header
         # propagation.
-        lava_headers = {
-            k: v for k, v in self.headers.items()
-            if k.lower().startswith("lava-")
-        }
+        lava_headers = {k: v for k, v in self.headers.items() if k.lower().startswith("lava-")}
 
         parsed = urlparse(self.path)
         path = parsed.path
@@ -1733,8 +1899,16 @@ class RestHandler(BaseHTTPRequestHandler):
         # set on any chain_family 503s the REST port (MAG-2092), while
         # non-down content faults still only fire when chain_family="rest".
         if rest_run_fault and snap["mode"] == "down":
-            fault = _apply_fault(state, snap, "*", None, lava_headers, t_start,
-                                 chain=listener_chain, port=listener_port)
+            fault = _apply_fault(
+                state,
+                snap,
+                "*",
+                None,
+                lava_headers,
+                t_start,
+                chain=listener_chain,
+                port=listener_port,
+            )
             self._emit_rest_fault(fault)
             return
 
@@ -1768,10 +1942,20 @@ class RestHandler(BaseHTTPRequestHandler):
             # MAG-2092: also fire the fault ladder on mode=down regardless
             # of chain_family so an unmatched URI still 503s a downed
             # provider before the 404 path runs.
-            fault = _apply_fault(state, snap, method_label, req_id,
-                                 lava_headers, t_start,
-                                 chain=listener_chain, port=listener_port) \
-                if rest_run_fault else None
+            fault = (
+                _apply_fault(
+                    state,
+                    snap,
+                    method_label,
+                    req_id,
+                    lava_headers,
+                    t_start,
+                    chain=listener_chain,
+                    port=listener_port,
+                )
+                if rest_run_fault
+                else None
+            )
             if fault is not None:
                 if snap["latency_ms"] > 0:
                     time.sleep(snap["latency_ms"] / 1000.0)
@@ -1780,10 +1964,15 @@ class RestHandler(BaseHTTPRequestHandler):
             # Genuine 404 — record so /history shows the miss. Push BEFORE
             # the sleep so a cancel mid-latency-sleep still records the
             # 404 (MAG-1832). Recorded latency_ms is the configured value.
-            state.push_call_to_buffer(method_label, "not_found",
-                                      snap["latency_ms"],
-                                      request_id=req_id, lava_headers=lava_headers,
-                                      chain=listener_chain, port=listener_port)
+            state.push_call_to_buffer(
+                method_label,
+                "not_found",
+                snap["latency_ms"],
+                request_id=req_id,
+                lava_headers=lava_headers,
+                chain=listener_chain,
+                port=listener_port,
+            )
             if snap["latency_ms"] > 0:
                 time.sleep(snap["latency_ms"] / 1000.0)
             self._reply(404, {"code": "not_found", "method": verb, "path": path})
@@ -1797,9 +1986,7 @@ class RestHandler(BaseHTTPRequestHandler):
         # ``method_snap is snap`` and behaviour matches pre-follow-up
         # exactly. Per-key fallback: a partial per-route entry inherits
         # provider-wide fault keys it doesn't override.
-        method_snap = _resolve_method_config(
-            (verb, template), snap, state.responses
-        )
+        method_snap = _resolve_method_config((verb, template), snap, state.responses)
 
         # Fault evaluation BEFORE the latency sleep — mirrors the JSON-RPC
         # post-parse fault branch (MAG-1832). _apply_fault records history
@@ -1811,10 +1998,20 @@ class RestHandler(BaseHTTPRequestHandler):
         # mode="down" regardless of chain_family because reachability is
         # provider-wide.
         run_fault_ladder = rest_owns_snap or method_snap["mode"] == "down"
-        fault = _apply_fault(state, method_snap, method_label, req_id,
-                             lava_headers, t_start,
-                             chain=listener_chain, port=listener_port) \
-            if run_fault_ladder else None
+        fault = (
+            _apply_fault(
+                state,
+                method_snap,
+                method_label,
+                req_id,
+                lava_headers,
+                t_start,
+                chain=listener_chain,
+                port=listener_port,
+            )
+            if run_fault_ladder
+            else None
+        )
         if fault is not None:
             if method_snap["latency_ms"] > 0:
                 time.sleep(method_snap["latency_ms"] / 1000.0)
@@ -1825,26 +2022,36 @@ class RestHandler(BaseHTTPRequestHandler):
         status, response_body = handlers_rest.handle(
             state, verb, template, path_params, query, body, snap, lava_headers
         )
-        emit_status = "error" if (isinstance(response_body, dict) and "error" in response_body) else "success"
+        emit_status = (
+            "error" if (isinstance(response_body, dict) and "error" in response_body) else "success"
+        )
         # MAG-1832: write history BEFORE the latency sleep so a router-side
         # cancel mid-sleep still records the call. latency_ms recorded is
         # the configured post-MAG-1821-override value.
-        state.push_call_to_buffer(method_label, emit_status, method_snap["latency_ms"],
-                                  request_id=req_id, lava_headers=lava_headers,
-                                  chain=listener_chain, port=listener_port)
+        state.push_call_to_buffer(
+            method_label,
+            emit_status,
+            method_snap["latency_ms"],
+            request_id=req_id,
+            lava_headers=lava_headers,
+            chain=listener_chain,
+            port=listener_port,
+        )
         if method_snap["latency_ms"] > 0:
             time.sleep(method_snap["latency_ms"] / 1000.0)
         # MAG-1837 — only apply corruption_mode if the snap was authored for
         # the REST transport. A corruption set on chain_family="eth" must not
         # leak into the REST port.
-        self._reply(status, response_body,
-                    corruption_mode=_corruption_for(snap, "rest"),
-                    missing_field=_missing_field_for(snap, "rest"))
+        self._reply(
+            status,
+            response_body,
+            corruption_mode=_corruption_for(snap, "rest"),
+            missing_field=_missing_field_for(snap, "rest"),
+        )
 
     # ── Routing ───────────────────────────────────────────────────────────────
 
-    def _match_route(self, verb: str, path: str
-                     ) -> Optional[Tuple[str, Dict[str, str]]]:
+    def _match_route(self, verb: str, path: str) -> Optional[Tuple[str, Dict[str, str]]]:
         """Match ``(verb, path)`` against ``_REST_ROUTES``.
 
         Returns ``(template_str, path_params)`` on first match, else None.
@@ -1920,13 +2127,20 @@ class RestHandler(BaseHTTPRequestHandler):
         # so a corruption authored for another transport can't reach here.
         snap = self.server.state.snapshot()
         body = {"code": fault["error_code"], "message": fault["error_message"]}
-        self._reply(fault["status"], body,
-                    corruption_mode=_corruption_for(snap, "rest"),
-                    missing_field=_missing_field_for(snap, "rest"))
+        self._reply(
+            fault["status"],
+            body,
+            corruption_mode=_corruption_for(snap, "rest"),
+            missing_field=_missing_field_for(snap, "rest"),
+        )
 
-    def _reply(self, status: int, data: Any,
-               corruption_mode: Optional[str] = None,
-               missing_field: Optional[str] = None) -> None:
+    def _reply(
+        self,
+        status: int,
+        data: Any,
+        corruption_mode: Optional[str] = None,
+        missing_field: Optional[str] = None,
+    ) -> None:
         """Serialise ``data`` as JSON and write a complete HTTP response.
 
         Mirrors JSONRPCHandler._reply: applies corruption_mode hooks (empty
@@ -2099,13 +2313,11 @@ class TendermintHandler(BaseHTTPRequestHandler):
         # back to the chain_family value this handler gates on; the bound port
         # is unique per Tendermint listener.
         listener_chain = getattr(self.server, "handler_chain_family", "tendermintrpc")
-        listener_port  = self.server.server_address[1]
+        listener_port = self.server.server_address[1]
 
         # Lava-* request headers — used for /history filtering, threaded
         # through to handlers_tendermintrpc for symmetry with other handlers.
-        lava_headers = {
-            k: v for k, v in self.headers.items() if k.lower().startswith("lava-")
-        }
+        lava_headers = {k: v for k, v in self.headers.items() if k.lower().startswith("lava-")}
 
         # Cross-transport isolation — mirrors MAG-1838's jsonrpc_owns_snap
         # gate. ``ProviderState`` is shared across all transports for the
@@ -2139,8 +2351,16 @@ class TendermintHandler(BaseHTTPRequestHandler):
         #    503s the Tendermint port (MAG-2092), while non-down content
         #    faults still only fire when chain_family="tendermintrpc".
         if tm_run_fault and snap["mode"] == "down":
-            fault = _apply_fault(state, snap, "*", None, lava_headers, t_start,
-                                 chain=listener_chain, port=listener_port)
+            fault = _apply_fault(
+                state,
+                snap,
+                "*",
+                None,
+                lava_headers,
+                t_start,
+                chain=listener_chain,
+                port=listener_port,
+            )
             self._emit_tm_fault(fault, request_id=None)
             return
 
@@ -2181,9 +2401,20 @@ class TendermintHandler(BaseHTTPRequestHandler):
         #    pass through to the success-path below. MAG-2092: but always
         #    honor mode="down" regardless of chain_family.
         run_fault_ladder = tm_owns_snap or snap["mode"] == "down"
-        fault = _apply_fault(state, snap, method_label, request_id, lava_headers, t_start,
-                             chain=listener_chain, port=listener_port) \
-            if run_fault_ladder else None
+        fault = (
+            _apply_fault(
+                state,
+                snap,
+                method_label,
+                request_id,
+                lava_headers,
+                t_start,
+                chain=listener_chain,
+                port=listener_port,
+            )
+            if run_fault_ladder
+            else None
+        )
         if fault is not None:
             if snap["latency_ms"] > 0:
                 time.sleep(snap["latency_ms"] / 1000.0)
@@ -2436,6 +2667,7 @@ class _TmParseError(ValueError):
 
 # ── Control API handler ───────────────────────────────────────────────────────
 
+
 class ControlHandler(BaseHTTPRequestHandler):
 
     # Socket timeout for a single request read. Without it, a client that
@@ -2463,15 +2695,15 @@ class ControlHandler(BaseHTTPRequestHandler):
         Returns 404 for any unrecognised path.
         """
         length = int(self.headers.get("Content-Length", 0))
-        body   = json.loads(self.rfile.read(length)) if length else {}
+        body = json.loads(self.rfile.read(length)) if length else {}
 
         # The control routes below read body.get(...); a non-object JSON body
         # (list / scalar) would raise AttributeError and break the socket. Guard
         # it with a clear 400 — the same way JSONRPCHandler guards a batch body.
         if not isinstance(body, dict):
-            self._reply(400, {"error": (
-                f"request body must be a JSON object, got {type(body).__name__}"
-            )})
+            self._reply(
+                400, {"error": (f"request body must be a JSON object, got {type(body).__name__}")}
+            )
             return
 
         if self.path == "/scenario":
@@ -2486,10 +2718,15 @@ class ControlHandler(BaseHTTPRequestHandler):
             # full validation pass succeeds do we mutate any state.
             providers_payload = body.get("providers", {})
             if not isinstance(providers_payload, dict):
-                self._reply(400, {"error": (
-                    "'providers' must be an object mapping provider id -> config, "
-                    f"got {type(providers_payload).__name__}"
-                )})
+                self._reply(
+                    400,
+                    {
+                        "error": (
+                            "'providers' must be an object mapping provider id -> config, "
+                            f"got {type(providers_payload).__name__}"
+                        )
+                    },
+                )
                 return
             staged: list = []
             try:
@@ -2507,9 +2744,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                         # state.update mutates scalar fields. The result is
                         # already a dict so state.update's re-call of
                         # _normalise_responses is an idempotent no-op.
-                        staged_cfg["responses"] = _normalise_responses(
-                            staged_cfg["responses"]
-                        )
+                        staged_cfg["responses"] = _normalise_responses(staged_cfg["responses"])
                     # _validate_scenario_cfg guarantees chain_family is present
                     # on every block, so the receipt always echoes the value
                     # the caller sent — never a filled-in default.
@@ -2520,14 +2755,12 @@ class ControlHandler(BaseHTTPRequestHandler):
                 return
             for _pid, state, staged_cfg, _family in staged:
                 state.update(staged_cfg)
-            applied = {
-                pid: {"chain_family": family}
-                for pid, _state, _staged_cfg, family in staged
-            }
+            applied = {pid: {"chain_family": family} for pid, _state, _staged_cfg, family in staged}
             self._reply(200, {"status": "ok", "applied": applied})
 
         elif self.path == "/reset":
             import handlers_eth
+
             handlers_eth.reset_eth_head()  # MAG-1897: reset advancing eth head
             for state in self.server.provider_states.values():
                 state.reset_scenario()
@@ -2540,6 +2773,7 @@ class ControlHandler(BaseHTTPRequestHandler):
 
         elif self.path == "/reset/all":
             import handlers_eth
+
             handlers_eth.reset_eth_head()  # MAG-1897: reset advancing eth head
             for state in self.server.provider_states.values():
                 state.reset_scenario()
@@ -2553,6 +2787,7 @@ class ControlHandler(BaseHTTPRequestHandler):
             #   {"per_second": R}  -> enable (R>0) / freeze (R<=0) continuous advance
             #   {"blocks": N}      -> one-time bump of the head by N blocks
             import handlers_eth
+
             if "per_second" in body:
                 handlers_eth.set_eth_advance(float(body.get("per_second") or 0))
             if "blocks" in body:
@@ -2574,8 +2809,10 @@ class ControlHandler(BaseHTTPRequestHandler):
                 return
 
             import stubs_ws
+
             wrapped = stubs_ws.build_event_frame(handle.envelope, sub_id, event)
             import handlers_ws as _hws
+
             frame_bytes = _hws._text_frame(wrapped)
 
             try:
@@ -2593,9 +2830,13 @@ class ControlHandler(BaseHTTPRequestHandler):
             state = self.server.provider_states.get(handle.provider_id)
             if state is not None:
                 state.push_call_to_buffer(
-                    f"{handle.envelope} push", "success", 0,
-                    request_id=sub_id, lava_headers={},
-                    chain="ws", port=None,
+                    f"{handle.envelope} push",
+                    "success",
+                    0,
+                    request_id=sub_id,
+                    lava_headers={},
+                    chain="ws",
+                    port=None,
                 )
 
             self._reply(200, {"status": "emitted", "subscription_id": sub_id})
@@ -2636,26 +2877,44 @@ class ControlHandler(BaseHTTPRequestHandler):
             # suite then runs against a router whose pairing pool is
             # poisoned from the start.
             import socket
+
             from constants import (
-                ETH_PRIMARY_PORTS, ETH_BACKUP_PORTS, ETH_SOLO_PORTS,
-                BTC_PRIMARY_PORTS, LN_PRIMARY_PORTS, SOLANA_PRIMARY_PORTS,
+                BTC_PRIMARY_PORTS,
+                ETH_BACKUP_PORTS,
+                ETH_PRIMARY_PORTS,
+                ETH_SOLO_PORTS,
+                GRPC_BACKUP_PORTS,
+                GRPC_PRIMARY_PORTS,
+                LN_PRIMARY_PORTS,
+                REST_BACKUP_PORTS,
+                REST_PRIMARY_PORTS,
+                SOLANA_PRIMARY_PORTS,
                 SOLANA_SOLO_PORTS,
-                GRPC_PRIMARY_PORTS, GRPC_BACKUP_PORTS,
-                REST_PRIMARY_PORTS, REST_BACKUP_PORTS,
-                TM_PRIMARY_PORTS, TM_BACKUP_PORTS,
-                WS_PRIMARY_PORTS, WS_BACKUP_PORTS,
+                TM_BACKUP_PORTS,
+                TM_PRIMARY_PORTS,
+                WS_BACKUP_PORTS,
+                WS_PRIMARY_PORTS,
             )
-            all_ports = sorted({
-                *ETH_PRIMARY_PORTS.values(), *ETH_BACKUP_PORTS.values(),
-                *ETH_SOLO_PORTS.values(),
-                *BTC_PRIMARY_PORTS.values(), *LN_PRIMARY_PORTS.values(),
-                *SOLANA_PRIMARY_PORTS.values(),
-                *SOLANA_SOLO_PORTS.values(),
-                *GRPC_PRIMARY_PORTS.values(), *GRPC_BACKUP_PORTS.values(),
-                *REST_PRIMARY_PORTS.values(), *REST_BACKUP_PORTS.values(),
-                *TM_PRIMARY_PORTS.values(), *TM_BACKUP_PORTS.values(),
-                *WS_PRIMARY_PORTS.values(), *WS_BACKUP_PORTS.values(),
-            })
+
+            all_ports = sorted(
+                {
+                    *ETH_PRIMARY_PORTS.values(),
+                    *ETH_BACKUP_PORTS.values(),
+                    *ETH_SOLO_PORTS.values(),
+                    *BTC_PRIMARY_PORTS.values(),
+                    *LN_PRIMARY_PORTS.values(),
+                    *SOLANA_PRIMARY_PORTS.values(),
+                    *SOLANA_SOLO_PORTS.values(),
+                    *GRPC_PRIMARY_PORTS.values(),
+                    *GRPC_BACKUP_PORTS.values(),
+                    *REST_PRIMARY_PORTS.values(),
+                    *REST_BACKUP_PORTS.values(),
+                    *TM_PRIMARY_PORTS.values(),
+                    *TM_BACKUP_PORTS.values(),
+                    *WS_PRIMARY_PORTS.values(),
+                    *WS_BACKUP_PORTS.values(),
+                }
+            )
             missing = []
             for port in all_ports:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -2666,32 +2925,42 @@ class ControlHandler(BaseHTTPRequestHandler):
                 finally:
                     s.close()
             if missing:
-                self._reply(503, {
-                    "status": "not_ready",
-                    "listening": len(all_ports) - len(missing),
-                    "expected": len(all_ports),
-                    "missing_ports": missing,
-                })
+                self._reply(
+                    503,
+                    {
+                        "status": "not_ready",
+                        "listening": len(all_ports) - len(missing),
+                        "expected": len(all_ports),
+                        "missing_ports": missing,
+                    },
+                )
             else:
-                self._reply(200, {
-                    "status": "ready",
-                    "listening": len(all_ports),
-                    "expected": len(all_ports),
-                })
+                self._reply(
+                    200,
+                    {
+                        "status": "ready",
+                        "listening": len(all_ports),
+                        "expected": len(all_ports),
+                    },
+                )
 
         elif self.path == "/scenario":
-            self._reply(200, {
-                "providers": {pid: s.snapshot()
-                              for pid, s in self.server.provider_states.items()}
-            })
+            self._reply(
+                200,
+                {
+                    "providers": {
+                        pid: s.snapshot() for pid, s in self.server.provider_states.items()
+                    }
+                },
+            )
 
         elif self.path == "/stats":
             # Per-provider call counts and status breakdown.
             # Use this to see if one provider is being skipped or hammered.
-            self._reply(200, {
-                "providers": {pid: s.stats()
-                              for pid, s in self.server.provider_states.items()}
-            })
+            self._reply(
+                200,
+                {"providers": {pid: s.stats() for pid, s in self.server.provider_states.items()}},
+            )
 
         elif self.path == "/history" or self.path.startswith("/history?"):
             # Supported query params (all optional, combinable):
@@ -2728,13 +2997,13 @@ class ControlHandler(BaseHTTPRequestHandler):
             #   /history?max=50            — tail 50 most-recent across all providers
             qs = parse_qs(urlparse(self.path).query)
 
-            t_from        = float(qs["from"][0])      if "from"       in qs else None
-            t_to          = float(qs["to"][0])         if "to"         in qs else None
-            last_secs     = float(qs["last"][0])       if "last"       in qs else None
-            f_provider    = qs["provider"][0]          if "provider"   in qs else None
-            f_method      = qs["method"][0]            if "method"     in qs else None
-            f_status      = qs["status"][0]            if "status"     in qs else None
-            f_request_id  = qs["request_id"][0]        if "request_id" in qs else None
+            t_from = float(qs["from"][0]) if "from" in qs else None
+            t_to = float(qs["to"][0]) if "to" in qs else None
+            last_secs = float(qs["last"][0]) if "last" in qs else None
+            f_provider = qs["provider"][0] if "provider" in qs else None
+            f_method = qs["method"][0] if "method" in qs else None
+            f_status = qs["status"][0] if "status" in qs else None
+            f_request_id = qs["request_id"][0] if "request_id" in qs else None
 
             # ?max=N — MAG-1822 tail-slicing. Parsed here so a malformed value
             # short-circuits with 400 before we do any history work.
@@ -2744,16 +3013,22 @@ class ControlHandler(BaseHTTPRequestHandler):
                 try:
                     parsed_max = int(raw_max)
                 except (TypeError, ValueError):
-                    self._reply(400, {
-                        "error": "invalid_max",
-                        "message": f"max must be a non-negative integer, got {raw_max!r}",
-                    })
+                    self._reply(
+                        400,
+                        {
+                            "error": "invalid_max",
+                            "message": f"max must be a non-negative integer, got {raw_max!r}",
+                        },
+                    )
                     return
                 if parsed_max < 0:
-                    self._reply(400, {
-                        "error": "invalid_max",
-                        "message": f"max must be >= 0, got {parsed_max}",
-                    })
+                    self._reply(
+                        400,
+                        {
+                            "error": "invalid_max",
+                            "message": f"max must be >= 0, got {parsed_max}",
+                        },
+                    )
                     return
                 f_max = parsed_max
 
@@ -2773,11 +3048,16 @@ class ControlHandler(BaseHTTPRequestHandler):
                 if f_provider and pid != f_provider:
                     continue
                 for entry in s.get_history():
-                    if t_from is not None and entry["ts"] < t_from:                 continue
-                    if t_to   is not None and entry["ts"] > t_to:                   continue
-                    if f_method      and entry["method"] != f_method:               continue
-                    if f_status      and entry["status"] != f_status:               continue
-                    if f_request_id  and str(entry.get("request_id")) != f_request_id: continue
+                    if t_from is not None and entry["ts"] < t_from:
+                        continue
+                    if t_to is not None and entry["ts"] > t_to:
+                        continue
+                    if f_method and entry["method"] != f_method:
+                        continue
+                    if f_status and entry["status"] != f_status:
+                        continue
+                    if f_request_id and str(entry.get("request_id")) != f_request_id:
+                        continue
                     # Check lava header filters (all must match)
                     if f_lava_headers:
                         entry_headers = entry.get("lava_headers", {})
@@ -2786,14 +3066,14 @@ class ControlHandler(BaseHTTPRequestHandler):
                     all_calls.append({"provider": pid, **entry})
 
             all_calls.sort(key=lambda x: x["ts"])
-            
+
             # Assign correlation_group: group calls by (request_id, method) within 50ms window
             correlation_map = {}  # (request_id, method) → (last_ts, group_id)
             group_counter = 0
-            
+
             for entry in all_calls:
                 key = (entry.get("request_id"), entry["method"])
-                
+
                 if key in correlation_map:
                     last_ts, group_id = correlation_map[key]
                     if entry["ts"] - last_ts < 0.050:  # 50ms window
@@ -2808,7 +3088,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                     group_counter += 1
                     entry["correlation_group"] = group_counter
                     correlation_map[key] = (entry["ts"], group_counter)
-            
+
             # Assign call_order within the merged timeline
             for i, entry in enumerate(all_calls, start=1):
                 entry["call_order"] = i
@@ -2851,7 +3131,9 @@ class ControlHandler(BaseHTTPRequestHandler):
 # ── Server startup ────────────────────────────────────────────────────────────
 
 
-def _scenario_ttl_sweep(states: Dict[str, ProviderState], ttl_s: int, interval_s: float = 120.0) -> None:
+def _scenario_ttl_sweep(
+    states: Dict[str, ProviderState], ttl_s: int, interval_s: float = 120.0
+) -> None:
     """Background daemon (MAG-2022): every interval_s, revert any provider whose
     scenario hasn't been written-to in > ttl_s seconds back to defaults.
     Prevents stale state (e.g., mode=hang from a prior test) from surviving
@@ -2870,7 +3152,7 @@ def _scenario_ttl_sweep(states: Dict[str, ProviderState], ttl_s: int, interval_s
                 non_default = state.mode != "success"
             if age > ttl_s and non_default:
                 state.reset_scenario()
-                print(f"[ttl-sweep] reverted provider {pid} (idle {age:.0f}s > {ttl_s}s TTL)")
+                _log.info(f"[ttl-sweep] reverted provider {pid} (idle {age:.0f}s > {ttl_s}s TTL)")
 
 
 class _SimThreadingHTTPServer(ThreadingHTTPServer):
@@ -2973,6 +3255,13 @@ def main():
     Blocks on thread.join() and shuts all servers down cleanly on
     KeyboardInterrupt.
     """
+    # format="%(message)s" keeps output identical to a bare print() — no
+    # timestamp/level/logger-name prefix — since the simulator's stdout is
+    # scraped by tests and `kubectl logs` in its current bare-text shape.
+    # Level defaults to INFO (same visibility as the print() calls this
+    # replaces); set SIM_LOG_LEVEL=DEBUG/WARNING/ERROR to change it.
+    logging.basicConfig(level=os.environ.get("SIM_LOG_LEVEL", "INFO"), format="%(message)s")
+
     # Primary-tier states are shared across surfaces (one ProviderState backs
     # JSON-RPC + REST + gRPC + TM + WS for the same pid). Backup-tier states
     # are independent per surface — distinct pids guarantee distinct state.
@@ -3001,10 +3290,10 @@ def main():
         # so the ETH listeners don't need to set them explicitly — leaving the
         # defaults documents intent on read.
         srv = _SimThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
-        srv.state                = states[pid]
-        srv.provider_id          = pid    # available as self.server.provider_id in handler
+        srv.state = states[pid]
+        srv.provider_id = pid  # available as self.server.provider_id in handler
         srv.handler_chain_family = "eth"
-        srv.handler_module       = handlers_eth
+        srv.handler_module = handlers_eth
         servers.append(srv)
 
     # BTC JSON-RPC primary listeners (MAG-2089). Each runs JSONRPCHandler with
@@ -3017,10 +3306,10 @@ def main():
     # (which will ignore the BTC fault) and the BTC port (which acts on it).
     for pid, port in BTC_PRIMARY_PORTS.items():
         btc_srv = _SimThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
-        btc_srv.state                = states[pid]
-        btc_srv.provider_id          = pid
+        btc_srv.state = states[pid]
+        btc_srv.provider_id = pid
         btc_srv.handler_chain_family = "btc"
-        btc_srv.handler_module       = handlers_btc
+        btc_srv.handler_module = handlers_btc
         servers.append(btc_srv)
 
     # LN JSON-RPC primary listeners (MAG-2089). Same shape as the BTC pool:
@@ -3030,10 +3319,10 @@ def main():
     # the ETH and LN listeners that share a pid.
     for pid, port in LN_PRIMARY_PORTS.items():
         ln_srv = _SimThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
-        ln_srv.state                = states[pid]
-        ln_srv.provider_id          = pid
+        ln_srv.state = states[pid]
+        ln_srv.provider_id = pid
         ln_srv.handler_chain_family = "ln"
-        ln_srv.handler_module       = handlers_lnd
+        ln_srv.handler_module = handlers_lnd
         servers.append(ln_srv)
 
     # Solana JSON-RPC primary listeners (MAG-2231). Same shape as the BTC / LN
@@ -3048,10 +3337,10 @@ def main():
     # exactly mirroring how BTC_PRIMARY_PORTS / LN_PRIMARY_PORTS are wired.
     for pid, port in SOLANA_PRIMARY_PORTS.items():
         sol_srv = _SimThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
-        sol_srv.state                = states[pid]
-        sol_srv.provider_id          = pid
+        sol_srv.state = states[pid]
+        sol_srv.provider_id = pid
         sol_srv.handler_chain_family = "solana"
-        sol_srv.handler_module       = handlers_solana
+        sol_srv.handler_module = handlers_solana
         servers.append(sol_srv)
 
     # Solana JSON-RPC solo listener (MAG-2239). Same shape as the Solana
@@ -3069,10 +3358,10 @@ def main():
         # the bare server defaults to a backlog of 5, which drops connections
         # under burst.
         sol_solo_srv = _SimThreadingHTTPServer(("0.0.0.0", port), JSONRPCHandler)
-        sol_solo_srv.state                = states[pid]
-        sol_solo_srv.provider_id          = pid
+        sol_solo_srv.state = states[pid]
+        sol_solo_srv.provider_id = pid
         sol_solo_srv.handler_chain_family = "solana"
-        sol_solo_srv.handler_module       = handlers_solana
+        sol_solo_srv.handler_module = handlers_solana
         servers.append(sol_solo_srv)
 
     # REST servers (MAG-1777). Primary tier shares ProviderState with the
@@ -3082,7 +3371,7 @@ def main():
     # because BaseHTTPRequestHandler is per-request.
     for pid, port in REST_PRIMARY_PORTS.items():
         rest_srv = _SimThreadingHTTPServer(("0.0.0.0", port), RestHandler)
-        rest_srv.state       = states[pid]
+        rest_srv.state = states[pid]
         rest_srv.provider_id = pid
         servers.append(rest_srv)
 
@@ -3092,7 +3381,7 @@ def main():
     # values_sim.yml).
     for pid, port in REST_BACKUP_PORTS.items():
         rest_srv = _SimThreadingHTTPServer(("0.0.0.0", port), RestHandler)
-        rest_srv.state       = states[pid]
+        rest_srv.state = states[pid]
         rest_srv.provider_id = pid
         servers.append(rest_srv)
 
@@ -3101,13 +3390,13 @@ def main():
     # own pool with distinct pids 13-15.
     for pid, port in TM_PRIMARY_PORTS.items():
         tm_srv = _SimThreadingHTTPServer(("0.0.0.0", port), TendermintHandler)
-        tm_srv.state       = states[pid]
+        tm_srv.state = states[pid]
         tm_srv.provider_id = pid
         servers.append(tm_srv)
 
     for pid, port in TM_BACKUP_PORTS.items():
         tm_srv = _SimThreadingHTTPServer(("0.0.0.0", port), TendermintHandler)
-        tm_srv.state       = states[pid]
+        tm_srv.state = states[pid]
         tm_srv.provider_id = pid
         servers.append(tm_srv)
 
@@ -3117,13 +3406,13 @@ def main():
     # BaseHTTPRequestHandler is per-request.
     for pid, port in WS_PRIMARY_PORTS.items():
         ws_srv = _SimThreadingHTTPServer(("0.0.0.0", port), handlers_ws.WsHandler)
-        ws_srv.state       = states[pid]
+        ws_srv.state = states[pid]
         ws_srv.provider_id = pid
         servers.append(ws_srv)
 
     for pid, port in WS_BACKUP_PORTS.items():
         ws_srv = _SimThreadingHTTPServer(("0.0.0.0", port), handlers_ws.WsHandler)
-        ws_srv.state       = states[pid]
+        ws_srv.state = states[pid]
         ws_srv.provider_id = pid
         servers.append(ws_srv)
 
@@ -3152,43 +3441,45 @@ def main():
             name="scenario-ttl-sweep",
         )
         sweep_thread.start()
-        print(f"[ttl-sweep] started — scenario TTL = {scenario_ttl_s}s "
-              f"(set SIM_SCENARIO_TTL_SECONDS=0 to disable)")
+        _log.info(
+            f"[ttl-sweep] started — scenario TTL = {scenario_ttl_s}s "
+            f"(set SIM_SCENARIO_TTL_SECONDS=0 to disable)"
+        )
 
-    print("Provider simulator started")
+    _log.info("Provider simulator started")
     for pid, port in ETH_PRIMARY_PORTS.items():
-        print(f"  provider {pid:>2} (jsonrpc-eth,    primary) → :{port}")
+        _log.info(f"  provider {pid:>2} (jsonrpc-eth,    primary) → :{port}")
     for pid, port in ETH_BACKUP_PORTS.items():
-        print(f"  provider {pid:>2} (jsonrpc-eth,    backup)  → :{port}")
+        _log.info(f"  provider {pid:>2} (jsonrpc-eth,    backup)  → :{port}")
     for pid, port in ETH_SOLO_PORTS.items():
-        print(f"  provider {pid:>2} (jsonrpc-eth,    solo)    → :{port}")
+        _log.info(f"  provider {pid:>2} (jsonrpc-eth,    solo)    → :{port}")
     for pid, port in BTC_PRIMARY_PORTS.items():
-        print(f"  provider {pid:>2} (jsonrpc-btc,    primary) → :{port}")
+        _log.info(f"  provider {pid:>2} (jsonrpc-btc,    primary) → :{port}")
     for pid, port in LN_PRIMARY_PORTS.items():
-        print(f"  provider {pid:>2} (jsonrpc-ln,     primary) → :{port}")
+        _log.info(f"  provider {pid:>2} (jsonrpc-ln,     primary) → :{port}")
     for pid, port in SOLANA_PRIMARY_PORTS.items():
-        print(f"  provider {pid:>2} (jsonrpc-solana, primary) → :{port}")
+        _log.info(f"  provider {pid:>2} (jsonrpc-solana, primary) → :{port}")
     for pid, port in SOLANA_SOLO_PORTS.items():
-        print(f"  provider {pid:>2} (jsonrpc-solana, solo)    → :{port}")
+        _log.info(f"  provider {pid:>2} (jsonrpc-solana, solo)    → :{port}")
     for pid, port in GRPC_PRIMARY_PORTS.items():
-        print(f"  provider {pid:>2} (grpc,           primary) → :{port}")
+        _log.info(f"  provider {pid:>2} (grpc,           primary) → :{port}")
     for pid, port in GRPC_BACKUP_PORTS.items():
-        print(f"  provider {pid:>2} (grpc,           backup)  → :{port}")
+        _log.info(f"  provider {pid:>2} (grpc,           backup)  → :{port}")
     for pid, port in REST_PRIMARY_PORTS.items():
-        print(f"  provider {pid:>2} (rest,           primary) → :{port}")
+        _log.info(f"  provider {pid:>2} (rest,           primary) → :{port}")
     for pid, port in REST_BACKUP_PORTS.items():
-        print(f"  provider {pid:>2} (rest,           backup)  → :{port}")
+        _log.info(f"  provider {pid:>2} (rest,           backup)  → :{port}")
     for pid, port in TM_PRIMARY_PORTS.items():
-        print(f"  provider {pid:>2} (tendermintrpc,  primary) → :{port}")
+        _log.info(f"  provider {pid:>2} (tendermintrpc,  primary) → :{port}")
     for pid, port in TM_BACKUP_PORTS.items():
-        print(f"  provider {pid:>2} (tendermintrpc,  backup)  → :{port}")
+        _log.info(f"  provider {pid:>2} (tendermintrpc,  backup)  → :{port}")
     for pid, port in WS_PRIMARY_PORTS.items():
-        print(f"  provider {pid:>2} (ws,             primary) → :{port}")
+        _log.info(f"  provider {pid:>2} (ws,             primary) → :{port}")
     for pid, port in WS_BACKUP_PORTS.items():
-        print(f"  provider {pid:>2} (ws,             backup)  → :{port}")
-    print(f"  control API  → :{CONTROL_PORT}")
-    print(f"  GET /stats   → call counts per provider")
-    print(f"  GET /history → ordered call log (who was tried first)")
+        _log.info(f"  provider {pid:>2} (ws,             backup)  → :{port}")
+    _log.info(f"  control API  → :{CONTROL_PORT}")
+    _log.info("  GET /stats   → call counts per provider")
+    _log.info("  GET /history → ordered call log (who was tried first)")
 
     threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in servers]
 
@@ -3200,22 +3491,27 @@ def main():
     # tests that don't install gRPC extras).
     try:
         import grpc_server  # local import keeps gRPC dep optional
+
         for pid, port in GRPC_PRIMARY_PORTS.items():
-            threads.append(threading.Thread(
-                target=grpc_server.run_grpc_in_thread,
-                args=(port, states[pid]),
-                daemon=True,
-                name=f"grpc-provider-{pid}",
-            ))
+            threads.append(
+                threading.Thread(
+                    target=grpc_server.run_grpc_in_thread,
+                    args=(port, states[pid]),
+                    daemon=True,
+                    name=f"grpc-provider-{pid}",
+                )
+            )
         for pid, port in GRPC_BACKUP_PORTS.items():
-            threads.append(threading.Thread(
-                target=grpc_server.run_grpc_in_thread,
-                args=(port, states[pid]),
-                daemon=True,
-                name=f"grpc-backup-{pid}",
-            ))
+            threads.append(
+                threading.Thread(
+                    target=grpc_server.run_grpc_in_thread,
+                    args=(port, states[pid]),
+                    daemon=True,
+                    name=f"grpc-backup-{pid}",
+                )
+            )
     except ImportError as exc:
-        print(f"  gRPC servers DISABLED — grpcio import failed: {exc}")
+        _log.warning(f"  gRPC servers DISABLED — grpcio import failed: {exc}")
 
     for t in threads:
         t.start()
@@ -3231,4 +3527,3 @@ def main():
 # Entry point lives in run.py — see the docstring there. server.py is a
 # library module; running it directly would duplicate module-level state
 # (e.g. _WS_SUBSCRIPTIONS) across __main__ and a second `server` import.
-

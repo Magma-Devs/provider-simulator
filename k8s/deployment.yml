@@ -9,6 +9,16 @@ metadata:
     app.kubernetes.io/component: testing
 spec:
   replicas: 1
+  # Recreate (not the apps/v1 default RollingUpdate) — MAG-2318. All state
+  # (history, QoS-relevant scenario config, counters) lives in-memory in a
+  # single pod (see README's "intentionally 1 replica" note); a rolling
+  # update would briefly run old-and-new pods side by side under the same
+  # Service, splitting /scenario writes and /history reads across two
+  # independent state maps. Recreate guarantees the old pod is fully torn
+  # down before the new one starts, matching the single-replica, in-memory
+  # state model this deployment already relies on.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: provider-simulator
@@ -19,10 +29,33 @@ spec:
         app.kubernetes.io/name: provider-simulator
         app.kubernetes.io/component: testing
     spec:
+      # Non-root (MAG-2318) — matches the Dockerfile's USER simulator (uid
+      # 999). Pod-level securityContext is defense in depth: it holds even
+      # if a future image change drops the Dockerfile USER line.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
       containers:
         - name: provider-simulator
           image: provider-simulator:latest
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            # Verified by running the built image with `docker run --read-only
+            # --tmpfs /tmp`: server boots, /health returns ok, and a real
+            # eth_blockNumber request round-trips with no permission errors in
+            # the logs. The simulator keeps all state in memory (no filesystem
+            # writes at runtime) — the only thing that wants a writable path at
+            # all is Python's own /tmp usage, covered by the emptyDir below.
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
           ports:
             - name: provider-1
               containerPort: 18545
@@ -189,5 +222,8 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 15
             timeoutSeconds: 3
+      volumes:
+        - name: tmp
+          emptyDir: {}
       restartPolicy: Always
 

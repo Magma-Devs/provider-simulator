@@ -64,11 +64,11 @@ import stubs_solana
 # stubs_* family, next to stubs_btc / stubs_lnd. Re-exported here so existing
 # ``from handlers_solana import SOLANA_...`` importers keep working; new code
 # should import them from stubs_solana directly.
-SOLANA_BASE_SLOT              = stubs_solana.SOLANA_BASE_SLOT
+SOLANA_BASE_SLOT = stubs_solana.SOLANA_BASE_SLOT
 SOLANA_DEFAULT_SLOT_BLOCK_GAP = stubs_solana.SOLANA_DEFAULT_SLOT_BLOCK_GAP
-SOLANA_BLOCKHASH              = stubs_solana.SOLANA_BLOCKHASH
-SOLANA_CORE_VERSION           = stubs_solana.SOLANA_CORE_VERSION
-SOLANA_FEATURE_SET            = stubs_solana.SOLANA_FEATURE_SET
+SOLANA_BLOCKHASH = stubs_solana.SOLANA_BLOCKHASH
+SOLANA_CORE_VERSION = stubs_solana.SOLANA_CORE_VERSION
+SOLANA_FEATURE_SET = stubs_solana.SOLANA_FEATURE_SET
 
 # Named Solana JSON-RPC error catalogue — the inner ``error`` objects a test can
 # inject by name via ``responses[method] = {"error_stub": "<name>"}`` (mirrors
@@ -151,7 +151,9 @@ def handle(state, request: dict, snap: dict, lava_headers: dict) -> Tuple[int, D
     # Explicit per-method result override wins over the computed stub.
     if "result" in method_cfg:
         return snap.get("http_status", 200), {
-            "jsonrpc": "2.0", "id": req_id, "result": method_cfg["result"]
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": method_cfg["result"],
         }
 
     slot = _solana_slot(snap)
@@ -185,7 +187,8 @@ def handle(state, request: dict, snap: dict, lava_headers: dict) -> Tuple[int, D
         # found so the router's Solana error classifier can be exercised.
         if snap.get("solana_unknown_method_mode") == "error":
             return snap.get("http_status", 200), {
-                "jsonrpc": "2.0", "id": req_id,
+                "jsonrpc": "2.0",
+                "id": req_id,
                 "error": SOLANA_ERROR_STUBS["method_not_found"],
             }
         result = None

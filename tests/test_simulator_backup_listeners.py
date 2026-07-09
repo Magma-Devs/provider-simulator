@@ -45,6 +45,17 @@ Isolated test ports
 Each surface's fixture uses an offset-from-production port range so a
 developer running ``python -u server.py`` locally on the production
 ports (18545-18574 / 19000) can still ``pytest`` without collisions.
+Two rules keep binds reliable across the whole suite:
+
+1. Stay below 32768. Ports from 32768 up are the kernel's ephemeral
+   client-port range (Linux default 32768-60999, macOS 49152-65535):
+   every outgoing HTTP call an earlier test module makes grabs a random
+   source port there, and a lingering one makes a later module's bind
+   fail with "Address already in use" at fixture setup.
+2. Each test file owns a unique port block. This file owns 270xx-275xx,
+   one hundred-block per surface fixture (main JSON-RPC 270xx, REST
+   271xx, TM 272xx, WS 273xx, gRPC 274xx, cross-surface merge 275xx).
+
 The fixtures use the SAME iteration pattern main() uses for each
 surface — copying the bootstrap shape rather than reaching into main()
 directly. If main()'s loop were broken (e.g. iterated PROVIDER_PORTS
@@ -65,6 +76,7 @@ from http.server import HTTPServer, ThreadingHTTPServer
 
 import pytest
 
+import handlers_ws
 from constants import (
     ALL_PROVIDER_PORTS,
     BACKUP_PROVIDER_PORTS,
@@ -90,13 +102,13 @@ from server import (
     RestHandler,
     TendermintHandler,
 )
-import handlers_ws
 
-# ── Test ports (peer to test_simulator.py's 28xxx range) ─────────────────────
-_TEST_PRIMARY_PORTS = {"1": 58545, "2": 58546, "3": 58547}
-_TEST_BACKUP_PORTS  = {"4": 58554, "5": 58555, "6": 58556}
-_TEST_ALL_PORTS     = {**_TEST_PRIMARY_PORTS, **_TEST_BACKUP_PORTS}
-_TEST_CONTROL_PORT  = 59000
+# ── Test ports (peer to test_simulator.py's 28xxx range; see the module
+#    docstring's "Isolated test ports" section for the below-32768 rule) ──────
+_TEST_PRIMARY_PORTS = {"1": 27045, "2": 27046, "3": 27047}
+_TEST_BACKUP_PORTS = {"4": 27054, "5": 27055, "6": 27056}
+_TEST_ALL_PORTS = {**_TEST_PRIMARY_PORTS, **_TEST_BACKUP_PORTS}
+_TEST_CONTROL_PORT = 27000
 
 
 # ── HTTP helpers (same shape as test_simulator.py — inline keeps this file
@@ -106,9 +118,7 @@ _TEST_CONTROL_PORT  = 59000
 def _post(url: str, body: dict) -> tuple[int, dict]:
     """POST JSON body, return (status_code, parsed_response_body)."""
     data = json.dumps(body).encode()
-    req = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}
-    )
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
             raw = resp.read()
@@ -220,8 +230,7 @@ def test_all_provider_ports_is_union_of_primary_and_backup():
 
     all_port_values = list(ALL_PROVIDER_PORTS.values())
     assert len(all_port_values) == len(set(all_port_values)), (
-        f"ALL_PROVIDER_PORTS contains duplicate port numbers: "
-        f"{all_port_values}"
+        f"ALL_PROVIDER_PORTS contains duplicate port numbers: " f"{all_port_values}"
     )
 
     primary_pids = set(PROVIDER_PORTS.keys())
@@ -312,33 +321,27 @@ class TestBackupListenersWired:
         status, response = _get(f"{sim['control']}/scenario")
         assert status == 200
         snapshot = response.get("providers", {})
-        assert snapshot.get("1", {}).get("mode") == "down", (
-            f"primary pid=1 mode not applied; snapshot={snapshot.get('1')}"
-        )
-        assert snapshot.get("4", {}).get("mode") == "success", (
-            f"backup pid=4 mode not applied; snapshot={snapshot.get('4')}"
-        )
+        assert (
+            snapshot.get("1", {}).get("mode") == "down"
+        ), f"primary pid=1 mode not applied; snapshot={snapshot.get('1')}"
+        assert (
+            snapshot.get("4", {}).get("mode") == "success"
+        ), f"backup pid=4 mode not applied; snapshot={snapshot.get('4')}"
 
         # Both listeners answer per their own state.
-        status1, _ = _rpc(
-            f"http://127.0.0.1:{_TEST_PRIMARY_PORTS['1']}", "eth_blockNumber"
-        )
+        status1, _ = _rpc(f"http://127.0.0.1:{_TEST_PRIMARY_PORTS['1']}", "eth_blockNumber")
         assert status1 == 503, (
             f"primary listener pid=1 returned {status1}, expected 503 "
             "(down). Either state cross-contamination, or the mixed-"
             "tier POST stomped on the primary configuration."
         )
-        status4, body4 = _rpc(
-            f"http://127.0.0.1:{_TEST_BACKUP_PORTS['4']}", "eth_blockNumber"
-        )
+        status4, body4 = _rpc(f"http://127.0.0.1:{_TEST_BACKUP_PORTS['4']}", "eth_blockNumber")
         assert status4 == 200, (
             f"backup listener pid=4 returned {status4}, expected 200 "
             "(success). Either listener missing or state cross-"
             "contamination."
         )
-        assert "result" in body4, (
-            f"backup pid=4 success response missing 'result' field: {body4}"
-        )
+        assert "result" in body4, f"backup pid=4 success response missing 'result' field: {body4}"
 
 
 # ── Cross-surface constants shape (cheap; catches typos at import time) ──────
@@ -354,12 +357,12 @@ def test_backup_port_dicts_have_no_pid_collisions():
     exercised both pools at once and saw the cross-talk.
     """
     pid_sources = [
-        ("PROVIDER_PORTS",         PROVIDER_PORTS),
-        ("BACKUP_PROVIDER_PORTS",  BACKUP_PROVIDER_PORTS),
-        ("GRPC_BACKUP_PORTS",      GRPC_BACKUP_PORTS),
-        ("REST_BACKUP_PORTS",      REST_BACKUP_PORTS),
-        ("TM_BACKUP_PORTS",        TM_BACKUP_PORTS),
-        ("WS_BACKUP_PORTS",        WS_BACKUP_PORTS),
+        ("PROVIDER_PORTS", PROVIDER_PORTS),
+        ("BACKUP_PROVIDER_PORTS", BACKUP_PROVIDER_PORTS),
+        ("GRPC_BACKUP_PORTS", GRPC_BACKUP_PORTS),
+        ("REST_BACKUP_PORTS", REST_BACKUP_PORTS),
+        ("TM_BACKUP_PORTS", TM_BACKUP_PORTS),
+        ("WS_BACKUP_PORTS", WS_BACKUP_PORTS),
     ]
     seen: dict[str, str] = {}
     for source_name, port_dict in pid_sources:
@@ -370,8 +373,7 @@ def test_backup_port_dicts_have_no_pid_collisions():
                 # ProviderState per primary pid backing every surface).
                 # Only flag collisions between BACKUP dicts and primaries
                 # of a different surface.
-                if (source_name.endswith("_BACKUP_PORTS") or
-                        seen[pid].endswith("_BACKUP_PORTS")):
+                if source_name.endswith("_BACKUP_PORTS") or seen[pid].endswith("_BACKUP_PORTS"):
                     pytest.fail(
                         f"pid {pid!r} appears in both {seen[pid]} and "
                         f"{source_name} — backup pids must be disjoint "
@@ -389,16 +391,16 @@ def test_backup_port_dicts_have_no_port_collisions():
     one surface's listeners.
     """
     pool_sources = [
-        ("PROVIDER_PORTS",         PROVIDER_PORTS),
-        ("BACKUP_PROVIDER_PORTS",  BACKUP_PROVIDER_PORTS),
-        ("GRPC_PROVIDER_PORTS",    GRPC_PROVIDER_PORTS),
-        ("GRPC_BACKUP_PORTS",      GRPC_BACKUP_PORTS),
-        ("REST_PORTS",             REST_PORTS),
-        ("REST_BACKUP_PORTS",      REST_BACKUP_PORTS),
-        ("TM_PORTS",               TM_PORTS),
-        ("TM_BACKUP_PORTS",        TM_BACKUP_PORTS),
-        ("WS_PORTS",               WS_PORTS),
-        ("WS_BACKUP_PORTS",        WS_BACKUP_PORTS),
+        ("PROVIDER_PORTS", PROVIDER_PORTS),
+        ("BACKUP_PROVIDER_PORTS", BACKUP_PROVIDER_PORTS),
+        ("GRPC_PROVIDER_PORTS", GRPC_PROVIDER_PORTS),
+        ("GRPC_BACKUP_PORTS", GRPC_BACKUP_PORTS),
+        ("REST_PORTS", REST_PORTS),
+        ("REST_BACKUP_PORTS", REST_BACKUP_PORTS),
+        ("TM_PORTS", TM_PORTS),
+        ("TM_BACKUP_PORTS", TM_BACKUP_PORTS),
+        ("WS_PORTS", WS_PORTS),
+        ("WS_BACKUP_PORTS", WS_BACKUP_PORTS),
     ]
     seen: dict[int, str] = {}
     for source_name, port_dict in pool_sources:
@@ -415,25 +417,27 @@ def test_backup_port_dicts_have_no_port_collisions():
 @pytest.mark.parametrize(
     "surface,primary_dict,backup_dict",
     [
-        ("jsonrpc",        PROVIDER_PORTS,      BACKUP_PROVIDER_PORTS),
-        ("grpc",           GRPC_PROVIDER_PORTS, GRPC_BACKUP_PORTS),
-        ("rest",           REST_PORTS,          REST_BACKUP_PORTS),
-        ("tendermintrpc",  TM_PORTS,            TM_BACKUP_PORTS),
-        ("ws",             WS_PORTS,            WS_BACKUP_PORTS),
+        ("jsonrpc", PROVIDER_PORTS, BACKUP_PROVIDER_PORTS),
+        ("grpc", GRPC_PROVIDER_PORTS, GRPC_BACKUP_PORTS),
+        ("rest", REST_PORTS, REST_BACKUP_PORTS),
+        ("tendermintrpc", TM_PORTS, TM_BACKUP_PORTS),
+        ("ws", WS_PORTS, WS_BACKUP_PORTS),
     ],
 )
 def test_each_surface_has_three_primary_and_three_backup(
-    surface, primary_dict, backup_dict,
+    surface,
+    primary_dict,
+    backup_dict,
 ):
     """Every surface boots a 3+3 pool. Catches an accidental drop of one
     pid (e.g. {"7": 18563, "8": 18564} silently shipping a 2-node backup
     pool when the router expects 3)."""
-    assert len(primary_dict) == 3, (
-        f"{surface} primary pool has {len(primary_dict)} entries, expected 3"
-    )
-    assert len(backup_dict) == 3, (
-        f"{surface} backup pool has {len(backup_dict)} entries, expected 3"
-    )
+    assert (
+        len(primary_dict) == 3
+    ), f"{surface} primary pool has {len(primary_dict)} entries, expected 3"
+    assert (
+        len(backup_dict) == 3
+    ), f"{surface} backup pool has {len(backup_dict)} entries, expected 3"
 
 
 def test_solo_solana_provider_ports_shape_and_uniqueness():
@@ -461,20 +465,20 @@ def test_solo_solana_provider_ports_shape_and_uniqueness():
     #    shared across surfaces by design; the solo Solana pid must NOT clash
     #    with any of them, with the ETH solo pid 19, or with any backup pid.)
     other_pid_sources = [
-        ("PROVIDER_PORTS",         PROVIDER_PORTS),
-        ("BACKUP_PROVIDER_PORTS",  BACKUP_PROVIDER_PORTS),
-        ("SOLO_PROVIDER_PORTS",    SOLO_PROVIDER_PORTS),
-        ("BTC_PRIMARY_PORTS",      BTC_PRIMARY_PORTS),
-        ("LN_PRIMARY_PORTS",       LN_PRIMARY_PORTS),
-        ("SOLANA_PRIMARY_PORTS",   SOLANA_PRIMARY_PORTS),
-        ("GRPC_PROVIDER_PORTS",    GRPC_PROVIDER_PORTS),
-        ("GRPC_BACKUP_PORTS",      GRPC_BACKUP_PORTS),
-        ("REST_PORTS",             REST_PORTS),
-        ("REST_BACKUP_PORTS",      REST_BACKUP_PORTS),
-        ("TM_PORTS",               TM_PORTS),
-        ("TM_BACKUP_PORTS",        TM_BACKUP_PORTS),
-        ("WS_PORTS",               WS_PORTS),
-        ("WS_BACKUP_PORTS",        WS_BACKUP_PORTS),
+        ("PROVIDER_PORTS", PROVIDER_PORTS),
+        ("BACKUP_PROVIDER_PORTS", BACKUP_PROVIDER_PORTS),
+        ("SOLO_PROVIDER_PORTS", SOLO_PROVIDER_PORTS),
+        ("BTC_PRIMARY_PORTS", BTC_PRIMARY_PORTS),
+        ("LN_PRIMARY_PORTS", LN_PRIMARY_PORTS),
+        ("SOLANA_PRIMARY_PORTS", SOLANA_PRIMARY_PORTS),
+        ("GRPC_PROVIDER_PORTS", GRPC_PROVIDER_PORTS),
+        ("GRPC_BACKUP_PORTS", GRPC_BACKUP_PORTS),
+        ("REST_PORTS", REST_PORTS),
+        ("REST_BACKUP_PORTS", REST_BACKUP_PORTS),
+        ("TM_PORTS", TM_PORTS),
+        ("TM_BACKUP_PORTS", TM_BACKUP_PORTS),
+        ("WS_PORTS", WS_PORTS),
+        ("WS_BACKUP_PORTS", WS_BACKUP_PORTS),
     ]
     solo_pid = "20"
     for source_name, port_dict in other_pid_sources:
@@ -510,9 +514,9 @@ def test_solo_solana_provider_ports_shape_and_uniqueness():
 
 # ── REST backup-tier smoke test ──────────────────────────────────────────────
 
-_REST_TEST_PRIMARY = {"1": 60545, "2": 60546, "3": 60547}
-_REST_TEST_BACKUP  = {"10": 60566, "11": 60567, "12": 60568}
-_REST_TEST_CONTROL = 60000
+_REST_TEST_PRIMARY = {"1": 27145, "2": 27146, "3": 27147}
+_REST_TEST_BACKUP = {"10": 27166, "11": 27167, "12": 27168}
+_REST_TEST_CONTROL = 27100
 
 
 @pytest.fixture(scope="module")
@@ -545,9 +549,9 @@ def rest_sim():
     time.sleep(0.15)
 
     yield {
-        "control":        f"http://127.0.0.1:{_REST_TEST_CONTROL}",
-        "primary_ports":  dict(_REST_TEST_PRIMARY),
-        "backup_ports":   dict(_REST_TEST_BACKUP),
+        "control": f"http://127.0.0.1:{_REST_TEST_CONTROL}",
+        "primary_ports": dict(_REST_TEST_PRIMARY),
+        "backup_ports": dict(_REST_TEST_BACKUP),
     }
 
     for s in servers:
@@ -588,8 +592,7 @@ class TestRestBackupListenersWired:
         assert status == 200
         snapshot = response.get("providers", {})
         assert snapshot.get(pid, {}).get("mode") == "down", (
-            f"GET /scenario doesn't echo back REST backup pid={pid!r}: "
-            f"{snapshot.get(pid)}"
+            f"GET /scenario doesn't echo back REST backup pid={pid!r}: " f"{snapshot.get(pid)}"
         )
 
         # 3) The REST listener answers per the configured mode. `down`
@@ -615,9 +618,9 @@ class TestRestBackupListenersWired:
 
 # ── Tendermint-RPC backup-tier smoke test ────────────────────────────────────
 
-_TM_TEST_PRIMARY = {"1": 61545, "2": 61546, "3": 61547}
-_TM_TEST_BACKUP  = {"13": 61569, "14": 61570, "15": 61571}
-_TM_TEST_CONTROL = 61000
+_TM_TEST_PRIMARY = {"1": 27245, "2": 27246, "3": 27247}
+_TM_TEST_BACKUP = {"13": 27269, "14": 27270, "15": 27271}
+_TM_TEST_CONTROL = 27200
 
 
 @pytest.fixture(scope="module")
@@ -644,9 +647,9 @@ def tm_sim():
     time.sleep(0.15)
 
     yield {
-        "control":        f"http://127.0.0.1:{_TM_TEST_CONTROL}",
-        "primary_ports":  dict(_TM_TEST_PRIMARY),
-        "backup_ports":   dict(_TM_TEST_BACKUP),
+        "control": f"http://127.0.0.1:{_TM_TEST_CONTROL}",
+        "primary_ports": dict(_TM_TEST_PRIMARY),
+        "backup_ports": dict(_TM_TEST_BACKUP),
     }
 
     for s in servers:
@@ -685,8 +688,7 @@ class TestTmBackupListenersWired:
         assert status == 200
         snapshot = response.get("providers", {})
         assert snapshot.get(pid, {}).get("mode") == "down", (
-            f"GET /scenario doesn't echo back TM backup pid={pid!r}: "
-            f"{snapshot.get(pid)}"
+            f"GET /scenario doesn't echo back TM backup pid={pid!r}: " f"{snapshot.get(pid)}"
         )
 
         # 3) The TM listener returns 503 on a GET URI form (the CometBFT-
@@ -695,7 +697,8 @@ class TestTmBackupListenersWired:
         port = _TM_TEST_BACKUP[pid]
         try:
             with urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/status", timeout=5,
+                f"http://127.0.0.1:{port}/status",
+                timeout=5,
             ) as resp:
                 pytest.fail(
                     f"TM backup listener on port {port} (pid={pid!r}) "
@@ -710,9 +713,9 @@ class TestTmBackupListenersWired:
 
 # ── WebSocket backup-tier smoke test ─────────────────────────────────────────
 
-_WS_TEST_PRIMARY = {"1": 62545, "2": 62546, "3": 62547}
-_WS_TEST_BACKUP  = {"16": 62572, "17": 62573, "18": 62574}
-_WS_TEST_CONTROL = 62000
+_WS_TEST_PRIMARY = {"1": 27345, "2": 27346, "3": 27347}
+_WS_TEST_BACKUP = {"16": 27372, "17": 27373, "18": 27374}
+_WS_TEST_CONTROL = 27300
 
 
 @pytest.fixture(scope="module")
@@ -739,9 +742,9 @@ def ws_sim():
     time.sleep(0.15)
 
     yield {
-        "control":        f"http://127.0.0.1:{_WS_TEST_CONTROL}",
-        "primary_ports":  dict(_WS_TEST_PRIMARY),
-        "backup_ports":   dict(_WS_TEST_BACKUP),
+        "control": f"http://127.0.0.1:{_WS_TEST_CONTROL}",
+        "primary_ports": dict(_WS_TEST_PRIMARY),
+        "backup_ports": dict(_WS_TEST_BACKUP),
     }
 
     for s in servers:
@@ -780,8 +783,7 @@ class TestWsBackupListenersWired:
         assert status == 200
         snapshot = response.get("providers", {})
         assert snapshot.get(pid, {}).get("mode") == "down", (
-            f"GET /scenario doesn't echo back WS backup pid={pid!r}: "
-            f"{snapshot.get(pid)}"
+            f"GET /scenario doesn't echo back WS backup pid={pid!r}: " f"{snapshot.get(pid)}"
         )
 
         # 3) The WS listener refuses the upgrade with 503 when in down
@@ -818,9 +820,9 @@ class TestWsBackupListenersWired:
 
 # ── gRPC backup-tier smoke test (skipped when grpcio missing) ────────────────
 
-_GRPC_TEST_PRIMARY = {"1": 63548, "2": 63549, "3": 63550}
-_GRPC_TEST_BACKUP  = {"7": 63563, "8": 63564, "9": 63565}
-_GRPC_TEST_CONTROL = 63000
+_GRPC_TEST_PRIMARY = {"1": 27448, "2": 27449, "3": 27450}
+_GRPC_TEST_BACKUP = {"7": 27463, "8": 27464, "9": 27465}
+_GRPC_TEST_CONTROL = 27400
 
 
 @pytest.fixture(scope="module")
@@ -842,12 +844,14 @@ def grpc_sim():
 
     threads = [threading.Thread(target=ctrl.serve_forever, daemon=True)]
     for pid, port in all_pids.items():
-        threads.append(threading.Thread(
-            target=grpc_server.run_grpc_in_thread,
-            args=(port, states[pid]),
-            daemon=True,
-            name=f"grpc-backup-test-{pid}",
-        ))
+        threads.append(
+            threading.Thread(
+                target=grpc_server.run_grpc_in_thread,
+                args=(port, states[pid]),
+                daemon=True,
+                name=f"grpc-backup-test-{pid}",
+            )
+        )
     for t in threads:
         t.start()
 
@@ -855,9 +859,9 @@ def grpc_sim():
     time.sleep(0.5)
 
     yield {
-        "control":        f"http://127.0.0.1:{_GRPC_TEST_CONTROL}",
-        "primary_ports":  dict(_GRPC_TEST_PRIMARY),
-        "backup_ports":   dict(_GRPC_TEST_BACKUP),
+        "control": f"http://127.0.0.1:{_GRPC_TEST_CONTROL}",
+        "primary_ports": dict(_GRPC_TEST_PRIMARY),
+        "backup_ports": dict(_GRPC_TEST_BACKUP),
     }
 
     ctrl.shutdown()
@@ -884,8 +888,9 @@ class TestGrpcBackupListenersWired:
         import asyncio
 
         import grpc as _grpc
-        import cosmos_pb2  # noqa: F401 — splice sys.path
         from cosmos.base.tendermint.v1beta1 import query_pb2, query_pb2_grpc
+
+        import cosmos_pb2  # noqa: F401 — splice sys.path
 
         # 1) /scenario POST targeting this gRPC backup pid is accepted.
         status, body = _post(
@@ -902,8 +907,7 @@ class TestGrpcBackupListenersWired:
         assert status == 200
         snapshot = response.get("providers", {})
         assert snapshot.get(pid, {}).get("mode") == "down", (
-            f"GET /scenario doesn't echo back gRPC backup pid={pid!r}: "
-            f"{snapshot.get(pid)}"
+            f"GET /scenario doesn't echo back gRPC backup pid={pid!r}: " f"{snapshot.get(pid)}"
         )
 
         # 3) The gRPC servicer aborts UNAVAILABLE on the configured down
@@ -917,7 +921,8 @@ class TestGrpcBackupListenersWired:
             try:
                 stub = query_pb2_grpc.ServiceStub(channel)
                 await stub.GetLatestBlock(
-                    query_pb2.GetLatestBlockRequest(), timeout=3.0,
+                    query_pb2.GetLatestBlockRequest(),
+                    timeout=3.0,
                 )
             finally:
                 await channel.close()
@@ -940,7 +945,7 @@ class TestGrpcBackupListenersWired:
 # JSON-RPC request to the bound backup port, and asserts a fault-specific
 # observable that would FAIL if the provider were in success mode.
 #
-# Uses pid "4" (port _TEST_BACKUP_PORTS["4"] = 58554) and the `sim` fixture
+# Uses pid "4" (port _TEST_BACKUP_PORTS["4"] = 27054) and the `sim` fixture
 # which is already module-scoped and wires all six test ports.
 
 
@@ -984,10 +989,7 @@ class TestBackupListenerFaults:
         """
         self._set_scenario(sim, {"mode": "error"})
         status, body = _rpc(self._backup_url(), "eth_blockNumber")
-        assert status == 200, (
-            f"error mode: expected HTTP 200, got {status}. "
-            f"body={body}"
-        )
+        assert status == 200, f"error mode: expected HTTP 200, got {status}. " f"body={body}"
         assert "error" in body, (
             f"error mode: response body has no 'error' key. "
             f"expected={{'error': {{'code': -32000, ...}}}}, actual={body}"
@@ -1010,10 +1012,7 @@ class TestBackupListenerFaults:
         """
         self._set_scenario(sim, {"mode": "rate_limit"})
         status, body = _rpc(self._backup_url(), "eth_blockNumber")
-        assert status == 429, (
-            f"rate_limit mode: expected HTTP 429, got {status}. "
-            f"body={body}"
-        )
+        assert status == 429, f"rate_limit mode: expected HTTP 429, got {status}. " f"body={body}"
         assert body.get("error", {}).get("code") == 429, (
             f"rate_limit mode: expected error code 429 in body, "
             f"got {body.get('error')}. full body={body}"
@@ -1066,9 +1065,7 @@ class TestBackupListenerFaults:
         that urlopen raises a transport-level exception — the fault-specific
         observable that distinguishes drop_connection from all other modes.
         """
-        self._set_scenario(
-            sim, {"mode": "drop_connection", "drop_at": "before_headers"}
-        )
+        self._set_scenario(sim, {"mode": "drop_connection", "drop_at": "before_headers"})
         url = self._backup_url()
         req = urllib.request.Request(
             url,
@@ -1077,9 +1074,7 @@ class TestBackupListenerFaults:
         )
         # The connection is dropped before any HTTP response arrives, so any
         # transport-level exception is the valid observable here.
-        with pytest.raises(
-            (urllib.error.URLError, ConnectionResetError, OSError)
-        ):
+        with pytest.raises((urllib.error.URLError, ConnectionResetError, OSError)):
             urllib.request.urlopen(req, timeout=3.0)
 
     # ------------------------------------------------------------------
@@ -1145,14 +1140,22 @@ def test_scenario_merges_pids_from_every_surface_into_control_map():
     the test fails if the production iteration misses any of them.
     """
     all_pids = {
-        **_TEST_PRIMARY_PORTS,                 # pid "1"
-        **_TEST_BACKUP_PORTS,                  # pids "4"-"6"
-        "7":  64500, "8": 64501, "9": 64502,   # gRPC backup
-        "10": 64510, "11": 64511, "12": 64512, # REST backup
-        "13": 64520, "14": 64521, "15": 64522, # TM backup
-        "16": 64530, "17": 64531, "18": 64532, # WS backup
+        **_TEST_PRIMARY_PORTS,  # pid "1"
+        **_TEST_BACKUP_PORTS,  # pids "4"-"6"
+        "7": 27510,
+        "8": 27511,
+        "9": 27512,  # gRPC backup
+        "10": 27520,
+        "11": 27521,
+        "12": 27522,  # REST backup
+        "13": 27530,
+        "14": 27531,
+        "15": 27532,  # TM backup
+        "16": 27540,
+        "17": 27541,
+        "18": 27542,  # WS backup
     }
-    test_control = 64000
+    test_control = 27500
 
     states = {pid: ProviderState() for pid in all_pids}
     # We don't actually need to bind listeners here — the test is purely
@@ -1168,16 +1171,17 @@ def test_scenario_merges_pids_from_every_surface_into_control_map():
         # One body, one pid from every surface's backup pool (plus a primary).
         payload = {
             "providers": {
-                "1":  {"chain_family": "eth", "mode": "down"},      # primary
-                "4":  {"chain_family": "eth", "mode": "success"},   # JSON-RPC backup
-                "7":  {"chain_family": "eth", "mode": "rate_limit"},  # gRPC backup
-                "10": {"chain_family": "eth", "mode": "hang"},      # REST backup
-                "13": {"chain_family": "eth", "mode": "error"},     # TM backup
+                "1": {"chain_family": "eth", "mode": "down"},  # primary
+                "4": {"chain_family": "eth", "mode": "success"},  # JSON-RPC backup
+                "7": {"chain_family": "eth", "mode": "rate_limit"},  # gRPC backup
+                "10": {"chain_family": "eth", "mode": "hang"},  # REST backup
+                "13": {"chain_family": "eth", "mode": "error"},  # TM backup
                 "16": {"chain_family": "eth", "mode": "drop_connection"},  # WS backup
             }
         }
         status, body = _post(
-            f"http://127.0.0.1:{test_control}/scenario", payload,
+            f"http://127.0.0.1:{test_control}/scenario",
+            payload,
         )
         assert status == 200, f"mixed-surface /scenario rejected: {body}"
 
