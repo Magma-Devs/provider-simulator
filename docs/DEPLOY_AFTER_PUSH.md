@@ -20,11 +20,13 @@ bash scripts/deploy.sh
 ```
 
 What this script already does (`scripts/deploy.sh`):
-- builds `provider-simulator:latest`
+- builds `provider-simulator:latest` (unless `SKIP_BUILD=true`)
 - imports image into MicroK8s
-- applies `k8s/deployment.yml`, `k8s/service.yml`, `k8s/httproute-control.yml`
-- restarts `deployment/provider-simulator` in namespace `lava-infra`
-- waits for rollout to finish
+- applies `k8s/deployment.yml` + `k8s/service.yml` in one pass
+- applies the Gateway-API routes: `httproute-control.yml`, `grpcroute-lava-sim-grpc.yml`, `httproute-lava-sim-rest.yml`, `httproute-lava-sim-ws.yml`
+- restarts `deployment/provider-simulator` in namespace `lava-infra` — but only when a fresh image was built this run, the manifests actually changed (`kubectl diff`), or `FORCE_RESTART=true` is set. A no-op re-run (`SKIP_BUILD=true`, nothing changed) skips the restart and just confirms the deployment is healthy.
+- waits for rollout to finish (`--timeout=180s`, override with `ROLLOUT_TIMEOUT`)
+- prints a reminder to regenerate the TLS certificate for the current hostnames — this step is NOT automatic; if a route hostname is new, run the certificate script from `smart-router-standalone` yourself (`bash scripts/install_gateway_api_tls_certificate.sh`), or HTTPS requests to that hostname fail with a certificate error
 
 ## If image is already present and you only need restart
 

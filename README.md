@@ -7,6 +7,7 @@ It runs many listeners in a single pod:
 - **3 ETH JSON-RPC providers** on ports `18545` / `18546` / `18547` — dispatch to `handlers_eth`.
 - **3 BTC JSON-RPC providers** on ports `18575` / `18576` / `18577` — dispatch to `handlers_btc` (MAG-2089).
 - **3 LN JSON-RPC providers** on ports `18578` / `18579` / `18580` — dispatch to `handlers_lnd` (MAG-2089).
+- **3 Solana JSON-RPC providers** on ports `18582` / `18583` / `18584` — dispatch to `handlers_solana` (MAG-2231).
 - **3 gRPC providers** on ports `18548` / `18549` / `18550` (MAG-1780) — Cosmos `Service` with reflection enabled.
 - **3 REST providers** on ports `18551` / `18552` / `18553` (MAG-1777).
 - **3 Tendermint-RPC providers** on ports `18554` / `18555` / `18556` (MAG-1841).
@@ -14,7 +15,7 @@ It runs many listeners in a single pod:
 - **3 JSON-RPC backup providers** on `18560` / `18561` / `18562`, plus per-surface backup ranges in `18563`–`18574`.
 - **1 control API** on port `19000` — `POST /scenario`, `POST /reset[/all]`, `POST /advance` (MAG-1897 — opt-in advancing eth head), `GET /scenario`, `GET /stats`, `GET /history`, `GET /health`, `GET /ready`.
 
-For each pid (1-3), the ETH / BTC / LN / REST / gRPC / TM / WS primary listeners all share **the same `ProviderState`**, so one `POST /scenario` call reconfigures every transport for the same logical provider.
+For each pid (1-3), the ETH / BTC / LN / Solana / REST / gRPC / TM / WS primary listeners all share **the same `ProviderState`**, so one `POST /scenario` call reconfigures every transport for the same logical provider.
 
 ## Chain families
 
@@ -25,6 +26,7 @@ JSON-RPC handler dispatch is **port-derived** (MAG-2089): the ETH listener pool 
 | `eth` (default) | JSON-RPC | live on main | `18545`–`18547` | `handlers_eth.handle()` — ETH methods + `eth_getBlockByNumber` block-number echo |
 | `btc` | JSON-RPC | live on main (MAG-1716, ports moved MAG-2089) | `18575`–`18577` | `handlers_btc.handle()` — BTC RPC method set, see `stubs_btc.py` |
 | `ln` | JSON-RPC | live on main (MAG-1726, ports moved MAG-2089) | `18578`–`18580` | `handlers_lnd.handle()` — LND method set (`getinfo`, `listchannels`, `openchannel`, `decodepayreq`, `payinvoice`, `listpeers`), see `stubs_lnd.py` |
+| `solana` | JSON-RPC | live on main (MAG-2231) | `18582`–`18584` | `handlers_solana.handle()` — Solana method set, see `stubs_solana.py`. `getLatestBlockhash` separates `result.context.slot` from `result.value.lastValidBlockHeight` by a configurable gap to reproduce the router's MAG-1591 consistency-filter bug |
 | `grpc` | gRPC | live on main | `18548`–`18550` | `handlers_grpc.CosmosBaseTendermintServicer` |
 | `rest` | REST | live on main (MAG-1777) | `18551`–`18553` | `handlers_rest.handle()` |
 | `tendermintrpc` | JSON-RPC | live on main (MAG-1841) | `18554`–`18556` | `handlers_tendermintrpc` |
