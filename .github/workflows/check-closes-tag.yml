@@ -1,0 +1,51 @@
+name: "PR: Check #Closes tag"
+
+# Fails when a PR body is missing `#(Closes|Resolves|Fixes) MAG-XXXX`.
+# Matches the regex used by the jira-close-on-merge workflow so any PR
+# passing this check will also trigger auto-close on merge.
+#
+# Opt-out: label the PR `no-ticket` for tiny chore PRs that genuinely
+# don't close any ticket.
+
+on:
+  pull_request:
+    types: [opened, synchronize, edited, reopened, labeled, unlabeled]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  check-closes-tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-ticket') }}
+    env:
+      PR_BODY: ${{ github.event.pull_request.body }}
+    steps:
+      - name: Check for #Closes MAG-XXXX in PR body
+        run: |
+          set -e
+          if [ -z "${PR_BODY}" ]; then
+            echo "::error::PR body is empty. Add '#Closes MAG-XXXX' anywhere in the body, or apply the 'no-ticket' label if this PR genuinely doesn't close any ticket."
+            exit 1
+          fi
+          # Match #Closes, #Resolves, #Fixes followed by MAG-<digits>.
+          # Case-sensitive to match the auto-close workflow's pattern.
+          if printf '%s' "${PR_BODY}" | grep -qE '#(Closes|Resolves|Fixes) MAG-[0-9]+'; then
+            MATCHED=$(printf '%s' "${PR_BODY}" | grep -oE '#(Closes|Resolves|Fixes) MAG-[0-9]+' | head -3 | tr '\n' ' ')
+            echo "Found auto-close tag(s): ${MATCHED}"
+            exit 0
+          else
+            echo "::error::PR body is missing '#Closes MAG-XXXX' (or '#Resolves MAG-XXXX' / '#Fixes MAG-XXXX')."
+            echo ""
+            echo "Convention: add '#Closes MAG-XXXX' anywhere in the PR body (first line preferred but not required)."
+            echo "The auto-close workflow (.github/workflows/jira-close-on-merge.yml) parses this"
+            echo "exact tag to transition the matched Jira ticket on merge."
+            echo ""
+            echo "Footgun: example/docs mentions of '#Closes MAG-NNNN' with real digits will ALSO match."
+            echo "Avoid literal '#Closes MAG-\d+' patterns in prose; use placeholder text instead."
+            echo ""
+            echo "Opt-out: apply the 'no-ticket' label if this PR genuinely doesn't close any ticket"
+            echo "(rare — most PRs map to a tracked work item)."
+            exit 1
+          fi
