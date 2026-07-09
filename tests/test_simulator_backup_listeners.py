@@ -45,6 +45,17 @@ Isolated test ports
 Each surface's fixture uses an offset-from-production port range so a
 developer running ``python -u server.py`` locally on the production
 ports (18545-18574 / 19000) can still ``pytest`` without collisions.
+Two rules keep binds reliable across the whole suite:
+
+1. Stay below 32768. Ports from 32768 up are the kernel's ephemeral
+   client-port range (Linux default 32768-60999, macOS 49152-65535):
+   every outgoing HTTP call an earlier test module makes grabs a random
+   source port there, and a lingering one makes a later module's bind
+   fail with "Address already in use" at fixture setup.
+2. Each test file owns a unique port block. This file owns 270xx-275xx,
+   one hundred-block per surface fixture (main JSON-RPC 270xx, REST
+   271xx, TM 272xx, WS 273xx, gRPC 274xx, cross-surface merge 275xx).
+
 The fixtures use the SAME iteration pattern main() uses for each
 surface — copying the bootstrap shape rather than reaching into main()
 directly. If main()'s loop were broken (e.g. iterated PROVIDER_PORTS
@@ -92,11 +103,12 @@ from server import (
     TendermintHandler,
 )
 
-# ── Test ports (peer to test_simulator.py's 28xxx range) ─────────────────────
-_TEST_PRIMARY_PORTS = {"1": 58545, "2": 58546, "3": 58547}
-_TEST_BACKUP_PORTS = {"4": 58554, "5": 58555, "6": 58556}
+# ── Test ports (peer to test_simulator.py's 28xxx range; see the module
+#    docstring's "Isolated test ports" section for the below-32768 rule) ──────
+_TEST_PRIMARY_PORTS = {"1": 27045, "2": 27046, "3": 27047}
+_TEST_BACKUP_PORTS = {"4": 27054, "5": 27055, "6": 27056}
 _TEST_ALL_PORTS = {**_TEST_PRIMARY_PORTS, **_TEST_BACKUP_PORTS}
-_TEST_CONTROL_PORT = 59000
+_TEST_CONTROL_PORT = 27000
 
 
 # ── HTTP helpers (same shape as test_simulator.py — inline keeps this file
@@ -502,9 +514,9 @@ def test_solo_solana_provider_ports_shape_and_uniqueness():
 
 # ── REST backup-tier smoke test ──────────────────────────────────────────────
 
-_REST_TEST_PRIMARY = {"1": 60545, "2": 60546, "3": 60547}
-_REST_TEST_BACKUP = {"10": 60566, "11": 60567, "12": 60568}
-_REST_TEST_CONTROL = 60000
+_REST_TEST_PRIMARY = {"1": 27145, "2": 27146, "3": 27147}
+_REST_TEST_BACKUP = {"10": 27166, "11": 27167, "12": 27168}
+_REST_TEST_CONTROL = 27100
 
 
 @pytest.fixture(scope="module")
@@ -606,9 +618,9 @@ class TestRestBackupListenersWired:
 
 # ── Tendermint-RPC backup-tier smoke test ────────────────────────────────────
 
-_TM_TEST_PRIMARY = {"1": 61545, "2": 61546, "3": 61547}
-_TM_TEST_BACKUP = {"13": 61569, "14": 61570, "15": 61571}
-_TM_TEST_CONTROL = 61000
+_TM_TEST_PRIMARY = {"1": 27245, "2": 27246, "3": 27247}
+_TM_TEST_BACKUP = {"13": 27269, "14": 27270, "15": 27271}
+_TM_TEST_CONTROL = 27200
 
 
 @pytest.fixture(scope="module")
@@ -701,9 +713,9 @@ class TestTmBackupListenersWired:
 
 # ── WebSocket backup-tier smoke test ─────────────────────────────────────────
 
-_WS_TEST_PRIMARY = {"1": 62545, "2": 62546, "3": 62547}
-_WS_TEST_BACKUP = {"16": 62572, "17": 62573, "18": 62574}
-_WS_TEST_CONTROL = 62000
+_WS_TEST_PRIMARY = {"1": 27345, "2": 27346, "3": 27347}
+_WS_TEST_BACKUP = {"16": 27372, "17": 27373, "18": 27374}
+_WS_TEST_CONTROL = 27300
 
 
 @pytest.fixture(scope="module")
@@ -808,9 +820,9 @@ class TestWsBackupListenersWired:
 
 # ── gRPC backup-tier smoke test (skipped when grpcio missing) ────────────────
 
-_GRPC_TEST_PRIMARY = {"1": 63548, "2": 63549, "3": 63550}
-_GRPC_TEST_BACKUP = {"7": 63563, "8": 63564, "9": 63565}
-_GRPC_TEST_CONTROL = 63000
+_GRPC_TEST_PRIMARY = {"1": 27448, "2": 27449, "3": 27450}
+_GRPC_TEST_BACKUP = {"7": 27463, "8": 27464, "9": 27465}
+_GRPC_TEST_CONTROL = 27400
 
 
 @pytest.fixture(scope="module")
@@ -933,7 +945,7 @@ class TestGrpcBackupListenersWired:
 # JSON-RPC request to the bound backup port, and asserts a fault-specific
 # observable that would FAIL if the provider were in success mode.
 #
-# Uses pid "4" (port _TEST_BACKUP_PORTS["4"] = 58554) and the `sim` fixture
+# Uses pid "4" (port _TEST_BACKUP_PORTS["4"] = 27054) and the `sim` fixture
 # which is already module-scoped and wires all six test ports.
 
 
@@ -1127,20 +1139,20 @@ def test_scenario_merges_pids_from_every_surface_into_control_map():
     all_pids = {
         **_TEST_PRIMARY_PORTS,  # pid "1"
         **_TEST_BACKUP_PORTS,  # pids "4"-"6"
-        "7": 64500,
-        "8": 64501,
-        "9": 64502,  # gRPC backup
-        "10": 64510,
-        "11": 64511,
-        "12": 64512,  # REST backup
-        "13": 64520,
-        "14": 64521,
-        "15": 64522,  # TM backup
-        "16": 64530,
-        "17": 64531,
-        "18": 64532,  # WS backup
+        "7": 27510,
+        "8": 27511,
+        "9": 27512,  # gRPC backup
+        "10": 27520,
+        "11": 27521,
+        "12": 27522,  # REST backup
+        "13": 27530,
+        "14": 27531,
+        "15": 27532,  # TM backup
+        "16": 27540,
+        "17": 27541,
+        "18": 27542,  # WS backup
     }
-    test_control = 64000
+    test_control = 27500
 
     states = {pid: ProviderState() for pid in all_pids}
     # We don't actually need to bind listeners here — the test is purely

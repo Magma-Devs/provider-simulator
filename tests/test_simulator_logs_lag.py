@@ -39,15 +39,17 @@ import pytest
 
 from server import ControlHandler, JSONRPCHandler, ProviderState
 
-# ── Test ports (distinct from ETH suite 28545-28547 / 29000, BTC suite
-#     38545-38547 / 39000, and the production ports 18545-18547 / 19000 so
-#     all four suites can co-exist if run in parallel). 50845-50847/50200 —
-#     moved off 48545-48547/49000, which collided with test_simulator_rest.py
-#     and test_simulator_ws.py's identical literals (silent locally, surfaced
-#     on GitHub Actions' Linux runner). ───────────────────────
+# ── Test ports. Two rules keep binds reliable across the whole suite:
+#    1. Stay below 32768. Ports from 32768 up are the kernel's ephemeral
+#       client-port range (Linux default 32768-60999, macOS 49152-65535):
+#       every outgoing HTTP call an earlier test module makes grabs a random
+#       source port there, and a lingering one makes this module's bind fail
+#       with "Address already in use" at fixture setup.
+#    2. Each test file owns a unique port block (this file: 240xx) so all
+#       modules can run in one pytest invocation. ───────────────────────
 
-_PROVIDER_PORTS = {"1": 50845, "2": 50846, "3": 50847}
-_CONTROL_PORT = 50200
+_PROVIDER_PORTS = {"1": 24045, "2": 24046, "3": 24047}
+_CONTROL_PORT = 24000
 
 
 # ── HTTP helpers (kept self-contained, mirrors test_simulator_btc.py) ─────────

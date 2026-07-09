@@ -22,9 +22,9 @@ Port layout
 MAG-2089 moved BTC dispatch from a per-provider ``chain_family`` flag on the
 shared ETH JSON-RPC listener pool (18545-18547) to a dedicated BTC listener
 pool at 18575-18577. This suite mirrors the move: a dedicated BTC test port
-range at 38575-38577 (parallel to prod 18575-18577) hosts JSONRPCHandler
+range at 22575-22577 (tail digits mirror prod 18575-18577) hosts JSONRPCHandler
 listeners with ``handler_chain_family="btc"`` + ``handler_module=handlers_btc``.
-A second ETH listener pool at 38545-38547 (parallel to prod 18545-18547)
+A second ETH listener pool at 22545-22547 (tail digits mirror prod 18545-18547)
 hosts default-ETH listeners, used by the mixed-chain tests. Both pools share
 ProviderState per pid so a single ``/scenario`` POST reconfigures both
 listeners for the same logical provider — exactly mirroring prod.
@@ -48,17 +48,24 @@ import handlers_eth
 from server import ControlHandler, JSONRPCHandler, ProviderState
 from stubs_btc import BTC_METHOD_DEFAULTS
 
-# ── Test ports (distinct from ETH suite's 28545-28547 / 29000 and from the
-#     prod ports 18545-18547 / 19000 so the two suites can co-exist if run in
-#     parallel later).
+# ── Test ports. Two rules keep binds reliable across the whole suite:
+#    1. Stay below 32768. Ports from 32768 up are the kernel's ephemeral
+#       client-port range (Linux default 32768-60999, macOS 49152-65535):
+#       every outgoing HTTP call an earlier test module makes grabs a random
+#       source port there, and a lingering one makes this module's bind fail
+#       with "Address already in use" at fixture setup.
+#    2. Each test file owns a unique port block (this file: 225xx) so all
+#       modules can run in one pytest invocation. Also distinct from the
+#       prod ports 18545-18547 / 19000 so a locally running simulator
+#       doesn't collide.
 #
-#     ETH ports (38545-7) host default ETH listeners — used by the mixed-chain
-#     scenario to drive an ETH-only port for the same pid. BTC ports (38575-7)
+#     ETH ports (22545-7) host default ETH listeners — used by the mixed-chain
+#     scenario to drive an ETH-only port for the same pid. BTC ports (22575-7)
 #     host BTC-configured listeners and are the focus of this suite. ─────────
 
-_ETH_PROVIDER_PORTS = {"1": 38545, "2": 38546, "3": 38547}
-_BTC_PROVIDER_PORTS = {"1": 38575, "2": 38576, "3": 38577}
-_CONTROL_PORT = 39000
+_ETH_PROVIDER_PORTS = {"1": 22545, "2": 22546, "3": 22547}
+_BTC_PROVIDER_PORTS = {"1": 22575, "2": 22576, "3": 22577}
+_CONTROL_PORT = 22500
 
 # 29 BTC methods covered by the stub set. Source of truth: stubs_btc.py.
 ALL_BTC_METHODS = sorted(BTC_METHOD_DEFAULTS.keys())
@@ -111,21 +118,21 @@ def _ctrl(sim: dict, path: str) -> str:
 def sim():
     """Start 3 ETH listeners + 3 BTC listeners + 1 control server.
 
-    The BTC listeners (38575-38577) are the focus of this suite — they run
+    The BTC listeners (22575-22577) are the focus of this suite — they run
     JSONRPCHandler with ``handler_chain_family="btc"`` + ``handler_module=
     handlers_btc`` so the success path always dispatches to BTC regardless of
-    the snap's ``chain_family``. The ETH listeners (38545-38547) are bound on
+    the snap's ``chain_family``. The ETH listeners (22545-22547) are bound on
     the same ProviderState per pid; they exist for mixed-chain tests that
     drive an ETH-only port on a shared logical provider.
 
     Yields a dict with base URLs:
-      sim["control"]      → http://127.0.0.1:39000
-      sim["provider1"]    → http://127.0.0.1:38575    # primary BTC URL per pid
-      sim["provider2"]    → http://127.0.0.1:38576
-      sim["provider3"]    → http://127.0.0.1:38577
-      sim["eth_provider1"]→ http://127.0.0.1:38545    # ETH companion per pid
-      sim["eth_provider2"]→ http://127.0.0.1:38546
-      sim["eth_provider3"]→ http://127.0.0.1:38547
+      sim["control"]      → http://127.0.0.1:22500
+      sim["provider1"]    → http://127.0.0.1:22575    # primary BTC URL per pid
+      sim["provider2"]    → http://127.0.0.1:22576
+      sim["provider3"]    → http://127.0.0.1:22577
+      sim["eth_provider1"]→ http://127.0.0.1:22545    # ETH companion per pid
+      sim["eth_provider2"]→ http://127.0.0.1:22546
+      sim["eth_provider3"]→ http://127.0.0.1:22547
     """
     # One ProviderState per pid, shared between the ETH and BTC listeners
     # for that pid — mirrors prod's shared-state model.
@@ -237,7 +244,7 @@ class TestBTCPortDispatch:
             assert body["providers"][pid]["chain_family"] == "eth"
 
     def test_btc_port_dispatches_to_handlers_btc_with_default_chain_family(self, sim):
-        """No /scenario call at all — the BTC port (38575) must still answer
+        """No /scenario call at all — the BTC port (22575) must still answer
         BTC methods because dispatch is port-derived, not chain_family-derived."""
         status, body = _rpc(sim["provider1"], "getblockcount")
         assert status == 200
@@ -474,7 +481,7 @@ class TestBTCErrorStubs:
 
 
 class TestMixedChainScenario:
-    """Each pid has both an ETH listener (38545-7) and a BTC listener (38575-7)
+    """Each pid has both an ETH listener (22545-7) and a BTC listener (22575-7)
     bound on the same ProviderState — mirrors prod's per-pid shared-state
     model. The ETH listener and BTC listener for the same pid can serve
     different responses simultaneously because dispatch is port-derived."""

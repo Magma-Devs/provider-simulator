@@ -25,10 +25,10 @@ Port layout
 Solana dispatch lives on a dedicated listener pool at prod ports 18582-18584
 (SOLANA_PRIMARY_PORTS), selected by handler_module=handlers_solana — exactly
 like BTC (18575-77) and LN (18578-80). This suite mirrors the move: a dedicated
-Solana test port range at 38582-38584 (parallel to prod 18582-18584) hosts
-JSONRPCHandler listeners with ``handler_chain_family="solana"`` +
-``handler_module=handlers_solana``. A second ETH listener pool at 38560-38562
-(distinct from the BTC suite's 38545-47) hosts default-ETH listeners, used by
+Solana test port range at 25582-25584 (tail digits mirror prod 18582-18584)
+hosts JSONRPCHandler listeners with ``handler_chain_family="solana"`` +
+``handler_module=handlers_solana``. A second ETH listener pool at 25560-25562
+(distinct from the BTC suite's 22545-47) hosts default-ETH listeners, used by
 the mixed-chain test. Both pools share ProviderState per pid so a single
 ``/scenario`` POST reconfigures both listeners for the same logical provider —
 exactly mirroring prod.
@@ -56,17 +56,24 @@ from handlers_solana import (
 )
 from server import ControlHandler, JSONRPCHandler, ProviderState
 
-# ── Test ports (distinct from the BTC suite's 38545-47 / 38575-77 / 39000 and
-#     from the prod ports 18582-18584 / 19000 so the suites can co-exist if run
-#     in parallel later).
+# ── Test ports. Two rules keep binds reliable across the whole suite:
+#    1. Stay below 32768. Ports from 32768 up are the kernel's ephemeral
+#       client-port range (Linux default 32768-60999, macOS 49152-65535):
+#       every outgoing HTTP call an earlier test module makes grabs a random
+#       source port there, and a lingering one makes this module's bind fail
+#       with "Address already in use" at fixture setup.
+#    2. Each test file owns a unique port block (this file: 255xx) so all
+#       modules can run in one pytest invocation. Also distinct from the
+#       prod ports 18582-18584 / 19000 so a locally running simulator
+#       doesn't collide.
 #
-#     ETH ports (38560-2) host default ETH listeners — used by the mixed-chain
-#     test to drive an ETH-only port for the same pid. Solana ports (38582-4)
+#     ETH ports (25560-2) host default ETH listeners — used by the mixed-chain
+#     test to drive an ETH-only port for the same pid. Solana ports (25582-4)
 #     host Solana-configured listeners and are the focus of this suite. ───────
 
-_ETH_PROVIDER_PORTS = {"1": 38560, "2": 38561, "3": 38562}
-_SOLANA_PROVIDER_PORTS = {"1": 38582, "2": 38583, "3": 38584}
-_CONTROL_PORT = 38900
+_ETH_PROVIDER_PORTS = {"1": 25560, "2": 25561, "3": 25562}
+_SOLANA_PROVIDER_PORTS = {"1": 25582, "2": 25583, "3": 25584}
+_CONTROL_PORT = 25500
 
 
 # ── HTTP helpers (kept independent of test_simulator.py to avoid cross-file
@@ -116,21 +123,21 @@ def _ctrl(sim: dict, path: str) -> str:
 def sim():
     """Start 3 ETH listeners + 3 Solana listeners + 1 control server.
 
-    The Solana listeners (38582-38584) are the focus of this suite — they run
+    The Solana listeners (25582-25584) are the focus of this suite — they run
     JSONRPCHandler with ``handler_chain_family="solana"`` + ``handler_module=
     handlers_solana`` so the success path always dispatches to Solana regardless
-    of the snap's ``chain_family``. The ETH listeners (38560-38562) are bound on
+    of the snap's ``chain_family``. The ETH listeners (25560-25562) are bound on
     the same ProviderState per pid; they exist for the mixed-chain test that
     drives an ETH-only port on a shared logical provider.
 
     Yields a dict with base URLs:
-      sim["control"]      → http://127.0.0.1:38900
-      sim["provider1"]    → http://127.0.0.1:38582    # primary Solana URL per pid
-      sim["provider2"]    → http://127.0.0.1:38583
-      sim["provider3"]    → http://127.0.0.1:38584
-      sim["eth_provider1"]→ http://127.0.0.1:38560    # ETH companion per pid
-      sim["eth_provider2"]→ http://127.0.0.1:38561
-      sim["eth_provider3"]→ http://127.0.0.1:38562
+      sim["control"]      → http://127.0.0.1:25500
+      sim["provider1"]    → http://127.0.0.1:25582    # primary Solana URL per pid
+      sim["provider2"]    → http://127.0.0.1:25583
+      sim["provider3"]    → http://127.0.0.1:25584
+      sim["eth_provider1"]→ http://127.0.0.1:25560    # ETH companion per pid
+      sim["eth_provider2"]→ http://127.0.0.1:25561
+      sim["eth_provider3"]→ http://127.0.0.1:25562
     """
     # One ProviderState per pid, shared between the ETH and Solana listeners
     # for that pid — mirrors prod's shared-state model.
@@ -229,7 +236,7 @@ def clean_state(sim):
 class TestSolanaPortDispatch:
 
     def test_solana_port_dispatches_with_default_chain_family(self, sim):
-        """No /scenario call at all — the Solana port (38582) must answer Solana
+        """No /scenario call at all — the Solana port (25582) must answer Solana
         methods because dispatch is port-derived, not chain_family-derived."""
         status, body = _rpc(sim["provider1"], "getSlot")
         assert status == 200
@@ -553,8 +560,8 @@ class TestSolanaHistoryTracking:
 
 
 class TestMixedChainScenario:
-    """Each pid has both an ETH listener (38560-2) and a Solana listener
-    (38582-4) bound on the same ProviderState — mirrors prod's per-pid
+    """Each pid has both an ETH listener (25560-2) and a Solana listener
+    (25582-4) bound on the same ProviderState — mirrors prod's per-pid
     shared-state model. The ETH and Solana listeners for the same pid serve
     different responses simultaneously because dispatch is port-derived."""
 

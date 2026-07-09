@@ -44,16 +44,17 @@ from server import (
 )
 from stubs_tendermintrpc import TENDERMINT_ERROR_STUBS, TENDERMINT_METHOD_DEFAULTS
 
-# Test ports — distinct from the other suites' ranges so all four can co-exist
-# if run in parallel. ETH uses 28xxx, BTC uses 38xxx, REST uses 48xxx; TM gets
-# 50545-50547/50554-50556/50000 (58xxx was already claimed by
-# test_simulator_backup_listeners.py, which collided with this file's
-# identical 58545-58547/58554-58556/59000 literals — GitHub Actions' Linux
-# runner exposed the collision that macOS's faster teardown-then-bind timing
-# never surfaced locally).
-_PROVIDER_PORTS = {"1": 50545, "2": 50546, "3": 50547}
-_TM_PORTS = {"1": 50554, "2": 50555, "3": 50556}
-_CONTROL_PORT = 50000
+# ── Test ports. Two rules keep binds reliable across the whole suite:
+#    1. Stay below 32768. Ports from 32768 up are the kernel's ephemeral
+#       client-port range (Linux default 32768-60999, macOS 49152-65535):
+#       every outgoing HTTP call an earlier test module makes grabs a random
+#       source port there, and a lingering one makes this module's bind fail
+#       with "Address already in use" at fixture setup.
+#    2. Each test file owns a unique port block (this file: 260xx) so all
+#       modules can run in one pytest invocation.
+_PROVIDER_PORTS = {"1": 26045, "2": 26046, "3": 26047}
+_TM_PORTS = {"1": 26054, "2": 26055, "3": 26056}
+_CONTROL_PORT = 26000
 
 
 # ── HTTP helpers (independent of the other test files — duplication intentional) ──

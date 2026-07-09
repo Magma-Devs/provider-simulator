@@ -23,8 +23,8 @@ Run with:
 
 These tests run against an in-process simulator (a ``ProviderState`` plus a
 grpc.aio server on a non-default port). They do not touch the cluster or
-the production simulator ports — picked 49548-49550 for the gRPC providers
-and 49000 for the control API so they coexist with the BTC suite (38545+)
+the production simulator ports — picked 23048-23050 for the gRPC providers
+and 23000 for the control API so they coexist with the BTC suite (225xx)
 and the ETH suite (28545+) when run side-by-side.
 """
 
@@ -52,10 +52,17 @@ from cosmos.base.tendermint.v1beta1 import query_pb2, query_pb2_grpc  # isort: s
 import grpc_server
 from server import ControlHandler, JSONRPCHandler, ProviderState
 
-# ── Test ports (distinct from ETH 28545+ / BTC 38545+) ──────────────────────
-_GRPC_PORTS = {"1": 49548, "2": 49549, "3": 49550}
-_JSONRPC_PORTS = {"1": 49545, "2": 49546, "3": 49547}
-_CONTROL_PORT = 49000
+# ── Test ports. Two rules keep binds reliable across the whole suite:
+#    1. Stay below 32768. Ports from 32768 up are the kernel's ephemeral
+#       client-port range (Linux default 32768-60999, macOS 49152-65535):
+#       every outgoing HTTP call an earlier test module makes grabs a random
+#       source port there, and a lingering one makes this module's bind fail
+#       with "Address already in use" at fixture setup.
+#    2. Each test file owns a unique port block (this file: 230xx) so all
+#       modules can run in one pytest invocation. ──────────────────────
+_GRPC_PORTS = {"1": 23048, "2": 23049, "3": 23050}
+_JSONRPC_PORTS = {"1": 23045, "2": 23046, "3": 23047}
+_CONTROL_PORT = 23000
 
 
 # ── HTTP helpers for the control plane (no JSON-RPC over HTTP needed) ───────
@@ -103,10 +110,10 @@ def sim():
     contract as the production ``main()``.
 
     Yields a dict:
-      sim["control"]   → http://127.0.0.1:49000
-      sim["grpc1"]     → "127.0.0.1:49548"  (use as channel address)
-      sim["grpc2"]     → "127.0.0.1:49549"
-      sim["grpc3"]     → "127.0.0.1:49550"
+      sim["control"]   → http://127.0.0.1:23000
+      sim["grpc1"]     → "127.0.0.1:23048"  (use as channel address)
+      sim["grpc2"]     → "127.0.0.1:23049"
+      sim["grpc3"]     → "127.0.0.1:23050"
     """
     states = {pid: ProviderState() for pid in _GRPC_PORTS}
 

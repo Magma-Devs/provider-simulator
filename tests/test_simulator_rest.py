@@ -38,17 +38,20 @@ import pytest
 from server import ControlHandler, JSONRPCHandler, ProviderState, RestHandler
 from stubs_rest import REST_ERROR_STUBS, REST_LATEST_HEIGHT, REST_METHOD_DEFAULTS
 
-# ── Test ports (distinct from ETH suite's 28545-28547 / 29000 and BTC suite's
-#     38545-38547 / 39000 so the three suites can co-exist if run in parallel).
-#     REST sim uses 50945-50947 for JSON-RPC echoes (helpful for mixed-chain
-#     tests; moved off 48545-48547, which collided with test_simulator_ws.py
-#     and test_simulator_logs_lag.py's identical literals) plus 48551-48553
-#     for the REST handler itself (unique, unchanged). Control moved off
-#     49000 (shared with logs_lag/ws/grpc) to 50300. ──────────────────
+# ── Test ports. Two rules keep binds reliable across the whole suite:
+#    1. Stay below 32768. Ports from 32768 up are the kernel's ephemeral
+#       client-port range (Linux default 32768-60999, macOS 49152-65535):
+#       every outgoing HTTP call an earlier test module makes grabs a random
+#       source port there, and a lingering one makes this module's bind fail
+#       with "Address already in use" at fixture setup.
+#    2. Each test file owns a unique port block (this file: 250xx) so all
+#       modules can run in one pytest invocation.
+#     JSON-RPC echo listeners (25045-7, for mixed-chain tests) + REST
+#     handler listeners (25051-3) + control (25000). ──────────────────
 
-_PROVIDER_PORTS = {"1": 50945, "2": 50946, "3": 50947}
-_REST_PORTS = {"1": 48551, "2": 48552, "3": 48553}
-_CONTROL_PORT = 50300
+_PROVIDER_PORTS = {"1": 25045, "2": 25046, "3": 25047}
+_REST_PORTS = {"1": 25051, "2": 25052, "3": 25053}
+_CONTROL_PORT = 25000
 
 # All (verb, template) pairs covered by the seed stub set.
 ALL_REST_ROUTES = sorted(REST_METHOD_DEFAULTS.keys())
@@ -116,11 +119,11 @@ def sim():
     """Start 3 JSON-RPC + 3 REST + 1 control server on dedicated test ports.
 
     Yields a dict with base URLs:
-      sim["control"]  → http://127.0.0.1:50300
-      sim["rest1"]    → http://127.0.0.1:48551
-      sim["rest2"]    → http://127.0.0.1:48552
-      sim["rest3"]    → http://127.0.0.1:48553
-      sim["jsonrpc1"] → http://127.0.0.1:50945
+      sim["control"]  → http://127.0.0.1:25000
+      sim["rest1"]    → http://127.0.0.1:25051
+      sim["rest2"]    → http://127.0.0.1:25052
+      sim["rest3"]    → http://127.0.0.1:25053
+      sim["jsonrpc1"] → http://127.0.0.1:25045
     """
     states = {pid: ProviderState() for pid in _PROVIDER_PORTS}
 
@@ -961,8 +964,8 @@ class TestRestPerPathFaultOverrides:
     def test_rest_tuple_keys_do_not_affect_jsonrpc_string_lookups(self, sim):
         """Cross-transport isolation: a tuple-keyed REST override does not
         accidentally shadow a string-keyed JSON-RPC method lookup on the
-        same provider. The JSON-RPC handler on port 50945 stays healthy
-        even though the REST handler on 48551 is faulted.
+        same provider. The JSON-RPC handler on port 25045 stays healthy
+        even though the REST handler on 25051 is faulted.
         """
         _post(
             _ctrl(sim, "/scenario"),

@@ -6,12 +6,11 @@ ports and exercises the WS handler. The module-scoped `sim` fixture boots
 once per test module. The autouse clean_state fixture calls /reset/all
 before and after every test so scenarios don't leak between tests.
 
-Test ports are 51045-51047 for the JSON-RPC pool / 48557-48559 for the WS
-pool so this file can run in the same pytest invocation as test_simulator.py
-/ test_simulator_rest.py without collision. The JSON-RPC pool and control
-port were moved off 48545-48547/49000, which collided with
-test_simulator_rest.py's and test_simulator_logs_lag.py's identical
-literals (silent locally, surfaced on GitHub Actions' Linux runner).
+Test ports are 26545-26547 for the JSON-RPC pool / 26557-26559 for the WS
+pool / 26500 for control so this file can run in the same pytest invocation
+as test_simulator.py / test_simulator_rest.py without collision (this file
+owns the 265xx block; see the port-block comment below for the below-32768
+rule every file follows).
 """
 
 from __future__ import annotations
@@ -42,9 +41,17 @@ from server import (
     ProviderState,
 )
 
-_PROVIDER_PORTS = {"1": 51045, "2": 51046, "3": 51047}
-_WS_PORTS = {"1": 48557, "2": 48558, "3": 48559}
-_CONTROL_PORT = 50400
+# ── Test ports. Two rules keep binds reliable across the whole suite:
+#    1. Stay below 32768. Ports from 32768 up are the kernel's ephemeral
+#       client-port range (Linux default 32768-60999, macOS 49152-65535):
+#       every outgoing HTTP call an earlier test module makes grabs a random
+#       source port there, and a lingering one makes this module's bind fail
+#       with "Address already in use" at fixture setup.
+#    2. Each test file owns a unique port block (this file: 265xx) so all
+#       modules can run in one pytest invocation.
+_PROVIDER_PORTS = {"1": 26545, "2": 26546, "3": 26547}
+_WS_PORTS = {"1": 26557, "2": 26558, "3": 26559}
+_CONTROL_PORT = 26500
 
 
 @pytest.fixture(scope="module")
