@@ -892,6 +892,7 @@ class TestRestPerPathFaultOverrides:
         _post(_ctrl(sim, "/scenario"), {
             "providers": {
                 "1": {
+                    "chain_family": "eth",
                     "responses": {
                         "eth_blockNumber": {"mode": "down"},
                     },

@@ -77,7 +77,7 @@ pause
 header "1a. Dirty up — set provider 1 to error mode and make a call"
 curl -s -X POST "$CONTROL/scenario" \
     -H "Content-Type: application/json" \
-    -d '{"providers": {"1": {"mode": "error"}}}' | python3 -m json.tool
+    -d '{"providers":{"1":{"chain_family":"eth","mode":"error"}}}' | python3 -m json.tool
 pause
 
 rpc
@@ -102,7 +102,7 @@ pause
 header "2a. Dirty up — set provider 2 to rate_limit"
 curl -s -X POST "$CONTROL/scenario" \
     -H "Content-Type: application/json" \
-    -d '{"providers": {"2": {"mode": "rate_limit"}}}' | python3 -m json.tool
+    -d '{"providers":{"2":{"chain_family":"eth","mode":"rate_limit"}}}' | python3 -m json.tool
 pause
 
 header "2b. POST /history/clear  — wipes history, does NOT touch scenario"
@@ -124,7 +124,7 @@ pause
 header "3a. Dirty up — set provider 3 to down and make two calls"
 curl -s -X POST "$CONTROL/scenario" \
     -H "Content-Type: application/json" \
-    -d '{"providers": {"3": {"mode": "down"}}}' | python3 -m json.tool
+    -d '{"providers":{"3":{"chain_family":"eth","mode":"down"}}}' | python3 -m json.tool
 pause
 
 rpc
@@ -150,7 +150,7 @@ pause
 header "4a. Setup — set provider 2 to error, make a few calls to populate history"
 curl -s -X POST "$CONTROL/scenario" \
     -H "Content-Type: application/json" \
-    -d '{"providers": {"2": {"mode": "error"}}}' > /dev/null
+    -d '{"providers":{"2":{"chain_family":"eth","mode":"error"}}}' > /dev/null
 rpc
 rpc
 rpc

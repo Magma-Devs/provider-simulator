@@ -629,16 +629,16 @@ def do_POST(self):
 # Request body:
 {
   "providers": {
-    "1": {"mode": "rate_limit"},
-    "2": {"mode": "down"},
-    "3": {"mode": "success", "latency_ms": 100}
+    "1": {"chain_family": "eth", "mode": "rate_limit"},
+    "2": {"chain_family": "eth", "mode": "down"},
+    "3": {"chain_family": "eth", "mode": "success", "latency_ms": 100}
   }
 }
 
-# Runs:
-state["1"].update({"mode": "rate_limit"})
-state["2"].update({"mode": "down"})
-state["3"].update({"mode": "success", "latency_ms": 100})
+# Runs (after validation — chain_family is required on every block):
+state["1"].update({"chain_family": "eth", "mode": "rate_limit"})
+state["2"].update({"chain_family": "eth", "mode": "down"})
+state["3"].update({"chain_family": "eth", "mode": "success", "latency_ms": 100})
 
 # Returns:
 {"status": "ok"}
@@ -745,13 +745,13 @@ Request 1:
 POST /scenario HTTP/1.1
 Content-Type: application/json
 
-{"providers": {"1": {"mode": "rate_limit"}}}
+{"providers": {"1": {"chain_family": "eth", "mode": "rate_limit"}}}
 
 ↓
 ControlHandler.do_POST() runs:
 1. Parse body
 2. Check path == "/scenario"? YES
-3. For provider "1", call state.update({"mode": "rate_limit"})
+3. For provider "1", call state.update({"chain_family": "eth", "mode": "rate_limit"})
 4. Call _reply(200, {"status": "ok"})
 
 Response:

@@ -245,20 +245,20 @@ class TestScenario:
             assert p["error_probability"] == 0.0
 
     def test_post_updates_target_provider_only(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "error"}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "error"}}})
         _, body = _get(_ctrl(sim, "/scenario"))
         assert body["providers"]["1"]["mode"] == "error"
         assert body["providers"]["2"]["mode"] == "success"   # untouched
         assert body["providers"]["3"]["mode"] == "success"   # untouched
 
     def test_post_partial_update_preserves_other_fields(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"2": {"latency_ms": 100}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"2": {"chain_family": "eth", "latency_ms": 100}}})
         _, body = _get(_ctrl(sim, "/scenario"))
         assert body["providers"]["2"]["latency_ms"] == 100
         assert body["providers"]["2"]["mode"]       == "success"   # unchanged
 
     def test_post_error_probability(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"3": {"error_probability": 0.7}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"3": {"chain_family": "eth", "error_probability": 0.7}}})
         _, body = _get(_ctrl(sim, "/scenario"))
         assert body["providers"]["3"]["error_probability"] == 0.7
 
@@ -281,26 +281,29 @@ class TestScenario:
         assert body["applied"]["1"]["chain_family"] == "eth"
         assert body["applied"]["2"]["chain_family"] == "btc"
 
-    def test_post_response_applied_shows_default_family_when_field_omitted(self, sim):
-        # A scenario posted without chain_family must echo the effective value
-        # ("eth" by default) in the applied receipt, not absent or null.
+    def test_post_without_chain_family_is_rejected_and_applies_nothing(self, sim):
+        # The old behaviour quietly filled chain_family="eth" when the field
+        # was omitted, so a scenario meant for another surface armed nothing
+        # and the test passed while testing nothing. Now the POST is rejected
+        # outright and the provider keeps its defaults.
         status, body = _post(_ctrl(sim, "/scenario"), {
-            "providers": {"3": {"mode": "success"}}
+            "providers": {"3": {"mode": "error"}}
         })
-        assert status == 200
-        assert "applied" in body
-        assert body["applied"]["3"]["chain_family"] == "eth"
+        assert status == 400
+        assert "chain_family is required" in body["error"]
+        _, snap = _get(_ctrl(sim, "/scenario"))
+        assert snap["providers"]["3"]["mode"] == "success", \
+            "a rejected scenario must not mutate the provider"
 
     def test_scenario_success_response_shape_includes_applied(self, sim):
-        # Pin the full /scenario success response shape, including the new
-        # "applied" key: the body is always exactly {"status": "ok", "applied": {...}}
-        # — no key missing, no extra keys.
+        # Pin the exact /scenario success response body, including the
+        # "applied" receipt content — the whole body, byte for byte, so a
+        # change to any key or value fails here first.
         status, body = _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"mode": "error"}}
+            "providers": {"1": {"chain_family": "eth", "mode": "error"}}
         })
         assert status == 200
-        assert set(body.keys()) == {"status", "applied"}
-        assert body["status"] == "ok"
+        assert body == {"status": "ok", "applied": {"1": {"chain_family": "eth"}}}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -316,40 +319,40 @@ class TestProviderModes:
         assert "error" not in body
 
     def test_error_mode_returns_jsonrpc_error(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "error"}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "error"}}})
         status, body = _rpc(sim["provider1"], "eth_blockNumber")
         assert status == 200
         assert "error" in body
         assert body["error"]["code"] == -32000
 
     def test_rate_limit_returns_429(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "rate_limit"}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "rate_limit"}}})
         status, body = _rpc(sim["provider1"], "eth_blockNumber")
         assert status == 429
         assert body["error"]["code"] == 429
 
     def test_down_returns_503_with_no_body(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "down"}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "down"}}})
         status, body = _rpc(sim["provider1"], "eth_blockNumber")
         assert status == 503
         assert body == {}   # server sends no body for 503
 
     def test_error_probability_1_always_errors(self, sim):
         _post(_ctrl(sim, "/scenario"),
-              {"providers": {"1": {"mode": "success", "error_probability": 1.0}}})
+              {"providers": {"1": {"chain_family": "eth", "mode": "success", "error_probability": 1.0}}})
         for _ in range(5):
             _, body = _rpc(sim["provider1"], "eth_blockNumber")
             assert "error" in body
 
     def test_error_probability_0_never_errors(self, sim):
         _post(_ctrl(sim, "/scenario"),
-              {"providers": {"1": {"mode": "success", "error_probability": 0.0}}})
+              {"providers": {"1": {"chain_family": "eth", "mode": "success", "error_probability": 0.0}}})
         for _ in range(5):
             _, body = _rpc(sim["provider1"], "eth_blockNumber")
             assert "result" in body
 
     def test_latency_ms_delays_response(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"latency_ms": 200}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "latency_ms": 200}}})
         t0 = time.monotonic()
         _rpc(sim["provider1"], "eth_blockNumber")
         elapsed_ms = (time.monotonic() - t0) * 1000
@@ -357,14 +360,14 @@ class TestProviderModes:
 
     def test_custom_response_per_method(self, sim):
         _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"responses": {"eth_blockNumber": {"result": "0xDEAD"}}}}
+            "providers": {"1": {"chain_family": "eth", "responses": {"eth_blockNumber": {"result": "0xDEAD"}}}}
         })
         _, body = _rpc(sim["provider1"], "eth_blockNumber")
         assert body["result"] == "0xDEAD"
 
     def test_custom_default_response(self, sim):
         _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"responses": {"default": {"result": "0xBEEF"}}}}
+            "providers": {"1": {"chain_family": "eth", "responses": {"default": {"result": "0xBEEF"}}}}
         })
         _, body = _rpc(sim["provider1"], "eth_unknownMethod")
         assert body["result"] == "0xBEEF"
@@ -408,7 +411,7 @@ class TestErrorStubs:
         """
         stub = ERROR_STUBS[stub_name]
         _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"responses": {"eth_call": {"error_stub": stub_name}}}}
+            "providers": {"1": {"chain_family": "eth", "responses": {"eth_call": {"error_stub": stub_name}}}}
         })
         status, body = _rpc(sim["provider1"], "eth_call")
         assert status == 200
@@ -427,7 +430,7 @@ class TestErrorStubs:
         the per-method override errors only for the named method.
         """
         _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"responses": {"eth_call": {"error_stub": "revert"}}}}
+            "providers": {"1": {"chain_family": "eth", "responses": {"eth_call": {"error_stub": "revert"}}}}
         })
         _, err_body = _rpc(sim["provider1"], "eth_call")
         assert "error" in err_body
@@ -443,7 +446,7 @@ class TestErrorStubs:
         when present, otherwise state.responses.get("default", {}) is used.
         """
         _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"responses": {"default": {"error_stub": "oog"}}}}
+            "providers": {"1": {"chain_family": "eth", "responses": {"default": {"error_stub": "oog"}}}}
         })
         _, body = _rpc(sim["provider1"], "eth_unknownMethod")
         assert "error" in body
@@ -457,7 +460,7 @@ class TestErrorStubs:
         branch logic has an in-place regression check.
         """
         _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"responses": {"eth_blockNumber": {"result": "0xDEAD"}}}}
+            "providers": {"1": {"chain_family": "eth", "responses": {"eth_blockNumber": {"result": "0xDEAD"}}}}
         })
         _, body = _rpc(sim["provider1"], "eth_blockNumber")
         assert body["result"] == "0xDEAD"
@@ -471,7 +474,7 @@ class TestErrorStubs:
         provider can succeed with a different status if needed.
         """
         _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"responses": {
+            "providers": {"1": {"chain_family": "eth", "responses": {
                 "eth_call": {"error_stub": "revert", "http_status": 200}
             }}}
         })
@@ -487,7 +490,7 @@ class TestErrorStubs:
         sources identically.
         """
         _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"responses": {"eth_call": {"error_stub": "revert"}}}}
+            "providers": {"1": {"chain_family": "eth", "responses": {"eth_call": {"error_stub": "revert"}}}}
         })
         _rpc(sim["provider1"], "eth_call")
         _, body = _get(_ctrl(sim, "/history"))
@@ -504,7 +507,7 @@ class TestErrorStubs:
         ad_hoc = {"code": -32099, "message": "synthetic test error",
                   "data": {"trace_id": "abc-123"}}
         _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"responses": {"eth_call": {"error": ad_hoc}}}}
+            "providers": {"1": {"chain_family": "eth", "responses": {"eth_call": {"error": ad_hoc}}}}
         })
         _, body = _rpc(sim["provider1"], "eth_call")
         assert body["error"] == ad_hoc
@@ -518,7 +521,7 @@ class TestReset:
 
     def test_reset_restores_scenario_to_defaults(self, sim):
         _post(_ctrl(sim, "/scenario"), {"providers": {
-            "1": {"mode": "error", "latency_ms": 500, "error_probability": 0.9}
+            "1": {"chain_family": "eth", "mode": "error", "latency_ms": 500, "error_probability": 0.9}
         }})
         status, body = _post(_ctrl(sim, "/reset"), {})
         assert status == 200
@@ -610,7 +613,7 @@ class TestHistoryClear:
                 f"provider {pid} total_requests_all_time should be 0 after clear, got {total}"
 
     def test_does_not_change_scenario_config(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"2": {"mode": "error"}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"2": {"chain_family": "eth", "mode": "error"}}})
         _post(_ctrl(sim, "/history/clear"), {})
         _, scenario = _get(_ctrl(sim, "/scenario"))
         assert scenario["providers"]["2"]["mode"] == "error"   # untouched
@@ -691,7 +694,7 @@ class TestResetAll:
                 f"provider {pid} history not cleared — got: {body}"
 
     def test_reset_all_also_resets_scenario(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"3": {"mode": "down"}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"3": {"chain_family": "eth", "mode": "down"}}})
         _rpc(sim["provider1"], "eth_blockNumber")
         _post(_ctrl(sim, "/reset/all"), {})
         _, scenario = _get(_ctrl(sim, "/scenario"))
@@ -762,9 +765,9 @@ class TestStats:
         assert p1["requests_by_status_all_time"].get("success", 0) >= 2
 
     def test_tracks_status_breakdown(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "error"}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "error"}}})
         _rpc(sim["provider1"], "eth_blockNumber")
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "rate_limit"}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "rate_limit"}}})
         _rpc(sim["provider1"], "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/stats"))
         breakdown = body["providers"]["1"]["requests_by_status_all_time"]
@@ -772,7 +775,7 @@ class TestStats:
         assert breakdown.get("rate_limit", 0) >= 1
 
     def test_down_mode_counted_in_stats(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "down"}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "down"}}})
         _rpc(sim["provider1"], "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/stats"))
         assert body["providers"]["1"]["requests_by_status_all_time"].get("down", 0) >= 1
@@ -826,7 +829,7 @@ class TestHistory:
 
     def test_down_mode_request_id_is_null(self, sim):
         """Down-mode entries must have request_id=None (body is never parsed)."""
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "down"}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "down"}}})
         _rpc(sim["provider1"], "eth_blockNumber")
         _, hist = _get(_ctrl(sim, "/history?provider=1"))
         assert hist["count"] >= 1
@@ -851,7 +854,7 @@ class TestHistory:
         assert body["history"][0]["latency_ms"] == 0
 
     def test_latency_ms_reflects_configured_delay(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"latency_ms": 150}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "latency_ms": 150}}})
         _rpc(sim["provider1"], "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/history"))
         assert body["history"][0]["latency_ms"] >= 100
@@ -908,14 +911,14 @@ class TestHistory:
 
     def test_filter_status_success(self, sim):
         _rpc(sim["provider1"], "eth_blockNumber")               # success
-        _post(_ctrl(sim, "/scenario"), {"providers": {"2": {"mode": "error"}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"2": {"chain_family": "eth", "mode": "error"}}})
         _rpc(sim["provider2"], "eth_blockNumber")               # error
         _, body = _get(_ctrl(sim, "/history?status=success"))
         assert body["count"] >= 1
         assert all(e["status"] == "success" for e in body["history"])
 
     def test_filter_status_error(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "error"}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "error"}}})
         _rpc(sim["provider1"], "eth_blockNumber")
         _rpc(sim["provider2"], "eth_blockNumber")               # success
         _, body = _get(_ctrl(sim, "/history?status=error"))
@@ -923,21 +926,21 @@ class TestHistory:
         assert all(e["status"] == "error" for e in body["history"])
 
     def test_filter_status_rate_limit(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "rate_limit"}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "rate_limit"}}})
         _rpc(sim["provider1"], "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/history?status=rate_limit"))
         assert body["count"] >= 1
         assert all(e["status"] == "rate_limit" for e in body["history"])
 
     def test_filter_status_down(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "down"}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "down"}}})
         _rpc(sim["provider1"], "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/history?status=down"))
         assert body["count"] >= 1
         assert all(e["status"] == "down" for e in body["history"])
 
     def test_down_mode_recorded_with_wildcard_method(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "down"}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "down"}}})
         _rpc(sim["provider1"], "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/history?provider=1"))
         assert any(e["method"] == "*" for e in body["history"])
@@ -990,7 +993,7 @@ class TestHistory:
 
     def test_combined_last_provider_status(self, sim):
         _rpc(sim["provider1"], "eth_blockNumber")               # success
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "error"}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "error"}}})
         _rpc(sim["provider1"], "eth_blockNumber")               # error
         _rpc(sim["provider2"], "eth_blockNumber")               # success on p2
         _, body = _get(_ctrl(sim, "/history?last=30&provider=1&status=error"))
@@ -1186,7 +1189,7 @@ class TestScenarioValidation:
     def test_valid_scenario_still_returns_200(self, sim):
         """A well-formed scenario is unaffected by the new validation."""
         status, body = _post(_ctrl(sim, "/scenario"),
-                             {"providers": {"1": {"mode": "error", "latency_ms": 10}}})
+                             {"providers": {"1": {"chain_family": "eth", "mode": "error", "latency_ms": 10}}})
         assert status == 200
         assert body["status"] == "ok"
 
@@ -1194,13 +1197,13 @@ class TestScenarioValidation:
         """A misspelled field (e.g. 'latencyms') is a typo — reject it so the
         test doesn't pass green against an unconfigured provider."""
         status, body = _post(_ctrl(sim, "/scenario"),
-                             {"providers": {"1": {"latencyms": 500}}})
+                             {"providers": {"1": {"chain_family": "eth", "latencyms": 500}}})
         assert status == 400
         assert "latencyms" in body["error"]
 
     def test_invalid_mode_returns_400(self, sim):
         status, body = _post(_ctrl(sim, "/scenario"),
-                             {"providers": {"1": {"mode": "boom"}}})
+                             {"providers": {"1": {"chain_family": "eth", "mode": "boom"}}})
         assert status == 400
         assert "mode" in body["error"]
 
@@ -1210,15 +1213,57 @@ class TestScenarioValidation:
         assert status == 400
         assert "chain_family" in body["error"]
 
+    def test_missing_chain_family_returns_400(self, sim):
+        """A provider block that omits chain_family must be rejected, never
+        silently defaulted to "eth". The 400 body names the offending
+        provider and lists every valid value."""
+        status, body = _post(_ctrl(sim, "/scenario"),
+                             {"providers": {"2": {"mode": "error"}}})
+        assert status == 400
+        assert "provider '2'" in body["error"]
+        assert "chain_family is required" in body["error"]
+        assert ("valid values: ['btc', 'eth', 'grpc', 'ln', 'rest', "
+                "'solana', 'tendermintrpc', 'ws']") in body["error"]
+
+    def test_missing_chain_family_rejected_for_down_mode_too(self, sim):
+        """mode="down" gets no exemption. Reachability faults fire on every
+        surface, but the scenario author must still say which surface owns
+        the scenario — omission is rejected the same way."""
+        status, body = _post(_ctrl(sim, "/scenario"),
+                             {"providers": {"1": {"mode": "down"}}})
+        assert status == 400
+        assert "chain_family is required" in body["error"]
+
+    def test_empty_provider_block_missing_chain_family_returns_400(self, sim):
+        """Even an empty config block ({}) lacks chain_family and is rejected."""
+        status, body = _post(_ctrl(sim, "/scenario"),
+                             {"providers": {"3": {}}})
+        assert status == 400
+        assert "provider '3'" in body["error"]
+        assert "chain_family is required" in body["error"]
+
+    def test_missing_chain_family_on_one_block_rejects_whole_post(self, sim):
+        """All-or-nothing: provider 1 carries the field, provider 2 omits it —
+        the POST is 400 and provider 1's valid config is NOT applied."""
+        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {
+            "1": {"chain_family": "eth", "mode": "error"},
+            "2": {"latency_ms": 50},
+        }})
+        assert status == 400
+        assert "provider '2'" in body["error"]
+        _, snap = _get(_ctrl(sim, "/scenario"))
+        assert snap["providers"]["1"]["mode"] == "success", \
+            "provider 1 must not be mutated when provider 2's block is rejected"
+
     def test_invalid_corruption_mode_returns_400(self, sim):
         status, body = _post(_ctrl(sim, "/scenario"),
-                             {"providers": {"1": {"corruption_mode": "shred"}}})
+                             {"providers": {"1": {"chain_family": "eth", "corruption_mode": "shred"}}})
         assert status == 400
         assert "corruption_mode" in body["error"]
 
     def test_error_probability_out_of_range_returns_400(self, sim):
         status, body = _post(_ctrl(sim, "/scenario"),
-                             {"providers": {"1": {"error_probability": 2.0}}})
+                             {"providers": {"1": {"chain_family": "eth", "error_probability": 2.0}}})
         assert status == 400
         assert "error_probability" in body["error"]
 
@@ -1226,7 +1271,7 @@ class TestScenarioValidation:
         """A negative latency reaches time.sleep(-x) → ValueError at request
         time. Reject it up front so the fault primitive stays clean."""
         status, body = _post(_ctrl(sim, "/scenario"),
-                             {"providers": {"1": {"latency_ms": -5}}})
+                             {"providers": {"1": {"chain_family": "eth", "latency_ms": -5}}})
         assert status == 400
         assert "latency_ms" in body["error"]
 
@@ -1251,19 +1296,19 @@ class TestScenarioValidation:
 
     def test_invalid_then_mode_returns_400(self, sim):
         status, body = _post(_ctrl(sim, "/scenario"),
-                             {"providers": {"1": {"then_mode": "sucess"}}})
+                             {"providers": {"1": {"chain_family": "eth", "then_mode": "sucess"}}})
         assert status == 400
         assert "then_mode" in body["error"]
 
     def test_negative_fail_first_n_returns_400(self, sim):
         status, body = _post(_ctrl(sim, "/scenario"),
-                             {"providers": {"1": {"fail_first_n": -1}}})
+                             {"providers": {"1": {"chain_family": "eth", "fail_first_n": -1}}})
         assert status == 400
         assert "fail_first_n" in body["error"]
 
     def test_invalid_solana_unknown_method_mode_returns_400(self, sim):
         status, body = _post(_ctrl(sim, "/scenario"),
-                             {"providers": {"1": {"solana_unknown_method_mode": "bogus"}}})
+                             {"providers": {"1": {"chain_family": "eth", "solana_unknown_method_mode": "bogus"}}})
         assert status == 400
         assert "solana_unknown_method_mode" in body["error"]
 
@@ -1271,7 +1316,7 @@ class TestScenarioValidation:
         """All-or-nothing: if provider 2's config is invalid, provider 1's
         valid config in the same call is not applied."""
         status, _ = _post(_ctrl(sim, "/scenario"),
-                          {"providers": {"1": {"mode": "error"}, "2": {"mode": "boom"}}})
+                          {"providers": {"1": {"chain_family": "eth", "mode": "error"}, "2": {"chain_family": "eth", "mode": "boom"}}})
         assert status == 400
         _, snap = _get(_ctrl(sim, "/scenario"))
         assert snap["providers"]["1"]["mode"] == "success", \
@@ -1306,6 +1351,7 @@ class TestSequencedFaults:
         then every call after switches to then_mode (default success) — a
         deterministic retry-then-recover, no random error_probability."""
         _post(_ctrl(sim, "/scenario"), {"providers": {"1": {
+            "chain_family": "eth",
             "mode": "error", "error_code": -32050, "error_message": "boom",
             "fail_first_n": 2,
         }}})
@@ -1320,6 +1366,7 @@ class TestSequencedFaults:
         """fail_first_n=0 (default) means the sequenced fault is off — the
         configured mode applies to every call, as before."""
         _post(_ctrl(sim, "/scenario"), {"providers": {"1": {
+            "chain_family": "eth",
             "mode": "error", "error_code": -32051, "fail_first_n": 0,
         }}})
         _, b1 = _rpc(sim["provider1"], "eth_blockNumber")
@@ -1330,6 +1377,7 @@ class TestSequencedFaults:
     def test_then_mode_honored_after_window(self, sim):
         """then_mode can be any mode — succeed for the first call, then go down."""
         _post(_ctrl(sim, "/scenario"), {"providers": {"1": {
+            "chain_family": "eth",
             "mode": "success", "fail_first_n": 1, "then_mode": "down",
         }}})
         s1, _ = _rpc(sim["provider1"], "eth_blockNumber")
@@ -1363,7 +1411,7 @@ class TestModePriority:
 
     def test_down_skips_latency_responds_immediately(self, sim):
         """mode=down must return 503 without sleeping, even when latency_ms is set."""
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "down", "latency_ms": 5000}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "down", "latency_ms": 5000}}})
         t0 = time.monotonic()
         _rpc(sim["provider1"], "eth_blockNumber")
         elapsed_ms = (time.monotonic() - t0) * 1000
@@ -1373,7 +1421,7 @@ class TestModePriority:
     def test_error_mode_always_errors_regardless_of_probability(self, sim):
         """mode=error must always return error even if error_probability=0.0."""
         _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"mode": "error", "error_probability": 0.0}}
+            "providers": {"1": {"chain_family": "eth", "mode": "error", "error_probability": 0.0}}
         })
         for _ in range(5):
             _, body = _rpc(sim["provider1"], "eth_blockNumber")
@@ -1382,7 +1430,7 @@ class TestModePriority:
     def test_rate_limit_takes_priority_over_error_probability(self, sim):
         """mode=rate_limit must always return 429 even if error_probability=1.0."""
         _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"mode": "rate_limit", "error_probability": 1.0}}
+            "providers": {"1": {"chain_family": "eth", "mode": "rate_limit", "error_probability": 1.0}}
         })
         for _ in range(3):
             status, _ = _rpc(sim["provider1"], "eth_blockNumber")
@@ -1391,7 +1439,7 @@ class TestModePriority:
     def test_down_takes_priority_over_error_probability(self, sim):
         """mode=down must always return 503 regardless of error_probability."""
         _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"mode": "down", "error_probability": 1.0}}
+            "providers": {"1": {"chain_family": "eth", "mode": "down", "error_probability": 1.0}}
         })
         status, _ = _rpc(sim["provider1"], "eth_blockNumber")
         assert status == 503
@@ -1416,7 +1464,7 @@ class TestScenarioEdgeCases:
         Reject it with a clean 400 — not a crash, and not a silent 200 that
         would let a test run green against an unconfigured provider — and leave
         the real providers untouched, so the rejection is atomic."""
-        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"99": {"mode": "error"}}})
+        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"99": {"chain_family": "eth", "mode": "error"}}})
         assert status == 400
         assert "99" in body["error"]
         # real providers unchanged — the whole call was rejected, not partially applied
@@ -1426,9 +1474,9 @@ class TestScenarioEdgeCases:
 
     def test_all_three_providers_updated_in_one_call(self, sim):
         _post(_ctrl(sim, "/scenario"), {"providers": {
-            "1": {"mode": "error"},
-            "2": {"mode": "rate_limit"},
-            "3": {"mode": "down"},
+            "1": {"chain_family": "eth", "mode": "error"},
+            "2": {"chain_family": "eth", "mode": "rate_limit"},
+            "3": {"chain_family": "eth", "mode": "down"},
         }})
         _, scenario = _get(_ctrl(sim, "/scenario"))
         assert scenario["providers"]["1"]["mode"] == "error"
@@ -1438,7 +1486,7 @@ class TestScenarioEdgeCases:
     def test_custom_responses_cleared_by_reset(self, sim):
         """POST /reset must wipe custom responses, not just mode/latency."""
         _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"responses": {"eth_blockNumber": {"result": "0xCAFE"}}}}
+            "providers": {"1": {"chain_family": "eth", "responses": {"eth_blockNumber": {"result": "0xCAFE"}}}}
         })
         _, before = _rpc(sim["provider1"], "eth_blockNumber")
         assert before["result"] == "0xCAFE"
@@ -1450,7 +1498,7 @@ class TestScenarioEdgeCases:
 
     def test_custom_responses_cleared_by_reset_all(self, sim):
         _post(_ctrl(sim, "/scenario"), {
-            "providers": {"2": {"responses": {"eth_blockNumber": {"result": "0xDEAD"}}}}
+            "providers": {"2": {"chain_family": "eth", "responses": {"eth_blockNumber": {"result": "0xDEAD"}}}}
         })
         _post(_ctrl(sim, "/reset/all"), {})
         _, body = _rpc(sim["provider2"], "eth_blockNumber")
@@ -1460,7 +1508,7 @@ class TestScenarioEdgeCases:
     def test_custom_responses_survive_history_clear(self, sim):
         """/history/clear must NOT touch scenario config — custom responses must persist."""
         _post(_ctrl(sim, "/scenario"), {
-            "providers": {"3": {"responses": {"eth_blockNumber": {"result": "0xBEEF"}}}}
+            "providers": {"3": {"chain_family": "eth", "responses": {"eth_blockNumber": {"result": "0xBEEF"}}}}
         })
         _post(_ctrl(sim, "/history/clear"), {})
         _, body = _rpc(sim["provider3"], "eth_blockNumber")
@@ -1774,7 +1822,7 @@ class TestConcurrency:
 
         def flip():
             for mode in ("success", "error", "success", "error", "success"):
-                _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": mode}}})
+                _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": mode}}})
                 time.sleep(0.01)
 
         t1 = threading.Thread(target=spam)
@@ -1903,7 +1951,7 @@ class TestLavaHeadersCapture:
         for mode in modes:
             _post(_ctrl(sim, "/history/clear"), {})
             _post(_ctrl(sim, "/scenario"), {
-                "providers": {"1": {"mode": mode}}
+                "providers": {"1": {"chain_family": "eth", "mode": mode}}
             })
             _rpc(sim["provider1"], "eth_blockNumber")
 
@@ -2163,7 +2211,7 @@ class TestHttpStatusInSuccessMode:
     status code with a valid JSON-RPC success body."""
 
     def test_success_mode_with_custom_http_status(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "success", "http_status": 502}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "success", "http_status": 502}}})
         status, body = _rpc(sim["provider1"], "eth_blockNumber")
         assert status == 502, f"expected HTTP 502, got {status}"
         assert "result" in body, f"expected JSON-RPC success body, got {body}"
@@ -2171,7 +2219,7 @@ class TestHttpStatusInSuccessMode:
 
     def test_success_mode_default_http_status_is_200(self, sim):
         # Regression: default http_status=200 must continue to apply in success mode
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "success"}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "success"}}})
         status, body = _rpc(sim["provider1"], "eth_blockNumber")
         assert status == 200
         assert "result" in body
@@ -2179,7 +2227,7 @@ class TestHttpStatusInSuccessMode:
     def test_error_mode_still_honors_http_status(self, sim):
         # Regression: existing behaviour (http_status in error mode) still works
         _post(_ctrl(sim, "/scenario"),
-              {"providers": {"1": {"mode": "error", "http_status": 500, "error_code": -32603}}})
+              {"providers": {"1": {"chain_family": "eth", "mode": "error", "http_status": 500, "error_code": -32603}}})
         status, body = _rpc(sim["provider1"], "eth_blockNumber")
         assert status == 500
         assert body["error"]["code"] == -32603
@@ -2203,7 +2251,7 @@ class TestCorruptionMode:
 
     def test_truncated_corrupts_json(self, sim):
         _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"mode": "success", "corruption_mode": "truncated"}}
+            "providers": {"1": {"chain_family": "eth", "mode": "success", "corruption_mode": "truncated"}}
         })
         # Use raw urllib because _rpc parses JSON which would fail on truncated
         req = urllib.request.Request(
@@ -2220,7 +2268,7 @@ class TestCorruptionMode:
 
     def test_missing_field_omits_specified_top_level_field(self, sim):
         _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"mode": "success", "corruption_mode": "missing_field",
+            "providers": {"1": {"chain_family": "eth", "mode": "success", "corruption_mode": "missing_field",
                                  "missing_field": "result"}}
         })
         status, body = _rpc(sim["provider1"], "eth_blockNumber")
@@ -2231,7 +2279,7 @@ class TestCorruptionMode:
 
     def test_invalid_json_returns_garbage(self, sim):
         _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"mode": "success", "corruption_mode": "invalid_json"}}
+            "providers": {"1": {"chain_family": "eth", "mode": "success", "corruption_mode": "invalid_json"}}
         })
         req = urllib.request.Request(
             sim["provider1"], data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}',
@@ -2246,7 +2294,7 @@ class TestCorruptionMode:
 
     def test_empty_response_returns_no_body(self, sim):
         _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"mode": "success", "corruption_mode": "empty_response"}}
+            "providers": {"1": {"chain_family": "eth", "mode": "success", "corruption_mode": "empty_response"}}
         })
         req = urllib.request.Request(
             sim["provider1"], data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}',
@@ -2257,7 +2305,7 @@ class TestCorruptionMode:
 
     def test_default_corruption_mode_is_none(self, sim):
         # Regression: default behaviour unchanged when corruption_mode is unset
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "success"}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "success"}}})
         status, body = _rpc(sim["provider1"], "eth_blockNumber")
         assert status == 200
         assert "result" in body
@@ -2266,7 +2314,7 @@ class TestCorruptionMode:
         # eth_blockNumber returns result as a hex string (e.g. "0x1234"); wrong_type
         # should flip it to an int. Default target field is "result".
         _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"mode": "success", "corruption_mode": "wrong_type"}}
+            "providers": {"1": {"chain_family": "eth", "mode": "success", "corruption_mode": "wrong_type"}}
         })
         status, body = _rpc(sim["provider1"], "eth_blockNumber")
         assert status == 200
@@ -2283,6 +2331,7 @@ class TestCorruptionMode:
         _post(_ctrl(sim, "/scenario"), {
             "providers": {
                 "1": {
+                    "chain_family": "eth",
                     "mode": "success",
                     "corruption_mode": "wrong_type",
                     "missing_field": "id",
@@ -2303,6 +2352,7 @@ class TestCorruptionMode:
         _post(_ctrl(sim, "/scenario"), {
             "providers": {
                 "1": {
+                    "chain_family": "eth",
                     "mode": "success",
                     "corruption_mode": "wrong_type",
                     "missing_field": "no_such_field",
@@ -2331,12 +2381,12 @@ class TestBlocksBehind:
     HEAD = int("0x1312D00", 16)  # 20,000,000 — the simulator's default eth_blockNumber
 
     def test_blocks_behind_shifts_eth_blockNumber(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "success", "blocks_behind": 100}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "success", "blocks_behind": 100}}})
         _, body = _rpc(sim["provider1"], "eth_blockNumber")
         assert int(body["result"], 16) == self.HEAD - 100
 
     def test_blocks_ahead_via_negative_value(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "success", "blocks_behind": -50}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "success", "blocks_behind": -50}}})
         _, body = _rpc(sim["provider1"], "eth_blockNumber")
         assert int(body["result"], 16) == self.HEAD + 50
 
@@ -2346,7 +2396,7 @@ class TestBlocksBehind:
         assert body["result"] == "0x1312D00"
 
     def test_eth_get_block_by_number_latest_respects_blocks_behind(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "success", "blocks_behind": 25}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "success", "blocks_behind": 25}}})
         _, body = _rpc(sim["provider1"], "eth_getBlockByNumber", ["latest", False])
         assert int(body["result"]["number"], 16) == self.HEAD - 25
 
@@ -2354,9 +2404,9 @@ class TestBlocksBehind:
         # Cross-validation enabler: each provider can report a different head
         _post(_ctrl(sim, "/scenario"), {
             "providers": {
-                "1": {"mode": "success", "blocks_behind": 0},
-                "2": {"mode": "success", "blocks_behind": 5},
-                "3": {"mode": "success", "blocks_behind": 100},
+                "1": {"chain_family": "eth", "mode": "success", "blocks_behind": 0},
+                "2": {"chain_family": "eth", "mode": "success", "blocks_behind": 5},
+                "3": {"chain_family": "eth", "mode": "success", "blocks_behind": 100},
             }
         })
         _, b1 = _rpc(sim["provider1"], "eth_blockNumber")
@@ -2379,7 +2429,7 @@ class TestHangMode:
     side it looks like a request that exceeds the read timeout."""
 
     def test_hang_blocks_until_client_timeout(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "hang"}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "hang"}}})
         # Client sets a small read timeout — should hit it because server hangs
         req = urllib.request.Request(
             sim["provider1"], data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}',
@@ -2394,7 +2444,7 @@ class TestHangMode:
             assert elapsed < 3.0, f"timeout took longer than client config: {elapsed:.2f}s"
 
     def test_hang_records_in_history(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "hang"}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "hang"}}})
         req = urllib.request.Request(
             sim["provider1"], data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}',
             headers={"Content-Type": "application/json"})
@@ -2439,7 +2489,7 @@ class TestDropConnection:
 
     def test_drop_before_headers_no_response(self, sim):
         _post(_ctrl(sim, "/scenario"), {"providers": {
-            "1": {"mode": "drop_connection", "drop_at": "before_headers"}
+            "1": {"chain_family": "eth", "mode": "drop_connection", "drop_at": "before_headers"}
         }})
         result = self._send_and_capture_error(sim["provider1"])
         assert result != "OK", "expected error from connection drop, got valid response"
@@ -2450,7 +2500,7 @@ class TestDropConnection:
 
     def test_drop_after_headers_incomplete_read(self, sim):
         _post(_ctrl(sim, "/scenario"), {"providers": {
-            "1": {"mode": "drop_connection", "drop_at": "after_headers"}
+            "1": {"chain_family": "eth", "mode": "drop_connection", "drop_at": "after_headers"}
         }})
         result = self._send_and_capture_error(sim["provider1"])
         assert result != "OK", "expected error from connection drop, got valid response"
@@ -2462,20 +2512,20 @@ class TestDropConnection:
 
     def test_drop_mid_body_truncated(self, sim):
         _post(_ctrl(sim, "/scenario"), {"providers": {
-            "1": {"mode": "drop_connection", "drop_at": "mid_body"}
+            "1": {"chain_family": "eth", "mode": "drop_connection", "drop_at": "mid_body"}
         }})
         result = self._send_and_capture_error(sim["provider1"])
         assert result != "OK", "expected error from connection drop, got valid response"
 
     def test_drop_default_at_is_before_headers(self, sim):
         # When drop_at is unset, default to before_headers (most disruptive)
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "drop_connection"}}})
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "drop_connection"}}})
         result = self._send_and_capture_error(sim["provider1"])
         assert result != "OK"
 
     def test_drop_records_in_history(self, sim):
         _post(_ctrl(sim, "/scenario"), {"providers": {
-            "1": {"mode": "drop_connection", "drop_at": "before_headers"}
+            "1": {"chain_family": "eth", "mode": "drop_connection", "drop_at": "before_headers"}
         }})
         self._send_and_capture_error(sim["provider1"])
         time.sleep(0.1)  # let the server flush history

@@ -192,8 +192,14 @@ def _set_btc(sim, pid: str = "1", **extra):
     Any extra kwargs are folded into the per-provider config dict (latency_ms,
     mode, blocks_behind, responses, etc.) so callers can write one-liners
     instead of nesting dicts.
+
+    MAG-1783: /scenario now rejects provider blocks without chain_family, so
+    this helper fills "eth" — the exact value the simulator used to default
+    to when the field was omitted. On the BTC listener "eth" keeps content
+    faults un-armed (the gate needs "btc"), which is what plain-helper
+    callers rely on. Override via ``chain_family="btc"`` in extras.
     """
-    cfg = dict(extra)
+    cfg = {"chain_family": "eth", **extra}
     return _post(_ctrl(sim, "/scenario"), {"providers": {pid: cfg}})
 
 

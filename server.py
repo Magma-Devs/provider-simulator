@@ -20,11 +20,14 @@ chain_family (per provider) tags which surface's faults the scenario owns:
 one word — a blockchain (eth / btc / ln / solana) or a connection type
 (grpc / rest / tendermintrpc / ws), never both at once. The listener port
 picks the response handler; chain_family only gates content-fault firing.
-mode="down" fires on every surface regardless. Unknown values → HTTP 400.
+mode="down" fires on every surface regardless. The field is REQUIRED on
+every provider block (MAG-1783): a missing or unknown value → HTTP 400,
+it is never silently defaulted to "eth".
 
 Control API:
-  POST /scenario   {"providers": {"1": {"mode": "error", "error_code": -32601,
-                     "error_message": "Method not found", "http_status": 200}}}
+  POST /scenario   {"providers": {"1": {"chain_family": "eth", "mode": "error",
+                     "error_code": -32601, "error_message": "Method not found",
+                     "http_status": 200}}}
   POST /reset      {}
   GET  /scenario   → current state of all providers
   GET  /health     → {"status": "ok"}
@@ -245,6 +248,23 @@ def _validate_scenario_cfg(pid: Any, cfg: Any) -> None:
             f"provider {pid!r}: unknown scenario field(s) {sorted(unknown)}; "
             f"allowed fields are {sorted(_SCENARIO_FIELDS)}"
         )
+    # chain_family is REQUIRED on every provider block — also for mode="down".
+    # The field used to be optional and quietly defaulted to "eth": a scenario
+    # meant for another surface then armed nothing (content faults are gated on
+    # the owning family) and the test passed while testing nothing. Rejecting
+    # the omission makes that mistake fail loudly at /scenario time. Checked
+    # right after the unknown-field pass so a typo'd field name still gets the
+    # more specific "unknown field" message.
+    if "chain_family" not in cfg:
+        raise ValueError(
+            f"provider {pid!r}: chain_family is required; "
+            f"valid values: {sorted(_SCENARIO_CHAIN_FAMILIES)}"
+        )
+    if cfg["chain_family"] not in _SCENARIO_CHAIN_FAMILIES:
+        raise ValueError(
+            f"provider {pid!r}: invalid chain_family {cfg['chain_family']!r}; "
+            f"allowed: {sorted(_SCENARIO_CHAIN_FAMILIES)}"
+        )
     if "mode" in cfg and cfg["mode"] not in _SCENARIO_MODES:
         raise ValueError(
             f"provider {pid!r}: invalid mode {cfg['mode']!r}; "
@@ -260,11 +280,6 @@ def _validate_scenario_cfg(pid: Any, cfg: Any) -> None:
         raise ValueError(
             f"provider {pid!r}: invalid drop_at {cfg['drop_at']!r}; "
             f"allowed: {sorted(_SCENARIO_DROP_AT)}"
-        )
-    if "chain_family" in cfg and cfg["chain_family"] not in _SCENARIO_CHAIN_FAMILIES:
-        raise ValueError(
-            f"provider {pid!r}: invalid chain_family {cfg['chain_family']!r}; "
-            f"allowed: {sorted(_SCENARIO_CHAIN_FAMILIES)}"
         )
     if "logs_lag_mode" in cfg and cfg["logs_lag_mode"] not in _SCENARIO_LOGS_LAG_MODES:
         raise ValueError(
@@ -440,7 +455,9 @@ class ProviderState:
     # / corruption / latency) — each listener fires them only when the snap's
     # chain_family matches its own. Exception: mode="down" fires on every
     # surface regardless (MAG-2092), because reachability is provider-wide.
-    # Values are validated against _SCENARIO_CHAIN_FAMILIES; unknown → HTTP 400.
+    # Values are validated against _SCENARIO_CHAIN_FAMILIES; a /scenario block
+    # that omits the field, or sends an unknown value, is rejected with HTTP
+    # 400 (MAG-1783) — the field is never silently defaulted on the wire.
     #
     # Per-value breadcrumbs: "btc" → handlers_btc, ports 18575-77 (MAG-1716);
     # "ln" → handlers_lnd, 18578-80 (MAG-1726); "solana" → handlers_solana,
@@ -448,8 +465,9 @@ class ProviderState:
     # solana_slot_block_gap); "grpc" → handlers_grpc, 18548-50; "rest" →
     # handlers_rest, 18551-53 (MAG-1777); "tendermintrpc" → 18554-56
     # (MAG-1841); "ws" → handlers_ws, 18557-59 (MAG-1801) — WS delegates
-    # non-subscription calls back to handlers_eth / handlers_btc. Default
-    # "eth" preserves backward-compat.
+    # non-subscription calls back to handlers_eth / handlers_btc. The dataclass
+    # default "eth" is only the pre-first-POST / post-reset state; a /scenario
+    # POST can no longer rely on it (the field is required per block).
     chain_family: str = "eth"
     # MAG-1791: provider-stale-on-getLogs primitive — head-fresh but logs-indexing-lagged.
     # Models the real production failure mode where providers update eth_blockNumber
@@ -2492,7 +2510,10 @@ class ControlHandler(BaseHTTPRequestHandler):
                         staged_cfg["responses"] = _normalise_responses(
                             staged_cfg["responses"]
                         )
-                    effective_family = staged_cfg.get("chain_family", state.chain_family)
+                    # _validate_scenario_cfg guarantees chain_family is present
+                    # on every block, so the receipt always echoes the value
+                    # the caller sent — never a filled-in default.
+                    effective_family = staged_cfg["chain_family"]
                     staged.append((str(pid), state, staged_cfg, effective_family))
             except ValueError as exc:
                 self._reply(400, {"error": str(exc)})

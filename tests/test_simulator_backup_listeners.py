@@ -254,7 +254,7 @@ class TestBackupListenersWired:
         # 1) /scenario POST targeting this backup id is accepted.
         status, body = _post(
             f"{sim['control']}/scenario",
-            {"providers": {pid: {"mode": "down"}}},
+            {"providers": {pid: {"chain_family": "eth", "mode": "down"}}},
         )
         assert status == 200, (
             f"Control API rejected /scenario for backup pid={pid!r}: "
@@ -302,8 +302,8 @@ class TestBackupListenersWired:
             f"{sim['control']}/scenario",
             {
                 "providers": {
-                    "1": {"mode": "down"},  # primary
-                    "4": {"mode": "success"},  # backup
+                    "1": {"chain_family": "eth", "mode": "down"},  # primary
+                    "4": {"chain_family": "eth", "mode": "success"},  # backup
                 }
             },
         )
@@ -959,9 +959,12 @@ class TestBackupListenerFaults:
         return f"http://127.0.0.1:{port}"
 
     def _set_scenario(self, sim, scenario: dict) -> None:
+        # MAG-1783: /scenario rejects blocks without chain_family. This class
+        # exercises the ETH JSON-RPC backup listener (pid "4"), whose content
+        # faults gate on "eth", so fill it unless the caller set one.
         status, body = _post(
             f"{sim['control']}/scenario",
-            {"providers": {self._PID: scenario}},
+            {"providers": {self._PID: {"chain_family": "eth", **scenario}}},
         )
         assert status == 200, (
             f"Control API rejected /scenario for backup pid={self._PID!r}: "
@@ -1165,12 +1168,12 @@ def test_scenario_merges_pids_from_every_surface_into_control_map():
         # One body, one pid from every surface's backup pool (plus a primary).
         payload = {
             "providers": {
-                "1":  {"mode": "down"},      # primary
-                "4":  {"mode": "success"},   # JSON-RPC backup
-                "7":  {"mode": "rate_limit"},  # gRPC backup
-                "10": {"mode": "hang"},      # REST backup
-                "13": {"mode": "error"},     # TM backup
-                "16": {"mode": "drop_connection"},  # WS backup
+                "1":  {"chain_family": "eth", "mode": "down"},      # primary
+                "4":  {"chain_family": "eth", "mode": "success"},   # JSON-RPC backup
+                "7":  {"chain_family": "eth", "mode": "rate_limit"},  # gRPC backup
+                "10": {"chain_family": "eth", "mode": "hang"},      # REST backup
+                "13": {"chain_family": "eth", "mode": "error"},     # TM backup
+                "16": {"chain_family": "eth", "mode": "drop_connection"},  # WS backup
             }
         }
         status, body = _post(

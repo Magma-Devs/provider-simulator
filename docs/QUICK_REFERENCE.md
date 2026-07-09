@@ -90,9 +90,9 @@ Router ─→ Provider 1/2/3 (ports 18545-47) ─→ JSONRPCHandler ─→ Read 
 ```json
 {
   "providers": {
-    "1": {"mode": "rate_limit"},
-    "2": {"mode": "down"},
-    "3": {"mode": "success", "latency_ms": 100}
+    "1": {"chain_family": "eth", "mode": "rate_limit"},
+    "2": {"chain_family": "eth", "mode": "down"},
+    "3": {"chain_family": "eth", "mode": "success", "latency_ms": 100}
   }
 }
 ```
@@ -247,7 +247,7 @@ JSONRPCHandler[1,2,3]
 POST https://sim-control.${BASE_DOMAIN}/scenario
 Content-Type: application/json
 
-{"providers": {"1": {"mode": "rate_limit"}}}
+{"providers": {"1": {"chain_family": "eth", "mode": "rate_limit"}}}
 ```
 
 **Response:**
@@ -416,7 +416,7 @@ curl https://sim-control.${BASE_DOMAIN}/health
 # Set scenario
 curl -X POST https://sim-control.${BASE_DOMAIN}/scenario \
   -H "Content-Type: application/json" \
-  -d '{"providers": {"1": {"mode": "down"}}}'
+  -d '{"providers":{"1":{"chain_family":"eth","mode":"down"}}}'
 
 # Get state
 curl https://sim-control.${BASE_DOMAIN}/scenario

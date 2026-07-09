@@ -398,6 +398,7 @@ class TestPostHandshakeFaults:
     def test_latency_ms_delays_reply(self, sim):
         """latency_ms=200 inserts at least 200ms between request and reply."""
         _control(sim, "POST", "/scenario", {"providers": {"1": {
+            "chain_family": "eth",
             "mode": "success", "latency_ms": 200,
         }}})
         with WsClient(sim["ws1_host"], sim["ws1_port"], "/ws") as c:
@@ -917,6 +918,7 @@ class TestWsPerMethodFaultOverrides:
         """Non-overridden methods on the same provider serve normally."""
         _control(sim, "POST", "/scenario", {
             "providers": {"1": {
+                "chain_family": "eth",
                 "mode": "success",
                 "responses": {
                     "eth_blockNumber": {"mode": "down"},
@@ -954,6 +956,7 @@ class TestWsPerMethodFaultOverrides:
         """Per-method ``latency_ms`` only delays the named method."""
         _control(sim, "POST", "/scenario", {
             "providers": {"1": {
+                "chain_family": "eth",
                 "mode": "success",
                 "latency_ms": 0,
                 "responses": {
@@ -1033,6 +1036,7 @@ class TestWsPerMethodFaultOverrides:
         """Per-method ``mode: error`` is rejected at /scenario time (MAG-1821 rule)."""
         status, body = _ctrl_post_raw(sim, {
             "providers": {"1": {
+                "chain_family": "eth",
                 "responses": {
                     "eth_blockNumber": {"mode": "error"},
                 },

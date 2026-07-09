@@ -167,6 +167,7 @@ class TestPerMethodOverrides:
         _post(_ctrl(sim, "/scenario"), {
             "providers": {
                 "1": {
+                    "chain_family": "eth",
                     "mode": "success",
                     "responses": {
                         "eth_blockNumber": {"mode": "down"},
@@ -200,6 +201,7 @@ class TestPerMethodOverrides:
         _post(_ctrl(sim, "/scenario"), {
             "providers": {
                 "1": {
+                    "chain_family": "eth",
                     "mode": "success",
                     "latency_ms": 0,
                     "responses": {
@@ -240,6 +242,7 @@ class TestPerMethodOverrides:
         _post(_ctrl(sim, "/scenario"), {
             "providers": {
                 "1": {
+                    "chain_family": "eth",
                     "mode": "success",
                     "latency_ms": 100,
                     "responses": {
@@ -273,6 +276,7 @@ class TestPerMethodOverrides:
         status, body = _post(_ctrl(sim, "/scenario"), {
             "providers": {
                 "1": {
+                    "chain_family": "eth",
                     "responses": {
                         "eth_blockNumber": {"mode": "error"},
                     },
@@ -369,6 +373,7 @@ class TestPerMethodOverrides:
         _post(_ctrl(sim, "/scenario"), {
             "providers": {
                 "1": {
+                    "chain_family": "eth",
                     "mode": "success",
                     "responses": {
                         "eth_blockNumber": {
@@ -453,6 +458,7 @@ class TestPerMethodOverrides:
         _post(_ctrl(sim, "/scenario"), {
             "providers": {
                 "1": {
+                    "chain_family": "eth",
                     "mode": "success",
                     "responses": {
                         "eth_blockNumber": {
@@ -544,6 +550,7 @@ class TestPerMethodBodyOverride:
         _post(_ctrl(sim, "/scenario"), {
             "providers": {
                 "1": {
+                    "chain_family": "eth",
                     "mode": "success",
                     "responses": {
                         "eth_blockNumber": {
@@ -591,6 +598,7 @@ class TestPerMethodBodyOverride:
         _post(_ctrl(sim, "/scenario"), {
             "providers": {
                 "1": {
+                    "chain_family": "eth",
                     "mode": "success",
                     "responses": {
                         "eth_blockNumber": {"body": override_body},
@@ -632,6 +640,7 @@ class TestPerMethodBodyOverride:
         status, body = _post(_ctrl(sim, "/scenario"), {
             "providers": {
                 "1": {
+                    "chain_family": "eth",
                     "responses": {
                         "eth_blockNumber": {
                             "status": 500,
@@ -683,6 +692,7 @@ class TestPerMethodBodyOverride:
         _post(_ctrl(sim, "/scenario"), {
             "providers": {
                 "1": {
+                    "chain_family": "eth",
                     "mode": "success",
                     "responses": {
                         "eth_blockNumber": {
@@ -733,6 +743,7 @@ class TestPerMethodBodyOverride:
         status, body = _post(_ctrl(sim, "/scenario"), {
             "providers": {
                 "1": {
+                    "chain_family": "eth",
                     "responses": {
                         "eth_blockNumber": {
                             "mode": "down",
@@ -786,6 +797,7 @@ class TestPerMethodBodyOverride:
         _post(_ctrl(sim, "/scenario"), {
             "providers": {
                 "1": {
+                    "chain_family": "eth",
                     "mode": "success",
                     "responses": {
                         "eth_blockNumber": {"body": override_body},
@@ -866,6 +878,7 @@ class TestPerMethodBodyOverride:
         _post(_ctrl(sim, "/scenario"), {
             "providers": {
                 "1": {
+                    "chain_family": "eth",
                     "mode": "success",
                     "responses": {
                         "eth_blockNumber": {

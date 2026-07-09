@@ -182,38 +182,38 @@ curl -s "$SIM_CONTROL_URL/history?provider=1&status=success" | python3 -m json.t
 # ── single provider down ──────────────────────────────────────────────────────
 curl -si -X POST "$SIM_CONTROL_URL/scenario" \
   -H "Content-Type: application/json" \
-  -d '{"providers":{"1":{"mode":"down"}}}'
+  -d '{"providers":{"1":{"chain_family":"eth","mode":"down"}}}'
 
 # ── two providers down ────────────────────────────────────────────────────────
 curl -si -X POST "$SIM_CONTROL_URL/scenario" \
   -H "Content-Type: application/json" \
-  -d '{"providers":{"1":{"mode":"down"},"2":{"mode":"down"}}}'
+  -d '{"providers":{"1":{"chain_family":"eth","mode":"down"},"2":{"chain_family":"eth","mode":"down"}}}'
 
 # ── provider 1 rate-limited ───────────────────────────────────────────────────
 curl -si -X POST "$SIM_CONTROL_URL/scenario" \
   -H "Content-Type: application/json" \
-  -d '{"providers":{"1":{"mode":"rate_limit"}}}'
+  -d '{"providers":{"1":{"chain_family":"eth","mode":"rate_limit"}}}'
 
 # ── 200 ms latency on provider 2 (no errors) ─────────────────────────────────
 curl -si -X POST "$SIM_CONTROL_URL/scenario" \
   -H "Content-Type: application/json" \
-  -d '{"providers":{"2":{"mode":"success","latency_ms":200}}}'
+  -d '{"providers":{"2":{"chain_family":"eth","mode":"success","latency_ms":200}}}'
 
 # ── 40 % random error rate on provider 1 ─────────────────────────────────────
 # error_probability fires on top of mode=success; keep mode=success here
 curl -si -X POST "$SIM_CONTROL_URL/scenario" \
   -H "Content-Type: application/json" \
-  -d '{"providers":{"1":{"mode":"success","error_probability":0.4}}}'
+  -d '{"providers":{"1":{"chain_family":"eth","mode":"success","error_probability":0.4}}}'
 
 # ── forced error with custom code and message ─────────────────────────────────
 curl -si -X POST "$SIM_CONTROL_URL/scenario" \
   -H "Content-Type: application/json" \
-  -d '{"providers":{"1":{"mode":"error","error_code":-32601,"error_message":"Method not found"}}}'
+  -d '{"providers":{"1":{"chain_family":"eth","mode":"error","error_code":-32601,"error_message":"Method not found"}}}'
 
 # ── forced error returned as HTTP 500 (not just JSON-RPC body error) ──────────
 curl -si -X POST "$SIM_CONTROL_URL/scenario" \
   -H "Content-Type: application/json" \
-  -d '{"providers":{"1":{"mode":"error","error_code":-32000,"http_status":500}}}'
+  -d '{"providers":{"1":{"chain_family":"eth","mode":"error","error_code":-32000,"http_status":500}}}'
 
 # ── reset all providers back to healthy defaults ──────────────────────────────
 curl -si -X POST "$SIM_CONTROL_URL/reset"
@@ -230,22 +230,22 @@ All other methods continue to return their default stubs.
 # make provider 1 return a custom block number for eth_blockNumber
 curl -si -X POST "$SIM_CONTROL_URL/scenario" \
   -H "Content-Type: application/json" \
-  -d '{"providers":{"1":{"responses":{"eth_blockNumber":{"result":"0xdeadbeef"}}}}}'
+  -d '{"providers":{"1":{"chain_family":"eth","responses":{"eth_blockNumber":{"result":"0xdeadbeef"}}}}}'
 
 # make provider 2 return empty logs for eth_getLogs
 curl -si -X POST "$SIM_CONTROL_URL/scenario" \
   -H "Content-Type: application/json" \
-  -d '{"providers":{"2":{"responses":{"eth_getLogs":{"result":[]}}}}}'
+  -d '{"providers":{"2":{"chain_family":"eth","responses":{"eth_getLogs":{"result":[]}}}}}'
 
 # override eth_getBalance to return a non-zero value on provider 3
 curl -si -X POST "$SIM_CONTROL_URL/scenario" \
   -H "Content-Type: application/json" \
-  -d '{"providers":{"3":{"responses":{"eth_getBalance":{"result":"0x1bc16d674ec80000"}}}}}'
+  -d '{"providers":{"3":{"chain_family":"eth","responses":{"eth_getBalance":{"result":"0x1bc16d674ec80000"}}}}}'
 
 # clear all overrides (reset responses to defaults) without touching mode/latency
 curl -si -X POST "$SIM_CONTROL_URL/scenario" \
   -H "Content-Type: application/json" \
-  -d '{"providers":{"1":{"responses":{}},"2":{"responses":{}},"3":{"responses":{}}}}'
+  -d '{"providers":{"1":{"chain_family":"eth","responses":{}},"2":{"chain_family":"eth","responses":{}},"3":{"chain_family":"eth","responses":{}}}}'
 ```
 
 ---
@@ -261,7 +261,7 @@ Each recipe shows setup → trigger → verify.
 curl -s -X POST "$SIM_CONTROL_URL/reset/all"
 curl -s -X POST "$SIM_CONTROL_URL/scenario" \
   -H "Content-Type: application/json" \
-  -d '{"providers":{"1":{"mode":"down"}}}'
+  -d '{"providers":{"1":{"chain_family":"eth","mode":"down"}}}'
 
 # trigger
 curl -si -X POST "$SIM_ROUTER_URL" \
@@ -278,7 +278,7 @@ curl -s "$SIM_CONTROL_URL/history" | python3 -m json.tool
 curl -s -X POST "$SIM_CONTROL_URL/reset/all"
 curl -s -X POST "$SIM_CONTROL_URL/scenario" \
   -H "Content-Type: application/json" \
-  -d '{"providers":{"1":{"mode":"down"},"2":{"mode":"down"}}}'
+  -d '{"providers":{"1":{"chain_family":"eth","mode":"down"},"2":{"chain_family":"eth","mode":"down"}}}'
 ```
 
 ### Rate-limit routing
@@ -287,7 +287,7 @@ curl -s -X POST "$SIM_CONTROL_URL/scenario" \
 curl -s -X POST "$SIM_CONTROL_URL/reset/all"
 curl -s -X POST "$SIM_CONTROL_URL/scenario" \
   -H "Content-Type: application/json" \
-  -d '{"providers":{"1":{"mode":"rate_limit"},"2":{"mode":"rate_limit"}}}'
+  -d '{"providers":{"1":{"chain_family":"eth","mode":"rate_limit"},"2":{"chain_family":"eth","mode":"rate_limit"}}}'
 ```
 
 ### Latency test
@@ -296,7 +296,7 @@ curl -s -X POST "$SIM_CONTROL_URL/scenario" \
 curl -s -X POST "$SIM_CONTROL_URL/reset/all"
 curl -s -X POST "$SIM_CONTROL_URL/scenario" \
   -H "Content-Type: application/json" \
-  -d '{"providers":{"1":{"latency_ms":500},"2":{"latency_ms":1000}}}'
+  -d '{"providers":{"1":{"chain_family":"eth","latency_ms":500},"2":{"chain_family":"eth","latency_ms":1000}}}'
 ```
 
 ### All providers healthy (clean slate)
@@ -545,7 +545,7 @@ curl -si -X POST "$P1" -H "Content-Type: application/json" \
 # set provider 2 to error mode and test it directly
 curl -si -X POST "http://localhost:19000/scenario" \
   -H "Content-Type: application/json" \
-  -d '{"providers":{"2":{"mode":"error","error_code":-32000}}}'
+  -d '{"providers":{"2":{"chain_family":"eth","mode":"error","error_code":-32000}}}'
 
 curl -si -X POST "$P2" -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'

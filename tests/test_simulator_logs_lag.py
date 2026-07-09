@@ -220,7 +220,7 @@ class TestDefaults:
         callers that don't opt in — existing 211 baseline tests stay green.
         """
         _post(_ctrl(sim, "/scenario"), {"providers": {
-            "1": {"responses": {"eth_getLogs": {"result": _CANNED_LOGS}}}
+            "1": {"chain_family": "eth", "responses": {"eth_getLogs": {"result": _CANNED_LOGS}}}
         }})
         params = [{"fromBlock": hex(HEAD_BLOCK - 30), "toBlock": "latest"}]
         status, body = _rpc(sim["provider1"], "eth_getLogs", params)
@@ -245,6 +245,7 @@ class TestEmptyMode:
         """
         _post(_ctrl(sim, "/scenario"), {"providers": {
             "1": {
+                "chain_family": "eth",
                 "logs_indexed_up_to": INDEXED_UP_TO_DEFAULT,
                 "logs_lag_mode": "empty",
                 "responses": {"eth_getLogs": {"result": _CANNED_LOGS}},
@@ -259,6 +260,7 @@ class TestEmptyMode:
         """Query stays at or below logs_indexed_up_to → no lag triggered."""
         _post(_ctrl(sim, "/scenario"), {"providers": {
             "1": {
+                "chain_family": "eth",
                 "logs_indexed_up_to": INDEXED_UP_TO_DEFAULT,
                 "logs_lag_mode": "empty",
                 "responses": {"eth_getLogs": {"result": _CANNED_LOGS}},
@@ -277,6 +279,7 @@ class TestEmptyMode:
         """Set only logs_indexed_up_to → mode defaults to 'empty'."""
         _post(_ctrl(sim, "/scenario"), {"providers": {
             "1": {
+                "chain_family": "eth",
                 "logs_indexed_up_to": INDEXED_UP_TO_DEFAULT,
                 "responses": {"eth_getLogs": {"result": _CANNED_LOGS}},
             }
@@ -303,6 +306,7 @@ class TestPartialMode:
         """
         _post(_ctrl(sim, "/scenario"), {"providers": {
             "1": {
+                "chain_family": "eth",
                 "logs_indexed_up_to": INDEXED_UP_TO_DEFAULT,
                 "logs_lag_mode": "partial",
                 "responses": {"eth_getLogs": {"result": _CANNED_LOGS}},
@@ -322,6 +326,7 @@ class TestPartialMode:
         all_post_index = [_LOG_ENTRY_PAST_INDEXED, _LOG_ENTRY_AT_HEAD]
         _post(_ctrl(sim, "/scenario"), {"providers": {
             "1": {
+                "chain_family": "eth",
                 "logs_indexed_up_to": INDEXED_UP_TO_DEFAULT,
                 "logs_lag_mode": "partial",
                 "responses": {"eth_getLogs": {"result": all_post_index}},
@@ -335,6 +340,7 @@ class TestPartialMode:
         """toBlock <= indexed → no filter (query doesn't touch lagged range)."""
         _post(_ctrl(sim, "/scenario"), {"providers": {
             "1": {
+                "chain_family": "eth",
                 "logs_indexed_up_to": INDEXED_UP_TO_DEFAULT,
                 "logs_lag_mode": "partial",
                 "responses": {"eth_getLogs": {"result": _CANNED_LOGS}},
@@ -365,6 +371,7 @@ class TestMethodIsolation:
         """
         _post(_ctrl(sim, "/scenario"), {"providers": {
             "1": {
+                "chain_family": "eth",
                 "logs_indexed_up_to": INDEXED_UP_TO_DEFAULT,
                 "logs_lag_mode": "empty",
             }
@@ -377,6 +384,7 @@ class TestMethodIsolation:
         """logs_indexed_up_to does NOT alter eth_getBlockByNumber."""
         _post(_ctrl(sim, "/scenario"), {"providers": {
             "1": {
+                "chain_family": "eth",
                 "logs_indexed_up_to": INDEXED_UP_TO_DEFAULT,
                 "logs_lag_mode": "partial",
             }
@@ -398,6 +406,7 @@ class TestResetClearsLag:
         """POST /reset clears both logs_indexed_up_to and logs_lag_mode."""
         _post(_ctrl(sim, "/scenario"), {"providers": {
             "1": {
+                "chain_family": "eth",
                 "logs_indexed_up_to": INDEXED_UP_TO_DEFAULT,
                 "logs_lag_mode": "partial",
             }
@@ -417,6 +426,7 @@ class TestResetClearsLag:
         """After /reset, subsequent eth_getLogs ignore the previously-set lag."""
         _post(_ctrl(sim, "/scenario"), {"providers": {
             "1": {
+                "chain_family": "eth",
                 "logs_indexed_up_to": INDEXED_UP_TO_DEFAULT,
                 "logs_lag_mode": "empty",
                 "responses": {"eth_getLogs": {"result": _CANNED_LOGS}},
@@ -434,7 +444,7 @@ class TestResetClearsLag:
         # to prove the lag is cleared (otherwise we'd see [] and not be able
         # to distinguish "lag still applied" from "no payload set").
         _post(_ctrl(sim, "/scenario"), {"providers": {
-            "1": {"responses": {"eth_getLogs": {"result": _CANNED_LOGS}}}
+            "1": {"chain_family": "eth", "responses": {"eth_getLogs": {"result": _CANNED_LOGS}}}
         }})
         _, body = _rpc(sim["provider1"], "eth_getLogs", params)
         assert body["result"] == _CANNED_LOGS

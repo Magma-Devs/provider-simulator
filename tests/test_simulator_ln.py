@@ -190,8 +190,13 @@ def _set_ln(sim, pid: str = "1", **extra):
     MAG-2089: no longer sets ``chain_family="ln"`` — the LN listener pool
     is port-derived. The helper is kept under the LN name so the LN-suite
     call sites stay readable. Use ``_set_ln_with_fault`` when the test
-    needs ``chain_family="ln"`` for the listener's fault gate to fire."""
-    cfg = dict(extra)
+    needs ``chain_family="ln"`` for the listener's fault gate to fire.
+
+    MAG-1783: /scenario now rejects provider blocks without chain_family, so
+    this helper fills "eth" — the exact value the simulator used to default
+    to when the field was omitted. On the LN listener "eth" keeps content
+    faults un-armed (the gate needs "ln"). Override via extras."""
+    cfg = {"chain_family": "eth", **extra}
     return _post(_ctrl(sim, "/scenario"), {"providers": {pid: cfg}})
 
 
