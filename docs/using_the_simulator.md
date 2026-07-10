@@ -49,19 +49,19 @@ This means `sim_control.set_scenario({"4": {"mode": "down"}, ...})` works exactl
 # all JSON-RPC primaries down, all JSON-RPC backups healthy
 # → drives a JSON-RPC backup-tier activation
 curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" \
-  -d '{"providers":{"1":{"mode":"down"},"2":{"mode":"down"},"3":{"mode":"down"},
-                    "4":{"mode":"success"},"5":{"mode":"success"},"6":{"mode":"success"}}}'
+  -d '{"providers":{"1":{"chain_family":"eth","mode":"down"},"2":{"chain_family":"eth","mode":"down"},"3":{"chain_family":"eth","mode":"down"},
+                    "4":{"chain_family":"eth","mode":"success"},"5":{"chain_family":"eth","mode":"success"},"6":{"chain_family":"eth","mode":"success"}}}'
 
 # gRPC-specific backup activation — primaries down on pid 1 (which also takes
 # down the JSON-RPC/REST/TM/WS primaries on pid 1 because they share state),
 # backup gRPC pool (pids 7-9) responds healthy.
 curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" \
-  -d '{"providers":{"1":{"mode":"down"},"2":{"mode":"down"},"3":{"mode":"down"},
-                    "7":{"mode":"success"},"8":{"mode":"success"},"9":{"mode":"success"}}}'
+  -d '{"providers":{"1":{"chain_family":"eth","mode":"down"},"2":{"chain_family":"eth","mode":"down"},"3":{"chain_family":"eth","mode":"down"},
+                    "7":{"chain_family":"grpc","mode":"success"},"8":{"chain_family":"grpc","mode":"success"},"9":{"chain_family":"grpc","mode":"success"}}}'
 
 # REST-only backup activation (pids 10-12).
 curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" \
-  -d '{"providers":{"10":{"mode":"success"},"11":{"mode":"success"},"12":{"mode":"success"}}}'
+  -d '{"providers":{"10":{"chain_family":"rest","mode":"success"},"11":{"chain_family":"rest","mode":"success"},"12":{"chain_family":"rest","mode":"success"}}}'
 ```
 
 ## Set a scenario
@@ -71,7 +71,7 @@ curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" 
 ### Minimal — one provider down
 
 ```bash
-curl -si -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" -d '{"providers":{"1":{"mode":"down"}}}'
+curl -si -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" -d '{"providers":{"1":{"chain_family":"eth","mode":"down"}}}'
 ```
 
 ### Full body shape
@@ -172,7 +172,7 @@ The fault ladder is evaluated in the order above (first match wins). Only `laten
 
 ```bash
 curl -s -X POST "$SIM_CONTROL_URL/reset/all"
-curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" -d '{"providers":{"1":{"mode":"down"}}}'
+curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" -d '{"providers":{"1":{"chain_family":"eth","mode":"down"}}}'
 curl -si -X POST "$SIM_ROUTER_URL" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 curl -s "$SIM_CONTROL_URL/history" | python3 -m json.tool
 ```
@@ -181,7 +181,7 @@ curl -s "$SIM_CONTROL_URL/history" | python3 -m json.tool
 
 ```bash
 curl -s -X POST "$SIM_CONTROL_URL/reset/all"
-curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" -d '{"providers":{"1":{"mode":"down"},"2":{"mode":"down"}}}'
+curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" -d '{"providers":{"1":{"chain_family":"eth","mode":"down"},"2":{"chain_family":"eth","mode":"down"}}}'
 ```
 
 ### Mixed chain families on the same pod
@@ -195,19 +195,19 @@ The JSON-RPC handler on port 18545 will dispatch ETH; port 18546 will dispatch B
 ### Forced error with a custom code
 
 ```bash
-curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" -d '{"providers":{"1":{"mode":"error","error_code":-32601,"error_message":"Method not found"}}}'
+curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" -d '{"providers":{"1":{"chain_family":"eth","mode":"error","error_code":-32601,"error_message":"Method not found"}}}'
 ```
 
 ### 40% random errors
 
 ```bash
-curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" -d '{"providers":{"1":{"mode":"success","error_probability":0.4}}}'
+curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" -d '{"providers":{"1":{"chain_family":"eth","mode":"success","error_probability":0.4}}}'
 ```
 
 ### Per-method response override
 
 ```bash
-curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" -d '{"providers":{"1":{"responses":{"eth_blockNumber":{"result":"0xdeadbeef"}}}}}'
+curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" -d '{"providers":{"1":{"chain_family":"eth","responses":{"eth_blockNumber":{"result":"0xdeadbeef"}}}}}'
 ```
 
 ### Per-method error override (named catalogue)
@@ -215,7 +215,7 @@ curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" 
 `stubs.ERROR_STUBS` keeps a single named-error catalogue. Use `error_stub` to inject one without re-typing the envelope:
 
 ```bash
-curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" -d '{"providers":{"1":{"responses":{"eth_call":{"error_stub":"revert"}}}}}'
+curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" -d '{"providers":{"1":{"chain_family":"eth","responses":{"eth_call":{"error_stub":"revert"}}}}}'
 ```
 
 ## REST surface (planned, not yet on develop)

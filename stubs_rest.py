@@ -49,7 +49,6 @@ from typing import Any, Dict, Tuple
 
 from constants import ETH_LATEST_BLOCK as _ETH_LATEST_HEX
 
-
 # ── Synthetic Cosmos head ──────────────────────────────────────────────────────
 # We re-use the ETH simulator's notion of "latest block" so the same
 # blocks_behind primitive shifts consistently across chain_family options.
@@ -216,20 +215,11 @@ def _validators_response() -> Dict[str, Any]:
 # for write-verb stubs to land in a follow-up.
 
 REST_METHOD_DEFAULTS: Dict[Tuple[str, str], Any] = {
-    ("GET", "/cosmos/base/tendermint/v1beta1/blocks/latest"):
-        _block_response(REST_LATEST_HEIGHT),
-
-    ("GET", "/cosmos/base/tendermint/v1beta1/blocks/{height}"):
-        _block_response(REST_LATEST_HEIGHT),
-
-    ("GET", "/cosmos/base/tendermint/v1beta1/node_info"):
-        _node_info_response(),
-
-    ("GET", "/cosmos/bank/v1beta1/balances/{address}"):
-        _balances_response("lava-sim-address"),
-
-    ("GET", "/cosmos/staking/v1beta1/validators"):
-        _validators_response(),
+    ("GET", "/cosmos/base/tendermint/v1beta1/blocks/latest"): _block_response(REST_LATEST_HEIGHT),
+    ("GET", "/cosmos/base/tendermint/v1beta1/blocks/{height}"): _block_response(REST_LATEST_HEIGHT),
+    ("GET", "/cosmos/base/tendermint/v1beta1/node_info"): _node_info_response(),
+    ("GET", "/cosmos/bank/v1beta1/balances/{address}"): _balances_response("lava-sim-address"),
+    ("GET", "/cosmos/staking/v1beta1/validators"): _validators_response(),
 }
 
 
@@ -258,19 +248,17 @@ def get_default(verb: str, template: str) -> Any:
 #                                              {"error_stub": "not_found", "status": 404}]]}}}
 
 REST_ERROR_STUBS: Dict[str, Dict[str, Any]] = {
-
     # Resource not found — grpc-gateway NotFound (code 5). Emitted when a
     # query targets a key / height / address the node doesn't have.
     "not_found": {
-        "code":    5,
+        "code": 5,
         "message": "rpc error: code = NotFound desc = not found",
         "details": [],
     },
-
     # Internal server error — grpc-gateway Internal (code 13). The generic
     # "something broke node-side" shape.
     "internal": {
-        "code":    13,
+        "code": 13,
         "message": "rpc error: code = Internal desc = internal error",
         "details": [],
     },

@@ -27,10 +27,12 @@ import grpc
 from grpc_reflection.v1alpha import reflection
 
 # Touch the package to splice cosmos_pb2/ onto sys.path so the generated
-# stub absolute imports work.
-import cosmos_pb2  # noqa: F401
+# stub absolute imports work. Must run before the `from cosmos...` import
+# below — isort must not reorder these two (see cosmos_pb2/__init__.py's
+# own docstring for why import order here is load-bearing).
+import cosmos_pb2  # noqa: F401  isort: split
 
-from cosmos.base.tendermint.v1beta1 import query_pb2, query_pb2_grpc
+from cosmos.base.tendermint.v1beta1 import query_pb2, query_pb2_grpc  # isort: skip
 
 from handlers_grpc import CosmosBaseTendermintServicer
 

@@ -50,9 +50,9 @@ Public URLs in this guide are derived from it.
 POST /scenario
 {
   "providers": {
-    "1": {"mode": "rate_limit"},
-    "2": {"mode": "down"},
-    "3": {"mode": "success", "latency_ms": 100}
+    "1": {"chain_family": "eth", "mode": "rate_limit"},
+    "2": {"chain_family": "eth", "mode": "down"},
+    "3": {"chain_family": "eth", "mode": "success", "latency_ms": 100}
   }
 }
 

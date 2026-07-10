@@ -300,19 +300,17 @@ TENDERMINT_METHOD_DEFAULTS: Dict[str, Dict[str, Any]] = {
 #                                              {"error_stub": "internal"}}}}}
 
 TENDERMINT_ERROR_STUBS: Dict[str, Dict[str, Any]] = {
-
     # Method not found — JSON-RPC 2.0 -32601, the code CometBFT emits for
     # an unknown RPC endpoint. Same code the handler's own unknown-method
     # fallback uses.
     "method_not_found": {
-        "code":    -32601,
+        "code": -32601,
         "message": "Method not found",
     },
-
     # Internal error — JSON-RPC 2.0 -32603. CometBFT's generic node-side
     # failure shape (e.g. an ABCI query that panicked).
     "internal": {
-        "code":    -32603,
+        "code": -32603,
         "message": "Internal error",
     },
 }

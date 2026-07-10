@@ -42,7 +42,6 @@ def compute_accept(client_key: str) -> str:
 
 from dataclasses import dataclass
 
-
 # RFC 6455 §5.2 opcode field values. We only emit TEXT / PONG ourselves; we
 # accept TEXT / CLOSE / PING / CONTINUATION from clients.
 OPCODE_CONTINUATION = 0x0
@@ -61,6 +60,7 @@ class Frame:
     (continuation frames) is hidden by parse_frame, which buffers the
     continuation chain and returns one Frame with the concatenated payload.
     """
+
     fin: bool
     opcode: int
     payload: bytes
@@ -170,8 +170,9 @@ def parse_frame(recv) -> Frame:
         # else: keep reading continuation frames
 
 
-def build_handshake_response(client_key: str,
-                              extra_headers: "dict[str, str] | None" = None) -> bytes:
+def build_handshake_response(
+    client_key: str, extra_headers: "dict[str, str] | None" = None
+) -> bytes:
     """Build the full HTTP 101 response bytes for a successful WS upgrade.
 
     Caller is responsible for writing this to the socket via sendall(). After

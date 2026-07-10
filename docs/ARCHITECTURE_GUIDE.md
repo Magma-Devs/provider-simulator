@@ -235,7 +235,7 @@ class ControlHandler(BaseHTTPRequestHandler):
 
 | Method | Path | Purpose | Example |
 |--------|------|---------|---------|
-| POST | `/scenario` | Configure all providers | `{"providers": {"1": {"mode": "down"}, "2": {"mode": "success"}}}` |
+| POST | `/scenario` | Configure all providers | `{"providers": {"1": {"chain_family": "eth", "mode": "down"}, "2": {"chain_family": "eth", "mode": "success"}}}` |
 | POST | `/reset` | Reset scenario config only | `{}` |
 | POST | `/history/clear` | Clear history/counters only | `{}` |
 | POST | `/reset/all` | Reset scenario config and clear history | `{}` |
@@ -247,7 +247,7 @@ class ControlHandler(BaseHTTPRequestHandler):
 **Example flow:**
 ```
 1. Test calls: POST /scenario
-   Body: {"providers": {"1": {"mode": "rate_limit"}}}
+   Body: {"providers": {"1": {"chain_family": "eth", "mode": "rate_limit"}}}
 
 2. ControlHandler.do_POST() runs:
    a. Parse the JSON body
@@ -565,7 +565,8 @@ Scenario: Test sets provider 1 to "rate_limit"
         ┌────────────────┴────────────────┐
         │ POST /scenario with scenario    │
         │ {"providers": {                 │
-        │  "1": {"mode": "rate_limit"}    │
+        │  "1": {"chain_family": "eth",   │
+        │        "mode": "rate_limit"}    │
         │ }}                              │
         ↓
 ┌────────────────────────────────────────────────────────┐
@@ -813,7 +814,7 @@ Scenario: Test wants to verify failover behavior
 
 1. TEST sends to Control API:
    POST https://sim-control.${BASE_DOMAIN}/scenario
-   Body: {"providers": {"1": {"mode": "down"}, "2": {"mode": "success"}}}
+   Body: {"providers": {"1": {"chain_family": "eth", "mode": "down"}, "2": {"chain_family": "eth", "mode": "success"}}}
 
 2. Cloudflare routes → Gateway → Service:19000 → ControlHandler.do_POST()
 

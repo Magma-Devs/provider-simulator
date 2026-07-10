@@ -32,7 +32,6 @@ from typing import Any, Dict, Tuple
 
 from stubs_btc import BTC_ERROR_STUBS, BTC_METHOD_DEFAULTS, btc_block_hash
 
-
 # Methods whose default value is a height that should be shifted by
 # state.blocks_behind. Listed once so we can adjust the rule centrally.
 _HEIGHT_METHODS = {"getblockcount"}
@@ -106,15 +105,15 @@ def handle(state, request: dict, snap: dict, lava_headers: dict) -> Tuple[int, D
             else:
                 result = btc_block_hash(effective_head)
         elif method == "getblockchaininfo" and isinstance(result, dict):
-            result["blocks"]        = effective_head
-            result["headers"]       = effective_head
+            result["blocks"] = effective_head
+            result["headers"] = effective_head
             result["bestblockhash"] = btc_block_hash(effective_head)
         elif method == "getblockheader" and isinstance(result, dict):
             result["height"] = effective_head
-            result["hash"]   = btc_block_hash(effective_head)
+            result["hash"] = btc_block_hash(effective_head)
         elif method == "getblock" and isinstance(result, dict):
             result["height"] = effective_head
-            result["hash"]   = btc_block_hash(effective_head)
+            result["hash"] = btc_block_hash(effective_head)
 
     # getblockhash: echo the requested height back in the hash so the router's
     # pruning verification can confirm it received the asked-for block.
@@ -122,15 +121,22 @@ def handle(state, request: dict, snap: dict, lava_headers: dict) -> Tuple[int, D
         try:
             height = int(params[0])
         except (TypeError, ValueError):
-            return 200, {"jsonrpc": "2.0", "id": req_id,
-                         "error": BTC_ERROR_STUBS["invalid_parameter"]}
+            return 200, {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": BTC_ERROR_STUBS["invalid_parameter"],
+            }
         result = btc_block_hash(height)
 
     # getblock / getblockheader: echo the requested block hash + height.
     # Bitcoin Core's getblock takes a HASH string (not a height). Tests that
     # pass a hash from a previous getblockhash call will see it reflected.
-    if method in ("getblock", "getblockheader") and params and isinstance(result, dict) \
-            and method not in state.responses:
+    if (
+        method in ("getblock", "getblockheader")
+        and params
+        and isinstance(result, dict)
+        and method not in state.responses
+    ):
         block_hash = params[0]
         if isinstance(block_hash, str):
             result = dict(result)
@@ -146,4 +152,5 @@ def _btc_head(blocks_behind: int) -> int:
     head as a hex string, BTC expresses it as a JSON number.
     """
     from constants import BTC_LATEST_BLOCK
+
     return BTC_LATEST_BLOCK - blocks_behind

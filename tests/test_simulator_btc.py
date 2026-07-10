@@ -22,9 +22,9 @@ Port layout
 MAG-2089 moved BTC dispatch from a per-provider ``chain_family`` flag on the
 shared ETH JSON-RPC listener pool (18545-18547) to a dedicated BTC listener
 pool at 18575-18577. This suite mirrors the move: a dedicated BTC test port
-range at 38575-38577 (parallel to prod 18575-18577) hosts JSONRPCHandler
+range at 22575-22577 (tail digits mirror prod 18575-18577) hosts JSONRPCHandler
 listeners with ``handler_chain_family="btc"`` + ``handler_module=handlers_btc``.
-A second ETH listener pool at 38545-38547 (parallel to prod 18545-18547)
+A second ETH listener pool at 22545-22547 (tail digits mirror prod 18545-18547)
 hosts default-ETH listeners, used by the mixed-chain tests. Both pools share
 ProviderState per pid so a single ``/scenario`` POST reconfigures both
 listeners for the same logical provider — exactly mirroring prod.
@@ -48,17 +48,24 @@ import handlers_eth
 from server import ControlHandler, JSONRPCHandler, ProviderState
 from stubs_btc import BTC_METHOD_DEFAULTS
 
-# ── Test ports (distinct from ETH suite's 28545-28547 / 29000 and from the
-#     prod ports 18545-18547 / 19000 so the two suites can co-exist if run in
-#     parallel later).
+# ── Test ports. Two rules keep binds reliable across the whole suite:
+#    1. Stay below 32768. Ports from 32768 up are the kernel's ephemeral
+#       client-port range (Linux default 32768-60999, macOS 49152-65535):
+#       every outgoing HTTP call an earlier test module makes grabs a random
+#       source port there, and a lingering one makes this module's bind fail
+#       with "Address already in use" at fixture setup.
+#    2. Each test file owns a unique port block (this file: 225xx) so all
+#       modules can run in one pytest invocation. Also distinct from the
+#       prod ports 18545-18547 / 19000 so a locally running simulator
+#       doesn't collide.
 #
-#     ETH ports (38545-7) host default ETH listeners — used by the mixed-chain
-#     scenario to drive an ETH-only port for the same pid. BTC ports (38575-7)
+#     ETH ports (22545-7) host default ETH listeners — used by the mixed-chain
+#     scenario to drive an ETH-only port for the same pid. BTC ports (22575-7)
 #     host BTC-configured listeners and are the focus of this suite. ─────────
 
-_ETH_PROVIDER_PORTS = {"1": 38545, "2": 38546, "3": 38547}
-_BTC_PROVIDER_PORTS = {"1": 38575, "2": 38576, "3": 38577}
-_CONTROL_PORT       = 39000
+_ETH_PROVIDER_PORTS = {"1": 22545, "2": 22546, "3": 22547}
+_BTC_PROVIDER_PORTS = {"1": 22575, "2": 22576, "3": 22577}
+_CONTROL_PORT = 22500
 
 # 29 BTC methods covered by the stub set. Source of truth: stubs_btc.py.
 ALL_BTC_METHODS = sorted(BTC_METHOD_DEFAULTS.keys())
@@ -72,9 +79,7 @@ ALL_BTC_METHODS = sorted(BTC_METHOD_DEFAULTS.keys())
 def _post(url: str, body: dict) -> tuple[int, dict]:
     """POST JSON body, return (status_code, parsed_response_body)."""
     data = json.dumps(body).encode()
-    req  = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}
-    )
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
             raw = resp.read()
@@ -108,25 +113,26 @@ def _ctrl(sim: dict, path: str) -> str:
 
 # ── Module-scoped fixture: start all servers once ─────────────────────────────
 
+
 @pytest.fixture(scope="module")
 def sim():
     """Start 3 ETH listeners + 3 BTC listeners + 1 control server.
 
-    The BTC listeners (38575-38577) are the focus of this suite — they run
+    The BTC listeners (22575-22577) are the focus of this suite — they run
     JSONRPCHandler with ``handler_chain_family="btc"`` + ``handler_module=
     handlers_btc`` so the success path always dispatches to BTC regardless of
-    the snap's ``chain_family``. The ETH listeners (38545-38547) are bound on
+    the snap's ``chain_family``. The ETH listeners (22545-22547) are bound on
     the same ProviderState per pid; they exist for mixed-chain tests that
     drive an ETH-only port on a shared logical provider.
 
     Yields a dict with base URLs:
-      sim["control"]      → http://127.0.0.1:39000
-      sim["provider1"]    → http://127.0.0.1:38575    # primary BTC URL per pid
-      sim["provider2"]    → http://127.0.0.1:38576
-      sim["provider3"]    → http://127.0.0.1:38577
-      sim["eth_provider1"]→ http://127.0.0.1:38545    # ETH companion per pid
-      sim["eth_provider2"]→ http://127.0.0.1:38546
-      sim["eth_provider3"]→ http://127.0.0.1:38547
+      sim["control"]      → http://127.0.0.1:22500
+      sim["provider1"]    → http://127.0.0.1:22575    # primary BTC URL per pid
+      sim["provider2"]    → http://127.0.0.1:22576
+      sim["provider3"]    → http://127.0.0.1:22577
+      sim["eth_provider1"]→ http://127.0.0.1:22545    # ETH companion per pid
+      sim["eth_provider2"]→ http://127.0.0.1:22546
+      sim["eth_provider3"]→ http://127.0.0.1:22547
     """
     # One ProviderState per pid, shared between the ETH and BTC listeners
     # for that pid — mirrors prod's shared-state model.
@@ -135,26 +141,26 @@ def sim():
     servers = []
     # ETH listener pool — default handler_chain_family / handler_module.
     for pid, port in _ETH_PROVIDER_PORTS.items():
-        srv                  = ThreadingHTTPServer(("127.0.0.1", port), JSONRPCHandler)
-        srv.daemon_threads   = True
-        srv.state                = states[pid]
-        srv.provider_id          = pid
+        srv = ThreadingHTTPServer(("127.0.0.1", port), JSONRPCHandler)
+        srv.daemon_threads = True
+        srv.state = states[pid]
+        srv.provider_id = pid
         srv.handler_chain_family = "eth"
-        srv.handler_module       = handlers_eth
+        srv.handler_module = handlers_eth
         servers.append(srv)
 
     # BTC listener pool — port-derived dispatch to handlers_btc.
     for pid, port in _BTC_PROVIDER_PORTS.items():
-        srv                  = ThreadingHTTPServer(("127.0.0.1", port), JSONRPCHandler)
-        srv.daemon_threads   = True
-        srv.state                = states[pid]
-        srv.provider_id          = pid
+        srv = ThreadingHTTPServer(("127.0.0.1", port), JSONRPCHandler)
+        srv.daemon_threads = True
+        srv.state = states[pid]
+        srv.provider_id = pid
         srv.handler_chain_family = "btc"
-        srv.handler_module       = handlers_btc
+        srv.handler_module = handlers_btc
         servers.append(srv)
 
-    ctrl                  = HTTPServer(("127.0.0.1", _CONTROL_PORT), ControlHandler)
-    ctrl.provider_states  = states
+    ctrl = HTTPServer(("127.0.0.1", _CONTROL_PORT), ControlHandler)
+    ctrl.provider_states = states
     servers.append(ctrl)
 
     threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in servers]
@@ -164,10 +170,10 @@ def sim():
     time.sleep(0.15)
 
     yield {
-        "control":       f"http://127.0.0.1:{_CONTROL_PORT}",
-        "provider1":     f"http://127.0.0.1:{_BTC_PROVIDER_PORTS['1']}",
-        "provider2":     f"http://127.0.0.1:{_BTC_PROVIDER_PORTS['2']}",
-        "provider3":     f"http://127.0.0.1:{_BTC_PROVIDER_PORTS['3']}",
+        "control": f"http://127.0.0.1:{_CONTROL_PORT}",
+        "provider1": f"http://127.0.0.1:{_BTC_PROVIDER_PORTS['1']}",
+        "provider2": f"http://127.0.0.1:{_BTC_PROVIDER_PORTS['2']}",
+        "provider3": f"http://127.0.0.1:{_BTC_PROVIDER_PORTS['3']}",
         "eth_provider1": f"http://127.0.0.1:{_ETH_PROVIDER_PORTS['1']}",
         "eth_provider2": f"http://127.0.0.1:{_ETH_PROVIDER_PORTS['2']}",
         "eth_provider3": f"http://127.0.0.1:{_ETH_PROVIDER_PORTS['3']}",
@@ -178,6 +184,7 @@ def sim():
 
 
 # ── Helper to apply per-provider scenario config ──────────────────────────────
+
 
 def _set_btc(sim, pid: str = "1", **extra):
     """Convenience: POST /scenario for a single provider.
@@ -192,8 +199,14 @@ def _set_btc(sim, pid: str = "1", **extra):
     Any extra kwargs are folded into the per-provider config dict (latency_ms,
     mode, blocks_behind, responses, etc.) so callers can write one-liners
     instead of nesting dicts.
+
+    MAG-1783: /scenario now rejects provider blocks without chain_family, so
+    this helper fills "eth" — the exact value the simulator used to default
+    to when the field was omitted. On the BTC listener "eth" keeps content
+    faults un-armed (the gate needs "btc"), which is what plain-helper
+    callers rely on. Override via ``chain_family="btc"`` in extras.
     """
-    cfg = dict(extra)
+    cfg = {"chain_family": "eth", **extra}
     return _post(_ctrl(sim, "/scenario"), {"providers": {pid: cfg}})
 
 
@@ -210,6 +223,7 @@ def _set_btc_with_fault(sim, pid: str = "1", **extra):
 
 # ── Function-scoped autouse: clean slate before/after every test ──────────────
 
+
 @pytest.fixture(autouse=True)
 def clean_state(sim):
     """Reset scenario config AND clear history before and after every test."""
@@ -224,6 +238,7 @@ def clean_state(sim):
 # port selects the handler. These tests now verify the PORT-based contract.
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestBTCPortDispatch:
 
     def test_default_chain_family_is_eth(self, sim):
@@ -235,7 +250,7 @@ class TestBTCPortDispatch:
             assert body["providers"][pid]["chain_family"] == "eth"
 
     def test_btc_port_dispatches_to_handlers_btc_with_default_chain_family(self, sim):
-        """No /scenario call at all — the BTC port (38575) must still answer
+        """No /scenario call at all — the BTC port (22575) must still answer
         BTC methods because dispatch is port-derived, not chain_family-derived."""
         status, body = _rpc(sim["provider1"], "getblockcount")
         assert status == 200
@@ -249,18 +264,14 @@ class TestBTCPortDispatch:
         dispatch — port-derived dispatch is the contract MAG-2089 introduced.
         This is the original symptom: a leftover chain_family from a sister
         test must not contaminate the BTC port's response."""
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"chain_family": "eth"}}
-        })
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth"}}})
         status, body = _rpc(sim["provider1"], "getblockcount")
         assert status == 200
         # Still 850_000 (decimal int), not "0x1" — would be "0x1" if ETH dispatch fired.
         assert body["result"] == 850_000
 
     def test_reset_clears_chain_family(self, sim):
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"chain_family": "btc"}}
-        })
+        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "btc"}}})
         _post(_ctrl(sim, "/reset"), {})
         _, body = _get(_ctrl(sim, "/scenario"))
         assert body["providers"]["1"]["chain_family"] == "eth"
@@ -280,6 +291,7 @@ class TestBTCPortDispatch:
 # Happy-path stubs per BTC method
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestBTCMethodDefaults:
 
     @pytest.mark.parametrize("method", ALL_BTC_METHODS)
@@ -298,9 +310,9 @@ class TestGetBlockCountReturnsDecimal:
     def test_getblockcount_is_int_not_hex(self, sim):
         """Critical Q3 invariant: bitcoind returns block heights as JSON numbers, not hex strings."""
         _, body = _rpc(sim["provider1"], "getblockcount")
-        assert isinstance(body["result"], int), (
-            f"getblockcount must return int, got {type(body['result']).__name__}: {body['result']!r}"
-        )
+        assert isinstance(
+            body["result"], int
+        ), f"getblockcount must return int, got {type(body['result']).__name__}: {body['result']!r}"
 
     def test_getblockcount_default_is_realistic_mainnet_height(self, sim):
         """The default head is pinned to BTC_LATEST_BLOCK (850_000) so tests can assert."""
@@ -369,6 +381,7 @@ class TestGetBlockEcho:
 # Fault-injection primitives applied on a BTC provider
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestBTCFaultInjection:
     """All fault tests in this class set ``chain_family="btc"`` so the BTC
     listener's fault gate (``handler_chain_family="btc"``) matches the snap
@@ -405,8 +418,9 @@ class TestBTCFaultInjection:
         # Build the request manually so we read raw bytes without json.loads.
         req = urllib.request.Request(
             f"{sim['provider1']}/",
-            data=json.dumps({"jsonrpc": "2.0", "id": 1,
-                              "method": "getblockcount", "params": []}).encode(),
+            data=json.dumps(
+                {"jsonrpc": "2.0", "id": 1, "method": "getblockcount", "params": []}
+            ).encode(),
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -416,8 +430,9 @@ class TestBTCFaultInjection:
 
     def test_status_override_on_btc(self, sim):
         """mode=error + http_status=502 must propagate the custom HTTP status."""
-        _set_btc_with_fault(sim, "1", mode="error", http_status=502, error_code=-5,
-                            error_message="Block not found")
+        _set_btc_with_fault(
+            sim, "1", mode="error", http_status=502, error_code=-5, error_message="Block not found"
+        )
         status, body = _rpc(sim["provider1"], "getblockhash", [999_999_999])
         assert status == 502
         assert body["error"]["code"] == -5
@@ -431,6 +446,7 @@ def http_err():
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-method error overrides on a BTC provider
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestBTCErrorStubs:
     """Per-method ``responses`` overrides don't go through the fault ladder —
@@ -447,9 +463,11 @@ class TestBTCErrorStubs:
 
     def test_btc_error_stub_raw_envelope(self, sim):
         """Escape hatch: responses[method] = {"error": {...}} bypasses the catalogue."""
-        _set_btc(sim, "1", responses={"sendrawtransaction": {
-            "error": {"code": -99, "message": "Custom"}
-        }})
+        _set_btc(
+            sim,
+            "1",
+            responses={"sendrawtransaction": {"error": {"code": -99, "message": "Custom"}}},
+        )
         _, body = _rpc(sim["provider1"], "sendrawtransaction", ["deadbeef"])
         assert body["error"]["code"] == -99
         assert body["error"]["message"] == "Custom"
@@ -467,8 +485,9 @@ class TestBTCErrorStubs:
 # Mixed-chain scenario — one ETH + one BTC provider in the same /scenario body
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestMixedChainScenario:
-    """Each pid has both an ETH listener (38545-7) and a BTC listener (38575-7)
+    """Each pid has both an ETH listener (22545-7) and a BTC listener (22575-7)
     bound on the same ProviderState — mirrors prod's per-pid shared-state
     model. The ETH listener and BTC listener for the same pid can serve
     different responses simultaneously because dispatch is port-derived."""
@@ -478,7 +497,7 @@ class TestMixedChainScenario:
         BTC on the BTC port. Pre-MAG-2089 this required setting chain_family
         per-pid; under the new model the ports themselves decide."""
         _, eth_body = _rpc(sim["eth_provider1"], "eth_blockNumber")
-        _, btc_body = _rpc(sim["provider1"],     "getblockcount")
+        _, btc_body = _rpc(sim["provider1"], "getblockcount")
 
         # ETH side: hex string with "0x" prefix.
         assert isinstance(eth_body["result"], str)
@@ -494,13 +513,16 @@ class TestMixedChainScenario:
         "eth"``). The pre-MAG-2089 sim would have rate-limited BOTH listeners
         because the ETH listener's ``{"eth","btc","ln"}`` gate matched the
         BTC tag."""
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {
-                "1": {"chain_family": "btc", "mode": "rate_limit"},
-            }
-        })
+        _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {"chain_family": "btc", "mode": "rate_limit"},
+                }
+            },
+        )
         eth_status, eth_body = _rpc(sim["eth_provider1"], "eth_blockNumber")
-        btc_status, _        = _rpc(sim["provider1"],     "getblockcount")
+        btc_status, _ = _rpc(sim["provider1"], "getblockcount")
 
         # ETH listener gate is exact-match "eth" — BTC fault is ignored.
         assert eth_status == 200, f"ETH listener should ignore BTC-tagged fault; got {eth_status}"
@@ -514,11 +536,14 @@ class TestMixedChainScenario:
         because its dispatch is to handlers_eth (which doesn't use the
         snap's blocks_behind for eth_blockNumber on the ETH suite's default
         defaults)."""
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {
-                "1": {"chain_family": "btc", "blocks_behind": 50},
-            }
-        })
+        _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {"chain_family": "btc", "blocks_behind": 50},
+                }
+            },
+        )
         _, btc_body = _rpc(sim["provider1"], "getblockcount")
         assert btc_body["result"] == 850_000 - 50
 
@@ -526,6 +551,7 @@ class TestMixedChainScenario:
 # ─────────────────────────────────────────────────────────────────────────────
 # History tracking — BTC requests must show up in /history like ETH ones
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestBTCHistoryTracking:
 
@@ -573,13 +599,11 @@ class TestBTCCrossTransportFaultIsolation:
         applies to content modes (error / corrupt / hang / rate_limit /
         drop_connection) — those gate on chain_family.
         """
-        _post(_ctrl(sim, "/scenario"), {
-            "providers": {"1": {"chain_family": "eth", "mode": "down"}}
-        })
-        status, _ = _rpc(sim["provider1"], "getblockcount")
-        assert status == 503, (
-            f"BTC port should refuse with 503 under universal-down; got {status}"
+        _post(
+            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "down"}}}
         )
+        status, _ = _rpc(sim["provider1"], "getblockcount")
+        assert status == 503, f"BTC port should refuse with 503 under universal-down; got {status}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -596,27 +620,34 @@ class TestBTCSequencedFaultObservation:
     window is open and clears once the ETH listener has consumed it."""
 
     def test_btc_down_clears_after_owning_eth_listener_consumes_window(self, sim):
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {
-            "chain_family": "eth", "mode": "down",
-            "fail_first_n": 2, "then_mode": "success",
-        }}})
+        _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "1": {
+                        "chain_family": "eth",
+                        "mode": "down",
+                        "fail_first_n": 2,
+                        "then_mode": "success",
+                    }
+                }
+            },
+        )
 
         status, _ = _rpc(sim["provider1"], "getblockcount")
-        assert status == 503, (
-            f"BTC port must 503 while the down window is open; got {status}"
-        )
+        assert status == 503, f"BTC port must 503 while the down window is open; got {status}"
 
         for i in (1, 2):
             eth_status, _ = _rpc(sim["eth_provider1"], "eth_blockNumber")
-            assert eth_status == 503, (
-                f"owning ETH call {i} is inside the down window; got {eth_status}"
-            )
+            assert (
+                eth_status == 503
+            ), f"owning ETH call {i} is inside the down window; got {eth_status}"
 
         status, body = _rpc(sim["provider1"], "getblockcount")
         assert status == 200, (
             f"BTC port must observe the consumed window and serve "
             f"then_mode=success; got {status}"
         )
-        assert isinstance(body.get("result"), int), (
-            f"expected the BTC success stub (decimal block count); got {body!r}"
-        )
+        assert isinstance(
+            body.get("result"), int
+        ), f"expected the BTC success stub (decimal block count); got {body!r}"

@@ -44,12 +44,17 @@ from server import (
 )
 from stubs_tendermintrpc import TENDERMINT_ERROR_STUBS, TENDERMINT_METHOD_DEFAULTS
 
-
-# Test ports — distinct from the other suites' ranges so all four can co-exist
-# if run in parallel. ETH uses 28xxx, BTC uses 38xxx, REST uses 48xxx; TM gets 58xxx.
-_PROVIDER_PORTS = {"1": 58545, "2": 58546, "3": 58547}
-_TM_PORTS       = {"1": 58554, "2": 58555, "3": 58556}
-_CONTROL_PORT   = 59000
+# ── Test ports. Two rules keep binds reliable across the whole suite:
+#    1. Stay below 32768. Ports from 32768 up are the kernel's ephemeral
+#       client-port range (Linux default 32768-60999, macOS 49152-65535):
+#       every outgoing HTTP call an earlier test module makes grabs a random
+#       source port there, and a lingering one makes this module's bind fail
+#       with "Address already in use" at fixture setup.
+#    2. Each test file owns a unique port block (this file: 260xx) so all
+#       modules can run in one pytest invocation.
+_PROVIDER_PORTS = {"1": 26045, "2": 26046, "3": 26047}
+_TM_PORTS = {"1": 26054, "2": 26055, "3": 26056}
+_CONTROL_PORT = 26000
 
 
 # ── HTTP helpers (independent of the other test files — duplication intentional) ──
@@ -143,10 +148,10 @@ def sim():
     time.sleep(0.15)
 
     yield {
-        "control":  f"http://127.0.0.1:{_CONTROL_PORT}",
-        "tm1":      f"http://127.0.0.1:{_TM_PORTS['1']}",
-        "tm2":      f"http://127.0.0.1:{_TM_PORTS['2']}",
-        "tm3":      f"http://127.0.0.1:{_TM_PORTS['3']}",
+        "control": f"http://127.0.0.1:{_CONTROL_PORT}",
+        "tm1": f"http://127.0.0.1:{_TM_PORTS['1']}",
+        "tm2": f"http://127.0.0.1:{_TM_PORTS['2']}",
+        "tm3": f"http://127.0.0.1:{_TM_PORTS['3']}",
         "jsonrpc1": f"http://127.0.0.1:{_PROVIDER_PORTS['1']}",
         "jsonrpc2": f"http://127.0.0.1:{_PROVIDER_PORTS['2']}",
     }
@@ -275,9 +280,9 @@ class TestTmMethodCoverage:
         if method == "health":
             assert body["result"] == {}
         else:
-            assert isinstance(body["result"], dict) and body["result"], (
-                f"{method}: result should be a non-empty dict, got {body['result']!r}"
-            )
+            assert (
+                isinstance(body["result"], dict) and body["result"]
+            ), f"{method}: result should be a non-empty dict, got {body['result']!r}"
 
     @pytest.mark.parametrize("method", _V1_METHODS)
     def test_get_method_returns_200_envelope(self, sim, method):
@@ -313,12 +318,22 @@ class TestTmRequestTimeLogic:
         """POST abci_query echoes height in response.height (the MAG-1741 contract)."""
         _set_tm(sim, "1")
         _, body, _ = _tm_post(
-            sim, "1", "abci_query",
+            sim,
+            "1",
+            "abci_query",
             params={"path": "/store/auth/key", "data": "", "height": "4500000", "prove": False},
         )
         envelope_keys = set(body["result"]["response"].keys())
         assert envelope_keys == {
-            "code", "log", "info", "index", "key", "value", "proofOps", "height", "codespace",
+            "code",
+            "log",
+            "info",
+            "index",
+            "key",
+            "value",
+            "proofOps",
+            "height",
+            "codespace",
         }
         assert body["result"]["response"]["height"] == "4500000"
 
@@ -326,7 +341,9 @@ class TestTmRequestTimeLogic:
         """GET abci_query?height="H" echoes height after normalisation."""
         _set_tm(sim, "1")
         _, body, _ = _tm_get(
-            sim, "1", "abci_query",
+            sim,
+            "1",
+            "abci_query",
             params={
                 "path": '"/store/auth/key"',
                 "data": '""',
@@ -340,7 +357,9 @@ class TestTmRequestTimeLogic:
         """POST validators?page=1&per_page=2 returns count=2, len(validators)=2."""
         _set_tm(sim, "1")
         _, body, _ = _tm_post(
-            sim, "1", "validators",
+            sim,
+            "1",
+            "validators",
             params={"page": "1", "per_page": "2"},
         )
         result = body["result"]
@@ -378,7 +397,8 @@ class TestTmFaults:
     def test_error_mode_returns_jsonrpc_error_envelope(self, sim):
         """mode=error returns an envelope with the configured code + message."""
         _set_tm(
-            sim, "1",
+            sim,
+            "1",
             mode="error",
             error_code=-32603,
             error_message="Internal error injected by test",
@@ -403,7 +423,8 @@ class TestTmFaults:
     def test_corruption_missing_field_strips_result(self, sim):
         """corruption_mode=missing_field+missing_field='result' drops the result key."""
         _set_tm(
-            sim, "1",
+            sim,
+            "1",
             corruption_mode="missing_field",
             missing_field="result",
         )
@@ -568,9 +589,11 @@ class TestTmCrossTransportFaultIsolation:
         provider being unreachable across every node-url (e.g. MAG-2061).
         Per-transport isolation still applies to content modes (error /
         corrupt / hang / rate_limit / drop_connection)."""
-        _request("POST", _ctrl(sim, "/scenario"), body={
-            "providers": {"1": {"chain_family": "eth", "mode": "down"}}
-        })
+        _request(
+            "POST",
+            _ctrl(sim, "/scenario"),
+            body={"providers": {"1": {"chain_family": "eth", "mode": "down"}}},
+        )
         status, _, _ = _tm_get(sim, "1", "status")
         assert status == 503, f"TM should refuse with 503 under universal-down; got {status}"
 
@@ -578,20 +601,31 @@ class TestTmCrossTransportFaultIsolation:
         """A ``chain_family="btc"`` mode=error must not produce an error
         body on the TM port — direct mirror of the leak shape surfaced in
         2026-05-18 triage."""
-        _request("POST", _ctrl(sim, "/scenario"), body={"providers": {"1": {
-            "chain_family": "btc",
-            "mode": "error", "error_code": -32000,
-            "error_message": "BTC error stub",
-        }}})
+        _request(
+            "POST",
+            _ctrl(sim, "/scenario"),
+            body={
+                "providers": {
+                    "1": {
+                        "chain_family": "btc",
+                        "mode": "error",
+                        "error_code": -32000,
+                        "error_message": "BTC error stub",
+                    }
+                }
+            },
+        )
         status, body, _ = _tm_get(sim, "1", "status")
         assert status == 200, f"TM should ignore btc-error; got {status}"
         assert "result" in body, f"expected TM success body; got {body!r}"
 
     def test_tm_unaffected_by_rest_rate_limit_fault(self, sim):
         """REST rate_limit must not 429 the TM port."""
-        _request("POST", _ctrl(sim, "/scenario"), body={
-            "providers": {"1": {"chain_family": "rest", "mode": "rate_limit"}}
-        })
+        _request(
+            "POST",
+            _ctrl(sim, "/scenario"),
+            body={"providers": {"1": {"chain_family": "rest", "mode": "rate_limit"}}},
+        )
         status, body, _ = _tm_get(sim, "1", "status")
         assert status == 200
         assert "result" in body
@@ -600,27 +634,33 @@ class TestTmCrossTransportFaultIsolation:
         """Sanity check: ``chain_family="tendermintrpc"`` + mode=rate_limit
         must still fire on the TM port. The gate must not regress
         TM-authored faults."""
-        _request("POST", _ctrl(sim, "/scenario"), body={
-            "providers": {"1": {"chain_family": "tendermintrpc", "mode": "rate_limit"}}
-        })
+        _request(
+            "POST",
+            _ctrl(sim, "/scenario"),
+            body={"providers": {"1": {"chain_family": "tendermintrpc", "mode": "rate_limit"}}},
+        )
         status, _, _ = _tm_get(sim, "1", "status")
         assert status == 429
 
     def test_tm_killed_by_btc_down_fault(self, sim):
         """MAG-2092 universal-down: a ``chain_family="btc"`` mode=down
         also 503s the TM port."""
-        _request("POST", _ctrl(sim, "/scenario"), body={
-            "providers": {"1": {"chain_family": "btc", "mode": "down"}}
-        })
+        _request(
+            "POST",
+            _ctrl(sim, "/scenario"),
+            body={"providers": {"1": {"chain_family": "btc", "mode": "down"}}},
+        )
         status, _, _ = _tm_get(sim, "1", "status")
         assert status == 503, f"TM should refuse with 503 under universal-down; got {status}"
 
     def test_tm_killed_by_rest_down_fault(self, sim):
         """MAG-2092 universal-down: a ``chain_family="rest"`` mode=down
         also 503s the TM port."""
-        _request("POST", _ctrl(sim, "/scenario"), body={
-            "providers": {"1": {"chain_family": "rest", "mode": "down"}}
-        })
+        _request(
+            "POST",
+            _ctrl(sim, "/scenario"),
+            body={"providers": {"1": {"chain_family": "rest", "mode": "down"}}},
+        )
         status, _, _ = _tm_get(sim, "1", "status")
         assert status == 503, f"TM should refuse with 503 under universal-down; got {status}"
 
@@ -639,15 +679,23 @@ class TestTmSequencedFaultObservation:
     must see then_mode instead of staying stuck on the raw fault forever."""
 
     def test_tm_down_clears_after_owning_listener_consumes_window(self, sim):
-        _request("POST", _ctrl(sim, "/scenario"), body={"providers": {"1": {
-            "chain_family": "eth", "mode": "down",
-            "fail_first_n": 2, "then_mode": "success",
-        }}})
+        _request(
+            "POST",
+            _ctrl(sim, "/scenario"),
+            body={
+                "providers": {
+                    "1": {
+                        "chain_family": "eth",
+                        "mode": "down",
+                        "fail_first_n": 2,
+                        "then_mode": "success",
+                    }
+                }
+            },
+        )
 
         status, _, _ = _tm_get(sim, "1", "status")
-        assert status == 503, (
-            f"TM must 503 while the down window is open; got {status}"
-        )
+        assert status == 503, f"TM must 503 while the down window is open; got {status}"
 
         for i in (1, 2):
             eth_status, _, _ = _request(
@@ -655,14 +703,13 @@ class TestTmSequencedFaultObservation:
                 sim["jsonrpc1"],
                 body={"jsonrpc": "2.0", "id": i, "method": "eth_blockNumber"},
             )
-            assert eth_status == 503, (
-                f"owning ETH call {i} is inside the down window; got {eth_status}"
-            )
+            assert (
+                eth_status == 503
+            ), f"owning ETH call {i} is inside the down window; got {eth_status}"
 
         status, body, _ = _tm_get(sim, "1", "status")
         assert status == 200, (
-            f"TM must observe the consumed window and serve then_mode=success; "
-            f"got {status}"
+            f"TM must observe the consumed window and serve then_mode=success; " f"got {status}"
         )
         assert "result" in body
         assert body["result"]["node_info"]["network"]

@@ -1,0 +1,47 @@
+# Pre-commit hooks configuration
+# Install: pip install pre-commit
+# Setup: pre-commit install
+# Run manually: pre-commit run --all-files
+#
+# Matching the sibling smart-router-automation repo's convention: hooks are
+# manual-only by default (won't block a commit). Run `pre-commit run --all-files`
+# before pushing, or rely on the CI lint job in
+# .github/workflows/lint-and-test.yml, which runs the same tools unconditionally.
+
+repos:
+  # ruff — linting + import sorting (replaces flake8 + isort)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.20
+    hooks:
+      - id: ruff
+        args: [--fix]
+        stages: [manual]
+
+  # black — code formatter
+  - repo: https://github.com/psf/black
+    rev: 26.5.1
+    hooks:
+      - id: black
+        language_version: python3.12
+        stages: [manual]
+
+  # mypy — type checking (permissive baseline, see pyproject.toml)
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v2.2.0
+    hooks:
+      - id: mypy
+        stages: [manual]
+        args: [--no-error-summary]
+
+  # Generic file hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+        stages: [manual]
+      - id: check-json
+        stages: [manual]
+      - id: end-of-file-fixer
+        stages: [manual]
+      - id: trailing-whitespace
+        stages: [manual]

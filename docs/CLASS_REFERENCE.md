@@ -52,7 +52,7 @@ class ProviderState:
 | `http_status` | int | `200` | HTTP status of error responses (200 = JSON-RPC body error; 400/500 = HTTP-level) |
 | `responses` | dict | `{}` | Per-method custom result overrides (`{method_name: {result: ...}}`) |
 | `lock` | Lock | new Lock() | Field-level lock used by every accessor method |
-| `history` | deque | `deque(maxlen=HISTORY_MAX)` | Per-provider ring buffer of recent calls; oldest is dropped at 200 entries |
+| `history` | deque | `deque(maxlen=HISTORY_MAX)` | Per-provider ring buffer of recent calls; oldest is dropped past `HISTORY_MAX` entries (2000 by default, `SIM_HISTORY_MAX` env var overrides) |
 | `total_calls` | int | `0` | All-time call count; never reset by ring rollover, only by `clear_history()` |
 | `calls_by_status` | dict | `{}` | All-time per-status counters (`success`/`error`/`rate_limit`/`down`) |
 
@@ -213,7 +213,7 @@ def push_call_to_buffer(self, method: str, status: str, latency_ms: int,
 ```
 
 **What it does:**
-- Appends one entry to the per-provider ring buffer (capped at `HISTORY_MAX = 200`; oldest is dropped on overflow)
+- Appends one entry to the per-provider ring buffer (capped at `HISTORY_MAX`, 2000 by default; oldest is dropped on overflow)
 - Increments the all-time `total_calls` counter (never reset by ring rollover)
 - Bumps the per-status counter in `calls_by_status`
 
@@ -629,20 +629,31 @@ def do_POST(self):
 # Request body:
 {
   "providers": {
-    "1": {"mode": "rate_limit"},
-    "2": {"mode": "down"},
-    "3": {"mode": "success", "latency_ms": 100}
+    "1": {"chain_family": "eth", "mode": "rate_limit"},
+    "2": {"chain_family": "eth", "mode": "down"},
+    "3": {"chain_family": "eth", "mode": "success", "latency_ms": 100}
   }
 }
 
-# Runs:
-state["1"].update({"mode": "rate_limit"})
-state["2"].update({"mode": "down"})
-state["3"].update({"mode": "success", "latency_ms": 100})
+# Runs (after validation — chain_family is required on every block):
+state["1"].update({"chain_family": "eth", "mode": "rate_limit"})
+state["2"].update({"chain_family": "eth", "mode": "down"})
+state["3"].update({"chain_family": "eth", "mode": "success", "latency_ms": 100})
 
 # Returns:
-{"status": "ok"}
+{
+  "status": "ok",
+  "applied": {
+    "1": {"chain_family": "eth"},
+    "2": {"chain_family": "eth"},
+    "3": {"chain_family": "eth"}
+  }
+}
 ```
+
+`applied` is a receipt: one entry per provider ID in the request, each
+echoing back the `chain_family` the caller sent (never a filled-in
+default — chain_family is required on every block, see validation above).
 
 **Case 2: POST /reset**
 - Calls `reset_scenario()` on all provider states
@@ -745,13 +756,13 @@ Request 1:
 POST /scenario HTTP/1.1
 Content-Type: application/json
 
-{"providers": {"1": {"mode": "rate_limit"}}}
+{"providers": {"1": {"chain_family": "eth", "mode": "rate_limit"}}}
 
 ↓
 ControlHandler.do_POST() runs:
 1. Parse body
 2. Check path == "/scenario"? YES
-3. For provider "1", call state.update({"mode": "rate_limit"})
+3. For provider "1", call state.update({"chain_family": "eth", "mode": "rate_limit"})
 4. Call _reply(200, {"status": "ok"})
 
 Response:

@@ -1,0 +1,112 @@
+name: Comment on Jira issue from PR
+
+on:
+  pull_request:
+    types: [opened, reopened, edited, synchronize, ready_for_review, closed]
+
+permissions:
+  pull-requests: read
+  contents: read
+
+jobs:
+  comment-jira:
+    runs-on: ubuntu-latest
+    if: ${{ (github.event.action == 'closed' && github.event.pull_request.merged == true) || (github.event.action != 'closed' && github.event.pull_request.draft == false) }}
+    steps:
+      - name: Extract Jira issue keys from PR body, branch, or title
+        id: extract
+        shell: bash
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+
+          # Resolution order:
+          #   1. PR body — '#Closes / #Resolves / #Fixes MAG-XXXX' (canonical signal;
+          #      every PR with a Jira ticket carries this per repo convention).
+          #      Multiple keys are supported — the next step comments on each.
+          #   2. Branch name — first MAG-XXXX-looking token (case-insensitive).
+          #   3. PR title — first MAG-XXXX-looking token (case-insensitive).
+          # Branch / title fallbacks return a single key; only PR-body matching
+          # yields a list, matching the convention in jira-close-on-merge.yml.
+
+          KEYS="$(printf '%s' "$PR_BODY" | grep -oE '#(Closes|Resolves|Fixes) MAG-[0-9]+' | grep -oE 'MAG-[0-9]+' | sort -u | tr '\n' ' ' || true)"
+          KEYS="$(echo "$KEYS" | xargs || true)"  # trim trailing whitespace
+
+          if [ -z "$KEYS" ]; then
+            KEYS="$(printf "%s\n%s\n" "$BRANCH" "$TITLE" | grep -Eio 'MAG-[0-9]+' | head -n1 | tr '[:lower:]' '[:upper:]' || true)"
+          fi
+
+          if [ -z "$KEYS" ]; then
+            echo "No Jira key found in PR body, branch, or title. Skipping."
+            echo "jira_keys=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "jira_keys=$KEYS" >> "$GITHUB_OUTPUT"
+          echo "Found Jira key(s): $KEYS"
+
+      - name: Post comment to Jira
+        if: ${{ steps.extract.outputs.jira_keys != '' }}
+        shell: bash
+        env:
+          POST_TO_JIRA: ${{ secrets.POST_TO_JIRA }}
+          JIRA_KEYS: ${{ steps.extract.outputs.jira_keys }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          ACTOR: ${{ github.actor }}
+          PR_MERGED: ${{ github.event.pull_request.merged }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${POST_TO_JIRA:-}" ]; then
+            echo "Missing POST_TO_JIRA secret. Skipping Jira comment."
+            exit 0
+          fi
+
+          # Parse POST_TO_JIRA secret (format: base_url|email|api_token)
+          JIRA_BASE_URL="$(echo "${POST_TO_JIRA}" | cut -d'|' -f1)"
+          JIRA_EMAIL="$(echo "${POST_TO_JIRA}" | cut -d'|' -f2)"
+          JIRA_API_TOKEN="$(echo "${POST_TO_JIRA}" | cut -d'|' -f3)"
+
+          if [ -z "${JIRA_BASE_URL}" ] || [ -z "${JIRA_EMAIL}" ] || [ -z "${JIRA_API_TOKEN}" ]; then
+            echo "Invalid POST_TO_JIRA secret format. Expected: base_url|email|api_token"
+            exit 1
+          fi
+
+          # Build a plain-text comment, then wrap into Jira ADF JSON.
+          if [ "${PR_MERGED}" = "true" ]; then
+            export COMMENT_TEXT="GitHub PR merged: ${PR_URL}\nTitle: ${PR_TITLE}\nBranch: ${BRANCH}\nBy: ${ACTOR}"
+          else
+            export COMMENT_TEXT="GitHub PR linked: ${PR_URL}\nTitle: ${PR_TITLE}\nBranch: ${BRANCH}\nBy: ${ACTOR}"
+          fi
+
+          python3 -c 'import json, os; text=os.environ["COMMENT_TEXT"]; payload={"body":{"type":"doc","version":1,"content":[{"type":"paragraph","content":[{"type":"text","text":text}]}]}}; print(json.dumps(payload))' > payload.json
+
+          POST_FAILED=0
+          for KEY in $JIRA_KEYS; do
+            echo "::group::Posting comment to Jira issue ${KEY}"
+            HTTP_CODE=$(curl -sS -X POST \
+              -u "${JIRA_EMAIL}:${JIRA_API_TOKEN}" \
+              -H "Accept: application/json" \
+              -H "Content-Type: application/json" \
+              "${JIRA_BASE_URL}/rest/api/3/issue/${KEY}/comment" \
+              --data @payload.json \
+              -o /tmp/jira_comment_response.txt \
+              -w '%{http_code}' || echo "000")
+            if [[ "$HTTP_CODE" =~ ^2[0-9][0-9]$ ]]; then
+              echo "✓ Posted to ${KEY} (HTTP ${HTTP_CODE})"
+            else
+              echo "::error::Failed to post comment to ${KEY} — HTTP ${HTTP_CODE}. Response body: $(cat /tmp/jira_comment_response.txt 2>/dev/null || echo '<none>')"
+              POST_FAILED=1
+            fi
+            echo "::endgroup::"
+          done
+          if [ "$POST_FAILED" = "1" ]; then
+            exit 1
+          fi
