@@ -15,6 +15,7 @@ only if they are the same object. Dataclass-generated equality would recurse
 through the Pool<->Provider cycle and make both types unhashable.
 """
 
+import threading
 from dataclasses import dataclass, field
 
 from provider_simulator.domain.call_log import CallLog
@@ -54,7 +55,28 @@ class Provider:
     quirks: Quirks
     log: CallLog
     endpoints: list[Endpoint]
+    # Runtime counter for the fail_first_n sequenced fault — not config, not
+    # telemetry, so it lives here. Endpoints targeted by a scenario consume it;
+    # the control API resets it when a new fail_first_n scenario is applied.
+    _fail_count: int = field(default=0, init=False, repr=False)
+    _fail_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     @property
     def key(self) -> str:
         return f"{self.pool.name}:{self.pid}"
+
+    def consume_fail(self) -> int:
+        """Increment and return the fail_first_n counter (targeted endpoints)."""
+        with self._fail_lock:
+            self._fail_count += 1
+            return self._fail_count
+
+    def peek_fail(self) -> int:
+        """Read the fail_first_n counter without advancing it (observers)."""
+        with self._fail_lock:
+            return self._fail_count
+
+    def reset_fail(self) -> None:
+        """Reset the fail_first_n counter (a fresh fail_first_n scenario / reset)."""
+        with self._fail_lock:
+            self._fail_count = 0
