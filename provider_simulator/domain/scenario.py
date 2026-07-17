@@ -8,10 +8,14 @@ loudly rather than being silently ignored.
 
 The `transports` field, when set, scopes the block's effect to specific
 endpoints of the provider (e.g. only its ws wire). None means every endpoint.
+Values are validated against the closed TRANSPORTS vocabulary — "grpc" is an
+interface, not a transport, and accepting it here would make a fault silently
+match zero endpoints.
 """
 
 from dataclasses import dataclass, field
 
+from provider_simulator.domain.endpoint import TRANSPORTS
 from provider_simulator.domain.introspective_config import IntrospectiveConfig
 
 
@@ -31,3 +35,15 @@ class ScenarioConfig(IntrospectiveConfig):
     then_mode: str = "success"
     drop_at: str = "before_headers"
     transports: list[str] | None = None  # endpoint filter; None = all endpoints
+
+    def _validate(self, cfg: dict) -> None:
+        transports = cfg.get("transports")
+        if transports is None:
+            return
+        bad = [t for t in transports if t not in TRANSPORTS]
+        if bad:
+            raise ValueError(
+                f"unknown transport(s) {bad}; valid transports are {list(TRANSPORTS)} "
+                "(interfaces like 'grpc'/'rest' are not transports — gRPC runs over "
+                "'http2', REST over 'http')"
+            )

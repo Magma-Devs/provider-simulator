@@ -10,6 +10,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # onto sys.path so generated absolute imports resolve.
 COPY *.py ./
 COPY cosmos_pb2/ ./cosmos_pb2/
+# The redesigned core (provider identity, config, telemetry, topology,
+# registry). server.py migrates onto it story by story; shipping it in the
+# image from day one means a wiring story can't silently deploy a pod whose
+# imports only work in a full checkout.
+COPY provider_simulator/ ./provider_simulator/
 # Non-root (MAG-2318): the simulator has no filesystem writes (in-memory
 # state only, see CLAUDE.md) and no reason to bind ports <1024, so it never
 # needs root. --system avoids UID/GID collisions with the host or other

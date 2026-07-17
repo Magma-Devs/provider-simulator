@@ -1,3 +1,5 @@
+import pytest
+
 from provider_simulator.domain.scenario import ScenarioConfig
 
 
@@ -28,12 +30,18 @@ def test_update_sets_transport_filter():
 
 def test_unknown_field_is_rejected_with_clear_message():
     s = ScenarioConfig()
-    try:
+    with pytest.raises(ValueError, match="slot_offset"):
         s.update({"slot_offset": 3})  # a Solana quirk, not a universal field
-    except ValueError as exc:
-        assert "slot_offset" in str(exc)
-    else:
-        raise AssertionError("a quirk key must not be accepted by ScenarioConfig")
+
+
+def test_unknown_transport_value_is_rejected():
+    s = ScenarioConfig()
+    # "grpc" is an interface, not a transport — accepting it would make the
+    # fault silently match zero endpoints.
+    with pytest.raises(ValueError, match="grpc"):
+        s.update({"mode": "error", "transports": ["grpc"]})
+    # the whole update aborted — mode unchanged
+    assert s.snapshot()["mode"] == "success"
 
 
 def test_reset_clears_a_prior_fault():
@@ -51,3 +59,11 @@ def test_two_instances_do_not_share_responses_dict():
     b = ScenarioConfig()
     a.update({"responses": {"eth_call": {"result": "0x1"}}})
     assert b.snapshot()["responses"] == {}
+
+
+def test_snapshot_responses_edits_do_not_touch_live_config():
+    s = ScenarioConfig()
+    s.update({"responses": {"eth_call": {"result": "0x1"}}})
+    snap = s.snapshot()
+    snap["responses"]["eth_call"] = "CORRUPTED"
+    assert s.snapshot()["responses"] == {"eth_call": {"result": "0x1"}}
