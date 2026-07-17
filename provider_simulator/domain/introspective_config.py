@@ -12,10 +12,14 @@ forgetting one. Subclasses just declare fields; this base does the rest.
 """
 
 import threading
-from dataclasses import MISSING, fields
+from dataclasses import MISSING, dataclass, fields
 
 
+@dataclass
 class IntrospectiveConfig:
+    """Field-less dataclass base. Being a dataclass is what lets ``fields(self)``
+    below type-check — subclasses add the real fields."""
+
     def __post_init__(self) -> None:
         # Not a dataclass field, so it never appears in fields()/snapshot().
         self._lock = threading.Lock()
