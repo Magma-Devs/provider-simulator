@@ -23,7 +23,7 @@ from typing import Any, Optional
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-import ws_protocol
+from provider_simulator.listeners import ws_protocol
 
 
 class WsClient:

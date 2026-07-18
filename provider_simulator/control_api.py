@@ -18,7 +18,14 @@ from provider_simulator.domain.registry import Registry
 from provider_simulator.listeners.ws import WsSubscriptions
 
 _MODES = {"success", "error", "rate_limit", "down", "hang", "drop_connection"}
-_CORRUPTION_MODES = {"truncated", "missing_field", "invalid_json", "empty_response", "wrong_type"}
+_CORRUPTION_MODES = {
+    "truncated",
+    "missing_field",
+    "invalid_json",
+    "empty_response",
+    "wrong_type",
+    "invalid_proto",  # gRPC-only wire corruption; other listeners never emit it
+}
 _DROP_AT = {"before_headers", "after_headers", "mid_body"}
 _LOGS_LAG_MODES = {"empty", "partial"}
 # Two calls with the same (request_id, method) within this window are one group.
@@ -30,7 +37,26 @@ _ENUMS = {
     "drop_at": _DROP_AT,
     "then_mode": _MODES,
     "logs_lag_mode": _LOGS_LAG_MODES,
+    "unknown_method_mode": {"null", "error"},
 }
+
+
+def _bad_number(field_name: str, value: object) -> str:
+    """Range/type validation for the numeric scenario fields, so a typo'd
+    payload fails with a 400 instead of silently mis-configuring a provider.
+    bool is rejected explicitly — it subclasses int and would masquerade as
+    a number."""
+    if field_name == "error_probability":
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not 0.0 <= value <= 1.0
+        ):
+            return f"error_probability must be a number in [0.0, 1.0], got {value!r}"
+    if field_name in ("latency_ms", "fail_first_n"):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return f"{field_name} must be a non-negative integer, got {value!r}"
+    return ""
 
 
 def _normalise_responses(responses: object) -> object:
@@ -54,9 +80,35 @@ def _normalise_responses(responses: object) -> object:
             out[(key[0], key[1])] = cfg
         return out
     if isinstance(responses, dict):
-        for cfg in responses.values():
-            if isinstance(cfg, dict) and cfg.get("mode") == "error":
+        for method_name, cfg in responses.items():
+            if not isinstance(cfg, dict):
+                continue
+            if cfg.get("mode") == "error":
                 raise ValueError("per-method mode='error' not allowed; use error_stub or error")
+            # Canned {status, body} success override (JSON-RPC method entries
+            # only — REST re-tupled entries own their body+status semantics).
+            # The body must be a JSON object, must not combine with a fault
+            # mode (they describe different outcomes), and the status must be
+            # 2xx — non-2xx shapes are what mode='error' + http_status is for.
+            if isinstance(method_name, str) and "body" in cfg:
+                if not isinstance(cfg["body"], dict):
+                    raise ValueError(
+                        f"per-method body override must be a dict (method={method_name!r})"
+                    )
+                if "mode" in cfg:
+                    raise ValueError(
+                        f"per-method body and mode are mutually exclusive (method={method_name!r})"
+                    )
+                status_val = cfg.get("status", 200)
+                if not (
+                    isinstance(status_val, int)
+                    and not isinstance(status_val, bool)
+                    and 200 <= status_val <= 299
+                ):
+                    raise ValueError(
+                        f"per-method body override status must be a 2xx int "
+                        f"(method={method_name!r}), got {status_val!r}"
+                    )
         return responses
     raise ValueError("responses must be an object (or a list of pairs for REST)")
 
@@ -102,11 +154,14 @@ class ControlApi:
                     except ValueError as exc:
                         return 400, {"error": f"{key}: {exc}"}
                 elif field_name in scenario_fields:
-                    err = _bad_enum(field_name, value)
+                    err = _bad_enum(field_name, value) or _bad_number(field_name, value)
                     if err:
                         return 400, {"error": f"{key}: {err}"}
                     scenario_updates[field_name] = value
                 elif field_name in quirks_fields:
+                    err = _bad_enum(field_name, value)
+                    if err:
+                        return 400, {"error": f"{key}: {err}"}
                     quirks_updates[field_name] = value
                 else:
                     return 400, {
@@ -127,7 +182,12 @@ class ControlApi:
             provider.scenario.update(scenario_updates)
             if quirks_updates:
                 provider.quirks.update(quirks_updates)
-            applied[provider.key] = {**scenario_updates, **quirks_updates}
+            # `responses` is write-only on the wire (REST entries re-tuple to
+            # (verb, template) keys, which JSON cannot carry) — echo every
+            # other resolved field.
+            applied[provider.key] = {
+                k: v for k, v in {**scenario_updates, **quirks_updates}.items() if k != "responses"
+            }
         return 200, {"status": "ok", "applied": applied}
 
     # ── resets ──────────────────────────────────────────────────────────────
@@ -135,6 +195,7 @@ class ControlApi:
         self._reset_heads()
         for provider in self.registry.all_providers():
             provider.scenario.reset()
+            provider.quirks.reset()
             provider.reset_fail()
         return 200, {"status": "scenario reset"}
 
@@ -147,6 +208,7 @@ class ControlApi:
         self._reset_heads()
         for provider in self.registry.all_providers():
             provider.scenario.reset()
+            provider.quirks.reset()
             provider.reset_fail()
             provider.log.clear()
         return 200, {"status": "scenario reset and history cleared"}
@@ -178,6 +240,9 @@ class ControlApi:
         for provider in self.registry.all_providers():
             snap = provider.scenario.snapshot()
             snap.pop("responses", None)  # write-only, like the flat /scenario (tuple keys, REST)
+            # Quirks read back flat, exactly as they are written — one dict per
+            # provider on the wire, no nesting.
+            snap.update(provider.quirks.snapshot())
             providers[provider.key] = snap
         return 200, {"providers": providers}
 
@@ -208,16 +273,20 @@ class ControlApi:
                 entry["correlation_group"] = next_group
 
         if "last" in query:
-            entries = entries[-_as_int(query["last"], len(entries)) :]
+            tail = _as_int(query["last"], len(entries))
+            # A slice of [-0:] is the WHOLE list — guard so last=0 means none.
+            entries = entries[-tail:] if tail > 0 else []
         if "max" in query:
             cap = _as_int(query["max"], -1)
             if cap < 0:
                 return 400, {"error": "max must be a non-negative integer"}
-            entries = entries[:cap]
+            # The cap keeps the TAIL — the most recent calls — and the kept
+            # entries retain their full-timeline call_order.
+            entries = entries[-cap:] if cap > 0 else []
         return 200, {"count": len(entries), "history": entries}
 
     def _filter_history(self, entries: list[dict], query: dict) -> list[dict]:
-        for key in ("pool", "transport", "method", "status", "interface"):
+        for key in ("pool", "pid", "transport", "method", "status", "interface"):
             if key in query:
                 entries = [e for e in entries if e.get(key) == query[key]]
         if "request_id" in query:
@@ -231,8 +300,17 @@ class ControlApi:
             entries = [e for e in entries if e.get("ts", 0.0) <= hi]
         for key, value in query.items():
             if key.startswith("lava_header_"):
-                name = key[len("lava_header_") :]
-                entries = [e for e in entries if e.get("lava_headers", {}).get(name) == value]
+                # Header names are case-insensitive on the wire (clients may
+                # title-case them) — match accordingly.
+                name = key[len("lava_header_") :].lower()
+                entries = [
+                    e
+                    for e in entries
+                    if any(
+                        header.lower() == name and header_value == value
+                        for header, header_value in e.get("lava_headers", {}).items()
+                    )
+                ]
         return entries
 
     # ── /ws/emit, /ws/subscriptions ───────────────────────────────────────────

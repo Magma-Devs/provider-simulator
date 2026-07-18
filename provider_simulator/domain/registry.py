@@ -39,6 +39,10 @@ class Registry:
     def all_providers(self) -> list[Provider]:
         return [p for pool in self.pools.values() for p in pool.providers.values()]
 
+    def ports(self) -> list[int]:
+        """Every bound listener port, sorted — the set a readiness probe checks."""
+        return sorted(self._by_port)
+
 
 def _validate_row(pool_name: str, chain: str, pid: str, endpoint_specs) -> None:
     if not pool_name or ":" in pool_name:

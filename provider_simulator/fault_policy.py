@@ -20,6 +20,11 @@ Two rules the ladder folds in:
   (default ``success``). The counter lives on the provider and is only advanced
   by endpoints the filter targets.
 
+``decide`` is split into two reusable halves so a listener that layers
+per-method overrides on top can consume the fail_first_n window exactly once:
+``resolve_mode`` applies the filter + window (the stateful half), ``ladder``
+maps a mode to a Verdict (the pure half). ``decide`` composes them.
+
 Latency is NOT a Verdict — it modifies timing on both success and fault paths, so
 the listener applies it, not the policy.
 """
@@ -40,14 +45,18 @@ class Verdict:
     drop_at: str = "before_headers"
 
 
-_NONE = Verdict(kind="none")
+NONE_VERDICT = Verdict(kind="none")
+_NONE = NONE_VERDICT  # backward-compatible module-private alias
 
 
-def decide(scenario: dict, endpoint: Endpoint, provider: Provider) -> Verdict:
-    """Return the fault Verdict for one request on ``endpoint`` of ``provider``.
+def resolve_mode(scenario: dict, endpoint: Endpoint, provider: Provider) -> tuple[bool, str]:
+    """Apply the transports filter and the fail_first_n window; return
+    ``(targeted, effective_mode)``.
 
-    ``scenario`` is a ScenarioConfig snapshot dict. Pure except for advancing the
-    provider's fail_first_n counter on a targeted endpoint.
+    This is the only stateful step of the policy: a targeted request under an
+    active ``fail_first_n`` advances the provider's counter, so call it exactly
+    once per request. An untargeted endpoint neither faults nor advances the
+    window — its effective mode is always ``success``.
     """
     transports = scenario.get("transports")
     targeted = transports is None or endpoint.transport in transports
@@ -60,8 +69,16 @@ def decide(scenario: dict, endpoint: Endpoint, provider: Provider) -> Verdict:
             mode = scenario.get("then_mode", "success")
 
     if not targeted:
-        return _NONE
+        return False, "success"
+    return True, mode
 
+
+def ladder(mode: str, scenario: dict) -> Verdict:
+    """Map an effective mode to its fault Verdict (pure — no window state).
+
+    ``error_probability`` still rolls here: a ``success`` mode can turn into an
+    error Verdict probabilistically, matching the legacy ladder order.
+    """
     if mode == "down":
         return Verdict(kind="down")
     if mode == "hang":
@@ -79,4 +96,16 @@ def decide(scenario: dict, endpoint: Endpoint, provider: Provider) -> Verdict:
             error_code=scenario.get("error_code", -32000),
             error_message=scenario.get("error_message", "Internal error"),
         )
-    return _NONE
+    return NONE_VERDICT
+
+
+def decide(scenario: dict, endpoint: Endpoint, provider: Provider) -> Verdict:
+    """Return the fault Verdict for one request on ``endpoint`` of ``provider``.
+
+    ``scenario`` is a ScenarioConfig snapshot dict. Pure except for advancing the
+    provider's fail_first_n counter on a targeted endpoint.
+    """
+    targeted, mode = resolve_mode(scenario, endpoint, provider)
+    if not targeted:
+        return NONE_VERDICT
+    return ladder(mode, scenario)

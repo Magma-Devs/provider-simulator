@@ -11,7 +11,7 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-import ws_protocol
+from provider_simulator.listeners import ws_protocol
 
 
 def test_handshake_accept_rfc6455_example():

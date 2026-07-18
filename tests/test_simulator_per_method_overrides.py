@@ -1,64 +1,45 @@
 """
-MAG-1821 + MAG-1846 — per-method overrides for the JSON-RPC provider simulator.
+Per-method overrides for the JSON-RPC provider simulator.
 
 These tests exercise the per-method override path on the simulator's
 ``responses`` dict: a test can set ``latency_ms``, ``mode``, or
 ``rate_limit`` (and the keys those modes need) for one specific JSON-RPC
 method on a provider, while every other method on the same provider keeps
-the provider-wide config. MAG-1846 extends this with ``body`` + ``status``
-override keys that emit a custom 2xx response and bypass the chain handler.
+the provider-wide config. The ``body`` + ``status`` override keys emit a
+custom 2xx response and bypass the chain entirely.
 
 What they cover
 ---------------
-  MAG-1821:
     1. per-method ``mode: down``           — fires only on the named method.
     2. per-method ``latency_ms``           — fires only on the named method.
     3. per-key fallback                    — partial entries inherit
                                               provider-wide fault keys.
     4. ``mode == "error"`` is rejected     — /scenario POST returns 400.
     5. composition order — latency FIRST   — latency paid even on fault.
-
-  MAG-1846 (TestPerMethodBodyOverride):
     6. body+status returns custom shape    — exact wire bytes, no chain
-                                              handler involvement.
+                                              involvement.
     7. status defaults to 200              — omitting ``status`` is fine.
     8. non-2xx status is rejected          — 4xx/5xx via mode=error path.
     9. body+latency composes               — latency first, then body.
    10. body+mode mutually exclusive        — 400 from /scenario.
    11. body bypasses healthy stub          — no stub fields leak through.
 
-Reuses the in-process fixture pattern from ``tests/test_simulator.py``
-(separate test ports so a parallel run doesn't collide with the existing
-test module).
+Runs against the shared in-process simulator (see conftest.py).
 
 Run with:
   pytest tests/test_simulator_per_method_overrides.py -v
 """
 
 import json
-import threading
 import time
 import urllib.error
 import urllib.request
-from http.server import HTTPServer, ThreadingHTTPServer
 
 import pytest
 
-from server import ControlHandler, JSONRPCHandler, ProviderState
+from constants import ETH_PRIMARY_PORTS
 
-# ── Test ports. Two rules keep binds reliable across the whole suite:
-#    1. Stay below 32768. Ports from 32768 up are the kernel's ephemeral
-#       client-port range (Linux default 32768-60999, macOS 49152-65535):
-#       every outgoing HTTP call an earlier test module makes grabs a random
-#       source port there, and a lingering one makes this module's bind fail
-#       with "Address already in use" at fixture setup.
-#    2. Each test file owns a unique port block (this file: 245xx) so all
-#       modules can run in one pytest invocation. The module-scoped
-#       sim fixture only binds the ports once, so even a serial run can't
-#       double-bind here either. ────────────────────
-
-_PROVIDER_PORTS = {"1": 24545, "2": 24546, "3": 24547}
-_CONTROL_PORT = 24500
+_P1 = f"http://127.0.0.1:{ETH_PRIMARY_PORTS['1']}"
 
 
 # ── HTTP helpers (same shape as tests/test_simulator.py) ──────────────────────
@@ -89,50 +70,6 @@ def _ctrl(sim: dict, path: str) -> str:
     return sim["control"] + path
 
 
-# ── Module-scoped fixture: start all servers once ─────────────────────────────
-
-
-@pytest.fixture(scope="module")
-def sim():
-    """Start 3 JSON-RPC servers + 1 control server on test ports.
-
-    Yields a dict with base URLs:
-      sim["control"]   → http://127.0.0.1:24500
-      sim["provider1"] → http://127.0.0.1:24545
-      sim["provider2"] → http://127.0.0.1:24546
-      sim["provider3"] → http://127.0.0.1:24547
-    """
-    states = {pid: ProviderState() for pid in _PROVIDER_PORTS}
-
-    servers = []
-    for pid, port in _PROVIDER_PORTS.items():
-        srv = ThreadingHTTPServer(("127.0.0.1", port), JSONRPCHandler)
-        srv.daemon_threads = True
-        srv.state = states[pid]
-        srv.provider_id = pid
-        servers.append(srv)
-
-    ctrl = HTTPServer(("127.0.0.1", _CONTROL_PORT), ControlHandler)
-    ctrl.provider_states = states
-    servers.append(ctrl)
-
-    threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in servers]
-    for t in threads:
-        t.start()
-
-    time.sleep(0.15)  # allow servers to finish binding
-
-    yield {
-        "control": f"http://127.0.0.1:{_CONTROL_PORT}",
-        "provider1": f"http://127.0.0.1:{_PROVIDER_PORTS['1']}",
-        "provider2": f"http://127.0.0.1:{_PROVIDER_PORTS['2']}",
-        "provider3": f"http://127.0.0.1:{_PROVIDER_PORTS['3']}",
-    }
-
-    for s in servers:
-        s.shutdown()
-
-
 # ── Function-scoped autouse: clean slate before/after every test ──────────────
 
 
@@ -145,7 +82,7 @@ def clean_state(sim):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MAG-1821 — per-method override behaviour
+# Per-method override behaviour (fault keys)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -155,12 +92,10 @@ class TestPerMethodOverrides:
     def test_per_method_mode_down_isolates_to_named_method(self, sim):
         """A per-method ``mode: down`` fires only for the named method.
 
-        Provider 1 starts healthy. We pin ``eth_blockNumber`` to ``down``
-        via the per-method override. The expectation is:
+        Provider eth-sim:1 starts healthy. We pin ``eth_blockNumber`` to
+        ``down`` via the per-method override. The expectation is:
 
-          * eth_blockNumber → HTTP 503 (the down primitive — 503 with no
-                              body, set by the provider-wide down branch
-                              equivalent at the per-method layer)
+          * eth_blockNumber → HTTP 503 (the down primitive — 503 with no body)
           * eth_getBlockByNumber → 200 success (no override, inherits
                                    the provider-wide healthy config)
 
@@ -172,8 +107,7 @@ class TestPerMethodOverrides:
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "mode": "success",
                         "responses": {
                             "eth_blockNumber": {"mode": "down"},
@@ -183,11 +117,11 @@ class TestPerMethodOverrides:
             },
         )
 
-        status_down, body_down = _rpc(sim["provider1"], "eth_blockNumber")
+        status_down, body_down = _rpc(_P1, "eth_blockNumber")
         assert status_down == 503, f"expected 503 on overridden method, got {status_down}"
         assert body_down == {}, f"down emits no body, got {body_down!r}"
 
-        status_ok, body_ok = _rpc(sim["provider1"], "eth_getBlockByNumber", ["latest", False])
+        status_ok, body_ok = _rpc(_P1, "eth_getBlockByNumber", ["latest", False])
         assert status_ok == 200, f"non-overridden method should succeed, got {status_ok}"
         assert "result" in body_ok
         assert "error" not in body_ok
@@ -196,8 +130,8 @@ class TestPerMethodOverrides:
     def test_per_method_latency_ms_isolates_to_named_method(self, sim):
         """A per-method ``latency_ms`` only delays the named method.
 
-        Provider 1 is configured with provider-wide ``latency_ms=0`` and
-        a per-method ``latency_ms=500`` for ``eth_getBlockByNumber``. We
+        Provider eth-sim:1 is configured with provider-wide ``latency_ms=0``
+        and a per-method ``latency_ms=500`` for ``eth_getBlockByNumber``. We
         assert:
 
           * eth_getBlockByNumber takes at least ~500ms (with a small slack
@@ -209,8 +143,7 @@ class TestPerMethodOverrides:
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "mode": "success",
                         "latency_ms": 0,
                         "responses": {
@@ -222,14 +155,14 @@ class TestPerMethodOverrides:
         )
 
         t0 = time.monotonic()
-        _rpc(sim["provider1"], "eth_getBlockByNumber", ["latest", False])
+        _rpc(_P1, "eth_getBlockByNumber", ["latest", False])
         elapsed_overridden_ms = (time.monotonic() - t0) * 1000
         assert (
             elapsed_overridden_ms >= 480
         ), f"overridden method should sleep ~500ms, elapsed={elapsed_overridden_ms:.0f}ms"
 
         t1 = time.monotonic()
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
         elapsed_other_ms = (time.monotonic() - t1) * 1000
         assert (
             elapsed_other_ms < 200
@@ -237,10 +170,10 @@ class TestPerMethodOverrides:
 
     @pytest.mark.timeout(10)
     def test_per_key_fallback_inherits_provider_wide_keys(self, sim):
-        """Q4: a partial per-method entry inherits provider-wide fault keys.
+        """A partial per-method entry inherits provider-wide fault keys.
 
-        Provider 1 has provider-wide ``latency_ms=100, mode=success`` and a
-        per-method override ``eth_blockNumber: {"mode": "down"}``. The
+        Provider eth-sim:1 has provider-wide ``latency_ms=100, mode=success``
+        and a per-method override ``eth_blockNumber: {"mode": "down"}``. The
         per-method entry does NOT set ``latency_ms``, so the merged config
         for ``eth_blockNumber`` should be ``{mode: down, latency_ms: 100,
         ...}``.
@@ -253,8 +186,7 @@ class TestPerMethodOverrides:
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "mode": "success",
                         "latency_ms": 100,
                         "responses": {
@@ -266,7 +198,7 @@ class TestPerMethodOverrides:
         )
 
         t0 = time.monotonic()
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        status, body = _rpc(_P1, "eth_blockNumber")
         elapsed_ms = (time.monotonic() - t0) * 1000
 
         assert status == 503, f"per-method mode=down should win, got {status}"
@@ -280,18 +212,17 @@ class TestPerMethodOverrides:
         """Per-method ``mode: "error"`` is rejected at /scenario POST time.
 
         Why: the per-method error semantic is owned by the existing
-        ``error_stub`` / ``error`` keys on the same method-cfg dict
-        (resolved in handlers_eth). Allowing ``mode: "error"`` here would
-        silently shadow that path because the merged-snap fault branch
-        in _apply_fault runs before handlers_eth ever reads the
-        error_stub. We surface the conflict at config-time with a 400.
+        ``error_stub`` / ``error`` keys on the same method-cfg dict (resolved
+        by the chain's success builder). Allowing ``mode: "error"`` here
+        would silently shadow that path because the merged fault ladder runs
+        before the chain ever reads the error_stub. We surface the conflict
+        at config-time with a 400.
         """
         status, body = _post(
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "responses": {
                             "eth_blockNumber": {"mode": "error"},
                         },
@@ -308,90 +239,47 @@ class TestPerMethodOverrides:
     @pytest.mark.timeout(10)
     def test_per_method_down_records_method_req_id_and_latency_in_history(self, sim):
         """Per-method ``mode: down`` must record the real method, request_id,
-        and latency_ms in the sim history — not placeholder values
-        (regression for commit 924f268).
+        and latency_ms in the sim history — not placeholder values.
 
         Background
         ----------
         Provider-wide ``mode: down`` is evaluated pre-body-parse, so the
-        handler has no method label or req_id available and passes
-        ``method="*"``, ``req_id=None``, ``t_start=now()`` into
-        ``_apply_fault`` — yielding a history entry with method ``"*"``,
-        ``request_id=None``, ``latency_ms≈0``. That's expected at that
+        listener has no method label or req_id available — its history entry
+        carries method ``"*"``, ``request_id=None``. That's expected at that
         layer.
 
-        Per-method ``mode: down`` is different: it's the post-parse path
-        in ``JSONRPCHandler.do_POST`` (server.py:535), where the body has
-        already been parsed and the inherited per-method ``latency_ms``
-        may have been slept. The handler must pass the *real* values into
-        ``_apply_fault``, and ``_apply_fault``'s down branch
-        (server.py:420-423) must record them — using ``method``, ``req_id``,
-        and ``_elapsed_ms(t_start)`` rather than the provider-wide-down
-        placeholders.
-
-        An earlier draft of the per-method down branch hardcoded ``"*" /
-        None / 0`` even on the post-parse path, which silently broke
+        Per-method ``mode: down`` is different: the body had to be parsed to
+        find the override, so the real method / request id are known and the
+        configured per-method latency applies. The listener must record those
+        real values; an earlier flat-handler draft hardcoded ``"*" / None /
+        0`` even on the post-parse path, which silently broke
         ``/history?method=X``, ``/history?request_id=Y``, and any
-        latency-based assertion on per-method down outcomes. The fix
-        Denis flagged in code review (924f268) routes the real method /
-        req_id / elapsed time through. This test pins that behaviour so
-        a future refactor can't re-introduce the placeholders quietly.
+        latency-based assertion on per-method down outcomes. This test pins
+        the behaviour so a refactor can't re-introduce the placeholders.
 
         Scenario
         --------
-        Provider 1: provider-wide ``mode=success`` with a per-method
-        override ``eth_blockNumber: {mode: down, latency_ms: 50}``.
-        The provider-wide config is healthy, so the body is parsed
-        normally and the per-method down branch fires post-parse.
-
-        Setup
-        -----
-          * The autouse ``clean_state`` fixture has already POSTed
-            ``/reset/all`` before the test runs, so history starts empty.
-          * POST ``/scenario`` with the per-method override above.
-
-        Act
-        ---
-        Send one JSON-RPC POST for ``eth_blockNumber`` with a known
-        ``id`` field. Expect HTTP 503 (per-method down primitive).
+        eth-sim:1: provider-wide ``mode=success`` with a per-method override
+        ``eth_blockNumber: {mode: down, latency_ms: 50}``. The provider-wide
+        config is healthy, so the body is parsed normally and the per-method
+        down branch fires post-parse.
 
         Assertions
         ----------
           * HTTP 503 (confirms the per-method down branch fired).
-          * /history filtered to ``provider=1`` returns exactly 1 entry.
+          * /history filtered to eth-sim:1 returns exactly 1 entry.
           * entry["method"] == "eth_blockNumber"  (NOT "*")
           * entry["request_id"] == the request id we sent  (NOT None)
-          * entry["latency_ms"] >= 40  (real elapsed time covering the
-            50ms inherited per-method latency — NOT the placeholder 0)
+          * entry["latency_ms"] >= 40  (the 50ms per-method latency — NOT 0)
           * entry["status"] == "down"
-          * /history?method=eth_blockNumber resolves to the same entry
-            (filter must work, which only happens if method is correctly
-            labelled).
-
-        How to read a failure
-        ---------------------
-          * ``entry["method"] == "*"`` → the per-method down branch is
-            back on the provider-wide-down placeholder. Check
-            server.py:420-423 and the post-parse call site at
-            server.py:535 — both must pass the real label through.
-          * ``entry["request_id"] is None`` → same root cause; req_id was
-            replaced with the placeholder ``None``.
-          * ``entry["latency_ms"] == 0`` (or < 40) → ``t_start`` is being
-            reset to ``now()`` inside the down branch, or ``_elapsed_ms``
-            was swapped for a literal ``0``. The per-method ``latency_ms``
-            sleep ran before ``_apply_fault`` (server.py:531-532), so
-            elapsed should be ~50ms+.
-          * The /history?method= filter returns no results → method label
-            is wrong even though the bare entry might look right; check
-            the filter logic in ControlHandler.do_GET (server.py:1344).
+          * /history?method=eth_blockNumber resolves to the same entry.
         """
         request_id = 4242
         _post(
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "mode": "success",
                         "responses": {
                             "eth_blockNumber": {
@@ -405,17 +293,16 @@ class TestPerMethodOverrides:
         )
 
         status, body = _post(
-            sim["provider1"],
+            _P1,
             {"jsonrpc": "2.0", "id": request_id, "method": "eth_blockNumber", "params": []},
         )
         assert status == 503, f"per-method down should emit 503, got {status}"
         assert body == {}, f"down emits no body, got {body!r}"
 
-        # Read /history filtered to provider 1 — the test scenario only
-        # configures provider 1, but ?provider=1 makes the assertion robust
-        # if a future test edit adds traffic elsewhere. Inline urllib GET
-        # rather than adding a _get helper for two call sites.
-        with urllib.request.urlopen(_ctrl(sim, "/history?provider=1"), timeout=5) as resp:
+        # Read /history filtered to eth-sim:1 — the test scenario only
+        # configures that provider, but the filter makes the assertion robust
+        # if a future test edit adds traffic elsewhere.
+        with urllib.request.urlopen(_ctrl(sim, "/history?pool=eth-sim&pid=1"), timeout=5) as resp:
             hist = json.loads(resp.read())
 
         # /history returns {"count": N, "history": [...]} — peel out the list.
@@ -423,13 +310,13 @@ class TestPerMethodOverrides:
         assert isinstance(entries, list), f"unexpected /history shape: {hist!r}"
         assert (
             len(entries) == 1
-        ), f"expected exactly 1 history entry for provider 1, got {len(entries)}: {entries!r}"
+        ), f"expected exactly 1 history entry for eth-sim:1, got {len(entries)}: {entries!r}"
 
         entry = entries[0]
         assert entry["method"] == "eth_blockNumber", (
             f"history method must be the real method, not placeholder. "
-            f"Got method={entry['method']!r}. If '*': per-method down branch "
-            f"reverted to provider-wide placeholder (server.py:420-423)."
+            f"Got method={entry['method']!r}. If '*': the per-method down "
+            f"branch reverted to the provider-wide pre-parse placeholder."
         )
         assert entry["request_id"] == request_id, (
             f"history request_id must echo the request id, not None. "
@@ -437,10 +324,8 @@ class TestPerMethodOverrides:
             f"If None: same site as the method regression."
         )
         assert entry["latency_ms"] >= 40, (
-            f"history latency_ms must reflect real elapsed time including the "
-            f"inherited 50ms per-method latency, not the placeholder 0. "
-            f"Got latency_ms={entry['latency_ms']}. If 0: t_start or _elapsed_ms "
-            f"was bypassed in the per-method down branch."
+            f"history latency_ms must reflect the configured 50ms per-method "
+            f"latency, not the placeholder 0. Got latency_ms={entry['latency_ms']}."
         )
         assert entry["status"] == "down", f"status should be 'down', got {entry['status']!r}"
 
@@ -449,7 +334,7 @@ class TestPerMethodOverrides:
         # the redundant check guards against a future regression where the
         # entry stores the right method but the filter path breaks.
         with urllib.request.urlopen(
-            _ctrl(sim, "/history?provider=1&method=eth_blockNumber"), timeout=5
+            _ctrl(sim, "/history?pool=eth-sim&pid=1&method=eth_blockNumber"), timeout=5
         ) as resp:
             filtered = json.loads(resp.read())
         filtered_entries = filtered["history"]
@@ -460,7 +345,7 @@ class TestPerMethodOverrides:
 
     @pytest.mark.timeout(10)
     def test_composition_order_latency_first_then_fault(self, sim):
-        """Q2: per-method composition is latency FIRST, then fault.
+        """Per-method composition is latency FIRST, then fault.
 
         Override: ``eth_blockNumber: {latency_ms: 200, mode: rate_limit}``.
         We assert both:
@@ -469,15 +354,14 @@ class TestPerMethodOverrides:
           * the elapsed time is >= ~200ms — proving the per-method
             latency was paid before the fault response was emitted.
 
-        Mirrors the provider-wide order (latency injection in do_POST
-        before _apply_fault evaluates the fault primitives).
+        Mirrors the provider-wide order (latency injected before the fault
+        response is written to the wire).
         """
         _post(
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "mode": "success",
                         "responses": {
                             "eth_blockNumber": {
@@ -491,7 +375,7 @@ class TestPerMethodOverrides:
         )
 
         t0 = time.monotonic()
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        status, body = _rpc(_P1, "eth_blockNumber")
         elapsed_ms = (time.monotonic() - t0) * 1000
 
         assert status == 429, f"expected rate_limit (429), got {status}"
@@ -503,77 +387,42 @@ class TestPerMethodOverrides:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MAG-1846 — per-method body+status override behaviour
+# Per-method body+status override behaviour
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 class TestPerMethodBodyOverride:
-    """Per-method body+status override (MAG-1846).
+    """Per-method body+status override.
 
-    Extends MAG-1821's per-method ``responses`` dict with two optional keys:
+    Extends the per-method ``responses`` dict with two optional keys:
 
       * ``status`` — HTTP status code, must be 2xx (200-299), default 200.
       * ``body``   — response body dict, JSON-encoded onto the wire.
 
     When ``body`` is set on a method entry, the sim returns ``{status, body}``
-    directly and bypasses the healthy-stub lookup in handlers_eth /
-    handlers_btc. ``body`` is mutually exclusive with ``mode`` (validated at
-    /scenario POST time); it composes with ``latency_ms`` in the documented
-    order (latency first, then body).
+    directly and bypasses the chain's healthy-stub lookup. ``body`` is
+    mutually exclusive with ``mode`` (validated at /scenario POST time); it
+    composes with ``latency_ms`` in the documented order (latency first,
+    then body).
 
     Why: lets a test pin a provider to "200 OK with this exact body" without
-    routing through the chain-specific success-shape builder. Specifically
-    unblocks ``test_status_200_with_body_error_passes_through`` in
-    smart-router-automation, where the router needs to receive a 200 carrying
-    an application-level failure body (e.g. ``{"success": false, ...}``).
+    routing through the chain-specific success-shape builder — e.g. a router
+    test that needs a 200 carrying an application-level failure body
+    (``{"success": false, ...}``).
     """
 
     @pytest.mark.timeout(10)
     def test_body_override_returns_custom_status_and_body(self, sim):
         """Given a per-method override with ``status: 200`` and a custom
         ``body``, the sim returns exactly that wire shape — HTTP 200 and the
-        body verbatim — instead of the chain-handler success stub.
-
-        Background
-        ----------
-        Without this override, every ``eth_blockNumber`` response on the eth
-        chain_family is built by ``handlers_eth.handle``. Tests that need to
-        assert router behaviour against a non-standard success body (e.g. a
-        provider that returns 200 OK with ``{"success": false, "error": ...}``)
-        had no way to drive the sim into that shape.
-
-        Setup
-        -----
-        Provider 1 is left at its default ``mode: success``. POST /scenario
-        with a per-method ``responses`` entry pinning ``eth_blockNumber`` to
-        ``{"status": 200, "body": {"success": False, "error": "oops"}}``.
-
-        Act
-        ---
-        Send one JSON-RPC POST for ``eth_blockNumber``.
-
-        Assertions
-        ----------
-          * HTTP status == 200 (the override status).
-          * Response body equals the override dict exactly — no extra keys
-            from the chain handler, no JSON-RPC wrapping, no result field.
-
-        How to read a failure
-        ---------------------
-          * Status 200 but body has ``"result"`` / ``"jsonrpc"`` keys → the
-            chain handler still ran; the bypass branch in do_POST wasn't
-            taken. Check the ``"body" in method_snap`` guard at
-            server.py do_POST.
-          * Status != 200 → the override status wasn't read; check
-            ``method_snap.get("status", 200)`` resolution.
+        body verbatim — instead of the chain success stub.
         """
         override_body = {"success": False, "error": "oops"}
         _post(
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "mode": "success",
                         "responses": {
                             "eth_blockNumber": {
@@ -586,45 +435,23 @@ class TestPerMethodBodyOverride:
             },
         )
 
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        status, body = _rpc(_P1, "eth_blockNumber")
         assert status == 200, f"expected override status 200, got {status}"
         assert body == override_body, (
             f"expected exact override body {override_body!r}, got {body!r}. "
-            f"Extra keys indicate the chain handler ran instead of the bypass."
+            f"Extra keys indicate the chain builder ran instead of the bypass."
         )
 
     @pytest.mark.timeout(10)
     def test_body_override_default_status_is_200(self, sim):
         """When ``status`` is omitted on the body override, the sim defaults
-        to HTTP 200.
-
-        Background
-        ----------
-        The body override declares its 2xx-only contract at /scenario time;
-        leaving ``status`` unset should not require the test to spell out
-        the default. The handler resolves ``method_snap.get("status", 200)``.
-
-        Setup
-        -----
-        Provider 1: ``mode: success`` + per-method override
-        ``eth_blockNumber: {"body": {...}}`` (no ``status`` key).
-
-        Act
-        ---
-        Send one JSON-RPC POST.
-
-        Assertions
-        ----------
-          * HTTP status == 200 (the default).
-          * Body matches the override.
-        """
+        to HTTP 200."""
         override_body = {"custom": True}
         _post(
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "mode": "success",
                         "responses": {
                             "eth_blockNumber": {"body": override_body},
@@ -634,7 +461,7 @@ class TestPerMethodBodyOverride:
             },
         )
 
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        status, body = _rpc(_P1, "eth_blockNumber")
         assert status == 200, f"expected default status 200, got {status}"
         assert body == override_body, f"expected {override_body!r}, got {body!r}"
 
@@ -643,33 +470,16 @@ class TestPerMethodBodyOverride:
         """Setting ``status`` outside the 2xx band is rejected at /scenario
         POST time with HTTP 400.
 
-        Background
-        ----------
         The body override is for "this 200 OK response with a custom body"
         scenarios. Non-2xx response shapes (4xx / 5xx) are already covered
         by ``mode: "error"`` + ``http_status`` / ``error_code`` /
         ``error_message`` — that path owns the error-envelope wire shape.
-        Letting body+status pretend to be a fault would silently bypass the
-        envelope contract; we reject at config-time instead.
-
-        Setup
-        -----
-        Issue POST /scenario with
-        ``eth_blockNumber: {"status": 500, "body": {"oops": True}}``.
-
-        Assertions
-        ----------
-          * /scenario returns HTTP 400.
-          * Response body carries an ``"error"`` key with a message that
-            mentions ``status`` or ``2xx``, so the test failure points at
-            the right validation rule.
         """
         status, body = _post(
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "responses": {
                             "eth_blockNumber": {
                                 "status": 500,
@@ -691,40 +501,13 @@ class TestPerMethodBodyOverride:
     def test_body_override_with_latency_applies_latency_first(self, sim):
         """A body override composes with ``latency_ms`` in the same order as
         every other per-method primitive: latency FIRST, then the body
-        response (Q2 of MAG-1821 carried forward).
-
-        Background
-        ----------
-        Latency is injected once in do_POST, before any branch decides what
-        to emit. So a per-method ``{latency_ms: 200, body: {...}}`` should
-        sleep for ~200ms before writing the override body to the wire — the
-        same composition order as ``{latency_ms: 200, mode: rate_limit}``
-        (already pinned by ``test_composition_order_latency_first_then_fault``).
-
-        Setup
-        -----
-        Provider 1: ``mode: success`` + per-method override
-        ``eth_blockNumber: {"latency_ms": 200, "body": {"ok": True}}``.
-
-        Act
-        ---
-        Send one JSON-RPC POST, measure elapsed wall-clock around it.
-
-        Assertions
-        ----------
-          * HTTP status == 200 (override default).
-          * Body equals the override.
-          * Elapsed time >= ~180ms — proving latency was paid before
-            the body was emitted. 180ms (not exactly 200ms) leaves slack
-            for HTTP framing / scheduler jitter.
-        """
+        response."""
         override_body = {"ok": True}
         _post(
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "mode": "success",
                         "responses": {
                             "eth_blockNumber": {
@@ -738,7 +521,7 @@ class TestPerMethodBodyOverride:
         )
 
         t0 = time.monotonic()
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        status, body = _rpc(_P1, "eth_blockNumber")
         elapsed_ms = (time.monotonic() - t0) * 1000
 
         assert status == 200, f"expected status 200, got {status}"
@@ -753,32 +536,16 @@ class TestPerMethodBodyOverride:
         """Setting both ``body`` and ``mode`` on the same method entry is
         rejected at /scenario POST time with HTTP 400.
 
-        Background
-        ----------
         ``body`` describes a custom success response; ``mode`` describes a
-        fault primitive (down / hang / drop_connection / rate_limit). They
-        describe different outcomes, and the wire can only emit one. Letting
-        both coexist would force the sim to silently pick — instead, the
-        config is rejected up front.
-
-        Setup
-        -----
-        Issue POST /scenario with
-        ``eth_blockNumber: {"mode": "down", "body": {"ok": True}}``.
-
-        Assertions
-        ----------
-          * /scenario returns HTTP 400.
-          * Response body carries an ``"error"`` with a message that
-            mentions ``body`` and ``mode`` (or "mutually exclusive"), so a
-            failure surfaces the rule.
+        fault primitive. They describe different outcomes, and the wire can
+        only emit one — the config is rejected up front instead of silently
+        picking.
         """
         status, body = _post(
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "responses": {
                             "eth_blockNumber": {
                                 "mode": "down",
@@ -802,42 +569,13 @@ class TestPerMethodBodyOverride:
     def test_body_override_bypasses_healthy_stub(self, sim):
         """The body override returns exactly the configured payload — no
         keys from the healthy stub leak through, even when the chosen body
-        doesn't look like a valid JSON-RPC response.
-
-        Background
-        ----------
-        A regression-shaped test: if a future refactor wires the body
-        override through the chain handler (instead of bypassing it), the
-        handler might "helpfully" merge stub fields into the response.
-        Pinning an obviously non-RPC-shaped body proves the bypass is
-        absolute — nothing else gets added.
-
-        Setup
-        -----
-        Provider 1: ``mode: success`` + per-method override
-        ``eth_blockNumber: {"body": {"completely": "unrelated",
-        "fields": [1, 2, 3]}}`` — no ``result`` / ``jsonrpc`` / ``id`` keys,
-        so a chain-handler leak would be obvious.
-
-        Act
-        ---
-        Send one JSON-RPC POST.
-
-        Assertions
-        ----------
-          * HTTP status == 200.
-          * Response body equals the override dict exactly — same keys,
-            same values, no extras. ``"jsonrpc"`` / ``"result"`` / ``"id"``
-            must be absent (their presence would prove the healthy stub
-            was merged in).
-        """
+        doesn't look like a valid JSON-RPC response."""
         override_body = {"completely": "unrelated", "fields": [1, 2, 3]}
         _post(
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "mode": "success",
                         "responses": {
                             "eth_blockNumber": {"body": override_body},
@@ -847,12 +585,12 @@ class TestPerMethodBodyOverride:
             },
         )
 
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        status, body = _rpc(_P1, "eth_blockNumber")
         assert status == 200, f"expected status 200, got {status}"
         assert body == override_body, (
             f"override body must be returned verbatim. "
             f"Expected {override_body!r}, got {body!r}. "
-            f"Extra keys would indicate the chain handler merged stub fields."
+            f"Extra keys would indicate the chain builder merged stub fields."
         )
         # Belt-and-braces: explicitly assert the canonical JSON-RPC envelope
         # keys are absent. If a future refactor adds a "helpful" wrap, this
@@ -867,61 +605,20 @@ class TestPerMethodBodyOverride:
         """Body-override responses always record status="success" in /history,
         regardless of body content.
 
-        Background
-        ----------
         The body override is validated 2xx-only at /scenario time, so by
         HTTP semantics the request always succeeds. The body itself is
-        arbitrary test-supplied content and may not follow JSON-RPC
-        conventions — a body of {"success": false, "error": "rate limit"}
-        (the motivating use case for MAG-1846, exercising router behaviour
-        on application-level failure shapes) is still an HTTP-200 success
-        from the simulator's perspective.
-
-        Inferring history status from body content (e.g. recording "error"
-        if the body has an "error" key) would silently mis-classify two
-        common shapes:
-
-          * {"success": false, "error": "..."}  — HTTP 200, but tester
-            asks /history?status=success and finds nothing.
-          * {"data": {"error_count": 0}}        — also flagged as "error"
-            by a naive "error" in body check, even though there's no error.
-
-        Pin both shapes to "success" so a future refactor that re-introduces
-        body-content inference is caught.
-
-        Setup
-        -----
-        Provider 1: mode=success + two body overrides on different methods:
-          - eth_blockNumber: body has "error" key (HTTP-200 failure shape)
-          - eth_chainId:     body has no "error" key (pure success shape)
-
-        Act
-        ---
-        Send one request to each, then read /history filtered to provider 1.
-
-        Assertions
-        ----------
-          * Both history entries have status="success".
-          * /history?status=success returns both entries.
-          * /history?status=error returns neither.
-
-        How to read a failure
-        ---------------------
-          * entry["status"] == "error" on the error-shape body → the
-            body-content inference has crept back in (regression of the
-            fix at server.py do_POST body-override branch). The override
-            is HTTP-2xx by construction; status must not depend on body
-            content.
-          * /history?status=success returns 0 or 1 instead of 2 → the
-            filter path itself is broken, or the second request never
-            recorded.
+        arbitrary test-supplied content — a body of
+        {"success": false, "error": "rate limit"} is still an HTTP-200
+        success from the simulator's perspective. Inferring history status
+        from body content (recording "error" when the body has an "error"
+        key) would silently mis-classify that shape, so both shapes are
+        pinned to "success" here.
         """
         _post(
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "mode": "success",
                         "responses": {
                             "eth_blockNumber": {
@@ -936,30 +633,27 @@ class TestPerMethodBodyOverride:
             },
         )
 
-        status_err_shape, body_err_shape = _rpc(sim["provider1"], "eth_blockNumber")
+        status_err_shape, body_err_shape = _rpc(_P1, "eth_blockNumber")
         assert status_err_shape == 200
         assert body_err_shape == {"success": False, "error": "rate limit"}
 
-        status_ok_shape, body_ok_shape = _rpc(sim["provider1"], "eth_chainId")
+        status_ok_shape, body_ok_shape = _rpc(_P1, "eth_chainId")
         assert status_ok_shape == 200
         assert body_ok_shape == {"data": {"error_count": 0}}
 
-        with urllib.request.urlopen(_ctrl(sim, "/history?provider=1"), timeout=5) as resp:
+        with urllib.request.urlopen(_ctrl(sim, "/history?pool=eth-sim&pid=1"), timeout=5) as resp:
             entries = json.loads(resp.read())["history"]
         assert len(entries) == 2, f"expected 2 entries, got {len(entries)}: {entries!r}"
         for entry in entries:
             assert entry["status"] == "success", (
                 f"body-override history status must be 'success' regardless "
                 f"of body shape (HTTP-2xx by construction). Got status="
-                f"{entry['status']!r} on method={entry['method']!r} with "
-                f"body={entry['method']!r}. If 'error': the body-content "
-                f"inference has been re-introduced — check the "
-                f"push_call_to_buffer call in the body-override branch of "
-                f"JSONRPCHandler.do_POST."
+                f"{entry['status']!r} on method={entry['method']!r}. If "
+                f"'error': body-content inference has been re-introduced."
             )
 
         with urllib.request.urlopen(
-            _ctrl(sim, "/history?provider=1&status=success"), timeout=5
+            _ctrl(sim, "/history?pool=eth-sim&pid=1&status=success"), timeout=5
         ) as resp:
             success_entries = json.loads(resp.read())["history"]
         assert len(success_entries) == 2, (
@@ -968,7 +662,7 @@ class TestPerMethodBodyOverride:
         )
 
         with urllib.request.urlopen(
-            _ctrl(sim, "/history?provider=1&status=error"), timeout=5
+            _ctrl(sim, "/history?pool=eth-sim&pid=1&status=error"), timeout=5
         ) as resp:
             error_entries = json.loads(resp.read())["history"]
         assert error_entries == [], (

@@ -80,6 +80,11 @@ class TendermintListener(Listener):
 
         return {"method": method, "params": _normalize_params(raw_params), "id": request_id}
 
+    def method_key(self, request: dict) -> object:
+        # Tendermint per-method overrides (error_stub / error / body) resolve
+        # inside LavaChain's success path; there is no per-method fault merge.
+        return None
+
     def build_fault(self, verdict: fault_policy.Verdict, request: dict) -> ServeResult:
         if verdict.kind == "hang":
             return ServeResult(action="hang")

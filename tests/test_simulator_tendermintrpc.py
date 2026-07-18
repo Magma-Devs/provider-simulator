@@ -1,10 +1,11 @@
-"""Unit tests for the Tendermint-RPC chain dispatch in the provider simulator (MAG-1841).
+"""Integration tests for the Tendermint-RPC pool of the provider simulator.
 
-Mirrors ``tests/test_simulator_rest.py`` (REST) but covers Tendermint-RPC-specific
-behaviour:
+Runs against the shared in-process simulator (see conftest.py): the
+lava-sim-tm pool listens on 18554-18556 and the eth-sim pool on 18545-18547.
+Under the pool:pid model those are SEPARATE providers, so cross-pool isolation
+is structural, not gated.
 
-  chain_family on /scenario   — ``"tendermintrpc"`` is accepted and round-trips
-                                through GET /scenario.
+Coverage:
   Verb dispatch               — GET (URI form) and POST (JSON-RPC body) both
                                 hit the right pipeline and return JSON-RPC
                                 envelopes.
@@ -17,44 +18,28 @@ behaviour:
                                 paginates by page/per_page.
   Fault primitives            — down / error / corruption_mode all apply on
                                 a Tendermint provider.
-  Mixed-chain                 — one ETH (JSON-RPC) + one Tendermint provider
-                                in the same /scenario body, each independently
-                                faulted.
+  Cross-pool isolation        — faults on eth-sim / btc-sim / lava-sim-rest
+                                never leak onto the TM pool.
 
 Run with:
   pytest tests/test_simulator_tendermintrpc.py -v
 """
 
 import json
-import threading
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from http.server import HTTPServer, ThreadingHTTPServer
 from typing import Any, Dict, Optional, Tuple
 
 import pytest
 
-from server import (
-    ControlHandler,
-    JSONRPCHandler,
-    ProviderState,
-    TendermintHandler,
-)
+from constants import BTC_PRIMARY_PORTS, ETH_PRIMARY_PORTS, REST_PRIMARY_PORTS, TM_PRIMARY_PORTS
 from stubs_tendermintrpc import TENDERMINT_ERROR_STUBS, TENDERMINT_METHOD_DEFAULTS
 
-# ── Test ports. Two rules keep binds reliable across the whole suite:
-#    1. Stay below 32768. Ports from 32768 up are the kernel's ephemeral
-#       client-port range (Linux default 32768-60999, macOS 49152-65535):
-#       every outgoing HTTP call an earlier test module makes grabs a random
-#       source port there, and a lingering one makes this module's bind fail
-#       with "Address already in use" at fixture setup.
-#    2. Each test file owns a unique port block (this file: 260xx) so all
-#       modules can run in one pytest invocation.
-_PROVIDER_PORTS = {"1": 26045, "2": 26046, "3": 26047}
-_TM_PORTS = {"1": 26054, "2": 26055, "3": 26056}
-_CONTROL_PORT = 26000
+_TM_URLS = {pid: f"http://127.0.0.1:{port}" for pid, port in TM_PRIMARY_PORTS.items()}
+_ETH1 = f"http://127.0.0.1:{ETH_PRIMARY_PORTS['1']}"
+_BTC1 = f"http://127.0.0.1:{BTC_PRIMARY_PORTS['1']}"
+_REST1 = f"http://127.0.0.1:{REST_PRIMARY_PORTS['1']}"
 
 
 # ── HTTP helpers (independent of the other test files — duplication intentional) ──
@@ -98,72 +83,26 @@ def _tm_post(sim: dict, pid: str, method: str, params: Optional[Any] = None, req
     body = {"jsonrpc": "2.0", "id": request_id, "method": method}
     if params is not None:
         body["params"] = params
-    return _request("POST", sim[f"tm{pid}"], body=body)
+    return _request("POST", _TM_URLS[pid], body=body)
 
 
 def _tm_get(sim: dict, pid: str, method: str, params: Optional[Dict[str, str]] = None):
     """GET the TM URI form. ``params`` values are URL-encoded as-is (callers
     decide whether to wrap strings in quotes per CometBFT's GET form)."""
-    url = sim[f"tm{pid}"] + f"/{method}"
+    url = _TM_URLS[pid] + f"/{method}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
     return _request("GET", url)
 
 
-# ── Module-scoped fixture: start all servers once ─────────────────────────────
-
-
-@pytest.fixture(scope="module")
-def sim():
-    """Start 3 JSON-RPC + 3 Tendermint + 1 control server on dedicated test ports.
-
-    JSON-RPC servers are started so mixed-chain tests can exercise both
-    transports against the same ProviderState dict.
-    """
-    states = {pid: ProviderState() for pid in _PROVIDER_PORTS}
-
-    servers = []
-    for pid, port in _PROVIDER_PORTS.items():
-        srv = ThreadingHTTPServer(("127.0.0.1", port), JSONRPCHandler)
-        srv.daemon_threads = True
-        srv.state = states[pid]
-        srv.provider_id = pid
-        servers.append(srv)
-
-    for pid, port in _TM_PORTS.items():
-        srv = ThreadingHTTPServer(("127.0.0.1", port), TendermintHandler)
-        srv.daemon_threads = True
-        srv.state = states[pid]
-        srv.provider_id = pid
-        servers.append(srv)
-
-    ctrl = HTTPServer(("127.0.0.1", _CONTROL_PORT), ControlHandler)
-    ctrl.provider_states = states
-    servers.append(ctrl)
-
-    threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in servers]
-    for t in threads:
-        t.start()
-
-    time.sleep(0.15)
-
-    yield {
-        "control": f"http://127.0.0.1:{_CONTROL_PORT}",
-        "tm1": f"http://127.0.0.1:{_TM_PORTS['1']}",
-        "tm2": f"http://127.0.0.1:{_TM_PORTS['2']}",
-        "tm3": f"http://127.0.0.1:{_TM_PORTS['3']}",
-        "jsonrpc1": f"http://127.0.0.1:{_PROVIDER_PORTS['1']}",
-        "jsonrpc2": f"http://127.0.0.1:{_PROVIDER_PORTS['2']}",
-    }
-
-    for s in servers:
-        s.shutdown()
-
-
 def _set_tm(sim, pid: str = "1", **extra):
-    """POST /scenario to put a provider into ``chain_family="tendermintrpc"``."""
-    cfg = {"chain_family": "tendermintrpc", **extra}
-    return _request("POST", _ctrl(sim, "/scenario"), body={"providers": {pid: cfg}})
+    """POST /scenario for one lava-sim-tm provider."""
+    return _request(
+        "POST", _ctrl(sim, "/scenario"), body={"providers": {f"lava-sim-tm:{pid}": dict(extra)}}
+    )
+
+
+# ── Function-scoped autouse: clean slate before/after every test ──────────────
 
 
 @pytest.fixture(autouse=True)
@@ -175,30 +114,30 @@ def clean_state(sim):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Chain-family routing
+# Addressing — pool:pid scoping on /scenario
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestTmChainFamily:
+class TestTmAddressing:
 
-    def test_chain_family_tendermintrpc_accepted_on_scenario(self, sim):
-        """``chain_family="tendermintrpc"`` round-trips through /scenario."""
-        _set_tm(sim, "1")
+    def test_scenario_on_tm_provider_round_trips(self, sim):
+        """A lava-sim-tm:1 block round-trips through GET /scenario."""
+        _set_tm(sim, "1", latency_ms=0)
         _, body, _ = _request("GET", _ctrl(sim, "/scenario"))
-        assert body["providers"]["1"]["chain_family"] == "tendermintrpc"
+        assert body["providers"]["lava-sim-tm:1"]["mode"] == "success"
+        assert "chain_family" not in body["providers"]["lava-sim-tm:1"]
 
     def test_other_providers_unchanged(self, sim):
-        _set_tm(sim, "1")
+        _set_tm(sim, "1", mode="error")
         _, body, _ = _request("GET", _ctrl(sim, "/scenario"))
-        # Default chain_family is "eth" for providers not explicitly set.
-        assert body["providers"]["2"]["chain_family"] == "eth"
-        assert body["providers"]["3"]["chain_family"] == "eth"
+        assert body["providers"]["lava-sim-tm:2"]["mode"] == "success"
+        assert body["providers"]["lava-sim-tm:3"]["mode"] == "success"
 
-    def test_reset_clears_chain_family(self, sim):
-        _set_tm(sim, "1")
+    def test_reset_restores_tm_defaults(self, sim):
+        _set_tm(sim, "1", mode="error")
         _request("POST", _ctrl(sim, "/reset"), body={})
         _, body, _ = _request("GET", _ctrl(sim, "/scenario"))
-        assert body["providers"]["1"]["chain_family"] == "eth"
+        assert body["providers"]["lava-sim-tm:1"]["mode"] == "success"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -209,7 +148,6 @@ class TestTmChainFamily:
 class TestTmVerbDispatch:
 
     def test_post_status_returns_envelope(self, sim):
-        _set_tm(sim, "1")
         status, body, _ = _tm_post(sim, "1", "status")
         assert status == 200
         assert body["jsonrpc"] == "2.0"
@@ -218,7 +156,6 @@ class TestTmVerbDispatch:
         assert body["result"]["node_info"]["network"]  # stub-defined value
 
     def test_get_status_returns_envelope(self, sim):
-        _set_tm(sim, "1")
         status, body, _ = _tm_get(sim, "1", "status")
         assert status == 200
         assert body["jsonrpc"] == "2.0"
@@ -226,33 +163,24 @@ class TestTmVerbDispatch:
         assert body["result"]["node_info"]["network"]
 
     def test_post_empty_body_returns_parse_error(self, sim):
-        _set_tm(sim, "1")
         # POST with no body — should return JSON-RPC -32700.
-        status, body, _ = _request("POST", sim["tm1"], body=None)
-        # ``urllib.request`` sends GET when body is None; force it via _request
-        # with method="POST" + Content-Length: 0.
-        # Workaround: hit POST via raw body but empty dict — that's a different
-        # branch (missing method). Instead test missing-method separately below.
-        # This case effectively becomes a GET on / which has empty path.
+        status, body, _ = _request("POST", _TM_URLS["1"], body=None)
         assert status == 400
         assert body.get("error", {}).get("code") == -32700
 
     def test_post_missing_method_returns_parse_error(self, sim):
-        _set_tm(sim, "1")
         # POST a valid JSON body that lacks the ``method`` field.
-        status, body, _ = _request("POST", sim["tm1"], body={"jsonrpc": "2.0", "id": 7})
+        status, body, _ = _request("POST", _TM_URLS["1"], body={"jsonrpc": "2.0", "id": 7})
         assert status == 400
         assert body.get("error", {}).get("code") == -32700
 
     def test_get_root_path_returns_parse_error(self, sim):
-        _set_tm(sim, "1")
         # GET / (no method in URI) → -32700 (empty path).
-        status, body, _ = _request("GET", sim["tm1"] + "/")
+        status, body, _ = _request("GET", _TM_URLS["1"] + "/")
         assert status == 400
         assert body.get("error", {}).get("code") == -32700
 
     def test_post_unknown_method_returns_method_not_found(self, sim):
-        _set_tm(sim, "1")
         status, body, _ = _tm_post(sim, "1", "this_does_not_exist")
         assert status == 200  # JSON-RPC errors come on HTTP 200.
         assert body.get("error", {}).get("code") == -32601
@@ -271,7 +199,6 @@ class TestTmMethodCoverage:
     @pytest.mark.parametrize("method", _V1_METHODS)
     def test_post_method_returns_200_envelope(self, sim, method):
         """Every v1 method returns HTTP 200 with a JSON-RPC envelope on POST."""
-        _set_tm(sim, "1")
         status, body, _ = _tm_post(sim, "1", method)
         assert status == 200, f"{method}: expected HTTP 200, got {status}, body={body!r}"
         assert body["jsonrpc"] == "2.0", f"{method}: jsonrpc envelope missing"
@@ -287,7 +214,6 @@ class TestTmMethodCoverage:
     @pytest.mark.parametrize("method", _V1_METHODS)
     def test_get_method_returns_200_envelope(self, sim, method):
         """Every v1 method also works via GET URI form."""
-        _set_tm(sim, "1")
         status, body, _ = _tm_get(sim, "1", method)
         assert status == 200, f"{method}: GET status {status}, body={body!r}"
         assert body["jsonrpc"] == "2.0"
@@ -303,20 +229,17 @@ class TestTmRequestTimeLogic:
 
     def test_block_echoes_post_height(self, sim):
         """POST /  with method=block + params.height echoes the height back."""
-        _set_tm(sim, "1")
         _, body, _ = _tm_post(sim, "1", "block", params={"height": "4500000"})
         assert body["result"]["block"]["header"]["height"] == "4500000"
 
     def test_block_echoes_get_height(self, sim):
         """GET /block?height="4500000" echoes the height back after normalisation."""
-        _set_tm(sim, "1")
         # CometBFT GET URI form quotes string values.
         _, body, _ = _tm_get(sim, "1", "block", params={"height": '"4500000"'})
         assert body["result"]["block"]["header"]["height"] == "4500000"
 
     def test_abci_query_echoes_post_height(self, sim):
-        """POST abci_query echoes height in response.height (the MAG-1741 contract)."""
-        _set_tm(sim, "1")
+        """POST abci_query echoes height in response.height."""
         _, body, _ = _tm_post(
             sim,
             "1",
@@ -339,7 +262,6 @@ class TestTmRequestTimeLogic:
 
     def test_abci_query_echoes_get_height(self, sim):
         """GET abci_query?height="H" echoes height after normalisation."""
-        _set_tm(sim, "1")
         _, body, _ = _tm_get(
             sim,
             "1",
@@ -355,7 +277,6 @@ class TestTmRequestTimeLogic:
 
     def test_validators_pagination_post(self, sim):
         """POST validators?page=1&per_page=2 returns count=2, len(validators)=2."""
-        _set_tm(sim, "1")
         _, body, _ = _tm_post(
             sim,
             "1",
@@ -370,7 +291,6 @@ class TestTmRequestTimeLogic:
 
     def test_validators_pagination_distinct_pages(self, sim):
         """Pages 1 and 2 with the same per_page return disjoint validator sets."""
-        _set_tm(sim, "1")
         _, body1, _ = _tm_post(sim, "1", "validators", params={"page": "1", "per_page": "2"})
         _, body2, _ = _tm_post(sim, "1", "validators", params={"page": "2", "per_page": "2"})
         addrs1 = {v["address"] for v in body1["result"]["validators"]}
@@ -450,10 +370,9 @@ class TestTmFaults:
 # Per-method error overrides — named error-stub catalogue + raw envelope
 #
 # Primary: responses[method] = {"error_stub": "<name>"} — the simulator
-# resolves the name against TENDERMINT_ERROR_STUBS and the caller wraps the
-# error into the JSON-RPC envelope. Escape hatch: responses[method] =
-# {"error": {...}} for ad-hoc shapes. Mirrors TestErrorStubs (ETH,
-# test_simulator.py) and TestBTCErrorStubs (test_simulator_btc.py).
+# resolves the name against TENDERMINT_ERROR_STUBS and wraps the error into
+# the JSON-RPC envelope. Escape hatch: responses[method] = {"error": {...}}
+# for ad-hoc shapes.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -492,41 +411,42 @@ class TestTmErrorStubs:
         """The per-method error path records status='error' in /history."""
         _set_tm(sim, "1", responses={"status": {"error_stub": "internal"}})
         _tm_post(sim, "1", "status")
-        _, hist, _ = _request("GET", _ctrl(sim, "/history?provider=1"))
+        _, hist, _ = _request("GET", _ctrl(sim, "/history?pool=lava-sim-tm&pid=1"))
         entries = [e for e in hist["history"] if e["method"] == "status"]
         assert len(entries) == 1
         assert entries[0]["status"] == "error"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Mixed-chain — ETH on p1 + Tendermint on p2 in one /scenario
+# Mixed pools — eth-sim:1 faulted + lava-sim-tm:2 healthy in one /scenario
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 class TestTmMixedChain:
 
-    def test_mixed_chain_each_independent(self, sim):
-        """One provider can be ETH (mode=error) and another TM (mode=success) at once."""
+    def test_mixed_pools_each_independent(self, sim):
+        """One /scenario body can fault eth-sim:1 and leave lava-sim-tm:2
+        healthy — the two pools never share state."""
         _request(
             "POST",
             _ctrl(sim, "/scenario"),
             body={
                 "providers": {
-                    "1": {"chain_family": "eth", "mode": "error", "error_code": -32000},
-                    "2": {"chain_family": "tendermintrpc", "mode": "success"},
+                    "eth-sim:1": {"mode": "error", "error_code": -32000},
+                    "lava-sim-tm:2": {"mode": "success"},
                 }
             },
         )
-        # ETH provider 1 — JSON-RPC port returns error envelope.
+        # eth-sim:1 — JSON-RPC port returns error envelope.
         eth_status, eth_body, _ = _request(
             "POST",
-            sim["jsonrpc1"],
+            _ETH1,
             body={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber"},
         )
         assert eth_status == 200
         assert eth_body.get("error", {}).get("code") == -32000
 
-        # TM provider 2 — Tendermint port returns success envelope.
+        # lava-sim-tm:2 — Tendermint port returns success envelope.
         tm_status, tm_body, _ = _tm_post(sim, "2", "status")
         assert tm_status == 200
         assert "result" in tm_body
@@ -542,21 +462,24 @@ class TestTmHistory:
 
     def test_post_request_appears_in_history(self, sim):
         """A successful TM POST shows up in /history with status=success."""
-        _set_tm(sim, "1")
         _tm_post(sim, "1", "status", request_id=42)
-        _, body, _ = _request("GET", _ctrl(sim, "/history") + "?provider=1&method=status")
+        _, body, _ = _request(
+            "GET", _ctrl(sim, "/history") + "?pool=lava-sim-tm&pid=1&method=status"
+        )
         entries = body.get("history", [])
         assert len(entries) >= 1, f"expected at least 1 history entry, got body={body!r}"
         latest = entries[-1]
         assert latest["method"] == "status"
         assert latest["status"] == "success"
         assert latest["request_id"] == 42
+        assert latest["interface"] == "tendermintrpc"
 
     def test_get_request_uses_sim_counter_for_request_id(self, sim):
         """GET URI form has no native id; sim assigns a monotonic counter."""
-        _set_tm(sim, "1")
         _tm_get(sim, "1", "status")
-        _, body, _ = _request("GET", _ctrl(sim, "/history") + "?provider=1&method=status")
+        _, body, _ = _request(
+            "GET", _ctrl(sim, "/history") + "?pool=lava-sim-tm&pid=1&method=status"
+        )
         entries = body.get("history", [])
         assert len(entries) >= 1, f"expected at least 1 history entry, got body={body!r}"
         latest = entries[-1]
@@ -566,48 +489,41 @@ class TestTmHistory:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Cross-transport isolation — the Tendermint handler's fault ladder is gated
-# on chain_family="tendermintrpc" so a fault authored for another transport
-# doesn't leak onto the TM port. Mirrors MAG-1838's JSON-RPC isolation
-# (TestJsonRpcCrossTransportFaultIsolation in test_simulator.py) and
-# TestRestCrossTransportFaultIsolation in test_simulator_rest.py. Surfaced
-# in the 2026-05-18 suite triage as one of the leak paths feeding the ~37
-# spurious failures.
+# Cross-pool isolation — faults on other pools never reach lava-sim-tm.
+# Under the old bare-pid model every transport shared pid "1"'s state, so an
+# eth/btc/rest down also killed the TM port; the pool:pid model abolishes that.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestTmCrossTransportFaultIsolation:
-    """TM port must ignore faults authored for any other chain_family."""
+class TestTmCrossPoolIsolation:
+    """The TM pool must be untouched by any other pool's faults — and its own
+    faults must still fire."""
 
-    def test_tm_killed_by_eth_down_fault(self, sim):
-        """A ``chain_family="eth"`` down fault MUST 503 the TM port.
-
-        MAG-2092: mode="down" is honored on every transport regardless of
-        chain_family because reachability is provider-wide. Without the
-        universal-down semantic, an ETH provider in mode=down would keep
-        serving TM responses, hiding router-side bugs that depend on the
-        provider being unreachable across every node-url (e.g. MAG-2061).
-        Per-transport isolation still applies to content modes (error /
-        corrupt / hang / rate_limit / drop_connection)."""
+    def test_tm_unaffected_by_eth_down_fault(self, sim):
+        """mode=down on eth-sim:1 kills eth-sim:1 and nothing else — the TM
+        port keeps serving success."""
         _request(
             "POST",
             _ctrl(sim, "/scenario"),
-            body={"providers": {"1": {"chain_family": "eth", "mode": "down"}}},
+            body={"providers": {"eth-sim:1": {"mode": "down"}}},
         )
-        status, _, _ = _tm_get(sim, "1", "status")
-        assert status == 503, f"TM should refuse with 503 under universal-down; got {status}"
+        eth_status, _, _ = _request(
+            "POST", _ETH1, body={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber"}
+        )
+        assert eth_status == 503, f"eth-sim:1 must be down; got {eth_status}"
+        status, body, _ = _tm_get(sim, "1", "status")
+        assert status == 200, f"lava-sim-tm:1 must ignore an eth-sim down; got {status}"
+        assert "result" in body
 
     def test_tm_unaffected_by_btc_error_fault(self, sim):
-        """A ``chain_family="btc"`` mode=error must not produce an error
-        body on the TM port — direct mirror of the leak shape surfaced in
-        2026-05-18 triage."""
+        """mode=error on btc-sim:1 must not produce an error body on the TM
+        port — different pools share nothing."""
         _request(
             "POST",
             _ctrl(sim, "/scenario"),
             body={
                 "providers": {
-                    "1": {
-                        "chain_family": "btc",
+                    "btc-sim:1": {
                         "mode": "error",
                         "error_code": -32000,
                         "error_message": "BTC error stub",
@@ -616,100 +532,105 @@ class TestTmCrossTransportFaultIsolation:
             },
         )
         status, body, _ = _tm_get(sim, "1", "status")
-        assert status == 200, f"TM should ignore btc-error; got {status}"
+        assert status == 200, f"TM should ignore a btc-sim error; got {status}"
         assert "result" in body, f"expected TM success body; got {body!r}"
 
     def test_tm_unaffected_by_rest_rate_limit_fault(self, sim):
-        """REST rate_limit must not 429 the TM port."""
+        """A lava-sim-rest rate_limit must not 429 the TM port."""
         _request(
             "POST",
             _ctrl(sim, "/scenario"),
-            body={"providers": {"1": {"chain_family": "rest", "mode": "rate_limit"}}},
+            body={"providers": {"lava-sim-rest:1": {"mode": "rate_limit"}}},
         )
         status, body, _ = _tm_get(sim, "1", "status")
         assert status == 200
         assert "result" in body
 
-    def test_tm_fault_still_fires_when_chain_family_is_tendermintrpc(self, sim):
-        """Sanity check: ``chain_family="tendermintrpc"`` + mode=rate_limit
-        must still fire on the TM port. The gate must not regress
-        TM-authored faults."""
+    def test_tm_fault_still_fires_on_its_own_pool(self, sim):
+        """Sanity check: mode=rate_limit on lava-sim-tm:1 must still fire on
+        the TM port — isolation must not swallow the pool's own faults."""
         _request(
             "POST",
             _ctrl(sim, "/scenario"),
-            body={"providers": {"1": {"chain_family": "tendermintrpc", "mode": "rate_limit"}}},
+            body={"providers": {"lava-sim-tm:1": {"mode": "rate_limit"}}},
         )
         status, _, _ = _tm_get(sim, "1", "status")
         assert status == 429
 
-    def test_tm_killed_by_btc_down_fault(self, sim):
-        """MAG-2092 universal-down: a ``chain_family="btc"`` mode=down
-        also 503s the TM port."""
+    def test_tm_unaffected_by_btc_down_fault(self, sim):
+        """mode=down on btc-sim:1 downs only btc-sim:1 — the TM port stays up."""
         _request(
             "POST",
             _ctrl(sim, "/scenario"),
-            body={"providers": {"1": {"chain_family": "btc", "mode": "down"}}},
+            body={"providers": {"btc-sim:1": {"mode": "down"}}},
         )
-        status, _, _ = _tm_get(sim, "1", "status")
-        assert status == 503, f"TM should refuse with 503 under universal-down; got {status}"
+        btc_status, _, _ = _request(
+            "POST", _BTC1, body={"jsonrpc": "2.0", "id": 1, "method": "getblockcount"}
+        )
+        assert btc_status == 503, f"btc-sim:1 must be down; got {btc_status}"
+        status, body, _ = _tm_get(sim, "1", "status")
+        assert status == 200, f"lava-sim-tm:1 must ignore a btc-sim down; got {status}"
+        assert "result" in body
 
-    def test_tm_killed_by_rest_down_fault(self, sim):
-        """MAG-2092 universal-down: a ``chain_family="rest"`` mode=down
-        also 503s the TM port."""
+    def test_tm_unaffected_by_rest_down_fault(self, sim):
+        """mode=down on lava-sim-rest:1 downs only that provider — the TM
+        port stays up (rest and tm are two separate lava routers)."""
         _request(
             "POST",
             _ctrl(sim, "/scenario"),
-            body={"providers": {"1": {"chain_family": "rest", "mode": "down"}}},
+            body={"providers": {"lava-sim-rest:1": {"mode": "down"}}},
         )
-        status, _, _ = _tm_get(sim, "1", "status")
-        assert status == 503, f"TM should refuse with 503 under universal-down; got {status}"
+        rest_status, _, _ = _request(
+            "GET", _REST1 + "/cosmos/base/tendermint/v1beta1/blocks/latest"
+        )
+        assert rest_status == 503, f"lava-sim-rest:1 must be down; got {rest_status}"
+        status, body, _ = _tm_get(sim, "1", "status")
+        assert status == 200, f"lava-sim-tm:1 must ignore a lava-sim-rest down; got {status}"
+        assert "result" in body
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Sequenced faults across transports — the fail_first_n window is consumed on
-# the owning JSON-RPC listener and only OBSERVED (never advanced) by TM
+# Sequenced faults stay inside their pool — another pool's fail_first_n window
+# neither downs the TM port nor is advanced by TM traffic
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestTmSequencedFaultObservation:
-    """The sequenced fault (fail_first_n / then_mode) counts requests on the
-    OWNING JSON-RPC listener only. The Tendermint port never advances that
-    window — it observes it: while the window is open, a provider-wide down
-    503s the TM port; once the owning listener has consumed the window, TM
-    must see then_mode instead of staying stuck on the raw fault forever."""
+class TestTmSequencedFaultIsolation:
 
-    def test_tm_down_clears_after_owning_listener_consumes_window(self, sim):
+    def test_tm_healthy_through_eth_down_window(self, sim):
+        """A sequenced down (fail_first_n) on eth-sim:1 opens and closes its
+        window on eth-sim:1 alone. The TM port serves success before, during,
+        and after — it neither observes nor advances another pool's window."""
         _request(
             "POST",
             _ctrl(sim, "/scenario"),
             body={
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
-                        "mode": "down",
-                        "fail_first_n": 2,
-                        "then_mode": "success",
-                    }
+                    "eth-sim:1": {"mode": "down", "fail_first_n": 2, "then_mode": "success"}
                 }
             },
         )
 
-        status, _, _ = _tm_get(sim, "1", "status")
-        assert status == 503, f"TM must 503 while the down window is open; got {status}"
+        status, body, _ = _tm_get(sim, "1", "status")
+        assert status == 200, f"TM must be healthy while eth's window is open; got {status}"
+        assert "result" in body
 
         for i in (1, 2):
             eth_status, _, _ = _request(
                 "POST",
-                sim["jsonrpc1"],
+                _ETH1,
                 body={"jsonrpc": "2.0", "id": i, "method": "eth_blockNumber"},
             )
             assert (
                 eth_status == 503
-            ), f"owning ETH call {i} is inside the down window; got {eth_status}"
+            ), f"eth-sim:1 call {i} is inside the down window; got {eth_status}"
+
+        eth_status, _, _ = _request(
+            "POST", _ETH1, body={"jsonrpc": "2.0", "id": 3, "method": "eth_blockNumber"}
+        )
+        assert eth_status == 200, f"eth-sim:1 must recover after the window; got {eth_status}"
 
         status, body, _ = _tm_get(sim, "1", "status")
-        assert status == 200, (
-            f"TM must observe the consumed window and serve then_mode=success; " f"got {status}"
-        )
+        assert status == 200, f"TM must still be healthy after eth's window; got {status}"
         assert "result" in body
         assert body["result"]["node_info"]["network"]

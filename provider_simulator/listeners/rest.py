@@ -41,6 +41,16 @@ def _next_request_id() -> int:
         return _ID
 
 
+def allowed_verbs(path: str) -> list[str]:
+    """The HTTP verbs registered for ``path`` (for the OPTIONS response's
+    ``Allow`` header). Empty when no route template matches."""
+    verbs: list[str] = []
+    for route_verb, regex, _template in _REST_ROUTES:
+        if regex.match(path) and route_verb not in verbs:
+            verbs.append(route_verb)
+    return verbs
+
+
 class RestListener(Listener):
     def parse_request(self, request: RawRequest) -> dict:
         verb = request.verb.upper()
@@ -88,6 +98,13 @@ class RestListener(Listener):
 
     def build_success(self, status: int, body: object) -> ServeResult:
         return ServeResult(action="respond", status=status, body=body)
+
+    def method_key(self, request: dict) -> object:
+        # REST per-method fault overrides are keyed by the matched route:
+        # the (verb, template) pair. Unmatched paths have no template and
+        # therefore no override.
+        template = request.get("template")
+        return (request.get("verb"), template) if template else None
 
     def success_label(self, status: int, body: object) -> str:
         if status == 404:

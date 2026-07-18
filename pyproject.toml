@@ -54,20 +54,12 @@ exclude = [
     "cosmos_pb2/",  # vendored, generated protobuf stubs
 ]
 
-# Permissive baseline (MAG-2318): this is the first mypy config the repo has
-# had. A full run against current `main` (with the overrides below removed)
-# finds 34 pre-existing errors across 6 files (server.py: 21, handlers_ws.py:
-# 4, handlers_solana.py: 4, handlers_rest.py: 2, handlers_tendermintrpc.py: 2,
-# ws_protocol.py: 1) — mostly dynamic attributes attached to stdlib
-# HTTPServer instances at bootstrap (self.server.provider_id /
-# self.server.state), which the stdlib stubs type as plain BaseServer with
-# no such attributes, plus a handful of real but minor return-type
-# mismatches. Fixing those is a typing pass on its own, not part of adding
-# the tool. The overrides below suppress exactly those known error
-# categories, on exactly those 6 files, so `mypy .` runs clean (exit 0) and
-# stays a normal, blocking CI step in .github/workflows/lint-and-test.yml —
-# it still catches any NEW error, in these files or any other, that isn't
-# one of the specific pre-existing categories listed above.
+# server.py wires per-listener state onto stdlib HTTPServer instances at
+# bootstrap (srv.listener / srv.control / srv.registry). The handler classes
+# declare those attributes on _SimThreadingHTTPServer, but BaseHTTPRequestHandler
+# types ``self.server`` as the plain socketserver.BaseServer, so attribute
+# reads through it still flag attr-defined. Suppress exactly that category on
+# exactly this module; every other check stays live.
 [[tool.mypy.overrides]]
-module = ["server", "handlers_ws", "handlers_solana", "handlers_rest", "handlers_tendermintrpc", "ws_protocol"]
-disable_error_code = ["attr-defined", "arg-type", "assignment", "index", "return-value", "dict-item"]
+module = ["server"]
+disable_error_code = ["attr-defined"]
