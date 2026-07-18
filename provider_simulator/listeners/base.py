@@ -3,21 +3,24 @@
 serve() runs one fixed sequence for all transports:
 
     record arrival → snapshot scenario → (down? emit before parsing) → parse
-    request → fault policy verdict → emit fault OR build the chain's success
-    response → finalize the log entry.
+    request (parse error?) → fault policy verdict → emit fault OR build the
+    chain's success response → finalize the log entry.
 
 The fault ladder (via ``fault_policy.decide``) and the success dispatch (via the
 provider's chain) live here, once. Transports differ only in parsing the raw
 request and shaping the wire output — the ``parse_request`` / ``build_fault`` /
-``build_success`` hooks.
+``build_success`` hooks (plus optional ``build_parse_error`` / ``success_label``
+overrides for transports with a malformed-wire path or a non-standard history
+label like REST's 404 → ``not_found``).
 
 ``down`` is evaluated and emitted BEFORE the body is parsed (a dead node never
 reads the request), so a down call's history carries method ``"*"`` and
 ``request_id`` None — matching the long-standing contract other code relies on.
 
 serve() returns a ServeResult describing WHAT to put on the wire — including the
-latency to wait first and any corruption to apply when serializing a success
-body. The socket adapter that performs the write (and the corruption, via
+latency to wait first and any corruption to apply when serializing a ``respond``
+body (success OR a rate_limit / error fault, matching the flat handlers). The
+socket adapter that performs the write (and the corruption, via
 ``listeners.wire.serialize``) is wired in at the server cut-over. Returning a
 plan keeps the whole flow unit-testable without a socket.
 """
@@ -37,6 +40,12 @@ _STATUS_LABEL = {
     "rate_limit": "rate_limit",
     "error": "error",
 }
+
+
+class ParseError(Exception):
+    """Raised by ``parse_request`` when the wire is malformed (Tendermint uses
+    this to surface a JSON-RPC -32700). Transports that tolerate junk input
+    (JSON-RPC, REST) return an empty dict instead of raising."""
 
 
 @dataclass
@@ -61,7 +70,7 @@ class ServeResult:
 
     ``latency_ms`` is the delay the adapter waits before emitting (0 = none).
     ``corruption_mode`` / ``missing_field`` tell the adapter how to break the
-    serialized body on a success response (None = clean).
+    serialized body on a ``respond`` response (None = clean).
     """
 
     action: str  # respond | no_body | hang | drop
@@ -95,39 +104,40 @@ class Listener(ABC):
             self.provider.log.finalize(entry, method="*", status="down", latency_ms=latency)
             return ServeResult(action="no_body", status=503)
 
-        parsed = self.parse_request(request)
+        try:
+            parsed = self.parse_request(request)
+        except ParseError as exc:
+            self.provider.log.finalize(entry, method="*", status="parse_error", latency_ms=0)
+            return self.build_parse_error(exc)
 
         if verdict.kind != "none":
             result = self.build_fault(verdict, parsed)
-            if result.action in ("respond", "drop"):
-                result.latency_ms = latency
-            self.provider.log.finalize(
-                entry,
-                method=self.request_method(parsed),
-                status=_STATUS_LABEL[verdict.kind],
-                latency_ms=latency,
-                request_id=self.request_id(parsed),
+            status_label = _STATUS_LABEL[verdict.kind]
+            request_id = self.request_id(parsed)
+        else:
+            chain = chain_for(self.provider.pool.chain)
+            status, body = chain.build_success(
+                parsed, scenario, self.provider.quirks.snapshot(), self.endpoint.interface
             )
-            return result
+            result = self.build_success(status, body)
+            status_label = self.success_label(status, body)
+            request_id = self.response_id(body) or self.request_id(parsed)
 
-        chain = chain_for(self.provider.pool.chain)
-        status, body = chain.build_success(
-            parsed, scenario, self.provider.quirks.snapshot(), self.endpoint.interface
-        )
-        result = self.build_success(status, body)
-        result.latency_ms = latency
-        # Corruption composes with a successful response, scoped by the same
-        # transports filter the fault ladder uses.
-        if self._targeted(scenario):
+        if result.action in ("respond", "drop"):
+            result.latency_ms = latency
+        # Corruption composes with any body actually written (a success OR a
+        # rate_limit / error fault), scoped by the same transports filter the
+        # fault ladder uses.
+        if result.action == "respond" and self._targeted(scenario):
             result.corruption_mode = scenario.get("corruption_mode")
             result.missing_field = scenario.get("missing_field")
-        label = "error" if isinstance(body, dict) and "error" in body else "success"
+
         self.provider.log.finalize(
             entry,
             method=self.request_method(parsed),
-            status=label,
+            status=status_label,
             latency_ms=latency,
-            request_id=self.response_id(body) or self.request_id(parsed),
+            request_id=request_id,
         )
         return result
 
@@ -143,6 +153,26 @@ class Listener(ABC):
 
     @abstractmethod
     def build_success(self, status: int, body: object) -> ServeResult: ...
+
+    def build_parse_error(self, exc: ParseError) -> ServeResult:
+        """Response for malformed input. Default is the JSON-RPC -32700 envelope
+        (what Tendermint emits); transports that never raise ParseError don't
+        reach this."""
+        return ServeResult(
+            action="respond",
+            status=400,
+            body={
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32700, "message": f"Parse error: {exc}"},
+            },
+        )
+
+    def success_label(self, status: int, body: object) -> str:
+        """History status for a success-path response. Default: ``error`` if the
+        body carries an error envelope, else ``success``. REST overrides to label
+        a 404 ``not_found``."""
+        return "error" if isinstance(body, dict) and "error" in body else "success"
 
     # Default request/response accessors work for the JSON-RPC dict shape;
     # transports with a different shape override these.
