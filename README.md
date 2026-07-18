@@ -6,28 +6,31 @@ simulator instead of real nodes, so a test can make a provider go **down**,
 then check how the router reacts.
 
 It runs as **one Python process**: many listeners (JSON-RPC, REST, gRPC,
-Tendermint RPC, WebSocket) plus a control API, all sharing one in-memory state
-map.
+Tendermint RPC, WebSocket) plus a control API, all over one in-memory registry
+of providers.
 
 ## Architecture
 
-Two planes over one shared state map. Tests **write** provider config on the
-control plane; the router **reads** it on the data plane. A change is instant —
-no restart, no IPC.
+Two planes over one registry. Tests **write** provider config on the control
+plane; the router **reads** it on the data plane. A change is instant — no
+restart, no IPC.
 
 ```mermaid
 flowchart TD
-    T["Test / sim_control"] -->|"control :19000"| CTRL["ControlHandler"]
+    T["Test / sim_control"] -->|"control :19000"| CTRL["control_api"]
     R["smart-router (SUT)"] -->|"provider ports 18545-18585"| LIS["Listeners (daemon threads)"]
-    CTRL -->|"writes config"| STATE["state map: pid to ProviderState"]
-    LIS -->|"reads snapshot"| STATE
-    LIS --> HAND["Handlers: eth / btc / ln / solana / rest / tm / ws / grpc"]
-    HAND -->|"append call"| STATE
+    CTRL -->|"writes scenario"| REG["Registry: pool:pid -> Provider"]
+    LIS -->|"reads snapshot"| REG
+    LIS --> CH["Chains: eth / btc / ln / solana / lava"]
+    LIS --> FP["fault_policy (one decision function)"]
 ```
 
-- Each listener owns one **port**, and the port decides which **handler** runs.
-- One `ProviderState` is created per provider id at startup, shared across every
-  surface that provider serves.
+- Identity is **`pool:pid`** — one provider is one named node in one router's
+  pool (e.g. `eth-sim:1`). Two chains never share a provider, so a fault on one
+  chain can never leak onto another.
+- Each listener owns one **port**; the port resolves through the registry to a
+  provider + endpoint. The provider's **chain** builds the success response, and
+  one **`fault_policy`** decides every fault.
 
 ## Run it locally
 
@@ -48,7 +51,7 @@ curl -s -X POST http://localhost:18545 -H "Content-Type: application/json" \
 grpcurl -plaintext localhost:18548 list
 ```
 
-Run the tests (they boot every listener in-process on isolated ports):
+Run the tests (they boot the server in-process on isolated ports):
 
 ```bash
 pytest tests/ -v
@@ -62,45 +65,40 @@ black --check . && ruff check . && mypy .
 
 ## Ports & dispatch
 
-Each row is a group of 3 providers (pids 1–3). The port picks the handler.
+Each row is a group of 3 providers. The port resolves to a `pool:pid` provider.
 
-| Surface | Ports (primary / backup / solo) | Handler |
+| Surface | Ports (primary / backup / solo) | Pool |
 |---|---|---|
-| ETH JSON-RPC | 18545–47 / 18560–62 / 18581 | `handlers_eth` |
-| BTC JSON-RPC | 18575–77 | `handlers_btc` |
-| LN JSON-RPC | 18578–80 | `handlers_lnd` |
-| Solana JSON-RPC | 18582–84 / 18585 | `handlers_solana` |
-| gRPC | 18548–50 / 18563–65 | `handlers_grpc` |
-| REST | 18551–53 / 18566–68 | `handlers_rest` |
-| Tendermint RPC | 18554–56 / 18569–71 | `handlers_tendermintrpc` |
-| WebSocket | 18557–59 / 18572–74 | `handlers_ws` |
-| Control API | 19000 | `ControlHandler` |
+| ETH JSON-RPC | 18545–47 / 18560–62 / 18581 | `eth-sim` (pids 1–6) / `eth-solo-sim` |
+| ETH WebSocket | 18557–59 / 18572–74 | `eth-sim` (same providers, ws endpoint) |
+| BTC JSON-RPC | 18575–77 | `btc-sim` |
+| LN JSON-RPC | 18578–80 | `ln-sim` |
+| Solana JSON-RPC | 18582–84 / 18585 | `solana-sim` / `solana-solo-sim` |
+| gRPC | 18548–50 / 18563–65 | `lava-sim-grpc` |
+| REST | 18551–53 / 18566–68 | `lava-sim-rest` |
+| Tendermint RPC | 18554–56 / 18569–71 | `lava-sim-tm` |
+| Control API | 19000 | `control_api` |
 
 ## Providers & state
 
-- A **provider** is one fake node, addressed by id (`"1"`, `"2"`, `"3"`). Its
-  behaviour lives in one `ProviderState`: fault mode, latency, error shape,
-  per-method overrides, history, and counters.
-- For pids 1–3, the primary listeners of every surface **share one
-  `ProviderState`**, so a single `POST /scenario` on pid `1` reconfigures that
-  provider on every transport at once.
-- `snapshot()` gives each request a stable read; `update()` applies a
-  `/scenario` change under a lock.
+- A **provider** is one fake node, addressed **`pool:pid`** (e.g. `eth-sim:1`).
+  Its behaviour lives in a `ScenarioConfig` (fault mode, latency, error shape,
+  per-method overrides) plus typed per-chain `Quirks`; its telemetry lives in a
+  `CallLog`. Nothing is shared with any other provider.
+- One ETH provider serves two endpoints under one identity — http and ws — so a
+  `down` on `eth-sim:1` covers both. REST / gRPC / Tendermint are separate pools
+  (`lava-sim-rest` / `-grpc` / `-tm`), so faulting one never touches another.
+- `snapshot()` gives each request a stable read; `update()` applies a `/scenario`
+  change under a lock.
 
-**Dispatch is port-derived.** The ETH ports always call `handlers_eth`, the BTC
-ports always `handlers_btc`, and so on. The listener's port picks the handler —
-not a field in the request. (BTC and LN moved to their own dedicated ports so a
-test on one chain could no longer flip another chain's handler through the
-shared state.)
+**Scope a fault with `transports`, not `chain_family`.** A scenario block's
+optional `transports` list (e.g. `["ws"]`) scopes its effect to specific
+endpoints of the provider; omit it and the block covers every endpoint. There is
+no `chain_family` field any more — the pool already fixes the chain.
 
-**`chain_family` gates content faults.** A scenario block names which surface
-its *content* faults (`error` / `rate_limit` / `hang` / `drop_connection` /
-`corruption`) apply to. It is **required** on every block — a missing or unknown
-value is rejected with HTTP 400, so a scenario can never silently arm nothing.
-
-**`down` is the exception — it fires everywhere.** A provider set to `down`
-returns 503 on all of its surfaces, because a dead node is unreachable on every
-port.
+**`down` is provider-wide by default.** A provider set to `down` returns 503 on
+all of its endpoints — a dead node is unreachable on every port. This is the
+natural default now, not a special case.
 
 ## Fault primitives
 
@@ -117,22 +115,24 @@ Pick one `mode`; combine it with the orthogonal fields.
 | `blocks_behind` | int | Report a stale head (`eth_blockNumber` / `eth_getBlockByNumber` / gRPC `GetLatestBlock`) |
 | `drop_at` | `before_headers` \| `after_headers` \| `mid_body` | Where `drop_connection` cuts the socket |
 | `fail_first_n` / `then_mode` | int / mode | Fail the first N calls, then switch to `then_mode` |
+| `transports` | list of `http` / `http2` / `ws` | Scope the block to specific endpoints (omit = all) |
 
 ## Control API (port 19000)
 
 | Route | Purpose |
 |---|---|
-| `POST /scenario` | Set per-provider behaviour: `{"providers": {"1": {"mode": "down", "chain_family": "eth"}}}` |
+| `POST /scenario` | Set per-provider behaviour, keyed `pool:pid`: `{"providers": {"eth-sim:1": {"mode": "down"}}}`. An old bare-pid key or a `chain_family` field gets a 400 naming the new format. |
 | `POST /reset` | Reset scenario config, keep history |
 | `POST /history/clear` | Clear history, keep config |
 | `POST /reset/all` | Reset both |
-| `POST /advance` | Move the simulated ETH head (sync-freshness tests) |
+| `POST /advance` | Move a chain's simulated head (default `eth`; sync-freshness tests) |
 | `POST /ws/emit` | Push a WebSocket event to a live subscription |
-| `GET /health` · `/scenario` · `/stats` · `/history` | Read health / config / counters / call log |
+| `GET /health` · `/ready` · `/scenario` · `/stats` · `/history` · `/ws/subscriptions` | Health / readiness (all listener ports bound) / config / counters / call log / live subscriptions |
 
 `GET /history` merges every provider's ring buffer, sorts by time, and adds
-`correlation_group` (the calls of one router relay) and `call_order`. Filter by
-`provider` / `method` / `status` / `request_id` / time / `lava_header_*`.
+`correlation_group` (the calls of one router relay) and `call_order`. Each entry
+carries `pool` / `pid` / `interface` / `transport` / `port`; filter by
+`pool` / `transport` / `method` / `status` / `request_id` / time / `lava_header_*`.
 
 ## Deploy
 
@@ -159,33 +159,23 @@ Pick one `mode`; combine it with the orthogonal fields.
 ## Repo layout
 
 ```
-run.py                 — entry point
-server.py              — listeners, control API, ProviderState, the fault ladder
-handlers_eth.py        — ETH success-branch dispatch
-handlers_btc.py        — BTC dispatch
-handlers_lnd.py        — Lightning (LND) dispatch
-handlers_solana.py     — Solana dispatch (slot vs lastValidBlockHeight gap)
-handlers_rest.py       — REST dispatch
-handlers_tendermintrpc.py — Tendermint-RPC dispatch
-handlers_ws.py         — WebSocket transport (subscribe / unsubscribe / emit)
-handlers_grpc.py       — Cosmos gRPC servicer
-grpc_server.py         — gRPC server bootstrap (reflection on)
-stubs*.py              — default results + error-stub catalogues per chain
-constants.py           — port maps, chain constants, history caps
-cosmos_pb2/            — vendored Cosmos protobufs
-config/base-domain.env — BASE_DOMAIN for deploy
-config/values_sim.yml  — smart-router Helm values that wire the sim in
-Dockerfile             — image used by scripts/deploy.sh
-k8s/                   — Deployment, Service, HTTPRoute, GRPCRoute
-scripts/deploy.sh      — build / import / apply / restart
-tests/                 — pytest suite (all surfaces, in-process)
+run.py                        — entry point
+server.py                     — bootstrap: build the registry from TOPOLOGY, bind listeners to ports
+provider_simulator/
+  topology.py                 — the pool / provider / endpoint table
+  fault_policy.py             — the one fault-decision function
+  domain/                     — Endpoint, ScenarioConfig, Quirks, CallLog, Pool/Provider, Registry
+  chains/                     — one class per chain (eth/btc/solana/ln/lava)
+  listeners/                  — base template + jsonrpc/rest/tendermint, a gRPC adapter, a WS
+                                subscription registry, and the corruption serializer
+  control_api.py              — the port-19000 routes over the registry
+stubs*.py                     — default success payloads per surface (eth/btc/ln/solana/rest/tm/ws)
+constants.py                  — port maps, chain constants, history caps
+cosmos_pb2/                   — vendored Cosmos protobufs
+config/base-domain.env        — BASE_DOMAIN for deploy
+config/values_sim.yml         — smart-router Helm values that wire the sim in
+Dockerfile                    — image used by scripts/deploy.sh
+k8s/                          — Deployment, Service, HTTPRoute, GRPCRoute
+scripts/deploy.sh             — build / import / apply / restart
+tests/                        — pytest suite (all surfaces, in-process)
 ```
-
-## Redesign in progress
-
-Today the state map is keyed by **provider id alone**, so different chains reuse
-ids 1–3 and share one `ProviderState` — a fault on one chain can leak to
-another. A **pool-based identity** redesign fixes this: one provider = one node
-in one router's pool (e.g. `eth-sim:1`), so chains never share state and a fault
-cannot cross between them. The change is additive — the current system keeps
-running — and lands in stages. The new code lives under `provider_simulator/`.
