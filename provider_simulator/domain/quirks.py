@@ -14,6 +14,7 @@ owns its quirks type and this accessor delegates to it — one module to edit.
 """
 
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from provider_simulator.domain.introspective_config import IntrospectiveConfig
 from stubs_solana import SOLANA_DEFAULT_SLOT_BLOCK_GAP
@@ -45,8 +46,9 @@ _QUIRKS_BY_CHAIN: dict[str, type[Quirks]] = {
     "lava": Quirks,
 }
 
-# Read-only view kept for topology tests that assert the chain vocabulary.
-QUIRKS_BY_CHAIN = _QUIRKS_BY_CHAIN
+# Read-only view: callers can't mutate the known-chain set (which drives
+# registry validation) by reaching into this mapping.
+QUIRKS_BY_CHAIN = MappingProxyType(_QUIRKS_BY_CHAIN)
 
 
 def known_chains() -> list[str]:

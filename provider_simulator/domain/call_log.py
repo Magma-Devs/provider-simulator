@@ -69,7 +69,7 @@ class CallLog:
             "method": method,
             "status": status,
             "latency_ms": latency_ms,
-            "lava_headers": lava_headers or {},
+            "lava_headers": dict(lava_headers) if lava_headers else {},
             "pool": self._pool,
             "pid": self._pid,
             "interface": interface,
@@ -185,4 +185,11 @@ class CallLog:
         (underscore-prefixed) are stripped and each row is an independent dict,
         so readers can hold, serialize, or edit the result freely."""
         with self._lock:
-            return [{k: v for k, v in e.items() if not k.startswith("_")} for e in self._history]
+            return [
+                {
+                    k: (dict(v) if k == "lava_headers" and isinstance(v, dict) else v)
+                    for k, v in e.items()
+                    if not k.startswith("_")
+                }
+                for e in self._history
+            ]

@@ -46,14 +46,23 @@ class IntrospectiveConfig:
     @property
     def _lock(self) -> threading.Lock:
         # Lazily created so it exists even when a subclass overrides
-        # __post_init__ without super(). setdefault is atomic under the GIL,
-        # so two racing first-callers still end up sharing one lock object.
-        return self.__dict__.setdefault("_lock_obj", threading.Lock())
+        # __post_init__ without super(). Check first so a fresh Lock() isn't
+        # built and immediately discarded on every access (snapshot/update/reset
+        # are hot paths); setdefault is atomic under the GIL, so two racing
+        # first-callers still share one lock object.
+        lock = self.__dict__.get("_lock_obj")
+        if lock is None:
+            lock = self.__dict__.setdefault("_lock_obj", threading.Lock())
+        return lock
 
     @property
     def last_write_at(self) -> float:
-        """Epoch seconds of the last update(); construction time if never updated."""
-        return self.__dict__.setdefault("_last_write_at", time.time())
+        """Epoch seconds of the last update(). Reading never stamps, so a
+        staleness sweep that reads this can't accidentally refresh a config to
+        "now". A never-updated config reads as ~now, but it is always at
+        defaults and the sweep only reverts non-default scenarios, so it's
+        skipped anyway."""
+        return self.__dict__.get("_last_write_at", time.time())
 
     def _field_names(self) -> set[str]:
         return {f.name for f in fields(self)}
