@@ -15,6 +15,7 @@ don't; that design is pinned in a later story.
 from provider_simulator.chains.base import AdvancingHead, Chain
 from provider_simulator.chains.btc import BtcChain
 from provider_simulator.chains.eth import EthChain
+from provider_simulator.chains.lava import LavaChain
 from provider_simulator.chains.ln import LnChain
 from provider_simulator.chains.solana import SolanaChain
 
@@ -23,6 +24,7 @@ CHAINS: dict[str, Chain] = {
     "btc": BtcChain(),
     "ln": LnChain(),
     "solana": SolanaChain(),
+    "lava": LavaChain(),
 }
 
 
@@ -41,6 +43,7 @@ __all__ = [
     "BtcChain",
     "LnChain",
     "SolanaChain",
+    "LavaChain",
     "CHAINS",
     "chain_for",
 ]

@@ -67,5 +67,12 @@ class Chain(ABC):
     quirks_type: type[Quirks] = Quirks
 
     @abstractmethod
-    def build_success(self, request: dict, scenario: dict, quirks: dict) -> tuple[int, dict]:
-        """Return (http_status, response_body) for the success path."""
+    def build_success(
+        self, request: dict, scenario: dict, quirks: dict, interface: str = ""
+    ) -> tuple[int, dict]:
+        """Return (http_status, response_body) for the success path.
+
+        ``interface`` is the application protocol of the serving endpoint
+        (jsonrpc / rest / grpc / tendermintrpc). Single-interface chains ignore
+        it; multi-interface chains (lava) branch on it.
+        """

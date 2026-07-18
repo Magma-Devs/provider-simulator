@@ -22,7 +22,9 @@ class LnChain(Chain):
     def error_stub(self, name: str) -> dict:
         return LND_ERROR_STUBS[name]
 
-    def build_success(self, request: dict, scenario: dict, quirks: dict) -> tuple[int, dict]:
+    def build_success(
+        self, request: dict, scenario: dict, quirks: dict, interface: str = ""
+    ) -> tuple[int, dict]:
         req_id = request.get("id", 1)
         method = request.get("method", "unknown")
         params = request.get("params", [])

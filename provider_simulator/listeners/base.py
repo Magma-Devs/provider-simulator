@@ -83,7 +83,9 @@ class Listener(ABC):
             return result
 
         chain = chain_for(self.provider.pool.chain)
-        status, body = chain.build_success(request, scenario, self.provider.quirks.snapshot())
+        status, body = chain.build_success(
+            request, scenario, self.provider.quirks.snapshot(), self.endpoint.interface
+        )
         result = self.build_success(status, body)
         label = "error" if isinstance(body, dict) and "error" in body else "success"
         self.provider.log.finalize(
