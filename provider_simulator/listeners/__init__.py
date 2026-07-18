@@ -8,7 +8,7 @@ the flow is testable without a socket; the socket adapter is wired in at the
 server cut-over.
 """
 
-from provider_simulator.listeners.base import Listener, ServeResult
+from provider_simulator.listeners.base import Listener, RawRequest, ServeResult
 from provider_simulator.listeners.jsonrpc import JsonRpcListener
 
-__all__ = ["Listener", "ServeResult", "JsonRpcListener"]
+__all__ = ["Listener", "RawRequest", "ServeResult", "JsonRpcListener"]

@@ -10,11 +10,12 @@ JSON-RPC error envelope.
 import json
 
 from provider_simulator import fault_policy
-from provider_simulator.listeners.base import Listener, ServeResult
+from provider_simulator.listeners.base import Listener, RawRequest, ServeResult
 
 
 class JsonRpcListener(Listener):
-    def parse_request(self, raw: bytes) -> dict:
+    def parse_request(self, request: RawRequest) -> dict:
+        raw = request.body
         if not raw:
             return {}
         try:
