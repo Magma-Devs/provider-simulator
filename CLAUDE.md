@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A multi-transport JSON-RPC / BTC RPC / REST / gRPC / WebSocket simulator used to test smart-router behavior. Top-level Python — no subpackages — with two C-extension deps (`grpcio`, `protobuf`) required only for the gRPC transport. Runs many `HTTPServer` instances plus three asyncio gRPC servers in daemon threads from a single process, all sharing one in-memory state map:
+A multi-transport JSON-RPC / BTC RPC / REST / gRPC / WebSocket simulator used to test smart-router behavior. Legacy runtime modules are flat top-level Python; the redesigned core lives in the `provider_simulator/` package (domain model, topology, registry — being wired in story by story). Two C-extension deps (`grpcio`, `protobuf`) are required only for the gRPC transport. Runs many `HTTPServer` instances plus three asyncio gRPC servers in daemon threads from a single process, all sharing one in-memory state map:
 
 - ETH JSON-RPC providers on `18545`/`18546`/`18547` (dispatch always handlers_eth).
 - BTC JSON-RPC providers on `18575`/`18576`/`18577` (dispatch always handlers_btc — MAG-2089 gave BTC its own dedicated listener pool, the handler is port-derived).
@@ -31,7 +31,7 @@ pytest tests/test_simulator.py::TestHistory::test_filter_method_returns_matching
 bash scripts/deploy.sh
 ```
 
-There is no linter or formatter configured. The Dockerfile copies only `*.py` from the repo root, so any new runtime module must live at the top level (not inside a subpackage).
+Lint/format/type-check are configured in `pyproject.toml` and CI-enforced (`black --check .`, `ruff check .`, `mypy .` — see `.github/workflows/lint-and-test.yml`); run all three before pushing. Runtime layout: legacy modules are flat `*.py` at the repo root; the redesigned core lives in the `provider_simulator/` package. The Dockerfile copies both (`COPY *.py ./` + `COPY provider_simulator/ ./provider_simulator/`) — a new runtime module goes in the package unless it must interoperate with the flat legacy modules.
 
 ## Architecture
 

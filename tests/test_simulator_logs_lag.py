@@ -1,16 +1,11 @@
 """
-Unit tests for the MAG-1791 eth_getLogs stale-indexing primitive.
+Integration tests for the eth_getLogs stale-indexing primitive.
 
-Mirrors the structure of ``tests/test_simulator_btc.py`` (the MAG-1716 BTC
-suite) but covers only the ``logs_indexed_up_to`` / ``logs_lag_mode``
-behaviour added to ``handlers_eth.handle()`` and ``ProviderState``.
+Runs against the shared in-process simulator (see conftest.py) and covers the
+``logs_indexed_up_to`` / ``logs_lag_mode`` Ethereum quirks:
 
-Coverage
---------
   Default (no lag set)        — eth_getLogs returns its configured response
-                                 unchanged (today: ``METHOD_DEFAULTS["eth_getLogs"]``
-                                 which is an empty list, or whatever the test
-                                 overrode via ``/scenario.responses``).
+                                 unchanged.
   logs_lag_mode="empty"        — When the query's ``toBlock`` exceeds
                                  ``logs_indexed_up_to``, the response is forced
                                  to an empty array even when ``responses`` has
@@ -29,27 +24,14 @@ Run with:
 """
 
 import json
-import threading
-import time
 import urllib.error
 import urllib.request
-from http.server import HTTPServer, ThreadingHTTPServer
 
 import pytest
 
-from server import ControlHandler, JSONRPCHandler, ProviderState
+from constants import ETH_PRIMARY_PORTS
 
-# ── Test ports. Two rules keep binds reliable across the whole suite:
-#    1. Stay below 32768. Ports from 32768 up are the kernel's ephemeral
-#       client-port range (Linux default 32768-60999, macOS 49152-65535):
-#       every outgoing HTTP call an earlier test module makes grabs a random
-#       source port there, and a lingering one makes this module's bind fail
-#       with "Address already in use" at fixture setup.
-#    2. Each test file owns a unique port block (this file: 240xx) so all
-#       modules can run in one pytest invocation. ───────────────────────
-
-_PROVIDER_PORTS = {"1": 24045, "2": 24046, "3": 24047}
-_CONTROL_PORT = 24000
+_P1 = f"http://127.0.0.1:{ETH_PRIMARY_PORTS['1']}"
 
 
 # ── HTTP helpers (kept self-contained, mirrors test_simulator_btc.py) ─────────
@@ -88,43 +70,6 @@ def _rpc(url: str, method: str, params: list | None = None) -> tuple[int, dict]:
 
 def _ctrl(sim: dict, path: str) -> str:
     return sim["control"] + path
-
-
-# ── Module-scoped fixture: start all servers once ─────────────────────────────
-
-
-@pytest.fixture(scope="module")
-def sim():
-    """Start 3 JSON-RPC servers + 1 control server on dedicated logs-lag test ports."""
-    states = {pid: ProviderState() for pid in _PROVIDER_PORTS}
-
-    servers = []
-    for pid, port in _PROVIDER_PORTS.items():
-        srv = ThreadingHTTPServer(("127.0.0.1", port), JSONRPCHandler)
-        srv.daemon_threads = True
-        srv.state = states[pid]
-        srv.provider_id = pid
-        servers.append(srv)
-
-    ctrl = HTTPServer(("127.0.0.1", _CONTROL_PORT), ControlHandler)
-    ctrl.provider_states = states
-    servers.append(ctrl)
-
-    threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in servers]
-    for t in threads:
-        t.start()
-
-    time.sleep(0.15)
-
-    yield {
-        "control": f"http://127.0.0.1:{_CONTROL_PORT}",
-        "provider1": f"http://127.0.0.1:{_PROVIDER_PORTS['1']}",
-        "provider2": f"http://127.0.0.1:{_PROVIDER_PORTS['2']}",
-        "provider3": f"http://127.0.0.1:{_PROVIDER_PORTS['3']}",
-    }
-
-    for s in servers:
-        s.shutdown()
 
 
 # ── Function-scoped autouse: clean slate before/after every test ──────────────
@@ -208,31 +153,30 @@ _CANNED_LOGS = [
 class TestDefaults:
 
     def test_logs_indexed_up_to_defaults_to_none(self, sim):
-        """Fresh ProviderState has logs_indexed_up_to=None (primitive off)."""
+        """A freshly-reset eth provider has logs_indexed_up_to=None (off)."""
         _, body = _get(_ctrl(sim, "/scenario"))
         for pid in ("1", "2", "3"):
-            assert body["providers"][pid]["logs_indexed_up_to"] is None
-            assert body["providers"][pid]["logs_lag_mode"] == "empty"
+            assert body["providers"][f"eth-sim:{pid}"]["logs_indexed_up_to"] is None
+            assert body["providers"][f"eth-sim:{pid}"]["logs_lag_mode"] == "empty"
 
     def test_eth_getLogs_unaffected_when_primitive_unset(self, sim):
         """Without logs_indexed_up_to, eth_getLogs returns configured response.
 
         Kraken-CCIP risk control: the primitive must not change behaviour for
-        callers that don't opt in — existing 211 baseline tests stay green.
+        callers that don't opt in — existing baseline tests stay green.
         """
         _post(
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "responses": {"eth_getLogs": {"result": _CANNED_LOGS}},
                     }
                 }
             },
         )
         params = [{"fromBlock": hex(HEAD_BLOCK - 30), "toBlock": "latest"}]
-        status, body = _rpc(sim["provider1"], "eth_getLogs", params)
+        status, body = _rpc(_P1, "eth_getLogs", params)
         assert status == 200
         assert "error" not in body
         # Full list returned — no filtering applied because primitive is off.
@@ -256,8 +200,7 @@ class TestEmptyMode:
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "logs_indexed_up_to": INDEXED_UP_TO_DEFAULT,
                         "logs_lag_mode": "empty",
                         "responses": {"eth_getLogs": {"result": _CANNED_LOGS}},
@@ -266,7 +209,7 @@ class TestEmptyMode:
             },
         )
         params = [{"fromBlock": hex(HEAD_BLOCK - 30), "toBlock": "latest"}]
-        status, body = _rpc(sim["provider1"], "eth_getLogs", params)
+        status, body = _rpc(_P1, "eth_getLogs", params)
         assert status == 200
         assert body["result"] == []
 
@@ -276,8 +219,7 @@ class TestEmptyMode:
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "logs_indexed_up_to": INDEXED_UP_TO_DEFAULT,
                         "logs_lag_mode": "empty",
                         "responses": {"eth_getLogs": {"result": _CANNED_LOGS}},
@@ -291,7 +233,7 @@ class TestEmptyMode:
                 "toBlock": hex(HEAD_BLOCK - 100),
             }
         ]
-        status, body = _rpc(sim["provider1"], "eth_getLogs", params)
+        status, body = _rpc(_P1, "eth_getLogs", params)
         assert status == 200
         # toBlock (HEAD-100) <= indexed-up-to (HEAD-50) → full payload returned.
         assert body["result"] == _CANNED_LOGS
@@ -302,8 +244,7 @@ class TestEmptyMode:
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "logs_indexed_up_to": INDEXED_UP_TO_DEFAULT,
                         "responses": {"eth_getLogs": {"result": _CANNED_LOGS}},
                     }
@@ -311,7 +252,7 @@ class TestEmptyMode:
             },
         )
         params = [{"fromBlock": hex(HEAD_BLOCK - 30), "toBlock": "latest"}]
-        _, body = _rpc(sim["provider1"], "eth_getLogs", params)
+        _, body = _rpc(_P1, "eth_getLogs", params)
         assert body["result"] == []
 
 
@@ -334,8 +275,7 @@ class TestPartialMode:
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "logs_indexed_up_to": INDEXED_UP_TO_DEFAULT,
                         "logs_lag_mode": "partial",
                         "responses": {"eth_getLogs": {"result": _CANNED_LOGS}},
@@ -344,7 +284,7 @@ class TestPartialMode:
             },
         )
         params = [{"fromBlock": hex(HEAD_BLOCK - 200), "toBlock": "latest"}]
-        status, body = _rpc(sim["provider1"], "eth_getLogs", params)
+        status, body = _rpc(_P1, "eth_getLogs", params)
         assert status == 200
         # Only entries with blockNumber <= HEAD - 50 stay in result.
         retained = body["result"]
@@ -359,8 +299,7 @@ class TestPartialMode:
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "logs_indexed_up_to": INDEXED_UP_TO_DEFAULT,
                         "logs_lag_mode": "partial",
                         "responses": {"eth_getLogs": {"result": all_post_index}},
@@ -369,7 +308,7 @@ class TestPartialMode:
             },
         )
         params = [{"fromBlock": hex(HEAD_BLOCK - 40), "toBlock": "latest"}]
-        _, body = _rpc(sim["provider1"], "eth_getLogs", params)
+        _, body = _rpc(_P1, "eth_getLogs", params)
         assert body["result"] == []
 
     def test_partial_mode_unfiltered_when_toBlock_within_indexed(self, sim):
@@ -378,8 +317,7 @@ class TestPartialMode:
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "logs_indexed_up_to": INDEXED_UP_TO_DEFAULT,
                         "logs_lag_mode": "partial",
                         "responses": {"eth_getLogs": {"result": _CANNED_LOGS}},
@@ -393,7 +331,7 @@ class TestPartialMode:
                 "toBlock": hex(HEAD_BLOCK - 100),
             }
         ]
-        _, body = _rpc(sim["provider1"], "eth_getLogs", params)
+        _, body = _rpc(_P1, "eth_getLogs", params)
         assert body["result"] == _CANNED_LOGS
 
 
@@ -416,15 +354,14 @@ class TestMethodIsolation:
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "logs_indexed_up_to": INDEXED_UP_TO_DEFAULT,
                         "logs_lag_mode": "empty",
                     }
                 }
             },
         )
-        _, body = _rpc(sim["provider1"], "eth_blockNumber")
+        _, body = _rpc(_P1, "eth_blockNumber")
         # Default head is METHOD_DEFAULTS["eth_blockNumber"] = "0x1312D00"
         assert body["result"].lower() == "0x1312d00"
 
@@ -434,15 +371,14 @@ class TestMethodIsolation:
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "logs_indexed_up_to": INDEXED_UP_TO_DEFAULT,
                         "logs_lag_mode": "partial",
                     }
                 }
             },
         )
-        _, body = _rpc(sim["provider1"], "eth_getBlockByNumber", ["latest", False])
+        _, body = _rpc(_P1, "eth_getBlockByNumber", ["latest", False])
         # Should still be a dict (the canonical block stub) — not [], not error.
         assert isinstance(body["result"], dict)
         assert "number" in body["result"]
@@ -461,8 +397,7 @@ class TestResetClearsLag:
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "logs_indexed_up_to": INDEXED_UP_TO_DEFAULT,
                         "logs_lag_mode": "partial",
                     }
@@ -471,14 +406,14 @@ class TestResetClearsLag:
         )
         # Verify lag was set.
         _, body = _get(_ctrl(sim, "/scenario"))
-        assert body["providers"]["1"]["logs_indexed_up_to"] == INDEXED_UP_TO_DEFAULT
-        assert body["providers"]["1"]["logs_lag_mode"] == "partial"
+        assert body["providers"]["eth-sim:1"]["logs_indexed_up_to"] == INDEXED_UP_TO_DEFAULT
+        assert body["providers"]["eth-sim:1"]["logs_lag_mode"] == "partial"
 
         # Reset and verify both are back to defaults.
         _post(_ctrl(sim, "/reset"), {})
         _, body = _get(_ctrl(sim, "/scenario"))
-        assert body["providers"]["1"]["logs_indexed_up_to"] is None
-        assert body["providers"]["1"]["logs_lag_mode"] == "empty"
+        assert body["providers"]["eth-sim:1"]["logs_indexed_up_to"] is None
+        assert body["providers"]["eth-sim:1"]["logs_lag_mode"] == "empty"
 
     def test_eth_getLogs_returns_full_response_after_reset(self, sim):
         """After /reset, subsequent eth_getLogs ignore the previously-set lag."""
@@ -486,8 +421,7 @@ class TestResetClearsLag:
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "logs_indexed_up_to": INDEXED_UP_TO_DEFAULT,
                         "logs_lag_mode": "empty",
                         "responses": {"eth_getLogs": {"result": _CANNED_LOGS}},
@@ -497,7 +431,7 @@ class TestResetClearsLag:
         )
         # Confirm lag is active.
         params = [{"fromBlock": hex(HEAD_BLOCK - 30), "toBlock": "latest"}]
-        _, body = _rpc(sim["provider1"], "eth_getLogs", params)
+        _, body = _rpc(_P1, "eth_getLogs", params)
         assert body["result"] == []
 
         # Reset — wipes scenario config including responses + lag.
@@ -510,12 +444,11 @@ class TestResetClearsLag:
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "eth",
+                    "eth-sim:1": {
                         "responses": {"eth_getLogs": {"result": _CANNED_LOGS}},
                     }
                 }
             },
         )
-        _, body = _rpc(sim["provider1"], "eth_getLogs", params)
+        _, body = _rpc(_P1, "eth_getLogs", params)
         assert body["result"] == _CANNED_LOGS

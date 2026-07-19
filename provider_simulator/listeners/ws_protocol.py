@@ -1,8 +1,7 @@
-"""
-ws_protocol.py — RFC 6455 codec for the WebSocket transport (MAG-1801).
+"""RFC 6455 codec for the WebSocket transport.
 
 Pure-function module: handshake hash, Frame dataclass, encode_frame, parse_frame.
-Reused by the server (handlers_ws.py) and the test client (tests/ws_client.py)
+Reused by the server's WS socket adapter and the test client (tests/ws_client.py)
 so codec bugs surface in tests/test_ws_protocol.py rather than masquerading as
 integration failures.
 
@@ -154,7 +153,7 @@ def parse_frame(recv) -> Frame:
 
         mask_key = _recv_exact(recv, 4) if masked else None
         payload = _recv_exact(recv, length) if length else b""
-        if masked and payload:
+        if mask_key is not None and payload:
             payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
 
         if first_opcode is None:
@@ -183,9 +182,8 @@ def build_handshake_response(
         client_key:    The Sec-WebSocket-Key request header value.
         extra_headers: Optional name→value mapping appended to the response
                        after the three mandatory upgrade headers. Used by the
-                       WS handler to attach Lava-Provider-Address so MAG-1749
-                       smoke tests can assert which simulated provider
-                       answered.
+                       WS adapter to attach Lava-Provider-Address so smoke
+                       tests can assert which simulated provider answered.
 
     Returns:
         Bytes ready for sendall(). Includes the terminating CRLF CRLF.

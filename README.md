@@ -1,42 +1,108 @@
 # Provider Simulator
 
-A small simulator pod used to test smart-router behaviour against deterministic, fault-injectable backends.
+Fake blockchain providers for testing the smart-router. The router talks to this
+simulator instead of real nodes, so a test can make a provider go **down**,
+**stall**, **return errors**, or **fall behind** — on demand, deterministically —
+then check how the router reacts.
 
-It runs many listeners in a single pod:
+It runs as **one Python process**: many listeners (JSON-RPC, REST, gRPC,
+Tendermint RPC, WebSocket) plus a control API, all over one in-memory registry
+of providers.
 
-- **3 ETH JSON-RPC providers** on ports `18545` / `18546` / `18547` — dispatch to `handlers_eth`.
-- **3 BTC JSON-RPC providers** on ports `18575` / `18576` / `18577` — dispatch to `handlers_btc` (MAG-2089).
-- **3 LN JSON-RPC providers** on ports `18578` / `18579` / `18580` — dispatch to `handlers_lnd` (MAG-2089).
-- **3 Solana JSON-RPC providers** on ports `18582` / `18583` / `18584` — dispatch to `handlers_solana` (MAG-2231).
-- **3 gRPC providers** on ports `18548` / `18549` / `18550` (MAG-1780) — Cosmos `Service` with reflection enabled.
-- **3 REST providers** on ports `18551` / `18552` / `18553` (MAG-1777).
-- **3 Tendermint-RPC providers** on ports `18554` / `18555` / `18556` (MAG-1841).
-- **3 WebSocket providers** on ports `18557` / `18558` / `18559` (MAG-1801).
-- **3 JSON-RPC backup providers** on `18560` / `18561` / `18562`, plus per-surface backup ranges in `18563`–`18574`.
-- **1 control API** on port `19000` — `POST /scenario`, `POST /reset[/all]`, `POST /advance` (MAG-1897 — opt-in advancing eth head), `GET /scenario`, `GET /stats`, `GET /history`, `GET /health`, `GET /ready`.
+## Architecture
 
-For each pid (1-3), the ETH / BTC / LN / Solana / REST / gRPC / TM / WS primary listeners all share **the same `ProviderState`**, so one `POST /scenario` call reconfigures every transport for the same logical provider.
+Two planes over one registry. Tests **write** provider config on the control
+plane; the router **reads** it on the data plane. A change is instant — no
+restart, no IPC.
 
-## Chain families
+```mermaid
+flowchart TD
+    T["Test / sim_control"] -->|"control :19000"| CTRL["control_api"]
+    R["smart-router (SUT)"] -->|"provider ports 18545-18585"| LIS["Listeners (daemon threads)"]
+    CTRL -->|"writes scenario"| REG["Registry: pool:pid -> Provider"]
+    LIS -->|"reads snapshot"| REG
+    LIS --> CH["Chains: eth / btc / ln / solana / lava"]
+    LIS --> FP["fault_policy (one decision function)"]
+```
 
-JSON-RPC handler dispatch is **port-derived** (MAG-2089): the ETH listener pool always calls `handlers_eth`, the BTC pool always calls `handlers_btc`, the LN pool always calls `handlers_lnd`. The `chain_family` field on `/scenario` payloads is still meaningful — REST / gRPC / TM / WS read it to gate **content** fault primitives (`error` / `rate_limit` / `hang` / `drop_connection` / `corruption`) to the transport that authored them, and the JSON-RPC listeners use it to gate content faults to their own pool (ETH listener fires `chain_family="eth"` content faults only, BTC fires `chain_family="btc"` only, LN fires `chain_family="ln"` only). `mode="down"` is the universal exception (MAG-2092): it is honored on every transport regardless of `chain_family` because reachability is provider-wide — a BTC-tagged `mode="down"` still 503s the ETH JSON-RPC, REST, gRPC, TM, and WS surfaces for the same provider id. One word only: `chain_family` holds a blockchain OR a connection type, never both — a combination like "Solana over WebSocket" is not expressible; splitting the field into two is deferred until a test needs such a combination. The field is REQUIRED on every `/scenario` provider block (MAG-1783): a block that omits it — including `mode="down"` blocks — is rejected with HTTP 400, and unknown values are rejected the same way. The simulator never fills in `eth` for you; the old silent default meant a scenario aimed at the wrong surface armed nothing and the test passed while testing nothing.
+- Identity is **`pool:pid`** — one provider is one named node in one router's
+  pool (e.g. `eth-sim:1`). Two chains never share a provider, so a fault on one
+  chain can never leak onto another.
+- Each listener owns one **port**; the port resolves through the registry to a
+  provider + endpoint. The provider's **chain** builds the success response, and
+  one **`fault_policy`** decides every fault.
 
-| `chain_family` | Transport | Status | Listener ports | Where it dispatches |
-|---|---|---|---|---|
-| `eth` | JSON-RPC | live on main | `18545`–`18547` | `handlers_eth.handle()` — ETH methods + `eth_getBlockByNumber` block-number echo |
-| `btc` | JSON-RPC | live on main (MAG-1716, ports moved MAG-2089) | `18575`–`18577` | `handlers_btc.handle()` — BTC RPC method set, see `stubs_btc.py` |
-| `ln` | JSON-RPC | live on main (MAG-1726, ports moved MAG-2089) | `18578`–`18580` | `handlers_lnd.handle()` — LND method set (`getinfo`, `listchannels`, `openchannel`, `decodepayreq`, `payinvoice`, `listpeers`), see `stubs_lnd.py` |
-| `solana` | JSON-RPC | live on main (MAG-2231) | `18582`–`18584` | `handlers_solana.handle()` — Solana method set, see `stubs_solana.py`. `getLatestBlockhash` separates `result.context.slot` from `result.value.lastValidBlockHeight` by a configurable gap to reproduce the router's MAG-1591 consistency-filter bug |
-| `grpc` | gRPC | live on main | `18548`–`18550` | `handlers_grpc.CosmosBaseTendermintServicer` |
-| `rest` | REST | live on main (MAG-1777) | `18551`–`18553` | `handlers_rest.handle()` |
-| `tendermintrpc` | JSON-RPC | live on main (MAG-1841) | `18554`–`18556` | `handlers_tendermintrpc` |
-| `ws` | WebSocket | live on main (MAG-1801) | `18557`–`18559` | `handlers_ws` |
+## Run it locally
 
-> Pre-MAG-2089 the BTC and LN JSON-RPC handlers were selected per-provider from `snap["chain_family"]` on the shared ETH listener pool (18545-18547). A test on `btc-sim-router` that set `chain_family="btc"` could be flipped back to `chain_family="eth"` by a concurrent test on `eth-sim-router` against the shared `ProviderState`, contaminating BTC responses. MAG-2089 moved BTC + LN to their own dedicated listener pools and made dispatch port-derived. The `chain_family` field is still set on `/scenario` payloads for fault-primitive gating, but no longer steers handler selection on JSON-RPC.
+Python 3.12. gRPC needs `grpcio` / `grpcio-reflection` / `protobuf`; the
+JSON-RPC side is standard-library only.
 
-## Fault-injection primitives
+```bash
+pip install -r requirements.txt
+python -u run.py
+```
 
-All primitives apply across chain families (with chain-appropriate translations — see `handlers_grpc.py` for the gRPC mapping).
+Smoke it:
+
+```bash
+curl -s http://localhost:19000/health
+curl -s -X POST http://localhost:18545 -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+grpcurl -plaintext localhost:18548 list
+```
+
+Run the tests (they boot the server in-process on isolated ports):
+
+```bash
+pytest tests/ -v
+```
+
+Lint, format, and type-check (CI runs all three):
+
+```bash
+black --check . && ruff check . && mypy .
+```
+
+## Ports & dispatch
+
+Each row is a group of 3 providers. The port resolves to a `pool:pid` provider.
+
+| Surface | Ports (primary / backup / solo) | Pool |
+|---|---|---|
+| ETH JSON-RPC | 18545–47 / 18560–62 / 18581 | `eth-sim` (pids 1–6) / `eth-solo-sim` |
+| ETH WebSocket | 18557–59 / 18572–74 | `eth-sim` (same providers, ws endpoint) |
+| BTC JSON-RPC | 18575–77 | `btc-sim` |
+| LN JSON-RPC | 18578–80 | `ln-sim` |
+| Solana JSON-RPC | 18582–84 / 18585 | `solana-sim` / `solana-solo-sim` |
+| gRPC | 18548–50 / 18563–65 | `lava-sim-grpc` |
+| REST | 18551–53 / 18566–68 | `lava-sim-rest` |
+| Tendermint RPC | 18554–56 / 18569–71 | `lava-sim-tm` |
+| Control API | 19000 | `control_api` |
+
+## Providers & state
+
+- A **provider** is one fake node, addressed **`pool:pid`** (e.g. `eth-sim:1`).
+  Its behaviour lives in a `ScenarioConfig` (fault mode, latency, error shape,
+  per-method overrides) plus typed per-chain `Quirks`; its telemetry lives in a
+  `CallLog`. Nothing is shared with any other provider.
+- One ETH provider serves two endpoints under one identity — http and ws — so a
+  `down` on `eth-sim:1` covers both. REST / gRPC / Tendermint are separate pools
+  (`lava-sim-rest` / `-grpc` / `-tm`), so faulting one never touches another.
+- `snapshot()` gives each request a stable read; `update()` applies a `/scenario`
+  change under a lock.
+
+**Scope a fault with `transports`, not `chain_family`.** A scenario block's
+optional `transports` list (e.g. `["ws"]`) scopes its effect to specific
+endpoints of the provider; omit it and the block covers every endpoint. There is
+no `chain_family` field any more — the pool already fixes the chain.
+
+**`down` is provider-wide by default.** A provider set to `down` returns 503 on
+all of its endpoints — a dead node is unreachable on every port. This is the
+natural default now, not a special case.
+
+## Fault primitives
+
+Pick one `mode`; combine it with the orthogonal fields.
 
 | Field | Values | Effect |
 |---|---|---|
@@ -45,85 +111,71 @@ All primitives apply across chain families (with chain-appropriate translations 
 | `error_probability` | 0.0–1.0 | Random error on top of `success` |
 | `error_code` / `error_message` / `http_status` | int / str / int | Customise the error returned |
 | `corruption_mode` | `truncated` \| `invalid_json` \| `empty_response` \| `missing_field` \| `wrong_type` | Break the response body |
-| `missing_field` | str | Which field to drop / retype |
-| `blocks_behind` | int | Shift the head reported by `eth_blockNumber` / `eth_getBlockByNumber` (and the gRPC `GetLatestBlock` height) |
+| `missing_field` | str | Which field to drop or retype |
+| `blocks_behind` | int | Report a stale head (`eth_blockNumber` / `eth_getBlockByNumber` / gRPC `GetLatestBlock`) |
 | `drop_at` | `before_headers` \| `after_headers` \| `mid_body` | Where `drop_connection` cuts the socket |
+| `fail_first_n` / `then_mode` | int / mode | Fail the first N calls, then switch to `then_mode` |
+| `transports` | list of `http` / `http2` / `ws` | Scope the block to specific endpoints (omit = all) |
 
-## TL;DR — run locally
+## Control API (port 19000)
 
-Requires Python 3.12. gRPC support needs `grpcio` / `grpcio-reflection` / `protobuf` (see `requirements.txt`); the JSON-RPC side is stdlib-only.
+| Route | Purpose |
+|---|---|
+| `POST /scenario` | Set per-provider behaviour, keyed `pool:pid`: `{"providers": {"eth-sim:1": {"mode": "down"}}}`. An old bare-pid key or a `chain_family` field gets a 400 naming the new format. |
+| `POST /reset` | Reset scenario config, keep history |
+| `POST /history/clear` | Clear history, keep config |
+| `POST /reset/all` | Reset both |
+| `POST /advance` | Move a chain's simulated head (default `eth`; sync-freshness tests) |
+| `POST /ws/emit` | Push a WebSocket event to a live subscription |
+| `GET /health` · `/ready` · `/scenario` · `/stats` · `/history` · `/ws/subscriptions` | Health / readiness (all listener ports bound) / config / counters / call log / live subscriptions |
 
-```bash
-pip install -r requirements.txt
-python -u run.py
-```
+`GET /history` merges every provider's ring buffer, sorts by time, and adds
+`correlation_group` (the calls of one router relay) and `call_order`. Each entry
+carries `pool` / `pid` / `interface` / `transport` / `port`; filter by
+`pool` / `transport` / `method` / `status` / `request_id` / time / `lava_header_*`.
 
-Quick checks:
+## Deploy
 
-```bash
-curl -s http://localhost:19000/health
-curl -s -X POST http://localhost:19000/reset/all
-curl -s -X POST http://localhost:18545 -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
-grpcurl -plaintext localhost:18548 list
-```
+- `scripts/deploy.sh` — build the image, import it, apply the manifests, and
+  rollout-restart. The image tag is always `:latest` with
+  `imagePullPolicy: IfNotPresent`, so the restart is what makes the new image
+  take effect.
+- Public URLs derive from `BASE_DOMAIN` in `config/base-domain.env`:
+  `sim-control.<BASE_DOMAIN>`, `eth-sim-jsonrpc.<BASE_DOMAIN>`,
+  `lava-sim-grpc.<BASE_DOMAIN>:443`.
+- The deployment is intentionally **1 replica** — history and counters live in
+  memory, so a second pod would split the state.
 
-Run the test suite (boots all listeners in-process on isolated test ports):
+## Docs
 
-```bash
-pytest tests/ -v
-```
-
-## How to set up (fresh server)
-
-See **[`docs/new_server_setup.md`](docs/new_server_setup.md)** — covers prereqs (`curl`, `grpcurl`), deploy, the 7-listener verification, smart-router wiring, and the debug-domain appendix.
-
-## How to use (once setup is done)
-
-- **[`docs/using_the_simulator.md`](docs/using_the_simulator.md)** — scenario / reset / history / fault primitives across chain families with paste-ready examples.
-- **[`docs/using_grpc.md`](docs/using_grpc.md)** — gRPC quickstart: reflection, two ways to reach the gRPC sim, real `grpcurl` commands, fault injection on gRPC providers, troubleshooting.
-- **[`docs/curl_reference.md`](docs/curl_reference.md)** — exhaustive curl catalogue for the JSON-RPC surface and all supported methods.
-
-## Public URLs
-
-Derived from `BASE_DOMAIN` in `config/base-domain.env`:
-
-- `https://sim-control.<BASE_DOMAIN>` — control API (HTTPRoute in this repo).
-- `https://eth-sim-jsonrpc.<BASE_DOMAIN>` — JSON-RPC sim through the smart-router (wired in `values_sim.yml`).
-- `lava-sim-grpc.<BASE_DOMAIN>:443` — gRPC sim ingress (GRPCRoute, MAG-1780).
-
-## Other docs
-
-- **[`docs/kubectl_reference.md`](docs/kubectl_reference.md)** — common kubectl commands for this pod.
-- **[`docs/DEPLOY_AFTER_PUSH.md`](docs/DEPLOY_AFTER_PUSH.md)** — push-to-deploy flow.
-- **[`docs/ARCHITECTURE_GUIDE.md`](docs/ARCHITECTURE_GUIDE.md)** — code/system walkthrough.
-- **[`docs/CLASS_REFERENCE.md`](docs/CLASS_REFERENCE.md)** — class-by-class breakdown.
-- **[`docs/DATA_FLOWS.md`](docs/DATA_FLOWS.md)** — request lifecycles.
-- **[`docs/START_HERE.md`](docs/START_HERE.md)** — docs index / learning path.
+- **[docs/START_HERE.md](docs/START_HERE.md)** — index / learning path.
+- **[docs/new_server_setup.md](docs/new_server_setup.md)** — fresh-server setup, verification, router wiring, debug domain.
+- **[docs/using_the_simulator.md](docs/using_the_simulator.md)** — scenarios, resets, history, fault primitives, with paste-ready examples.
+- **[docs/using_grpc.md](docs/using_grpc.md)** — gRPC quickstart, reflection, fault injection, troubleshooting.
+- **[docs/curl_reference.md](docs/curl_reference.md)** — full curl catalogue for the JSON-RPC surface.
+- **[docs/ARCHITECTURE_GUIDE.md](docs/ARCHITECTURE_GUIDE.md)** · **[docs/CLASS_REFERENCE.md](docs/CLASS_REFERENCE.md)** · **[docs/DATA_FLOWS.md](docs/DATA_FLOWS.md)** — deeper code walkthroughs.
+- **[docs/kubectl_reference.md](docs/kubectl_reference.md)** · **[docs/DEPLOY_AFTER_PUSH.md](docs/DEPLOY_AFTER_PUSH.md)** — cluster ops.
 
 ## Repo layout
 
 ```
-server.py              — process entry: JSON-RPC servers, gRPC servers, control API
-handlers_eth.py        — ETH success-branch dispatch (ports 18545-18547)
-handlers_btc.py        — BTC success-branch dispatch (ports 18575-18577, MAG-1716 / MAG-2089)
-handlers_lnd.py        — Lightning Network (LND) dispatch (ports 18578-18580, MAG-1726 / MAG-2089)
-handlers_grpc.py       — Cosmos gRPC servicer (chain_family="grpc", MAG-1780)
-grpc_server.py         — gRPC server bootstrap (3 servers on 18548-18550, reflection on)
-stubs.py               — default ETH JSON-RPC results + ERROR_STUBS catalogue
-stubs_btc.py           — default BTC JSON-RPC results
-stubs_lnd.py           — default LND JSON-RPC results + LND_ERROR_STUBS catalogue
-constants.py           — port maps, chain constants, history caps
-cosmos_pb2/            — vendored Cosmos protobufs (MAG-1780)
-config/base-domain.env — sets BASE_DOMAIN for deploy
-config/values_sim.yml  — smart-router Helm values used to wire the sim in
-Dockerfile             — image used by scripts/deploy.sh
-k8s/                   — Deployment, Service, HTTPRoute (control), GRPCRoute (gRPC sim)
-scripts/deploy.sh      — build/import/apply/restart deploy flow
-tests/                 — pytest suite (ETH, BTC, LN, gRPC, REST, TM, WS)
+run.py                        — entry point
+server.py                     — bootstrap: build the registry from TOPOLOGY, bind listeners to ports
+provider_simulator/
+  topology.py                 — the pool / provider / endpoint table
+  fault_policy.py             — the one fault-decision function
+  domain/                     — Endpoint, ScenarioConfig, Quirks, CallLog, Pool/Provider, Registry
+  chains/                     — one class per chain (eth/btc/solana/ln/lava)
+  listeners/                  — base template + jsonrpc/rest/tendermint, a gRPC adapter, a WS
+                                subscription registry, and the corruption serializer
+  control_api.py              — the port-19000 routes over the registry
+stubs*.py                     — default success payloads per surface (eth/btc/ln/solana/rest/tm/ws)
+constants.py                  — port maps, chain constants, history caps
+cosmos_pb2/                   — vendored Cosmos protobufs
+config/base-domain.env        — BASE_DOMAIN for deploy
+config/values_sim.yml         — smart-router Helm values that wire the sim in
+Dockerfile                    — image used by scripts/deploy.sh
+k8s/                          — Deployment, Service, HTTPRoute, GRPCRoute
+scripts/deploy.sh             — build / import / apply / restart
+tests/                        — pytest suite (all surfaces, in-process)
 ```
-
-## Notes
-
-- The Kubernetes deployment is intentionally **1 replica** — history and counters are in-memory; multiple pods would split state.
-- `scripts/deploy.sh` always rollout-restarts so the new image (always `:latest`) is actually picked up.
-- For debug-domain / clock-injection setup, see **Appendix A** in [`docs/new_server_setup.md`](docs/new_server_setup.md).

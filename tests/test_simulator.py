@@ -1,19 +1,21 @@
 """
-Unit tests for the provider-simulator.
+Integration tests for the provider-simulator core: the eth-sim JSON-RPC pool
+and the control API.
 
-Starts all 4 servers (3 JSON-RPC + 1 control) in-process on test ports so the
-tests are fully self-contained — no running pod or network required.
+Runs against the shared in-process simulator (see conftest.py) on the real
+ports — eth-sim:1-3 http endpoints at 18545-18547, control at 19000.
 
 Coverage
 --------
   /health                   liveness probe
-  /scenario  GET + POST     read and change provider config
+  /scenario  GET + POST     read and change provider config (pool:pid keys)
   /stats                    all-time call counters
   /reset                    scenario reset only (history untouched)
   /history/clear            history wipe only (scenario untouched)
   /reset/all                both together
-  /history                  all filter params:
-                              ?last=, ?from=, ?to=, ?provider=, ?method=, ?status=
+  /history                  filter params:
+                              ?last=, ?from=, ?to=, ?pool=, ?pid=, ?method=,
+                              ?status=, ?request_id=, ?max=, ?lava_header_*=
                             call_order sequential numbering
   provider modes            success, error, rate_limit, down,
                             error_probability, latency_ms
@@ -24,20 +26,15 @@ Coverage
 Architectural facts verified by these tests
 -------------------------------------------
   1. HISTORY_MAX cap
-       HISTORY_MAX defaults to 2000 entries per provider (MAG-1822, was 200);
-       override at pod startup via SIM_HISTORY_MAX. With 3 providers that's
-       6000 ring-buffer slots, all in memory. In the deployed environment the
-       router's background calls (scoring/pruning) fill the buffer continuously.
-       In unit tests there is no background traffic — history starts at 0 and
-       only grows with calls the tests explicitly make. The four ring-buffer-
-       rollover tests pin themselves to MAX_FOR_OVERFLOW_TEST=200 (via the
-       shrink_history fixture) so they don't fire ~2000 calls each.
+       HISTORY_MAX defaults to 2000 entries per provider; override at pod
+       startup via SIM_HISTORY_MAX. The ring-buffer-rollover tests pin
+       themselves to MAX_FOR_OVERFLOW_TEST=200 (via the shrink_history
+       fixture) so they don't fire ~2000 calls each.
 
   2. Method filter is the correct isolation tool (deployed env)
        The router's background calls are exclusively eth_blockNumber and
        eth_getBlockByNumber (pruning verification). Using ?method=eth_gasPrice
        therefore returns only the one call you explicitly sent (count=1).
-       Not relevant in unit tests — there is no background traffic to filter out.
 
   3. Clear-timestamp invariant
        /reset          — does NOT touch history. Every entry survives unchanged.
@@ -57,42 +54,42 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from collections import deque
-from http.server import ThreadingHTTPServer
 from urllib.parse import urlparse
 
 import pytest
 
+import server as server_module
 from constants import (
+    ETH_PRIMARY_PORTS,
     HISTORY_MAX,  # noqa: F401  (kept for module docstring reference; tests use MAX_FOR_OVERFLOW_TEST)
 )
-from server import ControlHandler, JSONRPCHandler, ProviderState
+from provider_simulator.domain.call_log import CallLog
 from stubs import ERROR_STUBS
 
-# ── Test ports (different from production 18545-18547 / 19000) ────────────────
+_P1 = f"http://127.0.0.1:{ETH_PRIMARY_PORTS['1']}"
+_P2 = f"http://127.0.0.1:{ETH_PRIMARY_PORTS['2']}"
+_P3 = f"http://127.0.0.1:{ETH_PRIMARY_PORTS['3']}"
+_PROVIDER_URLS = {"1": _P1, "2": _P2, "3": _P3}
 
-_PROVIDER_PORTS = {"1": 28545, "2": 28546, "3": 28547}
-_CONTROL_PORT = 29000
-
-# ── Overflow-test cap (MAG-1822) ──────────────────────────────────────────────
-# The 4 ring-buffer-rollover tests in this file send HISTORY_MAX (+a few) calls
-# to verify the deque caps at maxlen. After MAG-1822 raised HISTORY_MAX from
-# 200 → 2000, those loops would fire ~2005 calls each and turn the unit suite
-# slow without buying any extra correctness — the cap behaviour is identical
-# at any maxlen. We pin those tests to 200 by swapping the running provider's
-# `history` deque for a freshly-built one with maxlen=200 before pushing,
-# then restoring the original maxlen on test teardown (see the shrink_history
-# fixture below) so subsequent tests still see a HISTORY_MAX-sized buffer.
+# ── Overflow-test cap ─────────────────────────────────────────────────────────
+# The ring-buffer-rollover tests send HISTORY_MAX (+a few) calls to verify the
+# ring caps at maxlen. With the deployed default of 2000 those loops would fire
+# ~2005 calls each and turn the suite slow without buying any extra correctness
+# — the cap behaviour is identical at any maxlen. The shrink_history fixture
+# swaps the provider's CallLog for a 200-entry one and restores it afterwards.
 MAX_FOR_OVERFLOW_TEST = 200
 
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
 
 
-def _post(url: str, body: dict) -> tuple[int, dict]:
+def _post(url: str, body: dict, headers: dict | None = None) -> tuple[int, dict]:
     """POST JSON body, return (status_code, parsed_response_body)."""
     data = json.dumps(body).encode()
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    hdrs = {"Content-Type": "application/json"}
+    if headers:
+        hdrs.update(headers)
+    req = urllib.request.Request(url, data=data, headers=hdrs)
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
             raw = resp.read()
@@ -125,58 +122,9 @@ def _ctrl(sim: dict, path: str) -> str:
     return sim["control"] + path
 
 
-# ── Module-scoped fixture: start all servers once ─────────────────────────────
-
-
-@pytest.fixture(scope="module")
-def sim():
-    """Start 3 JSON-RPC servers + 1 control server on test ports.
-
-    Yields a dict with base URLs:
-      sim["control"]   → http://127.0.0.1:29000
-      sim["provider1"] → http://127.0.0.1:28545
-      sim["provider2"] → http://127.0.0.1:28546
-      sim["provider3"] → http://127.0.0.1:28547
-    """
-    states = {pid: ProviderState() for pid in _PROVIDER_PORTS}
-
-    servers = []
-    for pid, port in _PROVIDER_PORTS.items():
-        # ThreadingHTTPServer so slow/hanging requests don't serialize each
-        # provider's handler queue (matters for hang mode tests).
-        srv = ThreadingHTTPServer(("127.0.0.1", port), JSONRPCHandler)
-        srv.daemon_threads = True
-        srv.state = states[pid]
-        srv.provider_id = pid
-        servers.append(srv)
-
-    # Threaded control server, matching production main() — so a slow/stalled
-    # control client can't serialize every other control request.
-    ctrl = ThreadingHTTPServer(("127.0.0.1", _CONTROL_PORT), ControlHandler)
-    ctrl.daemon_threads = True
-    ctrl.provider_states = states
-    servers.append(ctrl)
-
-    threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in servers]
-    for t in threads:
-        t.start()
-
-    time.sleep(0.15)  # allow all servers to finish binding
-
-    yield {
-        "control": f"http://127.0.0.1:{_CONTROL_PORT}",
-        "provider1": f"http://127.0.0.1:{_PROVIDER_PORTS['1']}",
-        "provider2": f"http://127.0.0.1:{_PROVIDER_PORTS['2']}",
-        "provider3": f"http://127.0.0.1:{_PROVIDER_PORTS['3']}",
-        # Direct handle on the in-memory ProviderState objects backing the
-        # running test servers. Used by the MAG-1822 overflow tests to swap
-        # the history deque for a smaller one without restarting the suite.
-        # Most tests should NOT touch this — go through the control API.
-        "states": states,
-    }
-
-    for s in servers:
-        s.shutdown()
+def _set_eth(sim, pid: str = "1", **extra):
+    """Convenience: POST /scenario for one eth-sim provider."""
+    return _post(_ctrl(sim, "/scenario"), {"providers": {f"eth-sim:{pid}": dict(extra)}})
 
 
 # ── Function-scoped autouse: clean slate before/after every test ──────────────
@@ -192,33 +140,28 @@ def clean_state(sim):
 
 @pytest.fixture
 def shrink_history(sim):
-    """Temporarily shrink a provider's history deque, restoring the original
-    maxlen on teardown (MAG-1822).
+    """Temporarily swap a provider's CallLog for one with a small ring buffer,
+    restoring the original log on teardown.
 
-    `deque.maxlen` is immutable after construction — we swap the deque for a
-    smaller one (locking the state so a concurrent push doesn't drop the new
-    buffer on the floor) and remember the original maxlen so we can rebuild
-    a full-sized deque at the end of the test. Without the restore the shrunk
-    deque persists for the rest of the module run, silently capping any later
-    test that pushes past 200 entries to that provider.
+    The ring size is fixed at CallLog construction, so the fixture swaps the
+    whole log object (the listeners read ``provider.log`` per request, so they
+    pick the swap up immediately). Without the restore, the shrunk log would
+    persist for the rest of the session and silently cap later tests.
     """
-    original_maxlens: dict[str, int] = {}
+    originals: dict[tuple[str, str], CallLog] = {}
 
-    def _shrink(pid: str, maxlen: int = MAX_FOR_OVERFLOW_TEST) -> None:
-        state = sim["states"][pid]
-        with state.lock:
-            if pid not in original_maxlens:
-                original_maxlens[pid] = state.history.maxlen
-            state.history = deque(maxlen=maxlen)
-            state.total_calls = 0
-            state.calls_by_status = {}
+    def _shrink(pid: str, maxlen: int = MAX_FOR_OVERFLOW_TEST, pool: str = "eth-sim") -> None:
+        provider = sim["registry"].provider(pool, pid)
+        if (pool, pid) not in originals:
+            originals[(pool, pid)] = provider.log
+        provider.log = CallLog(pool=pool, pid=pid, history_max=maxlen)
 
     yield _shrink
 
-    for pid, original_maxlen in original_maxlens.items():
-        state = sim["states"][pid]
-        with state.lock:
-            state.history = deque(maxlen=original_maxlen)
+    for (pool, pid), log in originals.items():
+        provider = sim["registry"].provider(pool, pid)
+        log.clear()
+        provider.log = log
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -244,70 +187,60 @@ class TestScenario:
     def test_get_returns_defaults_after_reset(self, sim):
         _, body = _get(_ctrl(sim, "/scenario"))
         for pid in ["1", "2", "3"]:
-            p = body["providers"][pid]
+            p = body["providers"][f"eth-sim:{pid}"]
             assert p["mode"] == "success"
             assert p["latency_ms"] == 0
             assert p["error_probability"] == 0.0
 
     def test_post_updates_target_provider_only(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "error"}}}
-        )
+        _post(_ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"mode": "error"}}})
         _, body = _get(_ctrl(sim, "/scenario"))
-        assert body["providers"]["1"]["mode"] == "error"
-        assert body["providers"]["2"]["mode"] == "success"  # untouched
-        assert body["providers"]["3"]["mode"] == "success"  # untouched
+        assert body["providers"]["eth-sim:1"]["mode"] == "error"
+        assert body["providers"]["eth-sim:2"]["mode"] == "success"  # untouched
+        assert body["providers"]["eth-sim:3"]["mode"] == "success"  # untouched
 
     def test_post_partial_update_preserves_other_fields(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"2": {"chain_family": "eth", "latency_ms": 100}}},
-        )
+        _post(_ctrl(sim, "/scenario"), {"providers": {"eth-sim:2": {"latency_ms": 100}}})
         _, body = _get(_ctrl(sim, "/scenario"))
-        assert body["providers"]["2"]["latency_ms"] == 100
-        assert body["providers"]["2"]["mode"] == "success"  # unchanged
+        assert body["providers"]["eth-sim:2"]["latency_ms"] == 100
+        assert body["providers"]["eth-sim:2"]["mode"] == "success"  # unchanged
 
     def test_post_error_probability(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"3": {"chain_family": "eth", "error_probability": 0.7}}},
-        )
+        _post(_ctrl(sim, "/scenario"), {"providers": {"eth-sim:3": {"error_probability": 0.7}}})
         _, body = _get(_ctrl(sim, "/scenario"))
-        assert body["providers"]["3"]["error_probability"] == 0.7
+        assert body["providers"]["eth-sim:3"]["error_probability"] == 0.7
 
     def test_unknown_path_returns_404(self, sim):
         status, body = _get(_ctrl(sim, "/nonexistent"))
         assert status == 404
         assert "error" in body
 
-    def test_post_response_includes_applied_chain_family_two_providers(self, sim):
-        # Two-provider scenario with distinct chain families; the response must
-        # echo the exact family that was validated and applied for each pid.
+    def test_post_response_echoes_applied_fields_per_provider(self, sim):
+        # Two providers in one scenario; the response must echo the exact
+        # fields that were validated and applied for each address.
         status, body = _post(
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {"chain_family": "eth"},
-                    "2": {"chain_family": "btc"},
+                    "eth-sim:1": {"latency_ms": 5},
+                    "btc-sim:2": {"blocks_behind": 3},
                 }
             },
         )
         assert status == 200
         assert "applied" in body
-        assert body["applied"]["1"]["chain_family"] == "eth"
-        assert body["applied"]["2"]["chain_family"] == "btc"
+        assert body["applied"]["eth-sim:1"] == {"latency_ms": 5}
+        assert body["applied"]["btc-sim:2"] == {"blocks_behind": 3}
 
-    def test_post_without_chain_family_is_rejected_and_applies_nothing(self, sim):
-        # The old behaviour quietly filled chain_family="eth" when the field
-        # was omitted, so a scenario meant for another surface armed nothing
-        # and the test passed while testing nothing. Now the POST is rejected
-        # outright and the provider keeps its defaults.
+    def test_post_with_bare_pid_is_rejected_and_applies_nothing(self, sim):
+        # The old bare-pid addressing fails loudly with a 400 that names the
+        # new format, and the provider keeps its defaults.
         status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"3": {"mode": "error"}}})
         assert status == 400
-        assert "chain_family is required" in body["error"]
+        assert "pool:pid" in body["error"]
         _, snap = _get(_ctrl(sim, "/scenario"))
         assert (
-            snap["providers"]["3"]["mode"] == "success"
+            snap["providers"]["eth-sim:3"]["mode"] == "success"
         ), "a rejected scenario must not mutate the provider"
 
     def test_scenario_success_response_shape_includes_applied(self, sim):
@@ -316,10 +249,10 @@ class TestScenario:
         # here first. This compares the parsed JSON body (key/value
         # equality), not the raw response bytes.
         status, body = _post(
-            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "error"}}}
+            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"mode": "error"}}}
         )
         assert status == 200
-        assert body == {"status": "ok", "applied": {"1": {"chain_family": "eth"}}}
+        assert body == {"status": "ok", "applied": {"eth-sim:1": {"mode": "error"}}}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -330,106 +263,65 @@ class TestScenario:
 class TestProviderModes:
 
     def test_success_returns_result(self, sim):
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        status, body = _rpc(_P1, "eth_blockNumber")
         assert status == 200
         assert "result" in body
         assert "error" not in body
 
     def test_error_mode_returns_jsonrpc_error(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "error"}}}
-        )
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", mode="error")
+        status, body = _rpc(_P1, "eth_blockNumber")
         assert status == 200
         assert "error" in body
         assert body["error"]["code"] == -32000
 
     def test_rate_limit_returns_429(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "eth", "mode": "rate_limit"}}},
-        )
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", mode="rate_limit")
+        status, body = _rpc(_P1, "eth_blockNumber")
         assert status == 429
         assert body["error"]["code"] == 429
 
     def test_down_returns_503_with_no_body(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "down"}}}
-        )
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", mode="down")
+        status, body = _rpc(_P1, "eth_blockNumber")
         assert status == 503
         assert body == {}  # server sends no body for 503
 
     def test_error_probability_1_always_errors(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {"chain_family": "eth", "mode": "success", "error_probability": 1.0}
-                }
-            },
-        )
+        _set_eth(sim, "1", mode="success", error_probability=1.0)
         for _ in range(5):
-            _, body = _rpc(sim["provider1"], "eth_blockNumber")
+            _, body = _rpc(_P1, "eth_blockNumber")
             assert "error" in body
 
     def test_error_probability_0_never_errors(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {"chain_family": "eth", "mode": "success", "error_probability": 0.0}
-                }
-            },
-        )
+        _set_eth(sim, "1", mode="success", error_probability=0.0)
         for _ in range(5):
-            _, body = _rpc(sim["provider1"], "eth_blockNumber")
+            _, body = _rpc(_P1, "eth_blockNumber")
             assert "result" in body
 
     def test_latency_ms_delays_response(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "eth", "latency_ms": 200}}},
-        )
+        _set_eth(sim, "1", latency_ms=200)
         t0 = time.monotonic()
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
         elapsed_ms = (time.monotonic() - t0) * 1000
         assert elapsed_ms >= 180  # allow a little clock slack
 
     def test_custom_response_per_method(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {
-                        "chain_family": "eth",
-                        "responses": {"eth_blockNumber": {"result": "0xDEAD"}},
-                    }
-                }
-            },
-        )
-        _, body = _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", responses={"eth_blockNumber": {"result": "0xDEAD"}})
+        _, body = _rpc(_P1, "eth_blockNumber")
         assert body["result"] == "0xDEAD"
 
     def test_custom_default_response(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {"chain_family": "eth", "responses": {"default": {"result": "0xBEEF"}}}
-                }
-            },
-        )
-        _, body = _rpc(sim["provider1"], "eth_unknownMethod")
+        _set_eth(sim, "1", responses={"default": {"result": "0xBEEF"}})
+        _, body = _rpc(_P1, "eth_unknownMethod")
         assert body["result"] == "0xBEEF"
 
     def test_eth_get_block_by_number_echoes_block_number(self, sim):
-        _, body = _rpc(sim["provider1"], "eth_getBlockByNumber", ["0xABC123", False])
+        _, body = _rpc(_P1, "eth_getBlockByNumber", ["0xABC123", False])
         assert body["result"]["number"] == "0xABC123"
 
     def test_eth_get_block_by_number_latest(self, sim):
-        _, body = _rpc(sim["provider1"], "eth_getBlockByNumber", ["latest", False])
+        _, body = _rpc(_P1, "eth_getBlockByNumber", ["latest", False])
         assert body["result"]["number"] == "0x1312D00"
 
 
@@ -442,9 +334,6 @@ class TestProviderModes:
 #
 # Escape hatch: responses[method] = {"error": <inner_envelope>} — for ad-hoc
 #   error shapes that don't earn a permanent catalogue entry.
-#
-# Both flow through the same emission code in server.py; only the resolution
-# of `err` differs.
 #
 # Backward-compat invariant: when method_cfg has neither "error_stub" nor
 # "error" (i.e. the existing {"result": ...} pattern), the new code is a no-op.
@@ -463,18 +352,8 @@ class TestErrorStubs:
         matches the catalogue entry on code, message, and (when present) data.
         """
         stub = ERROR_STUBS[stub_name]
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {
-                        "chain_family": "eth",
-                        "responses": {"eth_call": {"error_stub": stub_name}},
-                    }
-                }
-            },
-        )
-        status, body = _rpc(sim["provider1"], "eth_call")
+        _set_eth(sim, "1", responses={"eth_call": {"error_stub": stub_name}})
+        status, body = _rpc(_P1, "eth_call")
         assert status == 200
         assert "error" in body, f"{stub_name}: expected error envelope, got {body!r}"
         assert "result" not in body
@@ -486,43 +365,26 @@ class TestErrorStubs:
     def test_per_method_scoping_other_methods_unaffected(self, sim):
         """An error on eth_call leaves eth_blockNumber on its success path.
 
-        This is the scoping guarantee that distinguishes the new branch from
-        mode="error" — mode="error" errors for *every* method on the provider;
-        the per-method override errors only for the named method.
+        This is the scoping guarantee that distinguishes the per-method
+        override from mode="error" — mode="error" errors for *every* method on
+        the provider; the per-method override errors only for the named method.
         """
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {
-                        "chain_family": "eth",
-                        "responses": {"eth_call": {"error_stub": "revert"}},
-                    }
-                }
-            },
-        )
-        _, err_body = _rpc(sim["provider1"], "eth_call")
+        _set_eth(sim, "1", responses={"eth_call": {"error_stub": "revert"}})
+        _, err_body = _rpc(_P1, "eth_call")
         assert "error" in err_body
 
-        _, ok_body = _rpc(sim["provider1"], "eth_blockNumber")
+        _, ok_body = _rpc(_P1, "eth_blockNumber")
         assert "result" in ok_body
         assert "error" not in ok_body
 
     def test_default_key_emits_error_for_unmatched_methods(self, sim):
         """The "default" fallback key also honours error_stub.
 
-        Same precedence as the success path: state.responses.get(method) wins
-        when present, otherwise state.responses.get("default", {}) is used.
+        Same precedence as the success path: responses.get(method) wins when
+        present, otherwise responses.get("default", {}) is used.
         """
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {"chain_family": "eth", "responses": {"default": {"error_stub": "oog"}}}
-                }
-            },
-        )
-        _, body = _rpc(sim["provider1"], "eth_unknownMethod")
+        _set_eth(sim, "1", responses={"default": {"error_stub": "oog"}})
+        _, body = _rpc(_P1, "eth_unknownMethod")
         assert "error" in body
         assert body["error"]["message"] == "out of gas"
 
@@ -530,21 +392,11 @@ class TestErrorStubs:
         """Backward-compat lock: {"result": ...} responses remain unchanged.
 
         Duplicate of test_custom_response_per_method by design — this one
-        sits next to the new error branch so any future change to the
-        branch logic has an in-place regression check.
+        sits next to the error branch so any future change to the branch
+        logic has an in-place regression check.
         """
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {
-                        "chain_family": "eth",
-                        "responses": {"eth_blockNumber": {"result": "0xDEAD"}},
-                    }
-                }
-            },
-        )
-        _, body = _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", responses={"eth_blockNumber": {"result": "0xDEAD"}})
+        _, body = _rpc(_P1, "eth_blockNumber")
         assert body["result"] == "0xDEAD"
         assert "error" not in body
 
@@ -555,40 +407,19 @@ class TestErrorStubs:
         body (the common chain-domain case) while another method on the same
         provider can succeed with a different status if needed.
         """
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {
-                        "chain_family": "eth",
-                        "responses": {"eth_call": {"error_stub": "revert", "http_status": 200}},
-                    }
-                }
-            },
-        )
-        status, body = _rpc(sim["provider1"], "eth_call")
+        _set_eth(sim, "1", responses={"eth_call": {"error_stub": "revert", "http_status": 200}})
+        status, body = _rpc(_P1, "eth_call")
         assert status == 200
         assert body["error"]["message"] == "execution reverted"
 
     def test_history_records_error_status(self, sim):
         """The per-method error path records status='error' in /history.
 
-        Aligns with the existing mode="error" path so downstream consumers
-        (RoutingTrace.retry_chain, assertion helpers) treat both error
-        sources identically.
+        Aligns with the mode="error" path so downstream consumers treat both
+        error sources identically.
         """
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {
-                        "chain_family": "eth",
-                        "responses": {"eth_call": {"error_stub": "revert"}},
-                    }
-                }
-            },
-        )
-        _rpc(sim["provider1"], "eth_call")
+        _set_eth(sim, "1", responses={"eth_call": {"error_stub": "revert"}})
+        _rpc(_P1, "eth_call")
         _, body = _get(_ctrl(sim, "/history"))
         entries = [e for e in body["history"] if e["method"] == "eth_call"]
         assert len(entries) == 1
@@ -605,15 +436,8 @@ class TestErrorStubs:
             "message": "synthetic test error",
             "data": {"trace_id": "abc-123"},
         }
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {"chain_family": "eth", "responses": {"eth_call": {"error": ad_hoc}}}
-                }
-            },
-        )
-        _, body = _rpc(sim["provider1"], "eth_call")
+        _set_eth(sim, "1", responses={"eth_call": {"error": ad_hoc}})
+        _, body = _rpc(_P1, "eth_call")
         assert body["error"] == ad_hoc
 
 
@@ -625,23 +449,11 @@ class TestErrorStubs:
 class TestReset:
 
     def test_reset_restores_scenario_to_defaults(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {
-                        "chain_family": "eth",
-                        "mode": "error",
-                        "latency_ms": 500,
-                        "error_probability": 0.9,
-                    }
-                }
-            },
-        )
+        _set_eth(sim, "1", mode="error", latency_ms=500, error_probability=0.9)
         status, body = _post(_ctrl(sim, "/reset"), {})
         assert status == 200
         _, scenario = _get(_ctrl(sim, "/scenario"))
-        p = scenario["providers"]["1"]
+        p = scenario["providers"]["eth-sim:1"]
         assert p["mode"] == "success"
         assert p["latency_ms"] == 0
         assert p["error_probability"] == 0.0
@@ -649,8 +461,8 @@ class TestReset:
     def test_reset_does_NOT_clear_history(self, sim):
         """history/clear — /reset must leave history intact."""
         # populate history on all 3 providers
-        for provider in ("provider1", "provider2", "provider3"):
-            _rpc(sim[provider], "eth_blockNumber")
+        for url in (_P1, _P2, _P3):
+            _rpc(url, "eth_blockNumber")
 
         _, before = _get(_ctrl(sim, "/history"))
         assert before["count"] == 3, f"expected 3 entries before reset, got {before['count']}"
@@ -675,9 +487,8 @@ class TestHistoryClear:
 
     def test_history_is_empty_immediately_after_clear(self, sim):
         """Core guarantee: /history/clear wipes every entry from all providers."""
-        # populate history on all 3 providers
-        for provider in ("provider1", "provider2", "provider3"):
-            _rpc(sim[provider], "eth_blockNumber")
+        for url in (_P1, _P2, _P3):
+            _rpc(url, "eth_blockNumber")
 
         _, before = _get(_ctrl(sim, "/history"))
         assert (
@@ -695,12 +506,12 @@ class TestHistoryClear:
 
     def test_new_call_after_clear_starts_at_count_1(self, sim):
         """After a clear, the very next call must be the only entry — no resurrection."""
-        for provider in ("provider1", "provider2", "provider3"):
-            _rpc(sim[provider], "eth_blockNumber")
+        for url in (_P1, _P2, _P3):
+            _rpc(url, "eth_blockNumber")
 
         _post(_ctrl(sim, "/history/clear"), {})
 
-        _rpc(sim["provider1"], "eth_blockNumber")  # exactly one new call
+        _rpc(_P1, "eth_blockNumber")  # exactly one new call
 
         _, after = _get(_ctrl(sim, "/history"))
         assert (
@@ -710,39 +521,35 @@ class TestHistoryClear:
 
     def test_clear_wipes_all_three_providers(self, sim):
         """All 3 provider ring-buffers must be empty after clear, not just one."""
-        for provider in ("provider1", "provider2", "provider3"):
-            _rpc(sim[provider], "eth_blockNumber")
+        for url in (_P1, _P2, _P3):
+            _rpc(url, "eth_blockNumber")
 
         _post(_ctrl(sim, "/history/clear"), {})
 
         for pid in ("1", "2", "3"):
-            _, body = _get(_ctrl(sim, f"/history?provider={pid}"))
+            _, body = _get(_ctrl(sim, f"/history?pool=eth-sim&pid={pid}"))
             assert body == {
                 "count": 0,
                 "history": [],
-            }, f"provider {pid} history not cleared — got: {body}"
+            }, f"provider eth-sim:{pid} history not cleared — got: {body}"
 
     def test_stats_counters_reset_to_zero_after_clear(self, sim):
         """All-time counters must be zeroed for all providers after clear."""
-        for provider in ("provider1", "provider2", "provider3"):
-            _rpc(sim[provider], "eth_blockNumber")
+        for url in (_P1, _P2, _P3):
+            _rpc(url, "eth_blockNumber")
 
         _post(_ctrl(sim, "/history/clear"), {})
 
         _, stats = _get(_ctrl(sim, "/stats"))
         for pid in ("1", "2", "3"):
-            total = stats["providers"][pid]["total_requests_all_time"]
-            assert (
-                total == 0
-            ), f"provider {pid} total_requests_all_time should be 0 after clear, got {total}"
+            total = stats["providers"][f"eth-sim:{pid}"]["total_calls"]
+            assert total == 0, f"eth-sim:{pid} total_calls should be 0 after clear, got {total}"
 
     def test_does_not_change_scenario_config(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"), {"providers": {"2": {"chain_family": "eth", "mode": "error"}}}
-        )
+        _set_eth(sim, "2", mode="error")
         _post(_ctrl(sim, "/history/clear"), {})
         _, scenario = _get(_ctrl(sim, "/scenario"))
-        assert scenario["providers"]["2"]["mode"] == "error"  # untouched
+        assert scenario["providers"]["eth-sim:2"]["mode"] == "error"  # untouched
 
     def test_all_entries_after_clear_have_ts_after_clear_time(self, sim):
         """Architectural fact 3 — clear-timestamp invariant.
@@ -751,15 +558,15 @@ class TestHistoryClear:
         ts >= the moment the clear was called.  No pre-clear entry can survive.
         """
         # make calls BEFORE the clear
-        for provider in ("provider1", "provider2", "provider3"):
-            _rpc(sim[provider], "eth_blockNumber")
+        for url in (_P1, _P2, _P3):
+            _rpc(url, "eth_blockNumber")
 
         t_clear = time.time()
         _post(_ctrl(sim, "/history/clear"), {})
 
         # make calls AFTER the clear
-        _rpc(sim["provider1"], "eth_blockNumber")
-        _rpc(sim["provider2"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
+        _rpc(_P2, "eth_blockNumber")
 
         _, body = _get(_ctrl(sim, "/history"))
         assert body["count"] == 2, f"expected exactly 2 post-clear entries, got {body['count']}"
@@ -779,8 +586,8 @@ class TestResetAll:
 
     def test_history_is_empty_immediately_after_reset_all(self, sim):
         """Core guarantee: /reset/all wipes every entry from all providers."""
-        for provider in ("provider1", "provider2", "provider3"):
-            _rpc(sim[provider], "eth_blockNumber")
+        for url in (_P1, _P2, _P3):
+            _rpc(url, "eth_blockNumber")
 
         _, before = _get(_ctrl(sim, "/history"))
         assert (
@@ -798,12 +605,12 @@ class TestResetAll:
 
     def test_new_call_after_reset_all_starts_at_count_1(self, sim):
         """After reset/all, the very next call must be the only entry."""
-        for provider in ("provider1", "provider2", "provider3"):
-            _rpc(sim[provider], "eth_blockNumber")
+        for url in (_P1, _P2, _P3):
+            _rpc(url, "eth_blockNumber")
 
         _post(_ctrl(sim, "/reset/all"), {})
 
-        _rpc(sim["provider2"], "eth_blockNumber")  # exactly one new call
+        _rpc(_P2, "eth_blockNumber")  # exactly one new call
 
         _, after = _get(_ctrl(sim, "/history"))
         assert (
@@ -813,26 +620,24 @@ class TestResetAll:
 
     def test_reset_all_clears_all_three_providers(self, sim):
         """All 3 provider ring-buffers must be empty after reset/all."""
-        for provider in ("provider1", "provider2", "provider3"):
-            _rpc(sim[provider], "eth_blockNumber")
+        for url in (_P1, _P2, _P3):
+            _rpc(url, "eth_blockNumber")
 
         _post(_ctrl(sim, "/reset/all"), {})
 
         for pid in ("1", "2", "3"):
-            _, body = _get(_ctrl(sim, f"/history?provider={pid}"))
+            _, body = _get(_ctrl(sim, f"/history?pool=eth-sim&pid={pid}"))
             assert body == {
                 "count": 0,
                 "history": [],
-            }, f"provider {pid} history not cleared — got: {body}"
+            }, f"provider eth-sim:{pid} history not cleared — got: {body}"
 
     def test_reset_all_also_resets_scenario(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"), {"providers": {"3": {"chain_family": "eth", "mode": "down"}}}
-        )
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "3", mode="down")
+        _rpc(_P1, "eth_blockNumber")
         _post(_ctrl(sim, "/reset/all"), {})
         _, scenario = _get(_ctrl(sim, "/scenario"))
-        assert scenario["providers"]["3"]["mode"] == "success"
+        assert scenario["providers"]["eth-sim:3"]["mode"] == "success"
 
     def test_all_entries_after_reset_all_have_ts_after_reset_time(self, sim):
         """Architectural fact 3 — clear-timestamp invariant for /reset/all.
@@ -841,15 +646,15 @@ class TestResetAll:
         ts >= the moment the reset was called.  No pre-reset entry can survive.
         """
         # make calls BEFORE the reset
-        for provider in ("provider1", "provider2", "provider3"):
-            _rpc(sim[provider], "eth_blockNumber")
+        for url in (_P1, _P2, _P3):
+            _rpc(url, "eth_blockNumber")
 
         t_reset = time.time()
         _post(_ctrl(sim, "/reset/all"), {})
 
         # make calls AFTER the reset
-        _rpc(sim["provider1"], "eth_blockNumber")
-        _rpc(sim["provider3"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
+        _rpc(_P3, "eth_blockNumber")
 
         _, body = _get(_ctrl(sim, "/history"))
         assert body["count"] == 2, f"expected exactly 2 post-reset entries, got {body['count']}"
@@ -862,20 +667,19 @@ class TestResetAll:
     def test_history_max_cap_per_provider(self, sim, shrink_history):
         """Architectural fact 1 — each provider's history is bounded by a maxlen cap.
 
-        Each provider's ring-buffer holds at most HISTORY_MAX entries. The deployed
-        default is 2000 (MAG-1822, raised from the original 200) and is overridable
-        via SIM_HISTORY_MAX. The cap behaviour itself is the same at any maxlen,
-        so we pin this test to MAX_FOR_OVERFLOW_TEST=200 to keep it fast — see the
-        shrink_history fixture for why we shrink in-place and how we restore.
+        Each provider's ring-buffer holds at most HISTORY_MAX entries (deployed
+        default 2000, overridable via SIM_HISTORY_MAX). The cap behaviour is
+        the same at any maxlen, so this pins to MAX_FOR_OVERFLOW_TEST=200 to
+        stay fast — see the shrink_history fixture for the swap/restore.
         """
         shrink_history("1")
 
         for _ in range(MAX_FOR_OVERFLOW_TEST + 5):
-            _rpc(sim["provider1"], "eth_blockNumber")
+            _rpc(_P1, "eth_blockNumber")
 
         _, stats = _get(_ctrl(sim, "/stats"))
-        ring_entries = stats["providers"]["1"]["history_ring_buffer_entries"]
-        total_calls = stats["providers"]["1"]["total_requests_all_time"]
+        ring_entries = stats["providers"]["eth-sim:1"]["history_entries"]
+        total_calls = stats["providers"]["eth-sim:1"]["total_calls"]
 
         assert (
             ring_entries == MAX_FOR_OVERFLOW_TEST
@@ -893,48 +697,41 @@ class TestResetAll:
 class TestStats:
 
     def test_counts_successful_calls(self, sim):
-        _rpc(sim["provider1"], "eth_blockNumber")
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/stats"))
-        p1 = body["providers"]["1"]
-        assert p1["total_requests_all_time"] >= 2
-        assert p1["requests_by_status_all_time"].get("success", 0) >= 2
+        p1 = body["providers"]["eth-sim:1"]
+        assert p1["total_calls"] >= 2
+        assert p1["calls_by_status"].get("success", 0) >= 2
 
     def test_tracks_status_breakdown(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "error"}}}
-        )
-        _rpc(sim["provider1"], "eth_blockNumber")
-        _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "eth", "mode": "rate_limit"}}},
-        )
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", mode="error")
+        _rpc(_P1, "eth_blockNumber")
+        _set_eth(sim, "1", mode="rate_limit")
+        _rpc(_P1, "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/stats"))
-        breakdown = body["providers"]["1"]["requests_by_status_all_time"]
+        breakdown = body["providers"]["eth-sim:1"]["calls_by_status"]
         assert breakdown.get("error", 0) >= 1
         assert breakdown.get("rate_limit", 0) >= 1
 
     def test_down_mode_counted_in_stats(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "down"}}}
-        )
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", mode="down")
+        _rpc(_P1, "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/stats"))
-        assert body["providers"]["1"]["requests_by_status_all_time"].get("down", 0) >= 1
+        assert body["providers"]["eth-sim:1"]["calls_by_status"].get("down", 0) >= 1
 
-    def test_history_ring_buffer_entries_in_stats(self, sim):
-        _rpc(sim["provider1"], "eth_blockNumber")
+    def test_history_entries_in_stats(self, sim):
+        _rpc(_P1, "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/stats"))
-        assert body["providers"]["1"]["history_ring_buffer_entries"] >= 1
+        assert body["providers"]["eth-sim:1"]["history_entries"] >= 1
 
     def test_independent_per_provider(self, sim):
-        _rpc(sim["provider1"], "eth_blockNumber")
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/stats"))
-        assert body["providers"]["1"]["total_requests_all_time"] >= 2
-        assert body["providers"]["2"]["total_requests_all_time"] == 0
-        assert body["providers"]["3"]["total_requests_all_time"] == 0
+        assert body["providers"]["eth-sim:1"]["total_calls"] >= 2
+        assert body["providers"]["eth-sim:2"]["total_calls"] == 0
+        assert body["providers"]["eth-sim:3"]["total_calls"] == 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -947,7 +744,7 @@ class TestHistory:
     # ── entry structure ───────────────────────────────────────────────────────
 
     def test_entry_has_required_fields(self, sim):
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/history"))
         entry = body["history"][0]
         for field in (
@@ -957,20 +754,31 @@ class TestHistory:
             "method",
             "status",
             "latency_ms",
-            "provider",
-            "call_order",
-            "chain",
+            "pool",
+            "pid",
+            "interface",
+            "transport",
             "port",
+            "call_order",
         ):
             assert field in entry, f"missing field: {field}"
 
+    def test_entry_carries_endpoint_identity(self, sim):
+        """Each entry natively names the endpoint that served it — never
+        ambiguous which listener a call came from."""
+        _rpc(_P1, "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history"))
+        entry = body["history"][0]
+        assert entry["pool"] == "eth-sim"
+        assert entry["pid"] == "1"
+        assert entry["interface"] == "jsonrpc"
+        assert entry["transport"] == "http"
+        assert entry["port"] == ETH_PRIMARY_PORTS["1"]
+
     def test_request_id_echoed_in_history(self, sim):
         """The history entry must carry the JSON-RPC id that was sent in the request."""
-        _post(
-            sim["provider1"],
-            {"jsonrpc": "2.0", "id": 99, "method": "eth_blockNumber", "params": []},
-        )
-        _, hist = _get(_ctrl(sim, "/history?provider=1"))
+        _post(_P1, {"jsonrpc": "2.0", "id": 99, "method": "eth_blockNumber", "params": []})
+        _, hist = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1"))
         assert hist["count"] >= 1
         last = hist["history"][-1]
         assert (
@@ -979,183 +787,177 @@ class TestHistory:
 
     def test_request_id_string_echoed_in_history(self, sim):
         """String JSON-RPC ids must also be echoed correctly in history."""
-        _post(
-            sim["provider1"],
-            {"jsonrpc": "2.0", "id": "trace-abc", "method": "eth_chainId", "params": []},
-        )
-        _, hist = _get(_ctrl(sim, "/history?provider=1&method=eth_chainId"))
+        _post(_P1, {"jsonrpc": "2.0", "id": "trace-abc", "method": "eth_chainId", "params": []})
+        _, hist = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1&method=eth_chainId"))
         assert hist["count"] >= 1
         assert hist["history"][-1]["request_id"] == "trace-abc"
 
     def test_down_mode_request_id_is_null(self, sim):
         """Down-mode entries must have request_id=None (body is never parsed)."""
-        _post(
-            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "down"}}}
-        )
-        _rpc(sim["provider1"], "eth_blockNumber")
-        _, hist = _get(_ctrl(sim, "/history?provider=1"))
+        _set_eth(sim, "1", mode="down")
+        _rpc(_P1, "eth_blockNumber")
+        _, hist = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1"))
         assert hist["count"] >= 1
         assert hist["history"][-1]["request_id"] is None
 
     def test_filter_request_id_returns_matching_only(self, sim):
         """?request_id= must return only the entry(ies) that carried that JSON-RPC id."""
-        _post(
-            sim["provider1"], {"jsonrpc": "2.0", "id": 7, "method": "eth_blockNumber", "params": []}
-        )
-        _post(
-            sim["provider1"], {"jsonrpc": "2.0", "id": 8, "method": "eth_blockNumber", "params": []}
-        )
+        _post(_P1, {"jsonrpc": "2.0", "id": 7, "method": "eth_blockNumber", "params": []})
+        _post(_P1, {"jsonrpc": "2.0", "id": 8, "method": "eth_blockNumber", "params": []})
         _, hist = _get(_ctrl(sim, "/history?request_id=7"))
         assert hist["count"] >= 1
         assert all(e["request_id"] == 7 for e in hist["history"])
 
     def test_time_field_contains_utc_string(self, sim):
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/history"))
         assert "UTC" in body["history"][0]["time"]
 
     def test_latency_ms_present_even_when_zero(self, sim):
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/history"))
         assert body["history"][0]["latency_ms"] == 0
 
     def test_latency_ms_reflects_configured_delay(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "eth", "latency_ms": 150}}},
-        )
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", latency_ms=150)
+        _rpc(_P1, "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/history"))
         assert body["history"][0]["latency_ms"] >= 100
 
     # ── call_order ────────────────────────────────────────────────────────────
 
     def test_call_order_is_1_based_sequential(self, sim):
-        _rpc(sim["provider1"], "eth_blockNumber")
-        _rpc(sim["provider2"], "eth_blockNumber")
-        _rpc(sim["provider3"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
+        _rpc(_P2, "eth_blockNumber")
+        _rpc(_P3, "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/history"))
         orders = [e["call_order"] for e in body["history"]]
         assert orders == list(range(1, len(orders) + 1))
 
     def test_call_order_restarts_after_clear(self, sim):
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
         _post(_ctrl(sim, "/history/clear"), {})
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/history"))
         assert body["history"][0]["call_order"] == 1
 
-    # ── ?provider= ────────────────────────────────────────────────────────────
+    # ── ?pool= / ?pid= ────────────────────────────────────────────────────────
 
-    def test_filter_provider_only_returns_that_provider(self, sim):
-        _rpc(sim["provider1"], "eth_blockNumber")
-        _rpc(sim["provider2"], "eth_blockNumber")
-        _rpc(sim["provider3"], "eth_blockNumber")
-        _, body = _get(_ctrl(sim, "/history?provider=2"))
+    def test_filter_pid_only_returns_that_provider(self, sim):
+        _rpc(_P1, "eth_blockNumber")
+        _rpc(_P2, "eth_blockNumber")
+        _rpc(_P3, "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history?pool=eth-sim&pid=2"))
         assert body["count"] >= 1
-        assert all(e["provider"] == "2" for e in body["history"])
+        assert all(e["pid"] == "2" for e in body["history"])
 
-    def test_filter_provider_excludes_others(self, sim):
-        _rpc(sim["provider1"], "eth_blockNumber")
-        _rpc(sim["provider2"], "eth_blockNumber")
-        _, body = _get(_ctrl(sim, "/history?provider=1"))
-        assert all(e["provider"] == "1" for e in body["history"])
+    def test_filter_pid_excludes_others(self, sim):
+        _rpc(_P1, "eth_blockNumber")
+        _rpc(_P2, "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1"))
+        assert all(e["pid"] == "1" for e in body["history"])
+
+    def test_filter_pool_scopes_to_the_pool(self, sim):
+        """?pool= answers "did anything touch this pool" in one call."""
+        _rpc(_P1, "eth_blockNumber")
+        _rpc("http://127.0.0.1:18575", "getblockcount")  # btc-sim:1
+        _, body = _get(_ctrl(sim, "/history?pool=eth-sim"))
+        assert body["count"] >= 1
+        assert all(e["pool"] == "eth-sim" for e in body["history"])
 
     # ── ?method= ─────────────────────────────────────────────────────────────
 
     def test_filter_method_returns_matching_only(self, sim):
-        _rpc(sim["provider1"], "eth_blockNumber")
-        _rpc(sim["provider1"], "eth_chainId")
+        _rpc(_P1, "eth_blockNumber")
+        _rpc(_P1, "eth_chainId")
         _, body = _get(_ctrl(sim, "/history?method=eth_blockNumber"))
         assert body["count"] >= 1
         assert all(e["method"] == "eth_blockNumber" for e in body["history"])
 
     def test_filter_method_excludes_others(self, sim):
-        _rpc(sim["provider1"], "eth_blockNumber")
-        _rpc(sim["provider1"], "eth_chainId")
+        _rpc(_P1, "eth_blockNumber")
+        _rpc(_P1, "eth_chainId")
         _, body = _get(_ctrl(sim, "/history?method=eth_chainId"))
         assert all(e["method"] == "eth_chainId" for e in body["history"])
 
     # ── ?status= ─────────────────────────────────────────────────────────────
 
     def test_filter_status_success(self, sim):
-        _rpc(sim["provider1"], "eth_blockNumber")  # success
-        _post(
-            _ctrl(sim, "/scenario"), {"providers": {"2": {"chain_family": "eth", "mode": "error"}}}
-        )
-        _rpc(sim["provider2"], "eth_blockNumber")  # error
+        _rpc(_P1, "eth_blockNumber")  # success
+        _set_eth(sim, "2", mode="error")
+        _rpc(_P2, "eth_blockNumber")  # error
         _, body = _get(_ctrl(sim, "/history?status=success"))
         assert body["count"] >= 1
         assert all(e["status"] == "success" for e in body["history"])
 
     def test_filter_status_error(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "error"}}}
-        )
-        _rpc(sim["provider1"], "eth_blockNumber")
-        _rpc(sim["provider2"], "eth_blockNumber")  # success
+        _set_eth(sim, "1", mode="error")
+        _rpc(_P1, "eth_blockNumber")
+        _rpc(_P2, "eth_blockNumber")  # success
         _, body = _get(_ctrl(sim, "/history?status=error"))
         assert body["count"] >= 1
         assert all(e["status"] == "error" for e in body["history"])
 
     def test_filter_status_rate_limit(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "eth", "mode": "rate_limit"}}},
-        )
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", mode="rate_limit")
+        _rpc(_P1, "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/history?status=rate_limit"))
         assert body["count"] >= 1
         assert all(e["status"] == "rate_limit" for e in body["history"])
 
     def test_filter_status_down(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "down"}}}
-        )
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", mode="down")
+        _rpc(_P1, "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/history?status=down"))
         assert body["count"] >= 1
         assert all(e["status"] == "down" for e in body["history"])
 
     def test_down_mode_recorded_with_wildcard_method(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "down"}}}
-        )
-        _rpc(sim["provider1"], "eth_blockNumber")
-        _, body = _get(_ctrl(sim, "/history?provider=1"))
+        _set_eth(sim, "1", mode="down")
+        _rpc(_P1, "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1"))
         assert any(e["method"] == "*" for e in body["history"])
 
-    # ── ?last= ────────────────────────────────────────────────────────────────
+    # ── ?last= (tail count) ───────────────────────────────────────────────────
 
     def test_filter_last_includes_recent_calls(self, sim):
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/history?last=10"))
         assert body["count"] >= 1
 
     def test_filter_last_0_excludes_all(self, sim):
-        _rpc(sim["provider1"], "eth_blockNumber")
-        time.sleep(0.05)  # make sure the call is at least 50ms in the past
+        """?last=0 asks for a zero-length tail — the response must be empty,
+        never "0 means everything"."""
+        _rpc(_P1, "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/history?last=0"))
         assert body["count"] == 0
+
+    def test_filter_last_returns_the_most_recent_entries(self, sim):
+        """?last=N returns the N most recent entries of the merged timeline."""
+        for i in range(6):
+            _post(_P1, {"jsonrpc": "2.0", "id": i, "method": "eth_blockNumber", "params": []})
+        _, body = _get(_ctrl(sim, "/history?last=2"))
+        assert body["count"] == 2
+        assert [e["request_id"] for e in body["history"]] == [4, 5]
 
     # ── ?from= / ?to= ─────────────────────────────────────────────────────────
 
     def test_filter_from_to_includes_call_in_window(self, sim):
         t_before = time.time() - 1
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
         t_after = time.time() + 1
         _, body = _get(_ctrl(sim, f"/history?from={t_before}&to={t_after}"))
         assert body["count"] >= 1
 
     def test_filter_from_future_excludes_all(self, sim):
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
         t_future = time.time() + 9999
         _, body = _get(_ctrl(sim, f"/history?from={t_future}"))
         assert body["count"] == 0
 
     def test_filter_to_past_excludes_all(self, sim):
         t_past = time.time() - 9999
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
         _, body = _get(_ctrl(sim, f"/history?to={t_past}"))
         assert body["count"] == 0
 
@@ -1163,7 +965,7 @@ class TestHistory:
         """?to=0 means 'at or before the epoch' — every real call is newer, so
         the window is empty. Guards the truthiness bug where a 0 boundary was
         treated as 'no filter' (0 is falsy) and wrongly returned everything."""
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
         status, body = _get(_ctrl(sim, "/history?to=0"))
         assert status == 200
         assert (
@@ -1172,34 +974,32 @@ class TestHistory:
 
     # ── combined filters ──────────────────────────────────────────────────────
 
-    def test_combined_last_provider_status(self, sim):
-        _rpc(sim["provider1"], "eth_blockNumber")  # success
-        _post(
-            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "error"}}}
-        )
-        _rpc(sim["provider1"], "eth_blockNumber")  # error
-        _rpc(sim["provider2"], "eth_blockNumber")  # success on p2
-        _, body = _get(_ctrl(sim, "/history?last=30&provider=1&status=error"))
+    def test_combined_last_pid_status(self, sim):
+        _rpc(_P1, "eth_blockNumber")  # success
+        _set_eth(sim, "1", mode="error")
+        _rpc(_P1, "eth_blockNumber")  # error
+        _rpc(_P2, "eth_blockNumber")  # success on p2
+        _, body = _get(_ctrl(sim, "/history?last=30&pool=eth-sim&pid=1&status=error"))
         assert body["count"] >= 1
         for e in body["history"]:
-            assert e["provider"] == "1"
+            assert e["pid"] == "1"
             assert e["status"] == "error"
 
-    def test_combined_provider_method(self, sim):
-        _rpc(sim["provider1"], "eth_blockNumber")
-        _rpc(sim["provider1"], "eth_chainId")
-        _rpc(sim["provider2"], "eth_blockNumber")
-        _, body = _get(_ctrl(sim, "/history?provider=1&method=eth_blockNumber"))
+    def test_combined_pid_method(self, sim):
+        _rpc(_P1, "eth_blockNumber")
+        _rpc(_P1, "eth_chainId")
+        _rpc(_P2, "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1&method=eth_blockNumber"))
         assert body["count"] >= 1
         for e in body["history"]:
-            assert e["provider"] == "1"
+            assert e["pid"] == "1"
             assert e["method"] == "eth_blockNumber"
 
     # ── empty results ─────────────────────────────────────────────────────────
 
     def test_empty_history_after_reset_all(self, sim):
-        for provider in ("provider1", "provider2", "provider3"):
-            _rpc(sim[provider], "eth_blockNumber")
+        for url in (_P1, _P2, _P3):
+            _rpc(url, "eth_blockNumber")
         _, before = _get(_ctrl(sim, "/history"))
         assert (
             before["count"] == 3
@@ -1212,11 +1012,11 @@ class TestHistory:
         }, f"/reset/all did not produce empty history — got: {body}"
 
     def test_history_sorted_by_timestamp(self, sim):
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
         time.sleep(0.02)
-        _rpc(sim["provider2"], "eth_blockNumber")
+        _rpc(_P2, "eth_blockNumber")
         time.sleep(0.02)
-        _rpc(sim["provider3"], "eth_blockNumber")
+        _rpc(_P3, "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/history"))
         timestamps = [e["ts"] for e in body["history"]]
         assert timestamps == sorted(timestamps)
@@ -1228,24 +1028,19 @@ class TestHistory:
         eth_getBlockByNumber as background calls continuously.  Using a method
         the router never sends (e.g. eth_gasPrice) means ?method=eth_gasPrice
         returns exactly one entry — your call and nothing else.
-
-        In unit tests there is no background traffic, so this test instead
-        verifies the isolation property directly: make N calls with method A
-        and M calls with method B, then confirm ?method=A returns exactly N
-        entries and every entry has method == A.
         """
-        _rpc(sim["provider1"], "eth_blockNumber")  # noise — 3 calls
-        _rpc(sim["provider2"], "eth_blockNumber")
-        _rpc(sim["provider3"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")  # noise — 3 calls
+        _rpc(_P2, "eth_blockNumber")
+        _rpc(_P3, "eth_blockNumber")
 
-        _rpc(sim["provider1"], "eth_gasPrice")  # signal — 1 call
+        _rpc(_P1, "eth_gasPrice")  # signal — 1 call
 
         _, body = _get(_ctrl(sim, "/history?method=eth_gasPrice"))
         assert (
             body["count"] == 1
         ), f"method filter should return exactly 1 entry, got {body['count']}"
         assert body["history"][0]["method"] == "eth_gasPrice"
-        assert body["history"][0]["provider"] == "1"
+        assert body["history"][0]["pid"] == "1"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1257,13 +1052,13 @@ class TestJSONRPCProtocol:
 
     def test_response_id_echoes_request_id(self, sim):
         """The response id must match whatever id was sent in the request."""
-        _, body = _rpc(sim["provider1"], "eth_blockNumber")
+        _, body = _rpc(_P1, "eth_blockNumber")
         assert body["id"] == 1
 
         body2 = json.loads(
             urllib.request.urlopen(
                 urllib.request.Request(
-                    sim["provider1"],
+                    _P1,
                     data=json.dumps(
                         {"jsonrpc": "2.0", "id": 42, "method": "eth_blockNumber", "params": []}
                     ).encode(),
@@ -1279,7 +1074,7 @@ class TestJSONRPCProtocol:
         body = json.loads(
             urllib.request.urlopen(
                 urllib.request.Request(
-                    sim["provider1"],
+                    _P1,
                     data=json.dumps(
                         {
                             "jsonrpc": "2.0",
@@ -1297,36 +1092,36 @@ class TestJSONRPCProtocol:
 
     def test_unknown_method_returns_fallback_result(self, sim):
         """A method not in METHOD_DEFAULTS must return '0x1' fallback, not crash."""
-        _, body = _rpc(sim["provider1"], "eth_notARealMethod")
+        _, body = _rpc(_P1, "eth_notARealMethod")
         assert body.get("result") == "0x1"
         assert "error" not in body
 
     def test_unknown_method_recorded_in_history(self, sim):
-        _rpc(sim["provider1"], "eth_notARealMethod")
+        _rpc(_P1, "eth_notARealMethod")
         _, hist = _get(_ctrl(sim, "/history?method=eth_notARealMethod"))
         assert hist["count"] == 1
         assert hist["history"][0]["status"] == "success"
 
     def test_eth_get_block_by_number_earliest(self, sim):
-        _, body = _rpc(sim["provider1"], "eth_getBlockByNumber", ["earliest", False])
+        _, body = _rpc(_P1, "eth_getBlockByNumber", ["earliest", False])
         assert body["result"]["number"] == "0x0"
 
     def test_eth_get_block_by_number_pending(self, sim):
-        _, body = _rpc(sim["provider1"], "eth_getBlockByNumber", ["pending", False])
+        _, body = _rpc(_P1, "eth_getBlockByNumber", ["pending", False])
         assert body["result"]["number"] == "0x1312D01"
 
     def test_eth_get_block_by_number_safe(self, sim):
-        _, body = _rpc(sim["provider1"], "eth_getBlockByNumber", ["safe", False])
+        _, body = _rpc(_P1, "eth_getBlockByNumber", ["safe", False])
         assert body["result"]["number"] == "0x1312D00"
 
     def test_eth_get_block_by_number_finalized(self, sim):
-        _, body = _rpc(sim["provider1"], "eth_getBlockByNumber", ["finalized", False])
+        _, body = _rpc(_P1, "eth_getBlockByNumber", ["finalized", False])
         assert body["result"]["number"] == "0x1312CFF"
 
     def test_empty_body_handled_gracefully(self, sim):
         """POST with no body must not crash — defaults to empty dict."""
         req = urllib.request.Request(
-            sim["provider1"],
+            _P1,
             data=b"",
             headers={"Content-Type": "application/json"},
         )
@@ -1341,9 +1136,9 @@ class TestJSONRPCProtocol:
     def test_missing_method_field_defaults_to_unknown_in_history(self, sim):
         """A request body that omits 'method' must record method='unknown' in history."""
         # Send a valid JSON body that has no "method" key at all
-        _post(sim["provider1"], {"jsonrpc": "2.0", "id": 1, "params": []})
+        _post(_P1, {"jsonrpc": "2.0", "id": 1, "params": []})
 
-        _, hist = _get(_ctrl(sim, "/history?provider=1"))
+        _, hist = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1"))
         assert hist["count"] >= 1
         last_entry = hist["history"][-1]
         assert last_entry["method"] == "unknown", (
@@ -1360,7 +1155,7 @@ class TestJSONRPCProtocol:
             {"jsonrpc": "2.0", "id": 2, "method": "eth_chainId", "params": []},
         ]
         req = urllib.request.Request(
-            sim["provider1"],
+            _P1,
             data=json.dumps(batch).encode(),
             headers={"Content-Type": "application/json"},
         )
@@ -1385,10 +1180,10 @@ class TestJSONRPCProtocol:
 class TestScenarioValidation:
 
     def test_valid_scenario_still_returns_200(self, sim):
-        """A well-formed scenario is unaffected by the new validation."""
+        """A well-formed scenario is unaffected by the validation."""
         status, body = _post(
             _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "eth", "mode": "error", "latency_ms": 10}}},
+            {"providers": {"eth-sim:1": {"mode": "error", "latency_ms": 10}}},
         )
         assert status == 200
         assert body["status"] == "ok"
@@ -1397,83 +1192,87 @@ class TestScenarioValidation:
         """A misspelled field (e.g. 'latencyms') is a typo — reject it so the
         test doesn't pass green against an unconfigured provider."""
         status, body = _post(
-            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "latencyms": 500}}}
+            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"latencyms": 500}}}
         )
         assert status == 400
         assert "latencyms" in body["error"]
 
     def test_invalid_mode_returns_400(self, sim):
         status, body = _post(
-            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "boom"}}}
+            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"mode": "boom"}}}
         )
         assert status == 400
         assert "mode" in body["error"]
 
-    def test_invalid_chain_family_returns_400(self, sim):
+    def test_chain_family_field_is_rejected_with_400(self, sim):
+        """The old chain_family field is gone — sending it fails loudly with a
+        message that points at the pool + transports replacement."""
         status, body = _post(
-            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "dogecoin"}}}
+            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"chain_family": "eth"}}}
         )
         assert status == 400
         assert "chain_family" in body["error"]
 
-    def test_missing_chain_family_returns_400(self, sim):
-        """A provider block that omits chain_family must be rejected, never
-        silently defaulted to "eth". The 400 body names the offending
-        provider and lists every valid value."""
+    def test_bare_pid_key_is_rejected_with_400(self, sim):
+        """The old bare-pid provider key must be rejected, never guessed at.
+        The 400 body names the pool:pid format."""
         status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"2": {"mode": "error"}}})
         assert status == 400
-        assert "provider '2'" in body["error"]
-        assert "chain_family is required" in body["error"]
-        assert (
-            "valid values: ['btc', 'eth', 'grpc', 'ln', 'rest', " "'solana', 'tendermintrpc', 'ws']"
-        ) in body["error"]
+        assert "pool:pid" in body["error"]
 
-    def test_missing_chain_family_rejected_for_down_mode_too(self, sim):
-        """mode="down" gets no exemption. Reachability faults fire on every
-        surface, but the scenario author must still say which surface owns
-        the scenario — omission is rejected the same way."""
-        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"mode": "down"}}})
+    def test_unknown_pool_returns_400_listing_pools(self, sim):
+        """An unknown pool name gets a 400 that lists the valid pools."""
+        status, body = _post(
+            _ctrl(sim, "/scenario"), {"providers": {"nope-sim:1": {"mode": "down"}}}
+        )
         assert status == 400
-        assert "chain_family is required" in body["error"]
+        assert "nope-sim" in body["error"]
+        assert "eth-sim" in body["error"]  # the valid-pool list is in the message
 
-    def test_empty_provider_block_missing_chain_family_returns_400(self, sim):
-        """Even an empty config block ({}) lacks chain_family and is rejected."""
-        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"3": {}}})
+    def test_unknown_pid_returns_400_listing_pids(self, sim):
+        """A pid the pool doesn't have gets a 400 that lists the valid pids."""
+        status, body = _post(
+            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:99": {"mode": "down"}}}
+        )
         assert status == 400
-        assert "provider '3'" in body["error"]
-        assert "chain_family is required" in body["error"]
+        assert "eth-sim:99" in body["error"]
 
-    def test_missing_chain_family_on_one_block_rejects_whole_post(self, sim):
-        """All-or-nothing: provider 1 carries the field, provider 2 omits it —
-        the POST is 400 and provider 1's valid config is NOT applied."""
+    def test_empty_provider_block_is_accepted_and_changes_nothing(self, sim):
+        """An empty config block ({}) is a no-op update — accepted, nothing
+        changes (there are no required fields in the new format)."""
+        status, _ = _post(_ctrl(sim, "/scenario"), {"providers": {"eth-sim:3": {}}})
+        assert status == 200
+        _, snap = _get(_ctrl(sim, "/scenario"))
+        assert snap["providers"]["eth-sim:3"]["mode"] == "success"
+
+    def test_bad_key_on_one_block_rejects_whole_post(self, sim):
+        """All-or-nothing: eth-sim:1 is valid, the second key is bare-pid —
+        the POST is 400 and eth-sim:1's valid config is NOT applied."""
         status, body = _post(
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {"chain_family": "eth", "mode": "error"},
+                    "eth-sim:1": {"mode": "error"},
                     "2": {"latency_ms": 50},
                 }
             },
         )
         assert status == 400
-        assert "provider '2'" in body["error"]
         _, snap = _get(_ctrl(sim, "/scenario"))
         assert (
-            snap["providers"]["1"]["mode"] == "success"
-        ), "provider 1 must not be mutated when provider 2's block is rejected"
+            snap["providers"]["eth-sim:1"]["mode"] == "success"
+        ), "eth-sim:1 must not be mutated when the sibling block is rejected"
 
     def test_invalid_corruption_mode_returns_400(self, sim):
         status, body = _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "eth", "corruption_mode": "shred"}}},
+            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"corruption_mode": "shred"}}}
         )
         assert status == 400
         assert "corruption_mode" in body["error"]
 
     def test_error_probability_out_of_range_returns_400(self, sim):
         status, body = _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "eth", "error_probability": 2.0}}},
+            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"error_probability": 2.0}}}
         )
         assert status == 400
         assert "error_probability" in body["error"]
@@ -1482,7 +1281,7 @@ class TestScenarioValidation:
         """A negative latency reaches time.sleep(-x) → ValueError at request
         time. Reject it up front so the fault primitive stays clean."""
         status, body = _post(
-            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "latency_ms": -5}}}
+            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"latency_ms": -5}}}
         )
         assert status == 400
         assert "latency_ms" in body["error"]
@@ -1508,45 +1307,53 @@ class TestScenarioValidation:
 
     def test_invalid_then_mode_returns_400(self, sim):
         status, body = _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "eth", "then_mode": "sucess"}}},
+            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"then_mode": "sucess"}}}
         )
         assert status == 400
         assert "then_mode" in body["error"]
 
     def test_negative_fail_first_n_returns_400(self, sim):
         status, body = _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "eth", "fail_first_n": -1}}},
+            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"fail_first_n": -1}}}
         )
         assert status == 400
         assert "fail_first_n" in body["error"]
 
-    def test_invalid_solana_unknown_method_mode_returns_400(self, sim):
+    def test_wrong_chain_quirk_returns_400(self, sim):
+        """A Solana quirk sent to an eth provider is a 400 naming the field —
+        never silently ignored."""
         status, body = _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "eth", "solana_unknown_method_mode": "bogus"}}},
+            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"unknown_method_mode": "error"}}}
         )
         assert status == 400
-        assert "solana_unknown_method_mode" in body["error"]
+        assert "unknown_method_mode" in body["error"]
+
+    def test_invalid_quirk_value_returns_400(self, sim):
+        """A known quirk with a bogus enum value is rejected on its own pool."""
+        status, body = _post(
+            _ctrl(sim, "/scenario"),
+            {"providers": {"solana-sim:1": {"unknown_method_mode": "bogus"}}},
+        )
+        assert status == 400
+        assert "unknown_method_mode" in body["error"]
 
     def test_invalid_scenario_does_not_mutate_other_providers(self, sim):
-        """All-or-nothing: if provider 2's config is invalid, provider 1's
+        """All-or-nothing: if eth-sim:2's config is invalid, eth-sim:1's
         valid config in the same call is not applied."""
         status, _ = _post(
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {"chain_family": "eth", "mode": "error"},
-                    "2": {"chain_family": "eth", "mode": "boom"},
+                    "eth-sim:1": {"mode": "error"},
+                    "eth-sim:2": {"mode": "boom"},
                 }
             },
         )
         assert status == 400
         _, snap = _get(_ctrl(sim, "/scenario"))
         assert (
-            snap["providers"]["1"]["mode"] == "success"
-        ), "provider 1 must not be mutated when provider 2's config is rejected"
+            snap["providers"]["eth-sim:1"]["mode"] == "success"
+        ), "eth-sim:1 must not be mutated when eth-sim:2's config is rejected"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1561,9 +1368,9 @@ class TestControlServerRobustness:
         can't hold a control thread open forever. Paired with a threaded
         control server, a single slow/hung client no longer blocks every
         /scenario, /reset, and /history call."""
-        assert ControlHandler.timeout == 30, (
-            "ControlHandler must set timeout=30 so a stalled client's socket "
-            f"read is bounded; got {ControlHandler.timeout!r}"
+        assert server_module._ControlHandler.timeout == 30, (
+            "the control handler must set timeout=30 so a stalled client's "
+            f"socket read is bounded; got {server_module._ControlHandler.timeout!r}"
         )
 
 
@@ -1578,23 +1385,10 @@ class TestSequencedFaults:
         """fail_first_n=N makes the first N calls use the configured fault mode,
         then every call after switches to then_mode (default success) — a
         deterministic retry-then-recover, no random error_probability."""
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {
-                        "chain_family": "eth",
-                        "mode": "error",
-                        "error_code": -32050,
-                        "error_message": "boom",
-                        "fail_first_n": 2,
-                    }
-                }
-            },
-        )
-        _, b1 = _rpc(sim["provider1"], "eth_blockNumber")
-        _, b2 = _rpc(sim["provider1"], "eth_blockNumber")
-        _, b3 = _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", mode="error", error_code=-32050, error_message="boom", fail_first_n=2)
+        _, b1 = _rpc(_P1, "eth_blockNumber")
+        _, b2 = _rpc(_P1, "eth_blockNumber")
+        _, b3 = _rpc(_P1, "eth_blockNumber")
         assert b1.get("error", {}).get("code") == -32050, f"call 1 should fail: {b1}"
         assert b2.get("error", {}).get("code") == -32050, f"call 2 should fail: {b2}"
         assert "error" not in b3 and "result" in b3, f"call 3 should recover: {b3}"
@@ -1602,69 +1396,45 @@ class TestSequencedFaults:
     def test_fail_first_n_zero_is_disabled(self, sim):
         """fail_first_n=0 (default) means the sequenced fault is off — the
         configured mode applies to every call, as before."""
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {
-                        "chain_family": "eth",
-                        "mode": "error",
-                        "error_code": -32051,
-                        "fail_first_n": 0,
-                    }
-                }
-            },
-        )
-        _, b1 = _rpc(sim["provider1"], "eth_blockNumber")
-        _, b2 = _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", mode="error", error_code=-32051, fail_first_n=0)
+        _, b1 = _rpc(_P1, "eth_blockNumber")
+        _, b2 = _rpc(_P1, "eth_blockNumber")
         assert b1.get("error", {}).get("code") == -32051
         assert b2.get("error", {}).get("code") == -32051, "fail_first_n=0 must not recover"
 
     def test_then_mode_honored_after_window(self, sim):
         """then_mode can be any mode — succeed for the first call, then go down."""
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {
-                        "chain_family": "eth",
-                        "mode": "success",
-                        "fail_first_n": 1,
-                        "then_mode": "down",
-                    }
-                }
-            },
-        )
-        s1, _ = _rpc(sim["provider1"], "eth_blockNumber")
-        s2, _ = _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", mode="success", fail_first_n=1, then_mode="down")
+        s1, _ = _rpc(_P1, "eth_blockNumber")
+        s2, _ = _rpc(_P1, "eth_blockNumber")
         assert s1 == 200, "first call is in the mode=success window"
         assert s2 == 503, "after the window, then_mode=down returns 503"
 
-    def test_non_owning_listener_never_advances_down_window(self, sim):
-        """A sequenced down authored for another transport is OBSERVED by this
-        listener (down is honored on every surface) but never ADVANCED by it:
-        the fail_first_n window counts owning-listener requests only, and no
-        listener in this fixture owns chain_family="grpc". However many calls
-        arrive here, the window stays open and every call keeps returning 503."""
+    def test_other_pools_never_advance_this_pools_window(self, sim):
+        """A sequenced down on btc-sim:1 belongs to btc-sim:1 alone: however
+        many eth-sim calls happen, btc's window is untouched — it still fails
+        exactly its first 2 calls and recovers on the 3rd."""
         _post(
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "grpc",
-                        "mode": "down",
-                        "fail_first_n": 2,
-                        "then_mode": "success",
-                    }
+                    "btc-sim:1": {"mode": "down", "fail_first_n": 2, "then_mode": "success"}
                 }
             },
         )
+        # eth traffic cannot consume another pool's window (and is unaffected).
         for attempt in range(1, 5):
-            status, _ = _rpc(sim["provider1"], "eth_blockNumber")
-            assert status == 503, (
-                f"call {attempt} on a non-owning listener must stay 503 — "
-                f"non-owning traffic never consumes the window; got {status}"
+            status, _ = _rpc(_P1, "eth_blockNumber")
+            assert status == 200, (
+                f"eth-sim call {attempt} must stay healthy while btc's window "
+                f"is pending; got {status}"
             )
+        btc_url = "http://127.0.0.1:18575"
+        for i in (1, 2):
+            status, _ = _rpc(btc_url, "getblockcount")
+            assert status == 503, f"btc-sim:1 call {i} is inside the down window; got {status}"
+        status, _ = _rpc(btc_url, "getblockcount")
+        assert status == 200, f"btc-sim:1 must recover after its own window; got {status}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1676,50 +1446,30 @@ class TestModePriority:
 
     def test_down_skips_latency_responds_immediately(self, sim):
         """mode=down must return 503 without sleeping, even when latency_ms is set."""
-        _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "eth", "mode": "down", "latency_ms": 5000}}},
-        )
+        _set_eth(sim, "1", mode="down", latency_ms=5000)
         t0 = time.monotonic()
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
         elapsed_ms = (time.monotonic() - t0) * 1000
         assert elapsed_ms < 500, f"down mode should respond immediately, took {elapsed_ms:.0f}ms"
 
     def test_error_mode_always_errors_regardless_of_probability(self, sim):
         """mode=error must always return error even if error_probability=0.0."""
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {"chain_family": "eth", "mode": "error", "error_probability": 0.0}
-                }
-            },
-        )
+        _set_eth(sim, "1", mode="error", error_probability=0.0)
         for _ in range(5):
-            _, body = _rpc(sim["provider1"], "eth_blockNumber")
+            _, body = _rpc(_P1, "eth_blockNumber")
             assert "error" in body, "mode=error must always return error"
 
     def test_rate_limit_takes_priority_over_error_probability(self, sim):
         """mode=rate_limit must always return 429 even if error_probability=1.0."""
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {"chain_family": "eth", "mode": "rate_limit", "error_probability": 1.0}
-                }
-            },
-        )
+        _set_eth(sim, "1", mode="rate_limit", error_probability=1.0)
         for _ in range(3):
-            status, _ = _rpc(sim["provider1"], "eth_blockNumber")
+            status, _ = _rpc(_P1, "eth_blockNumber")
             assert status == 429, "mode=rate_limit must always return 429"
 
     def test_down_takes_priority_over_error_probability(self, sim):
         """mode=down must always return 503 regardless of error_probability."""
-        _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "eth", "mode": "down", "error_probability": 1.0}}},
-        )
-        status, _ = _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", mode="down", error_probability=1.0)
+        status, _ = _rpc(_P1, "eth_blockNumber")
         assert status == 503
 
 
@@ -1736,90 +1486,60 @@ class TestScenarioEdgeCases:
         assert status == 200
         _, scenario = _get(_ctrl(sim, "/scenario"))
         for pid in ("1", "2", "3"):
-            assert scenario["providers"][pid]["mode"] == "success"
+            assert scenario["providers"][f"eth-sim:{pid}"]["mode"] == "success"
 
-    def test_unknown_provider_id_returns_400(self, sim):
-        """Posting to a provider id this sim doesn't have (e.g. '99') is a typo.
+    def test_unknown_provider_address_returns_400(self, sim):
+        """Posting to a provider this sim doesn't have (eth-sim:99) is a typo.
         Reject it with a clean 400 — not a crash, and not a silent 200 that
         would let a test run green against an unconfigured provider — and leave
         the real providers untouched, so the rejection is atomic."""
         status, body = _post(
-            _ctrl(sim, "/scenario"), {"providers": {"99": {"chain_family": "eth", "mode": "error"}}}
+            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:99": {"mode": "error"}}}
         )
         assert status == 400
         assert "99" in body["error"]
         # real providers unchanged — the whole call was rejected, not partially applied
         _, scenario = _get(_ctrl(sim, "/scenario"))
         for pid in ("1", "2", "3"):
-            assert scenario["providers"][pid]["mode"] == "success"
+            assert scenario["providers"][f"eth-sim:{pid}"]["mode"] == "success"
 
     def test_all_three_providers_updated_in_one_call(self, sim):
         _post(
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {"chain_family": "eth", "mode": "error"},
-                    "2": {"chain_family": "eth", "mode": "rate_limit"},
-                    "3": {"chain_family": "eth", "mode": "down"},
+                    "eth-sim:1": {"mode": "error"},
+                    "eth-sim:2": {"mode": "rate_limit"},
+                    "eth-sim:3": {"mode": "down"},
                 }
             },
         )
         _, scenario = _get(_ctrl(sim, "/scenario"))
-        assert scenario["providers"]["1"]["mode"] == "error"
-        assert scenario["providers"]["2"]["mode"] == "rate_limit"
-        assert scenario["providers"]["3"]["mode"] == "down"
+        assert scenario["providers"]["eth-sim:1"]["mode"] == "error"
+        assert scenario["providers"]["eth-sim:2"]["mode"] == "rate_limit"
+        assert scenario["providers"]["eth-sim:3"]["mode"] == "down"
 
     def test_custom_responses_cleared_by_reset(self, sim):
         """POST /reset must wipe custom responses, not just mode/latency."""
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {
-                        "chain_family": "eth",
-                        "responses": {"eth_blockNumber": {"result": "0xCAFE"}},
-                    }
-                }
-            },
-        )
-        _, before = _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", responses={"eth_blockNumber": {"result": "0xCAFE"}})
+        _, before = _rpc(_P1, "eth_blockNumber")
         assert before["result"] == "0xCAFE"
 
         _post(_ctrl(sim, "/reset"), {})
-        _, after = _rpc(sim["provider1"], "eth_blockNumber")
+        _, after = _rpc(_P1, "eth_blockNumber")
         assert after["result"] != "0xCAFE", "custom response should be cleared by /reset"
 
     def test_custom_responses_cleared_by_reset_all(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "2": {
-                        "chain_family": "eth",
-                        "responses": {"eth_blockNumber": {"result": "0xDEAD"}},
-                    }
-                }
-            },
-        )
+        _set_eth(sim, "2", responses={"eth_blockNumber": {"result": "0xDEAD"}})
         _post(_ctrl(sim, "/reset/all"), {})
-        _, body = _rpc(sim["provider2"], "eth_blockNumber")
+        _, body = _rpc(_P2, "eth_blockNumber")
         assert body["result"] != "0xDEAD", "custom response should be cleared by /reset/all"
 
     def test_custom_responses_survive_history_clear(self, sim):
         """/history/clear must NOT touch scenario config — custom responses must persist."""
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "3": {
-                        "chain_family": "eth",
-                        "responses": {"eth_blockNumber": {"result": "0xBEEF"}},
-                    }
-                }
-            },
-        )
+        _set_eth(sim, "3", responses={"eth_blockNumber": {"result": "0xBEEF"}})
         _post(_ctrl(sim, "/history/clear"), {})
-        _, body = _rpc(sim["provider3"], "eth_blockNumber")
+        _, body = _rpc(_P3, "eth_blockNumber")
         assert body["result"] == "0xBEEF", "custom response must survive /history/clear"
 
 
@@ -1831,24 +1551,23 @@ class TestScenarioEdgeCases:
 class TestRingBufferRollover:
 
     def test_oldest_entry_is_dropped_when_buffer_full(self, sim, shrink_history):
-        """When the ring buffer is full, the oldest entry is replaced by the newest.
-
-        Pinned to MAX_FOR_OVERFLOW_TEST (MAG-1822) — the production HISTORY_MAX
-        default is now 2000, but the rollover behaviour is identical at any maxlen.
+        """When the ring buffer is full, the oldest entry is replaced by the
+        newest. Pinned to MAX_FOR_OVERFLOW_TEST — the production HISTORY_MAX
+        default is 2000, but the rollover behaviour is identical at any maxlen.
         """
         shrink_history("1")
 
         # fill the buffer exactly
         for i in range(MAX_FOR_OVERFLOW_TEST):
-            _rpc(sim["provider1"], "eth_blockNumber")
+            _rpc(_P1, "eth_blockNumber")
 
         # record the oldest ts currently in the buffer
-        _, hist_before = _get(_ctrl(sim, "/history?provider=1"))
+        _, hist_before = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1"))
         oldest_ts = hist_before["history"][0]["ts"]
 
         # push one more — oldest must be gone
-        _rpc(sim["provider1"], "eth_blockNumber")
-        _, hist_after = _get(_ctrl(sim, "/history?provider=1"))
+        _rpc(_P1, "eth_blockNumber")
+        _, hist_after = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1"))
 
         assert (
             hist_after["count"] == MAX_FOR_OVERFLOW_TEST
@@ -1858,20 +1577,16 @@ class TestRingBufferRollover:
         ), "oldest entry should have been dropped after overflow"
 
     def test_all_time_counter_survives_rollover(self, sim, shrink_history):
-        """total_requests_all_time must keep counting past the ring buffer cap.
-
-        Pinned to MAX_FOR_OVERFLOW_TEST (MAG-1822) — what we're verifying is the
-        invariant "ring caps, all-time counter does not", which holds at every maxlen.
-        """
+        """total_calls must keep counting past the ring buffer cap."""
         shrink_history("1")
 
         extra = 10
         for _ in range(MAX_FOR_OVERFLOW_TEST + extra):
-            _rpc(sim["provider1"], "eth_blockNumber")
+            _rpc(_P1, "eth_blockNumber")
 
         _, stats = _get(_ctrl(sim, "/stats"))
-        total = stats["providers"]["1"]["total_requests_all_time"]
-        ring = stats["providers"]["1"]["history_ring_buffer_entries"]
+        total = stats["providers"]["eth-sim:1"]["total_calls"]
+        ring = stats["providers"]["eth-sim:1"]["history_entries"]
 
         assert (
             total == MAX_FOR_OVERFLOW_TEST + extra
@@ -1881,25 +1596,21 @@ class TestRingBufferRollover:
         ), f"ring buffer should be capped at {MAX_FOR_OVERFLOW_TEST}, got {ring}"
 
     def test_newest_entry_always_survives_rollover(self, sim, shrink_history):
-        """The most recently pushed entry must always be present after rollover.
-
-        Pinned to MAX_FOR_OVERFLOW_TEST (MAG-1822). The rollover semantics are
-        deque's, not ours — verifying them at 200 is enough.
-        """
+        """The most recently pushed entry must always be present after rollover."""
         shrink_history("1")
 
         for _ in range(MAX_FOR_OVERFLOW_TEST + 5):
-            _rpc(sim["provider1"], "eth_blockNumber")
+            _rpc(_P1, "eth_blockNumber")
 
         # push a unique method as the very last call
-        _rpc(sim["provider1"], "eth_gasPrice")
+        _rpc(_P1, "eth_gasPrice")
 
-        _, hist = _get(_ctrl(sim, "/history?provider=1&method=eth_gasPrice"))
+        _, hist = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1&method=eth_gasPrice"))
         assert hist["count"] == 1, "the most recent entry must always survive in the ring buffer"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MAG-1822 — HISTORY_MAX is env-driven (SIM_HISTORY_MAX)
+# HISTORY_MAX is env-driven (SIM_HISTORY_MAX)
 # ─────────────────────────────────────────────────────────────────────────────
 #
 # constants.HISTORY_MAX is read once at module import via
@@ -1909,7 +1620,7 @@ class TestRingBufferRollover:
 # the running test simulator was built around the original HISTORY_MAX import
 # and is not disturbed because we restore env state in the finally clause.
 
-import importlib  # noqa: E402  (placed near tests it serves to keep blast radius local)
+import importlib  # noqa: E402  (placed near the tests it serves)
 
 
 class TestHistoryMaxEnvConfig:
@@ -1921,7 +1632,7 @@ class TestHistoryMaxEnvConfig:
         return constants
 
     def test_history_max_defaults_to_2000_when_env_unset(self, monkeypatch):
-        """No SIM_HISTORY_MAX in env → HISTORY_MAX falls back to 2000 (MAG-1822 default)."""
+        """No SIM_HISTORY_MAX in env → HISTORY_MAX falls back to 2000."""
         monkeypatch.delenv("SIM_HISTORY_MAX", raising=False)
         constants = self._reload_constants()
         try:
@@ -1950,7 +1661,7 @@ class TestHistoryMaxEnvConfig:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MAG-1822 — /history?max=N tail-slice filter
+# /history?max=N tail-slice filter
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -1958,9 +1669,9 @@ class TestHistoryMaxQueryParam:
 
     def test_max_zero_returns_empty_list(self, sim):
         """?max=0 returns an empty history (documented edge case, not 400)."""
-        _rpc(sim["provider1"], "eth_blockNumber")
-        _rpc(sim["provider1"], "eth_blockNumber")
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
         status, body = _get(_ctrl(sim, "/history?max=0"))
         assert status == 200
         assert body["count"] == 0
@@ -1970,18 +1681,18 @@ class TestHistoryMaxQueryParam:
         """?max=-1 is a client error — caller must fix the request."""
         status, body = _get(_ctrl(sim, "/history?max=-1"))
         assert status == 400
-        assert body["error"] == "invalid_max"
+        assert "max" in body["error"]
 
     def test_max_non_integer_returns_400(self, sim):
         """?max=abc is malformed input — refuse with a clear error message."""
         status, body = _get(_ctrl(sim, "/history?max=abc"))
         assert status == 400
-        assert body["error"] == "invalid_max"
+        assert "max" in body["error"]
 
     def test_max_returns_at_most_n_entries(self, sim):
         """?max=N caps the response at N entries."""
         for _ in range(20):
-            _rpc(sim["provider1"], "eth_blockNumber")
+            _rpc(_P1, "eth_blockNumber")
         status, body = _get(_ctrl(sim, "/history?max=5"))
         assert status == 200
         assert body["count"] == 5
@@ -1991,7 +1702,7 @@ class TestHistoryMaxQueryParam:
         """?max=N returns the TAIL — the most recent calls, not the oldest."""
         for i in range(10):
             _post(
-                sim["provider1"],
+                _P1,
                 {
                     "jsonrpc": "2.0",
                     "id": i,
@@ -2014,7 +1725,7 @@ class TestHistoryMaxQueryParam:
         not 1..N of the sliced result. Anchors a sliced response back to the
         full history for the caller."""
         for i in range(10):
-            _rpc(sim["provider1"], "eth_blockNumber")
+            _rpc(_P1, "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/history?max=3"))
         orders = [e["call_order"] for e in body["history"]]
         assert orders == [
@@ -2023,21 +1734,21 @@ class TestHistoryMaxQueryParam:
             10,
         ], f"call_order should be the tail of the full timeline, got {orders}"
 
-    def test_max_combinable_with_provider_filter(self, sim):
-        """?max= composes with the existing ?provider= filter — applied after it."""
+    def test_max_combinable_with_pid_filter(self, sim):
+        """?max= composes with the ?pool=/?pid= filters — applied after them."""
         for _ in range(5):
-            _rpc(sim["provider1"], "eth_blockNumber")
+            _rpc(_P1, "eth_blockNumber")
         for _ in range(5):
-            _rpc(sim["provider2"], "eth_blockNumber")
-        _, body = _get(_ctrl(sim, "/history?provider=2&max=2"))
+            _rpc(_P2, "eth_blockNumber")
+        _, body = _get(_ctrl(sim, "/history?pool=eth-sim&pid=2&max=2"))
         assert body["count"] == 2
-        assert all(e["provider"] == "2" for e in body["history"])
+        assert all(e["pid"] == "2" for e in body["history"])
 
     def test_no_max_returns_all_entries(self, sim):
         """When ?max= is absent the response is unbounded (up to HISTORY_MAX).
         Asserts the filter is opt-in — existing callers see no behaviour change."""
         for _ in range(15):
-            _rpc(sim["provider1"], "eth_blockNumber")
+            _rpc(_P1, "eth_blockNumber")
         _, body = _get(_ctrl(sim, "/history"))
         assert body["count"] == 15
 
@@ -2094,7 +1805,7 @@ class TestConcurrency:
         results = []
 
         def call():
-            status, body = _rpc(sim["provider1"], "eth_blockNumber")
+            status, body = _rpc(_P1, "eth_blockNumber")
             results.append(status)
 
         threads = [threading.Thread(target=call) for _ in range(n)]
@@ -2105,7 +1816,7 @@ class TestConcurrency:
 
         assert all(s == 200 for s in results), f"some concurrent requests failed: {results}"
 
-        _, hist = _get(_ctrl(sim, "/history?provider=1"))
+        _, hist = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1"))
         assert hist["count"] == n, f"expected {n} history entries, got {hist['count']}"
 
     def test_concurrent_requests_to_different_providers(self, sim):
@@ -2118,8 +1829,8 @@ class TestConcurrency:
             results.append(status)
 
         threads = [
-            threading.Thread(target=call, args=(sim[f"provider{p}"],))
-            for p in (1, 2, 3)
+            threading.Thread(target=call, args=(url,))
+            for url in (_P1, _P2, _P3)
             for _ in range(n_per_provider)
         ]
         for t in threads:
@@ -2141,16 +1852,13 @@ class TestConcurrency:
         def spam():
             for _ in range(10):
                 try:
-                    _rpc(sim["provider1"], "eth_blockNumber")
+                    _rpc(_P1, "eth_blockNumber")
                 except Exception as e:
                     errors.append(str(e))
 
         def flip():
             for mode in ("success", "error", "success", "error", "success"):
-                _post(
-                    _ctrl(sim, "/scenario"),
-                    {"providers": {"1": {"chain_family": "eth", "mode": mode}}},
-                )
+                _set_eth(sim, "1", mode=mode)
                 time.sleep(0.01)
 
         t1 = threading.Thread(target=spam)
@@ -2168,14 +1876,14 @@ class TestConcurrency:
         The ring-buffer deque and counters are protected by a per-provider lock.
         This test races 20 rapid RPC calls against repeated clears to confirm
         no exception is raised and the final state is internally consistent
-        (history_ring_buffer_entries <= total_requests_all_time).
+        (history_entries <= total_calls).
         """
         errors = []
 
         def spam():
             for _ in range(20):
                 try:
-                    _rpc(sim["provider2"], "eth_blockNumber")
+                    _rpc(_P2, "eth_blockNumber")
                 except Exception as e:
                     errors.append(str(e))
 
@@ -2198,10 +1906,10 @@ class TestConcurrency:
 
         # Structural integrity check: ring entries can never exceed total calls
         _, stats = _get(_ctrl(sim, "/stats"))
-        p = stats["providers"]["2"]
-        assert p["history_ring_buffer_entries"] <= p["total_requests_all_time"], (
-            f"ring entries ({p['history_ring_buffer_entries']}) > "
-            f"total calls ({p['total_requests_all_time']}) — state corrupted"
+        p = stats["providers"]["eth-sim:2"]
+        assert p["history_entries"] <= p["total_calls"], (
+            f"ring entries ({p['history_entries']}) > "
+            f"total calls ({p['total_calls']}) — state corrupted"
         )
 
 
@@ -2216,39 +1924,39 @@ class TestStatsEdgeCases:
         """After reset/all, stats must show zero for all providers."""
         _, stats = _get(_ctrl(sim, "/stats"))
         for pid in ("1", "2", "3"):
-            p = stats["providers"][pid]
-            assert p["total_requests_all_time"] == 0
-            assert p["requests_by_status_all_time"] == {}
-            assert p["history_ring_buffer_entries"] == 0
+            p = stats["providers"][f"eth-sim:{pid}"]
+            assert p["total_calls"] == 0
+            assert p["calls_by_status"] == {}
+            assert p["history_entries"] == 0
 
     def test_ring_buffer_entries_drop_to_zero_after_clear(self, sim):
-        """history_ring_buffer_entries in /stats must be 0 after /history/clear."""
-        _rpc(sim["provider1"], "eth_blockNumber")
-        _rpc(sim["provider2"], "eth_blockNumber")
+        """history_entries in /stats must be 0 after /history/clear."""
+        _rpc(_P1, "eth_blockNumber")
+        _rpc(_P2, "eth_blockNumber")
 
         _, before = _get(_ctrl(sim, "/stats"))
-        assert before["providers"]["1"]["history_ring_buffer_entries"] >= 1
+        assert before["providers"]["eth-sim:1"]["history_entries"] >= 1
 
         _post(_ctrl(sim, "/history/clear"), {})
 
         _, after = _get(_ctrl(sim, "/stats"))
         for pid in ("1", "2", "3"):
             assert (
-                after["providers"][pid]["history_ring_buffer_entries"] == 0
-            ), f"ring buffer entries for provider {pid} should be 0 after clear"
+                after["providers"][f"eth-sim:{pid}"]["history_entries"] == 0
+            ), f"ring buffer entries for eth-sim:{pid} should be 0 after clear"
 
     def test_stats_not_affected_by_reset_scenario_only(self, sim):
         """/reset must NOT zero stats counters — only /history/clear does that."""
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
         _post(_ctrl(sim, "/reset"), {})
         _, stats = _get(_ctrl(sim, "/stats"))
         assert (
-            stats["providers"]["1"]["total_requests_all_time"] >= 1
+            stats["providers"]["eth-sim:1"]["total_calls"] >= 1
         ), "/reset must not touch all-time counters"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Feature 1: Lava Headers Capture
+# Lava headers capture
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -2258,7 +1966,7 @@ class TestLavaHeadersCapture:
     def test_lava_headers_field_exists_in_history_entries(self, sim):
         """Every history entry must have a lava_headers field (dict, never None)."""
         _post(_ctrl(sim, "/history/clear"), {})
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
 
         _, hist = _get(_ctrl(sim, "/history?last=60"))
         assert len(hist["history"]) >= 1
@@ -2270,7 +1978,7 @@ class TestLavaHeadersCapture:
         """lava_headers dict is empty {} when router sends no lava-* headers."""
         _post(_ctrl(sim, "/history/clear"), {})
         # Direct HTTP POST with no lava headers
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
 
         _, hist = _get(_ctrl(sim, "/history?last=60"))
         entry = hist["history"][0]
@@ -2282,10 +1990,8 @@ class TestLavaHeadersCapture:
 
         for mode in modes:
             _post(_ctrl(sim, "/history/clear"), {})
-            _post(
-                _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": mode}}}
-            )
-            _rpc(sim["provider1"], "eth_blockNumber")
+            _set_eth(sim, "1", mode=mode)
+            _rpc(_P1, "eth_blockNumber")
 
             _, hist = _get(_ctrl(sim, "/history?last=60"))
             assert len(hist["history"]) >= 1
@@ -2296,9 +2002,9 @@ class TestLavaHeadersCapture:
     def test_lava_headers_field_independent_per_provider(self, sim):
         """Each provider's history has independent lava_headers."""
         _post(_ctrl(sim, "/history/clear"), {})
-        _rpc(sim["provider1"], "eth_blockNumber")
-        _rpc(sim["provider2"], "eth_blockNumber")
-        _rpc(sim["provider3"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
+        _rpc(_P2, "eth_blockNumber")
+        _rpc(_P3, "eth_blockNumber")
 
         _, hist = _get(_ctrl(sim, "/history?last=60"))
         assert len(hist["history"]) >= 3
@@ -2309,7 +2015,7 @@ class TestLavaHeadersCapture:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Feature 2: Correlation Group
+# Correlation group
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -2319,7 +2025,7 @@ class TestCorrelationGroup:
     def test_correlation_group_field_exists_in_history_entries(self, sim):
         """Every history entry must have a correlation_group field (int)."""
         _post(_ctrl(sim, "/history/clear"), {})
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
 
         _, hist = _get(_ctrl(sim, "/history?last=60"))
         assert len(hist["history"]) >= 1
@@ -2330,7 +2036,7 @@ class TestCorrelationGroup:
     def test_correlation_group_starts_at_1(self, sim):
         """First history entry gets correlation_group = 1."""
         _post(_ctrl(sim, "/history/clear"), {})
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
 
         _, hist = _get(_ctrl(sim, "/history?last=60"))
         entry = hist["history"][0]
@@ -2341,16 +2047,10 @@ class TestCorrelationGroup:
         _post(_ctrl(sim, "/history/clear"), {})
 
         # Send call to provider 1
-        _post(
-            sim["provider1"],
-            {"jsonrpc": "2.0", "id": 42, "method": "eth_blockNumber", "params": []},
-        )
+        _post(_P1, {"jsonrpc": "2.0", "id": 42, "method": "eth_blockNumber", "params": []})
 
         # Immediately send to provider 2 (within 50ms)
-        _post(
-            sim["provider2"],
-            {"jsonrpc": "2.0", "id": 42, "method": "eth_blockNumber", "params": []},
-        )
+        _post(_P2, {"jsonrpc": "2.0", "id": 42, "method": "eth_blockNumber", "params": []})
 
         _, hist = _get(_ctrl(sim, "/history?last=60&method=eth_blockNumber"))
         entries = [e for e in hist["history"] if e["request_id"] == 42]
@@ -2367,15 +2067,8 @@ class TestCorrelationGroup:
         """Requests with different request_ids get different correlation_groups."""
         _post(_ctrl(sim, "/history/clear"), {})
 
-        _post(
-            sim["provider1"],
-            {"jsonrpc": "2.0", "id": 100, "method": "eth_blockNumber", "params": []},
-        )
-
-        _post(
-            sim["provider1"],
-            {"jsonrpc": "2.0", "id": 101, "method": "eth_blockNumber", "params": []},
-        )
+        _post(_P1, {"jsonrpc": "2.0", "id": 100, "method": "eth_blockNumber", "params": []})
+        _post(_P1, {"jsonrpc": "2.0", "id": 101, "method": "eth_blockNumber", "params": []})
 
         _, hist = _get(_ctrl(sim, "/history?last=60&method=eth_blockNumber"))
         entries = sorted(hist["history"], key=lambda e: e["ts"])
@@ -2390,14 +2083,8 @@ class TestCorrelationGroup:
         """Calls with same request_id but different methods don't share correlation_group."""
         _post(_ctrl(sim, "/history/clear"), {})
 
-        _post(
-            sim["provider1"],
-            {"jsonrpc": "2.0", "id": 42, "method": "eth_blockNumber", "params": []},
-        )
-
-        _post(
-            sim["provider1"], {"jsonrpc": "2.0", "id": 42, "method": "eth_gasPrice", "params": []}
-        )
+        _post(_P1, {"jsonrpc": "2.0", "id": 42, "method": "eth_blockNumber", "params": []})
+        _post(_P1, {"jsonrpc": "2.0", "id": 42, "method": "eth_gasPrice", "params": []})
 
         _, hist = _get(_ctrl(sim, "/history?last=60"))
         entries = [e for e in hist["history"] if e["request_id"] == 42]
@@ -2413,12 +2100,12 @@ class TestCorrelationGroup:
         ), "different methods should have different correlation_groups"
 
     def test_correlation_group_survives_filter_operations(self, sim):
-        """correlation_group field survives filtering by provider/method/status."""
+        """correlation_group field survives filtering by pool/pid/method/status."""
         _post(_ctrl(sim, "/history/clear"), {})
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
 
         # Test with various filters
-        _, hist1 = _get(_ctrl(sim, "/history?last=60&provider=1"))
+        _, hist1 = _get(_ctrl(sim, "/history?last=60&pool=eth-sim&pid=1"))
         _, hist2 = _get(_ctrl(sim, "/history?last=60&method=eth_blockNumber"))
         _, hist3 = _get(_ctrl(sim, "/history?last=60&status=success"))
 
@@ -2428,39 +2115,45 @@ class TestCorrelationGroup:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Feature 3: Lava Headers Filter
+# Lava headers filter
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 class TestLavaHeadersFilter:
-    """Verify that GET /history supports filtering by lava_header_* query params."""
+    """GET /history supports filtering by lava_header_<header-name> query
+    params — the name after the prefix is the header name verbatim (dashes
+    included)."""
 
     def test_lava_header_filter_param_syntax(self, sim):
         """Query param ?lava_header_X=Y is accepted (doesn't cause 404)."""
         _post(_ctrl(sim, "/history/clear"), {})
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
 
         # Query with lava_header filter should not 404
-        status, hist = _get(_ctrl(sim, "/history?last=60&lava_header_lava_stateful_api=true"))
+        status, hist = _get(_ctrl(sim, "/history?last=60&lava_header_lava-stateful-api=true"))
         assert status == 200, f"lava_header filter should return 200, got {status}"
         assert "history" in hist, "response should have history field"
 
-    def test_lava_header_filter_converts_underscores_to_hyphens(self, sim):
-        """Query param lava_header_lava_stateful_api becomes lava-stateful-api."""
-        # This test verifies the parameter parsing logic
-        # The simulator accepts the param without error (syntax valid)
+    def test_lava_header_filter_matches_sent_header(self, sim):
+        """A request that DID carry the lava header is matched by the filter."""
         _post(_ctrl(sim, "/history/clear"), {})
-        _rpc(sim["provider1"], "eth_blockNumber")
-
-        status, hist = _get(_ctrl(sim, "/history?last=60&lava_header_lava_stateful_api=true"))
-        assert status == 200
+        _post(
+            _P1,
+            {"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []},
+            headers={"lava-stateful-api": "true"},
+        )
+        _, hist = _get(_ctrl(sim, "/history?last=60&lava_header_lava-stateful-api=true"))
+        assert hist["count"] == 1
+        # The recorded key keeps the client's wire casing; compare lowercased.
+        recorded = {k.lower(): v for k, v in hist["history"][0]["lava_headers"].items()}
+        assert recorded.get("lava-stateful-api") == "true"
 
     def test_lava_header_filter_empty_when_no_match(self, sim):
         """Filtering for lava-header that wasn't sent returns empty history."""
         _post(_ctrl(sim, "/history/clear"), {})
-        _rpc(sim["provider1"], "eth_blockNumber")  # No lava headers sent
+        _rpc(_P1, "eth_blockNumber")  # No lava headers sent
 
-        _, hist = _get(_ctrl(sim, "/history?last=60&lava_header_lava_stateful_api=true"))
+        _, hist = _get(_ctrl(sim, "/history?last=60&lava_header_lava-stateful-api=true"))
         # Should be empty because no headers matched
         assert hist["count"] == 0, "filtering for non-existent header should return empty"
         assert hist["history"] == [], "history should be empty list"
@@ -2468,26 +2161,26 @@ class TestLavaHeadersFilter:
     def test_lava_header_filter_returns_matching_entries(self, sim):
         """When entries have matching lava headers, they appear in filtered results."""
         _post(_ctrl(sim, "/history/clear"), {})
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
 
         _, hist_all = _get(_ctrl(sim, "/history?last=60"))
         # All entries have empty lava_headers since we didn't send any
         assert hist_all["count"] >= 1
 
         # Filtering for a header that doesn't exist returns 0
-        _, hist_filtered = _get(_ctrl(sim, "/history?last=60&lava_header_lava_stateful_api=true"))
+        _, hist_filtered = _get(_ctrl(sim, "/history?last=60&lava_header_lava-stateful-api=true"))
         assert hist_filtered["count"] == 0
 
     def test_multiple_lava_header_filters_use_and_logic(self, sim):
         """Multiple lava_header filters are combined with AND (all must match)."""
         _post(_ctrl(sim, "/history/clear"), {})
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
 
         # Multiple filters combined
         status, hist = _get(
             _ctrl(
                 sim,
-                "/history?last=60&lava_header_lava_stateful_api=true&lava_header_lava_user_request_type=broadcast",
+                "/history?last=60&lava_header_lava-stateful-api=true&lava_header_lava-user-request-type=broadcast",
             )
         )
         assert status == 200
@@ -2495,16 +2188,16 @@ class TestLavaHeadersFilter:
         assert hist["count"] == 0
 
     def test_lava_header_filter_combines_with_existing_filters(self, sim):
-        """lava_header filters work alongside provider/method/status filters."""
+        """lava_header filters work alongside pool/pid/method/status filters."""
         _post(_ctrl(sim, "/history/clear"), {})
-        _rpc(sim["provider1"], "eth_blockNumber")
-        _rpc(sim["provider2"], "eth_gasPrice")
+        _rpc(_P1, "eth_blockNumber")
+        _rpc(_P2, "eth_gasPrice")
 
-        # Combine lava_header filter with provider and method filters
+        # Combine lava_header filter with pid and method filters
         status, hist = _get(
             _ctrl(
                 sim,
-                "/history?last=60&provider=1&method=eth_blockNumber&lava_header_lava_stateful_api=true",
+                "/history?last=60&pool=eth-sim&pid=1&method=eth_blockNumber&lava_header_lava-stateful-api=true",
             )
         )
         assert status == 200
@@ -2512,20 +2205,22 @@ class TestLavaHeadersFilter:
         assert hist["count"] == 0
 
         # But without the lava_header filter, we should get the entries
-        status, hist = _get(_ctrl(sim, "/history?last=60&provider=1&method=eth_blockNumber"))
+        status, hist = _get(
+            _ctrl(sim, "/history?last=60&pool=eth-sim&pid=1&method=eth_blockNumber")
+        )
         assert status == 200
         assert hist["count"] >= 1
 
     def test_lava_header_filter_survives_other_query_params(self, sim):
-        """lava_header filters don't interfere with last/from/to/provider/method/status."""
+        """lava_header filters don't interfere with last/from/to/pool/pid/method/status."""
         _post(_ctrl(sim, "/history/clear"), {})
-        _rpc(sim["provider1"], "eth_blockNumber")
+        _rpc(_P1, "eth_blockNumber")
 
         # Complex query with multiple filter types
         status, hist = _get(
             _ctrl(
                 sim,
-                "/history?last=60&provider=1&method=eth_blockNumber&status=success&lava_header_lava_test=value",
+                "/history?last=60&pool=eth-sim&pid=1&method=eth_blockNumber&status=success&lava_header_lava-test=value",
             )
         )
         assert status == 200
@@ -2539,46 +2234,27 @@ class TestLavaHeadersFilter:
 
 
 class TestHttpStatusInSuccessMode:
-    """The http_status field used to be honored only when mode='error'.
-    Now it applies in success mode too — provider returns the custom HTTP
-    status code with a valid JSON-RPC success body."""
+    """http_status applies in success mode too — the provider returns the
+    custom HTTP status code with a valid JSON-RPC success body."""
 
     def test_success_mode_with_custom_http_status(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "eth", "mode": "success", "http_status": 502}}},
-        )
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", mode="success", http_status=502)
+        status, body = _rpc(_P1, "eth_blockNumber")
         assert status == 502, f"expected HTTP 502, got {status}"
         assert "result" in body, f"expected JSON-RPC success body, got {body}"
         assert "error" not in body
 
     def test_success_mode_default_http_status_is_200(self, sim):
         # Regression: default http_status=200 must continue to apply in success mode
-        _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "eth", "mode": "success"}}},
-        )
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", mode="success")
+        status, body = _rpc(_P1, "eth_blockNumber")
         assert status == 200
         assert "result" in body
 
     def test_error_mode_still_honors_http_status(self, sim):
         # Regression: existing behaviour (http_status in error mode) still works
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {
-                        "chain_family": "eth",
-                        "mode": "error",
-                        "http_status": 500,
-                        "error_code": -32603,
-                    }
-                }
-            },
-        )
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", mode="error", http_status=500, error_code=-32603)
+        status, body = _rpc(_P1, "eth_blockNumber")
         assert status == 500
         assert body["error"]["code"] == -32603
 
@@ -2601,17 +2277,10 @@ class TestCorruptionMode:
     """
 
     def test_truncated_corrupts_json(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {"chain_family": "eth", "mode": "success", "corruption_mode": "truncated"}
-                }
-            },
-        )
+        _set_eth(sim, "1", mode="success", corruption_mode="truncated")
         # Use raw urllib because _rpc parses JSON which would fail on truncated
         req = urllib.request.Request(
-            sim["provider1"],
+            _P1,
             data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}',
             headers={"Content-Type": "application/json"},
         )
@@ -2625,40 +2294,17 @@ class TestCorruptionMode:
             pass  # expected
 
     def test_missing_field_omits_specified_top_level_field(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {
-                        "chain_family": "eth",
-                        "mode": "success",
-                        "corruption_mode": "missing_field",
-                        "missing_field": "result",
-                    }
-                }
-            },
-        )
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", mode="success", corruption_mode="missing_field", missing_field="result")
+        status, body = _rpc(_P1, "eth_blockNumber")
         assert status == 200
         assert "result" not in body, f"expected 'result' missing, got {body}"
         assert "jsonrpc" in body  # untouched
         assert "id" in body
 
     def test_invalid_json_returns_garbage(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {
-                        "chain_family": "eth",
-                        "mode": "success",
-                        "corruption_mode": "invalid_json",
-                    }
-                }
-            },
-        )
+        _set_eth(sim, "1", mode="success", corruption_mode="invalid_json")
         req = urllib.request.Request(
-            sim["provider1"],
+            _P1,
             data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}',
             headers={"Content-Type": "application/json"},
         )
@@ -2671,20 +2317,9 @@ class TestCorruptionMode:
             pass
 
     def test_empty_response_returns_no_body(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {
-                        "chain_family": "eth",
-                        "mode": "success",
-                        "corruption_mode": "empty_response",
-                    }
-                }
-            },
-        )
+        _set_eth(sim, "1", mode="success", corruption_mode="empty_response")
         req = urllib.request.Request(
-            sim["provider1"],
+            _P1,
             data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}',
             headers={"Content-Type": "application/json"},
         )
@@ -2694,26 +2329,16 @@ class TestCorruptionMode:
 
     def test_default_corruption_mode_is_none(self, sim):
         # Regression: default behaviour unchanged when corruption_mode is unset
-        _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "eth", "mode": "success"}}},
-        )
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", mode="success")
+        status, body = _rpc(_P1, "eth_blockNumber")
         assert status == 200
         assert "result" in body
 
     def test_wrong_type_default_target_is_result_string_to_int(self, sim):
         # eth_blockNumber returns result as a hex string (e.g. "0x1234"); wrong_type
         # should flip it to an int. Default target field is "result".
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {"chain_family": "eth", "mode": "success", "corruption_mode": "wrong_type"}
-                }
-            },
-        )
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", mode="success", corruption_mode="wrong_type")
+        status, body = _rpc(_P1, "eth_blockNumber")
         assert status == 200
         assert "result" in body, f"result field should remain present, got {body}"
         assert isinstance(body["result"], int), (
@@ -2725,20 +2350,8 @@ class TestCorruptionMode:
         # missing_field slot is reused as the "which field to corrupt" target.
         # Here we corrupt the "id" field, which is normally an int — should
         # flip to a string.
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {
-                        "chain_family": "eth",
-                        "mode": "success",
-                        "corruption_mode": "wrong_type",
-                        "missing_field": "id",
-                    }
-                }
-            },
-        )
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", mode="success", corruption_mode="wrong_type", missing_field="id")
+        status, body = _rpc(_P1, "eth_blockNumber")
         assert status == 200
         assert "id" in body
         assert isinstance(body["id"], str), (
@@ -2748,20 +2361,10 @@ class TestCorruptionMode:
     def test_wrong_type_missing_target_field_is_noop(self, sim):
         # If the configured target field isn't present on the response, the
         # response shape is left alone (no crash, no other fields touched).
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {
-                        "chain_family": "eth",
-                        "mode": "success",
-                        "corruption_mode": "wrong_type",
-                        "missing_field": "no_such_field",
-                    }
-                }
-            },
+        _set_eth(
+            sim, "1", mode="success", corruption_mode="wrong_type", missing_field="no_such_field"
         )
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        status, body = _rpc(_P1, "eth_blockNumber")
         assert status == 200
         assert "result" in body
         assert isinstance(body["result"], str), (
@@ -2784,32 +2387,23 @@ class TestBlocksBehind:
     HEAD = int("0x1312D00", 16)  # 20,000,000 — the simulator's default eth_blockNumber
 
     def test_blocks_behind_shifts_eth_blockNumber(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "eth", "mode": "success", "blocks_behind": 100}}},
-        )
-        _, body = _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", mode="success", blocks_behind=100)
+        _, body = _rpc(_P1, "eth_blockNumber")
         assert int(body["result"], 16) == self.HEAD - 100
 
     def test_blocks_ahead_via_negative_value(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "eth", "mode": "success", "blocks_behind": -50}}},
-        )
-        _, body = _rpc(sim["provider1"], "eth_blockNumber")
+        _set_eth(sim, "1", mode="success", blocks_behind=-50)
+        _, body = _rpc(_P1, "eth_blockNumber")
         assert int(body["result"], 16) == self.HEAD + 50
 
     def test_default_blocks_behind_is_zero(self, sim):
         # Regression: default behaviour returns the canonical head
-        _, body = _rpc(sim["provider1"], "eth_blockNumber")
+        _, body = _rpc(_P1, "eth_blockNumber")
         assert body["result"] == "0x1312D00"
 
     def test_eth_get_block_by_number_latest_respects_blocks_behind(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "eth", "mode": "success", "blocks_behind": 25}}},
-        )
-        _, body = _rpc(sim["provider1"], "eth_getBlockByNumber", ["latest", False])
+        _set_eth(sim, "1", mode="success", blocks_behind=25)
+        _, body = _rpc(_P1, "eth_getBlockByNumber", ["latest", False])
         assert int(body["result"]["number"], 16) == self.HEAD - 25
 
     def test_per_provider_disagreement(self, sim):
@@ -2818,15 +2412,15 @@ class TestBlocksBehind:
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {"chain_family": "eth", "mode": "success", "blocks_behind": 0},
-                    "2": {"chain_family": "eth", "mode": "success", "blocks_behind": 5},
-                    "3": {"chain_family": "eth", "mode": "success", "blocks_behind": 100},
+                    "eth-sim:1": {"mode": "success", "blocks_behind": 0},
+                    "eth-sim:2": {"mode": "success", "blocks_behind": 5},
+                    "eth-sim:3": {"mode": "success", "blocks_behind": 100},
                 }
             },
         )
-        _, b1 = _rpc(sim["provider1"], "eth_blockNumber")
-        _, b2 = _rpc(sim["provider2"], "eth_blockNumber")
-        _, b3 = _rpc(sim["provider3"], "eth_blockNumber")
+        _, b1 = _rpc(_P1, "eth_blockNumber")
+        _, b2 = _rpc(_P2, "eth_blockNumber")
+        _, b3 = _rpc(_P3, "eth_blockNumber")
         assert int(b1["result"], 16) == self.HEAD
         assert int(b2["result"], 16) == self.HEAD - 5
         assert int(b3["result"], 16) == self.HEAD - 100
@@ -2836,8 +2430,6 @@ class TestBlocksBehind:
 # hang mode: accept request, never respond (forces router timeout)
 # ─────────────────────────────────────────────────────────────────────────────
 
-import socket as _socket  # for timeout exception type
-
 
 class TestHangMode:
     """mode='hang' accepts the TCP connection and the request body but never
@@ -2845,12 +2437,10 @@ class TestHangMode:
     side it looks like a request that exceeds the read timeout."""
 
     def test_hang_blocks_until_client_timeout(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "hang"}}}
-        )
+        _set_eth(sim, "1", mode="hang")
         # Client sets a small read timeout — should hit it because server hangs
         req = urllib.request.Request(
-            sim["provider1"],
+            _P1,
             data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}',
             headers={"Content-Type": "application/json"},
         )
@@ -2858,27 +2448,25 @@ class TestHangMode:
         try:
             urllib.request.urlopen(req, timeout=1.0)  # 1 second client timeout
             assert False, "expected timeout, server responded"
-        except (urllib.error.URLError, _socket.timeout, TimeoutError):
+        except (urllib.error.URLError, socket.timeout, TimeoutError):
             elapsed = time.monotonic() - t0
             assert elapsed >= 0.9, f"expected ~1s timeout, elapsed {elapsed:.2f}s"
             assert elapsed < 3.0, f"timeout took longer than client config: {elapsed:.2f}s"
 
     def test_hang_records_in_history(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "hang"}}}
-        )
+        _set_eth(sim, "1", mode="hang")
         req = urllib.request.Request(
-            sim["provider1"],
+            _P1,
             data=b'{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}',
             headers={"Content-Type": "application/json"},
         )
         try:
             urllib.request.urlopen(req, timeout=0.5)
-        except (urllib.error.URLError, _socket.timeout, TimeoutError):
+        except (urllib.error.URLError, socket.timeout, TimeoutError):
             pass
         # Allow time for the server to record the call in history
         time.sleep(0.2)
-        _, history = _get(_ctrl(sim, "/history?provider=1"))
+        _, history = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1"))
         # We expect at least one entry recording the hang attempt
         entries = history.get("history", [])
         statuses = {e["status"] for e in entries}
@@ -2917,19 +2505,8 @@ class TestDropConnection:
             return type(exc).__name__
 
     def test_drop_before_headers_no_response(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {
-                        "chain_family": "eth",
-                        "mode": "drop_connection",
-                        "drop_at": "before_headers",
-                    }
-                }
-            },
-        )
-        result = self._send_and_capture_error(sim["provider1"])
+        _set_eth(sim, "1", mode="drop_connection", drop_at="before_headers")
+        result = self._send_and_capture_error(_P1)
         assert result != "OK", "expected error from connection drop, got valid response"
         # Common manifestations: RemoteDisconnected, BadStatusLine, URLError, ConnectionResetError
         assert any(
@@ -2944,19 +2521,8 @@ class TestDropConnection:
         ), f"unexpected error class for before_headers drop: {result}"
 
     def test_drop_after_headers_incomplete_read(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {
-                        "chain_family": "eth",
-                        "mode": "drop_connection",
-                        "drop_at": "after_headers",
-                    }
-                }
-            },
-        )
-        result = self._send_and_capture_error(sim["provider1"])
+        _set_eth(sim, "1", mode="drop_connection", drop_at="after_headers")
+        result = self._send_and_capture_error(_P1)
         assert result != "OK", "expected error from connection drop, got valid response"
         # Should manifest as IncompleteRead or similar (we sent headers + 0 bytes of body)
         assert any(
@@ -2972,42 +2538,21 @@ class TestDropConnection:
         ), f"unexpected error class for after_headers drop: {result}"
 
     def test_drop_mid_body_truncated(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {"chain_family": "eth", "mode": "drop_connection", "drop_at": "mid_body"}
-                }
-            },
-        )
-        result = self._send_and_capture_error(sim["provider1"])
+        _set_eth(sim, "1", mode="drop_connection", drop_at="mid_body")
+        result = self._send_and_capture_error(_P1)
         assert result != "OK", "expected error from connection drop, got valid response"
 
     def test_drop_default_at_is_before_headers(self, sim):
         # When drop_at is unset, default to before_headers (most disruptive)
-        _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "eth", "mode": "drop_connection"}}},
-        )
-        result = self._send_and_capture_error(sim["provider1"])
+        _set_eth(sim, "1", mode="drop_connection")
+        result = self._send_and_capture_error(_P1)
         assert result != "OK"
 
     def test_drop_records_in_history(self, sim):
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {
-                        "chain_family": "eth",
-                        "mode": "drop_connection",
-                        "drop_at": "before_headers",
-                    }
-                }
-            },
-        )
-        self._send_and_capture_error(sim["provider1"])
+        _set_eth(sim, "1", mode="drop_connection", drop_at="before_headers")
+        self._send_and_capture_error(_P1)
         time.sleep(0.1)  # let the server flush history
-        _, history = _get(_ctrl(sim, "/history?provider=1"))
+        _, history = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1"))
         entries = history.get("history", [])
         statuses = {e["status"] for e in entries}
         assert (
@@ -3016,73 +2561,40 @@ class TestDropConnection:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MAG-1838: cross-transport JSON-RPC fault isolation (inverse of MAG-1836)
+# Cross-pool fault isolation — nothing another pool does can reach eth-sim
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestJsonRpcCrossTransportFaultIsolation:
-    """``ProviderState`` is shared across JSON-RPC, REST, gRPC, WS, and
-    Tendermint-RPC for the same provider id. The fault primitives in
-    ``_apply_fault`` (down / hang / drop_connection / rate_limit / error)
-    are chain-agnostic on the snap, so without an explicit gate a fault
-    authored for one transport would also fire on every other transport
-    sharing the same state.
+class TestJsonRpcCrossPoolIsolation:
+    """Under the old bare-pid model, one state object backed pid "1" on every
+    transport, so faults authored for other surfaces could reach the ETH
+    JSON-RPC port — and a down always did. The pool:pid model abolishes that:
+    eth-sim:1 owns its state alone. These tests pin the isolation in both
+    directions, and that eth-sim's own faults still fire."""
 
-    MAG-2089 sharpened the gate: each JSON-RPC listener fires content
-    faults (error / corrupt / hang / rate_limit / drop_connection) only
-    when the snap's ``chain_family`` matches its OWN listener's
-    ``handler_chain_family``. The ETH listener (at ports 18545-7) owns
-    ``"eth"`` exclusively; BTC and LN have their own dedicated listener
-    pools at 18575-7 / 18578-80 that gate on ``"btc"`` / ``"ln"``
-    respectively. Any non-matching ``chain_family`` value (incl. "btc"
-    or "ln" on an ETH listener — what used to bleed) means the content
-    fault was set for a different transport and the listener falls
-    through to its normal success response.
-
-    MAG-2092 exception: ``mode="down"`` is honored on every JSON-RPC
-    listener regardless of ``chain_family`` because reachability is
-    provider-wide. Per-transport isolation applies to content modes
-    only; a BTC-tagged ``mode="down"`` still 503s the ETH JSON-RPC
-    port, matching the universal-down semantic on WS / gRPC / REST /
-    TM. The cross-transport-down tests immediately below assert this.
-    """
-
-    def test_jsonrpc_killed_by_grpc_down_fault(self, sim):
-        """A ``chain_family="grpc"`` down fault MUST 503 the JSON-RPC port.
-
-        MAG-2092: mode="down" is honored on every transport regardless of
-        chain_family because reachability is provider-wide. Without the
-        universal-down semantic, a gRPC-tagged down would leave the
-        JSON-RPC port serving, hiding router-side bugs that depend on the
-        provider being unreachable across every node-url (e.g. MAG-2061).
-        Per-transport isolation still applies to content modes (error /
-        corrupt / hang / rate_limit / drop_connection) — see sibling
-        rate_limit / error tests below."""
-        _post(
-            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "grpc", "mode": "down"}}}
-        )
-        status, _ = _rpc(sim["provider1"], "eth_blockNumber")
-        assert status == 503, f"JSON-RPC should refuse with 503 under universal-down; got {status}"
+    def test_jsonrpc_unaffected_by_grpc_down_fault(self, sim):
+        """mode=down on lava-sim-grpc:1 downs only that provider — the ETH
+        JSON-RPC port keeps serving success."""
+        _post(_ctrl(sim, "/scenario"), {"providers": {"lava-sim-grpc:1": {"mode": "down"}}})
+        status, body = _rpc(_P1, "eth_blockNumber")
+        assert status == 200, f"eth-sim:1 must ignore a lava-sim-grpc down; got {status}"
+        assert "result" in body
 
     def test_jsonrpc_unaffected_by_grpc_rate_limit_fault(self, sim):
-        """gRPC ``rate_limit`` must not return 429 on the JSON-RPC port."""
-        _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "grpc", "mode": "rate_limit"}}},
-        )
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
-        assert status == 200, f"JSON-RPC should ignore grpc-rate_limit; got {status}"
+        """A lava-sim-grpc rate_limit must not return 429 on the ETH port."""
+        _post(_ctrl(sim, "/scenario"), {"providers": {"lava-sim-grpc:1": {"mode": "rate_limit"}}})
+        status, body = _rpc(_P1, "eth_blockNumber")
+        assert status == 200, f"eth-sim:1 should ignore a grpc rate_limit; got {status}"
         assert "result" in body, f"expected success body; got {body}"
 
     def test_jsonrpc_unaffected_by_grpc_error_fault(self, sim):
-        """gRPC ``error`` must not return an error envelope on the
-        JSON-RPC port."""
+        """A lava-sim-grpc error must not return an error envelope on the ETH
+        port."""
         _post(
             _ctrl(sim, "/scenario"),
             {
                 "providers": {
-                    "1": {
-                        "chain_family": "grpc",
+                    "lava-sim-grpc:1": {
                         "mode": "error",
                         "error_message": "UNAVAILABLE",
                         "error_code": -32603,
@@ -3090,95 +2602,62 @@ class TestJsonRpcCrossTransportFaultIsolation:
                 }
             },
         )
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
+        status, body = _rpc(_P1, "eth_blockNumber")
         assert status == 200
         assert "error" not in body, f"expected no error key; got {body}"
         assert "result" in body
 
-    def test_jsonrpc_killed_by_rest_down_fault(self, sim):
-        """MAG-2092 universal-down: a ``chain_family="rest"`` mode=down
-        also 503s the JSON-RPC port."""
-        _post(
-            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "rest", "mode": "down"}}}
-        )
-        status, _ = _rpc(sim["provider1"], "eth_blockNumber")
-        assert status == 503, f"JSON-RPC should refuse with 503 under universal-down; got {status}"
+    def test_jsonrpc_unaffected_by_rest_down_fault(self, sim):
+        """mode=down on lava-sim-rest:1 downs only that provider — the ETH
+        port stays up."""
+        _post(_ctrl(sim, "/scenario"), {"providers": {"lava-sim-rest:1": {"mode": "down"}}})
+        status, body = _rpc(_P1, "eth_blockNumber")
+        assert status == 200, f"eth-sim:1 must ignore a lava-sim-rest down; got {status}"
+        assert "result" in body
 
-    def test_jsonrpc_killed_by_tendermintrpc_down_fault(self, sim):
-        """MAG-2092 universal-down: a ``chain_family="tendermintrpc"`` mode=down
-        also 503s the JSON-RPC port."""
-        _post(
-            _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "1": {
-                        "chain_family": "tendermintrpc",
-                        "mode": "down",
-                    }
-                }
-            },
-        )
-        status, _ = _rpc(sim["provider1"], "eth_blockNumber")
-        assert status == 503, f"JSON-RPC should refuse with 503 under universal-down; got {status}"
+    def test_jsonrpc_unaffected_by_tendermintrpc_down_fault(self, sim):
+        """mode=down on lava-sim-tm:1 downs only that provider — the ETH port
+        stays up."""
+        _post(_ctrl(sim, "/scenario"), {"providers": {"lava-sim-tm:1": {"mode": "down"}}})
+        status, body = _rpc(_P1, "eth_blockNumber")
+        assert status == 200, f"eth-sim:1 must ignore a lava-sim-tm down; got {status}"
+        assert "result" in body
 
-    def test_jsonrpc_fault_still_fires_when_chain_family_is_eth(self, sim):
-        """Sanity check: the gate must not break JSON-RPC-side faults.
-        A ``down`` fault with default ``chain_family="eth"`` must still
-        return 503."""
-        _post(
-            _ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "eth", "mode": "down"}}}
-        )
-        status, _ = _rpc(sim["provider1"], "eth_blockNumber")
+    def test_jsonrpc_fault_still_fires_on_its_own_provider(self, sim):
+        """Sanity check: isolation must not swallow the pool's own faults.
+        A down on eth-sim:1 must still return 503 on its http endpoint."""
+        _set_eth(sim, "1", mode="down")
+        status, _ = _rpc(_P1, "eth_blockNumber")
         assert status == 503
 
-    def test_jsonrpc_eth_listener_ignores_btc_chain_family_fault(self, sim):
-        """MAG-2089 — the ETH listener must NOT fire a fault authored for
-        chain_family="btc". Pre-MAG-2089 the ETH listener evaluated faults
-        for chain_family in {eth, btc, ln} and bled a BTC scenario's
-        rate_limit / down / hang onto the ETH port whenever the BTC and
-        ETH listeners shared a ProviderState. With BTC moved to its own
-        listener pool, the ETH listener's gate is exact-match on "eth"
-        — a BTC-tagged rate_limit must pass through to the ETH success
-        path. (The BTC listener on its own dedicated port would still
-        return 429 — that's the BTC suite's job to assert.)
-        """
-        _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "btc", "mode": "rate_limit"}}},
-        )
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
-        assert status == 200, f"ETH listener should ignore BTC-tagged fault; got {status}"
+    def test_jsonrpc_unaffected_by_btc_rate_limit_fault(self, sim):
+        """A rate_limit on btc-sim:1 fires on the BTC port only — the ETH
+        port serves success (the pre-pool leak this model abolishes)."""
+        _post(_ctrl(sim, "/scenario"), {"providers": {"btc-sim:1": {"mode": "rate_limit"}}})
+        status, body = _rpc(_P1, "eth_blockNumber")
+        assert status == 200, f"eth-sim:1 should ignore a btc-sim fault; got {status}"
         assert "result" in body, f"expected ETH success body; got {body}"
 
-    def test_jsonrpc_eth_listener_ignores_ln_chain_family_rate_limit_fault(self, sim):
-        """MAG-2089 companion to the BTC isolation test. LN-tagged content
-        faults set on a shared ProviderState must not bleed onto the ETH
-        listener.
-
-        MAG-2092: this test now uses mode=rate_limit (a content mode) instead
-        of mode=down. mode=down is universal across transports and would
-        legitimately 503 the ETH listener even when authored for chain_family="ln".
-        Per-transport isolation only applies to content modes (error / corrupt /
-        hang / rate_limit / drop_connection)."""
-        _post(
-            _ctrl(sim, "/scenario"),
-            {"providers": {"1": {"chain_family": "ln", "mode": "rate_limit"}}},
-        )
-        status, body = _rpc(sim["provider1"], "eth_blockNumber")
-        assert status == 200, f"ETH listener should ignore LN-tagged rate_limit; got {status}"
+    def test_jsonrpc_unaffected_by_ln_rate_limit_fault(self, sim):
+        """A rate_limit on ln-sim:1 must not bleed onto the ETH port."""
+        _post(_ctrl(sim, "/scenario"), {"providers": {"ln-sim:1": {"mode": "rate_limit"}}})
+        status, body = _rpc(_P1, "eth_blockNumber")
+        assert status == 200, f"eth-sim:1 should ignore an ln-sim rate_limit; got {status}"
         assert "result" in body, f"expected ETH success body; got {body}"
 
-    def test_jsonrpc_eth_listener_killed_by_ln_down_fault(self, sim):
-        """MAG-2092 universal-down: a ``chain_family="ln"`` mode=down
-        also 503s the ETH JSON-RPC listener — reachability is provider-wide.
-        Companion to the rate_limit isolation test above."""
-        _post(_ctrl(sim, "/scenario"), {"providers": {"1": {"chain_family": "ln", "mode": "down"}}})
-        status, _ = _rpc(sim["provider1"], "eth_blockNumber")
-        assert status == 503, f"JSON-RPC should refuse with 503 under universal-down; got {status}"
+    def test_jsonrpc_unaffected_by_ln_down_fault(self, sim):
+        """mode=down on ln-sim:1 downs only ln-sim:1 — the ETH port stays up,
+        and the LN port itself refuses."""
+        _post(_ctrl(sim, "/scenario"), {"providers": {"ln-sim:1": {"mode": "down"}}})
+        ln_status, _ = _rpc("http://127.0.0.1:18578", "getinfo")
+        assert ln_status == 503, f"ln-sim:1 must be down; got {ln_status}"
+        status, body = _rpc(_P1, "eth_blockNumber")
+        assert status == 200, f"eth-sim:1 must ignore an ln-sim down; got {status}"
+        assert "result" in body
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MAG-1832: cancel-during-response race — arrival is always recorded
+# Cancel-during-response race — arrival is always recorded
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -3190,12 +2669,11 @@ def _force_rst_mid_handler(
     reading, then close the socket with SO_LINGER=0 so the kernel emits a
     TCP RST instead of a clean FIN.
 
-    Why SO_LINGER=0: a clean close lets ``self.rfile.read(content_length)``
-    return ``b""`` (EOF) which the handler may swallow. We want
-    ``ConnectionResetError`` to fire on the read so the test exercises the
-    real cancellation path the router triggers when a hedge peer wins. The
-    short pre_close_delay gives the server thread time to enter ``rfile.read``
-    before the RST lands.
+    Why SO_LINGER=0: a clean close lets the server's body read return ``b""``
+    (EOF) which the handler may swallow. We want ``ConnectionResetError`` to
+    fire on the read so the test exercises the real cancellation path the
+    router triggers when a hedge peer wins. The short pre_close_delay gives
+    the server thread time to enter the body read before the RST lands.
     """
     parsed = urlparse(url)
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -3213,52 +2691,46 @@ def _force_rst_mid_handler(
 
 
 class TestCancelDuringResponseRecordsArrival:
-    """MAG-1832 — the cancel-during-response race lives in the handler stages
-    between request arrival and the first ``push_call_to_buffer``. The biggest
-    window is ``self.rfile.read(Content-Length)``: when the router's hedge
-    mechanism picks a faster peer it sends a TCP RST on the cancelled peer's
-    connection, that read raises ``ConnectionResetError``, and without an
-    arrival stub the handler dies before the history entry is written. The
-    invariant ``Lava-Retries + 1 == history_count`` then fails because the
-    router still counts the cancelled attempt in its retries header.
+    """The cancel-during-response race lives in the handler stages between
+    request arrival and the finalize call. The biggest window is the
+    Content-Length body read: when the router's hedge mechanism picks a
+    faster peer it sends a TCP RST on the cancelled peer's connection, that
+    read raises ``ConnectionResetError``, and without an arrival stub the
+    handler dies before the history entry is written. The invariant
+    ``Lava-Retries + 1 == history_count`` then fails because the router still
+    counts the cancelled attempt in its retries header.
 
-    PR #22 closed the sleep-then-write window (latency sleep was upstream of
-    the push). This test class pins the post-PR-#22 fix: arrival is recorded
-    BEFORE the body read so even a cancellation that lands mid-read leaves
-    the entry in /history.
+    The adapter therefore records arrival BEFORE the body read, so even a
+    cancellation that lands mid-read leaves the entry in /history.
 
     Recorded statuses:
       - Cancellation lands before any update          → ``in_flight``
       - Cancellation lands during latency sleep / response build → final status
-        (``success`` / ``error`` / fault status), because the in-place update
-        already fired.
+        (``success`` / ``error`` / fault status), because the finalize already
+        fired.
     Either way the entry exists, which is the only thing the router-vs-sim
     invariant counts.
     """
 
     def test_rst_before_body_arrives_still_records_history(self, sim):
         """Real reproducer: TCP RST in the middle of the handler's body read
-        used to drop the call from /history. After MAG-1832-v2 the arrival
-        stub is pushed before the read, so the entry survives.
-
-        Without the fix the assertion below sees count=0.
+        must not drop the call from /history — the arrival stub is pushed
+        before the read, so the entry survives.
         """
         # baseline: history is empty (autouse clean_state reset just ran)
-        _, before = _get(_ctrl(sim, "/history?provider=1"))
+        _, before = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1"))
         assert (
             before["count"] == 0
         ), f"expected empty history before the RST request, got {before['count']}"
 
-        _force_rst_mid_handler(sim["provider1"])
+        _force_rst_mid_handler(_P1)
 
         # The server thread that owns the cancelled connection still needs to
-        # finish unwinding; give it a brief moment to flush the entry. Without
-        # the fix this poll loop never sees an entry — the test would fail
-        # even at 2s. With the fix the entry shows up within 100ms.
+        # finish unwinding; give it a brief moment to flush the entry.
         deadline = time.monotonic() + 2.0
         entries: list = []
         while time.monotonic() < deadline:
-            _, after = _get(_ctrl(sim, "/history?provider=1"))
+            _, after = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1"))
             entries = after.get("history", [])
             if entries:
                 break
@@ -3274,7 +2746,7 @@ class TestCancelDuringResponseRecordsArrival:
         )
         # The entry's status depends on how far the handler got before the RST
         # raised. Any of the legitimate "this request existed" statuses is
-        # acceptable — the load-bearing assertion is that the entry exists.
+        # acceptable — the essential assertion is that the entry exists.
         assert entries[0]["status"] in {
             "in_flight",
             "success",
@@ -3287,22 +2759,22 @@ class TestCancelDuringResponseRecordsArrival:
 
     def test_rst_before_body_does_not_double_record(self, sim):
         """When the cancellation lands while the handler is still racing the
-        update path, the in-place update must not produce a second entry.
+        finalize path, the in-place update must not produce a second entry.
         Asserts the single-arrival, single-history-entry invariant.
         """
         for _ in range(5):
-            _force_rst_mid_handler(sim["provider2"])
+            _force_rst_mid_handler(_P2)
 
         # Wait for all five handler threads to flush
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
-            _, after = _get(_ctrl(sim, "/history?provider=2"))
+            _, after = _get(_ctrl(sim, "/history?pool=eth-sim&pid=2"))
             entries = after.get("history", [])
             if len(entries) >= 5:
                 break
             time.sleep(0.05)
 
-        _, after = _get(_ctrl(sim, "/history?provider=2"))
+        _, after = _get(_ctrl(sim, "/history?pool=eth-sim&pid=2"))
         entries = after.get("history", [])
         assert len(entries) == 5, (
             f"expected exactly 5 entries for 5 cancelled requests "
@@ -3313,10 +2785,10 @@ class TestCancelDuringResponseRecordsArrival:
     def test_arrival_stub_carries_lava_headers(self, sim):
         """Diagnostic value: cancelled-mid-handler entries must keep their
         captured lava-* headers so /history filters by GUID still match.
-        The headers are read off ``self.headers`` before the body read, so
-        they're available at the arrival moment.
+        The headers are read off the request before the body read, so they're
+        available at the arrival moment.
         """
-        parsed = urlparse(sim["provider3"])
+        parsed = urlparse(_P3)
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
         s.connect((parsed.hostname, parsed.port))
@@ -3334,126 +2806,100 @@ class TestCancelDuringResponseRecordsArrival:
         deadline = time.monotonic() + 2.0
         entries: list = []
         while time.monotonic() < deadline:
-            _, after = _get(_ctrl(sim, "/history?provider=3"))
+            _, after = _get(_ctrl(sim, "/history?pool=eth-sim&pid=3"))
             entries = after.get("history", [])
             if entries:
                 break
             time.sleep(0.05)
 
         assert entries, "no arrival entry recorded for cancelled request"
-        # BaseHTTPRequestHandler normalises header casing — the captured key
-        # may be "Lava-Guid" or "lava-guid" depending on Python's parser
-        # version. Match case-insensitively.
+        # Header casing follows the wire; match case-insensitively.
         captured = entries[0].get("lava_headers", {})
         captured_lower = {k.lower(): v for k, v in captured.items()}
         assert captured_lower.get("lava-guid") == "test-cancel-during-response-guid", (
             f"lava-guid header lost on cancelled-mid-handler entry; " f"got {captured}"
         )
 
-    def test_unit_level_arrival_then_update_does_not_double_count(self, sim):
-        """White-box unit test against the ProviderState API itself.
-        ``record_arrival`` followed by ``push_call_to_buffer(..., entry=stub)``
-        must produce exactly one history entry with the final status, and
-        the ``calls_by_status`` counter must rebalance from ``in_flight``
-        to the final status.
+    def test_unit_level_arrival_then_finalize_does_not_double_count(self, sim):
+        """White-box test against the CallLog API itself. ``record_arrival``
+        followed by ``finalize(entry, ...)`` must produce exactly one history
+        entry with the final status, and the counters must rebalance from
+        ``in_flight`` to the final status.
         """
-        state = sim["states"]["1"]
-        # clean_state autouse already reset the state, but be explicit
-        with state.lock:
-            state.history.clear()
-            state.total_calls = 0
-            state.calls_by_status = {}
+        provider = sim["registry"].provider("eth-sim", "1")
+        log = provider.log
+        log.clear()
 
-        stub = state.record_arrival(lava_headers={"Lava-Guid": "g1"})
-        assert state.calls_by_status.get("in_flight") == 1
-        assert state.total_calls == 1
-        assert len(state.history) == 1
+        stub = log.record_arrival("jsonrpc", "http", 18545, lava_headers={"Lava-Guid": "g1"})
+        stats = log.stats()
+        assert stats["calls_by_status"].get("in_flight") == 1
+        assert stats["total_calls"] == 1
+        assert stats["history_entries"] == 1
 
-        state.push_call_to_buffer(
-            "eth_blockNumber",
-            "success",
-            0,
-            request_id=42,
-            lava_headers={"Lava-Guid": "g1"},
-            entry=stub,
-        )
+        log.finalize(stub, method="eth_blockNumber", status="success", latency_ms=0, request_id=42)
+        stats = log.stats()
         assert (
-            state.total_calls == 1
-        ), "update must not bump total_calls — the entry is the same entry"
-        assert len(state.history) == 1, "update must not append a new entry"
+            stats["total_calls"] == 1
+        ), "finalize must not bump total_calls — the entry is the same entry"
+        assert stats["history_entries"] == 1, "finalize must not append a new entry"
         assert (
-            state.calls_by_status.get("in_flight", 0) == 0
-        ), "in_flight counter must be decremented on update"
+            stats["calls_by_status"].get("in_flight", 0) == 0
+        ), "in_flight counter must be decremented on finalize"
         assert (
-            state.calls_by_status.get("success") == 1
+            stats["calls_by_status"].get("success") == 1
         ), "final status must be reflected in calls_by_status"
-        assert state.history[0]["status"] == "success"
-        assert state.history[0]["method"] == "eth_blockNumber"
-        assert state.history[0]["request_id"] == 42
+        entry = log.get_history()[0]
+        assert entry["status"] == "success"
+        assert entry["method"] == "eth_blockNumber"
+        assert entry["request_id"] == 42
 
-    def test_in_place_update_after_reset_re_appends(self, sim):
-        """Denis P2 follow-up on PR #37 (MAG-1832).
-
-        If ``clear_history()`` (POST /history/clear) or ``/reset/all`` runs
-        between ``record_arrival`` and the final in-place update, the stub
-        has already been evicted from ``self.history`` and the counters are
-        back to zero. Without the fix, the update path mutates the detached
-        dict, bumps ``calls_by_status[status]`` (off the now-empty counter
-        dict), and never re-appends — leaving the completed request missing
-        from /history with the broken invariant
-        ``total_calls != len(history)``.
-
-        The fix stamps a per-state ``_reset_generation`` on every stub at
-        arrival and bumps it inside ``clear_history``. The update path
-        compares the stamp to the current generation; on mismatch it
-        re-appends the entry and re-bumps counters as if it were a fresh
-        push. This test exercises that re-append path.
+    def test_finalize_after_clear_re_appends(self, sim):
+        """If a clear (POST /history/clear or /reset/all) runs between
+        ``record_arrival`` and ``finalize``, the stub has already been evicted
+        and the counters are back to zero. The finalize path detects the
+        reset-generation mismatch, re-appends the entry, and re-bumps the
+        counters as if it were a fresh push — so the completed request is
+        never missing from /history and ``total_calls`` matches the buffer.
         """
-        state = sim["states"]["1"]
-        # clean_state autouse already reset the state, but be explicit so a
-        # standalone run of this test in isolation is deterministic.
-        with state.lock:
-            state.history.clear()
-            state.total_calls = 0
-            state.calls_by_status = {}
+        provider = sim["registry"].provider("eth-sim", "1")
+        log = provider.log
+        log.clear()
 
-        stub = state.record_arrival(lava_headers={"Lava-Guid": "g-reset-mid"})
-        assert state.total_calls == 1
-        assert len(state.history) == 1
-        assert state.calls_by_status.get("in_flight") == 1
+        stub = log.record_arrival(
+            "jsonrpc", "http", 18545, lava_headers={"Lava-Guid": "g-reset-mid"}
+        )
+        stats = log.stats()
+        assert stats["total_calls"] == 1
+        assert stats["history_entries"] == 1
+        assert stats["calls_by_status"].get("in_flight") == 1
 
         # Simulate /history/clear or /reset/all racing with the in-flight
         # handler — the stub gets evicted between arrival and completion.
-        state.clear_history()
-        assert state.total_calls == 0
-        assert len(state.history) == 0
-        assert state.calls_by_status == {}
+        log.clear()
+        stats = log.stats()
+        assert stats["total_calls"] == 0
+        assert stats["history_entries"] == 0
+        assert stats["calls_by_status"] == {}
 
-        # In-flight handler resumes and calls push_call_to_buffer with the
-        # now-detached stub. The fix detects the reset_generation mismatch
-        # and re-appends the entry + re-bumps counters.
-        state.push_call_to_buffer(
-            "eth_blockNumber",
-            "success",
-            0,
-            request_id=99,
-            lava_headers={"Lava-Guid": "g-reset-mid"},
-            entry=stub,
-        )
+        # In-flight handler resumes and finalizes the now-detached stub.
+        log.finalize(stub, method="eth_blockNumber", status="success", latency_ms=0, request_id=99)
 
-        assert len(state.history) == 1, "stub must be re-appended to history after detached update"
-        assert state.history[0] is stub, "re-appended entry must be the same dict the handler held"
-        assert state.total_calls == 1, "total_calls must be re-bumped so it matches len(history)"
+        stats = log.stats()
         assert (
-            state.calls_by_status.get("success") == 1
+            stats["history_entries"] == 1
+        ), "stub must be re-appended to history after detached finalize"
+        assert stats["total_calls"] == 1, "total_calls must be re-bumped so it matches the buffer"
+        assert (
+            stats["calls_by_status"].get("success") == 1
         ), "final status must be reflected in calls_by_status"
-        assert state.calls_by_status.get("in_flight", 0) == 0, (
-            "stale in_flight counter must NOT be revived — clear_history "
-            "zeroed it and the re-append path only bumps the final status"
+        assert stats["calls_by_status"].get("in_flight", 0) == 0, (
+            "stale in_flight counter must NOT be revived — the clear zeroed it "
+            "and the re-append path only bumps the final status"
         )
-        # The mutated stub itself carries the final values.
-        assert stub["status"] == "success"
-        assert stub["method"] == "eth_blockNumber"
-        assert stub["request_id"] == 99
-        # The captured lava header from arrival must still be present.
-        assert stub.get("lava_headers", {}).get("Lava-Guid") == "g-reset-mid"
+        # The re-appended entry carries the final values and the captured
+        # lava header from arrival.
+        entry = log.get_history()[0]
+        assert entry["status"] == "success"
+        assert entry["method"] == "eth_blockNumber"
+        assert entry["request_id"] == 99
+        assert entry.get("lava_headers", {}).get("Lava-Guid") == "g-reset-mid"
