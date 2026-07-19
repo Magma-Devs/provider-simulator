@@ -27,11 +27,12 @@
 #
 # Env overrides
 # -------------
-#   DEPLOY_REF=main      — git ref to fetch + hard-reset the checkout to
-#                          before building, so a stale local checkout can
-#                          never be deployed. Override to deploy a branch,
-#                          e.g. DEPLOY_REF=my-feature.
-#   SKIP_SELF_UPDATE=false — set true to skip the fetch + reset self-update
+#   DEPLOY_REF=main      — branch to fetch + check out (git checkout -B
+#                          origin/$DEPLOY_REF) before building, so a stale
+#                          local checkout can never be deployed. Override to
+#                          deploy another branch, e.g. DEPLOY_REF=my-feature.
+#                          Branch names only — not tags/SHAs.
+#   SKIP_SELF_UPDATE=false — set true to skip the fetch + checkout self-update
 #                          (offline/air-gapped runs, or to deploy files you
 #                          deliberately hand-edited). A dirty tree aborts
 #                          rather than being clobbered.
@@ -97,10 +98,10 @@ fi
 # checkout impossible to deploy, fetch and hard-reset to origin/$DEPLOY_REF
 # here — before the template render + docker build below read the tree.
 #
-# Resetting our own file mid-run is safe: git reset --hard writes a fresh
-# inode, so this already-running script keeps executing its current bytes to
-# the end while the downstream build reads the freshly-updated files. No
-# re-exec needed.
+# Updating our own file mid-run is safe: git checkout -B rewrites the working
+# tree via fresh inodes, so this already-running script keeps executing its
+# current bytes to the end while the downstream build reads the freshly-updated
+# files. No re-exec needed.
 #
 # SKIP_SELF_UPDATE=true bypasses this for offline/air-gapped runs, or to
 # deploy files you deliberately hand-edited. Uncommitted *tracked* changes

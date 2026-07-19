@@ -19,7 +19,7 @@ bash scripts/deploy.sh   # self-updates to origin/$DEPLOY_REF first; no manual g
 ```
 
 What this script already does (`scripts/deploy.sh`):
-- self-updates first: fetches and hard-resets the checkout to `origin/$DEPLOY_REF` (default `main`) before building, so a stale checkout can't be deployed — override `DEPLOY_REF` to deploy a branch, or set `SKIP_SELF_UPDATE=true` to skip (offline runs / deliberately hand-edited files; a dirty tree aborts rather than being clobbered)
+- self-updates first: fetches and checks out `origin/$DEPLOY_REF` (a branch; default `main`) via `git checkout -B` before building, so a stale checkout can't be deployed — override `DEPLOY_REF` to deploy another branch, or set `SKIP_SELF_UPDATE=true` to skip (offline runs / deliberately hand-edited files; a dirty tree aborts rather than being clobbered)
 - builds `provider-simulator:latest` (unless `SKIP_BUILD=true`)
 - imports image into MicroK8s
 - applies `k8s/deployment.yml` + `k8s/service.yml` in one pass
