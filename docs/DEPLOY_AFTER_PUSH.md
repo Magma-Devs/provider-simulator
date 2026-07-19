@@ -15,8 +15,7 @@ On the deployment server, run from `provider-simulator` repo:
 
 ```zsh
 cd /path/to/provider-simulator
-git pull
-bash scripts/deploy.sh
+bash scripts/deploy.sh   # self-updates to origin/$DEPLOY_REF first; no manual git pull needed
 ```
 
 What this script already does (`scripts/deploy.sh`):

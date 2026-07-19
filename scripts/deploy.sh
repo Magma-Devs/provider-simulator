@@ -117,8 +117,11 @@ else
 		echo "[deploy] commit or stash them, or re-run with SKIP_SELF_UPDATE=true to build as-is." >&2
 		exit 1
 	fi
-	git checkout --quiet "$DEPLOY_REF"
-	git reset --hard --quiet "origin/$DEPLOY_REF"
+	if ! git rev-parse --verify --quiet "refs/remotes/origin/$DEPLOY_REF" >/dev/null; then
+		echo "[deploy] origin/$DEPLOY_REF not found — check DEPLOY_REF (does that branch exist on origin?)." >&2
+		exit 1
+	fi
+	git checkout -q -B "$DEPLOY_REF" "origin/$DEPLOY_REF"
 	SELF_UPDATE_AFTER="$(git rev-parse --short HEAD)"
 	if [ "$SELF_UPDATE_BEFORE" = "$SELF_UPDATE_AFTER" ]; then
 		echo "[deploy] checkout already current at $SELF_UPDATE_AFTER (origin/$DEPLOY_REF)"
