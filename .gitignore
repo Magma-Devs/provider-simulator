@@ -22,3 +22,6 @@ venv/
 # local-only docs — never push
 docs/new_server_setup.md
 
+
+# Per-server tenant config — copy from base-domain.env.example
+config/base-domain.env

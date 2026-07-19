@@ -107,10 +107,10 @@ cd ~/provider-simulator
 
 ## 3. Set domain, deploy
 
-**Set the base domain before deploying** — `scripts/deploy.sh` reads this file to build hostnames.
-Replace the value with the domain you found in step 0:
+**Set the base domain before deploying** — `scripts/deploy.sh` reads `config/base-domain.env`, which is **per-server and untracked**. Create it from the template and set the domain you found in step 0:
 
 ```bash
+cp config/base-domain.env.example config/base-domain.env
 vi config/base-domain.env
 # Set: BASE_DOMAIN="<YOUR_DOMAIN>"   ← use the domain from step 0
 ```
