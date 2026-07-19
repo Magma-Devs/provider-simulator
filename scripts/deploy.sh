@@ -27,6 +27,14 @@
 #
 # Env overrides
 # -------------
+#   DEPLOY_REF=main      — git ref to fetch + hard-reset the checkout to
+#                          before building, so a stale local checkout can
+#                          never be deployed. Override to deploy a branch,
+#                          e.g. DEPLOY_REF=my-feature.
+#   SKIP_SELF_UPDATE=false — set true to skip the fetch + reset self-update
+#                          (offline/air-gapped runs, or to deploy files you
+#                          deliberately hand-edited). A dirty tree aborts
+#                          rather than being clobbered.
 #   FORCE_RESTART=true   — force a rollout restart even if diff is empty
 #                          (use to pick up a fresh :latest image without
 #                          touching manifests)
@@ -58,6 +66,10 @@ HTTPROUTE_REST_TEMPLATE="k8s/httproute-lava-sim-rest.yml"
 DEPLOYMENT_MANIFEST="k8s/deployment.yml"
 SERVICE_MANIFEST="k8s/service.yml"
 
+# Self-update controls (see the stale-checkout guard below).
+DEPLOY_REF="${DEPLOY_REF:-main}"
+SKIP_SELF_UPDATE="${SKIP_SELF_UPDATE:-false}"
+
 FORCE_RESTART="${FORCE_RESTART:-false}"
 SKIP_BUILD="${SKIP_BUILD:-false}"
 ROLLOUT_TIMEOUT="${ROLLOUT_TIMEOUT:-180s}"
@@ -73,6 +85,46 @@ source "$CONFIG_FILE"
 if [ -z "${BASE_DOMAIN:-}" ]; then
 	echo "[deploy] BASE_DOMAIN must be set in $CONFIG_FILE" >&2
 	exit 1
+fi
+
+# =========================================================================
+# Stale-checkout guard — self-update to the target ref BEFORE building.
+#
+# WHY: this script builds the image from whatever sits in the local checkout.
+# On a long-lived deploy server that checkout silently drifts behind origin
+# (one incident: 126 commits stale, which dropped the Solana provider ports
+# 18582-18584 from the built image with no error at all). To make a stale
+# checkout impossible to deploy, fetch and hard-reset to origin/$DEPLOY_REF
+# here — before the template render + docker build below read the tree.
+#
+# Resetting our own file mid-run is safe: git reset --hard writes a fresh
+# inode, so this already-running script keeps executing its current bytes to
+# the end while the downstream build reads the freshly-updated files. No
+# re-exec needed.
+#
+# SKIP_SELF_UPDATE=true bypasses this for offline/air-gapped runs, or to
+# deploy files you deliberately hand-edited. Uncommitted *tracked* changes
+# abort the run instead of being clobbered.
+# =========================================================================
+if [ "$SKIP_SELF_UPDATE" = "true" ]; then
+	echo "=== Skipping self-update (SKIP_SELF_UPDATE=true): building the local checkout as-is ==="
+else
+	echo "=== Self-updating checkout to origin/$DEPLOY_REF before build ==="
+	SELF_UPDATE_BEFORE="$(git rev-parse --short HEAD)"
+	git fetch origin --quiet
+	if ! git diff --quiet || ! git diff --cached --quiet; then
+		echo "[deploy] refusing to self-update: working tree has uncommitted tracked changes." >&2
+		echo "[deploy] commit or stash them, or re-run with SKIP_SELF_UPDATE=true to build as-is." >&2
+		exit 1
+	fi
+	git checkout --quiet "$DEPLOY_REF"
+	git reset --hard --quiet "origin/$DEPLOY_REF"
+	SELF_UPDATE_AFTER="$(git rev-parse --short HEAD)"
+	if [ "$SELF_UPDATE_BEFORE" = "$SELF_UPDATE_AFTER" ]; then
+		echo "[deploy] checkout already current at $SELF_UPDATE_AFTER (origin/$DEPLOY_REF)"
+	else
+		echo "[deploy] updated checkout: $SELF_UPDATE_BEFORE -> $SELF_UPDATE_AFTER (origin/$DEPLOY_REF)"
+	fi
 fi
 
 CONTROL_HOSTNAME="sim-control.${BASE_DOMAIN}"
