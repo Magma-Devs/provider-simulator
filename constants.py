@@ -45,11 +45,23 @@ ETH_BACKUP_PORTS = {"4": 18560, "5": 18561, "6": 18562}
 # the entry to ETH_ALL_PORTS is sufficient; no separate listener block
 # is required.
 ETH_SOLO_PORTS = {"19": 18581}
-# Union of the three ETH JSON-RPC pools above (primary + backup + solo) —
+# eth-duo-sim pool (MAG-2464 follow-up). Two primaries, no backup — the
+# stake-weight experiment topology (k3d-only router; see
+# tools/local-cluster/routers.yml in smart_router_automation). Pids 21/22
+# continue the global numbering after the Solana solo pid (20). Ports
+# 18586/18587 sit one above the Solana solo listener (18585) — previously
+# this router pointed its two upstreams directly at ETH_PRIMARY_PORTS'
+# pids 1/2 (18545/18546) with no listener of its own, so a /scenario flip
+# on eth-sim's pid 1 or 2 also reached this router's traffic. Dedicated
+# ports close that isolation gap. Handler dispatch is the default ETH path,
+# same as ETH_SOLO_PORTS above — adding the entry to ETH_ALL_PORTS is
+# sufficient; no separate listener block is required.
+ETH_DUO_PORTS = {"21": 18586, "22": 18587}
+# Union of the four ETH JSON-RPC pools above (primary + backup + solo + duo) —
 # the pid/port set the ETH-default bootstrap loop in server.py binds. The
 # other chains' pools (BTC / LN / Solana / gRPC / REST / TM / WS) are NOT
 # part of this union; each is bound by its own dedicated loop.
-ETH_ALL_PORTS = {**ETH_PRIMARY_PORTS, **ETH_BACKUP_PORTS, **ETH_SOLO_PORTS}
+ETH_ALL_PORTS = {**ETH_PRIMARY_PORTS, **ETH_BACKUP_PORTS, **ETH_SOLO_PORTS, **ETH_DUO_PORTS}
 
 PROVIDER_PORTS = ETH_PRIMARY_PORTS  # deprecated alias — migrate callers, then remove
 BACKUP_PROVIDER_PORTS = ETH_BACKUP_PORTS  # deprecated alias — migrate callers, then remove

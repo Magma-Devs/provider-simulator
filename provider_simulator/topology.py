@@ -4,9 +4,12 @@ endpoints each provider listens on.
 A pool is one router's provider set (one router = one chain + one application
 protocol). Pool names equal the router ids in the router-side values_sim.yml
 wherever a router is wired (eth-sim, eth-solo-sim, btc-sim, solana-sim,
-lava-sim-grpc, lava-sim-rest, lava-sim-tm). Two pools exist as bound listeners
-only, with no router wired yet: ln-sim (upstream LN router pending) and
-solana-solo-sim (the Solana analogue of eth-solo-sim; named by that pattern).
+lava-sim-grpc, lava-sim-rest, lava-sim-tm), or in the k3d-only
+tools/local-cluster/routers.yml for eth-duo-sim (the stake-weight experiment
+router — canonical has no router wired to this pool). Two pools exist as
+bound listeners only, with no router wired yet: ln-sim (upstream LN router
+pending) and solana-solo-sim (the Solana analogue of eth-solo-sim; named by
+that pattern).
 The listener ports themselves mirror constants.py — the port set the running
 server binds — and a unit test cross-checks the two so they cannot drift.
 
@@ -31,6 +34,13 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
     ("eth-sim", "eth", "5", (("jsonrpc", "http", 18561), ("jsonrpc", "ws", 18573))),
     ("eth-sim", "eth", "6", (("jsonrpc", "http", 18562), ("jsonrpc", "ws", 18574))),
     ("eth-solo-sim", "eth", "1", (("jsonrpc", "http", 18581),)),
+    # eth-duo-sim: 2 primaries, no backup tier — the stake-weight experiment
+    # topology (k3d-only; see tools/local-cluster/routers.yml in
+    # smart_router_automation). Dedicated listeners, distinct from eth-sim's
+    # pids 1/2 (18545/18546) — a /scenario flip on one pool can no longer
+    # leak into the other's provider state.
+    ("eth-duo-sim", "eth", "1", (("jsonrpc", "http", 18586),)),
+    ("eth-duo-sim", "eth", "2", (("jsonrpc", "http", 18587),)),
     ("btc-sim", "btc", "1", (("jsonrpc", "http", 18575),)),
     ("btc-sim", "btc", "2", (("jsonrpc", "http", 18576),)),
     ("btc-sim", "btc", "3", (("jsonrpc", "http", 18577),)),
