@@ -145,6 +145,34 @@ def test_history_max_caps_and_rejects_negative():
     assert st == 400
 
 
+# ── topology ──────────────────────────────────────────────────────────────────
+def test_topology_shape():
+    api = _api()
+    st, topo = api.get_topology()
+    assert st == 200
+    assert topo["topology"]["eth-sim"]["chain"] == "eth"
+    assert topo["topology"]["eth-sim"]["providers"]["1"] == [
+        {"interface": "jsonrpc", "transport": "http", "port": 18545},
+        {"interface": "jsonrpc", "transport": "ws", "port": 18557},
+    ]
+
+
+def test_topology_covers_every_pool():
+    api = _api()
+    _, topo = api.get_topology()
+    assert set(topo["topology"]) == set(build_registry().pools)
+
+
+def test_topology_has_no_side_effects():
+    api = _api()
+    _, stats_before = api.get_stats()
+    _, topo1 = api.get_topology()
+    _, topo2 = api.get_topology()
+    assert topo1 == topo2
+    _, stats_after = api.get_stats()
+    assert stats_before == stats_after
+
+
 # ── advance ───────────────────────────────────────────────────────────────────
 def test_advance_eth_head_then_reset():
     api = _api()
