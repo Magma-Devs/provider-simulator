@@ -127,7 +127,7 @@ Pick one `mode`; combine it with the orthogonal fields.
 | `POST /reset/all` | Reset both |
 | `POST /advance` | Move a chain's simulated head (default `eth`; sync-freshness tests) |
 | `POST /ws/emit` | Push a WebSocket event to a live subscription |
-| `GET /health` · `/ready` · `/scenario` · `/stats` · `/history` · `/ws/subscriptions` | Health / readiness (all listener ports bound) / config / counters / call log / live subscriptions |
+| `GET /health` · `/ready` · `/scenario` · `/stats` · `/topology` · `/history` · `/ws/subscriptions` | Health / readiness (all listener ports bound) / config / counters / read-only provider/port topology per pool / call log / live subscriptions |
 
 `GET /history` merges every provider's ring buffer, sorts by time, and adds
 `correlation_group` (the calls of one router relay) and `call_order`. Each entry

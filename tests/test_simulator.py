@@ -60,8 +60,10 @@ import pytest
 
 import server as server_module
 from constants import (
+    BTC_PRIMARY_PORTS,
     ETH_PRIMARY_PORTS,
     HISTORY_MAX,  # noqa: F401  (kept for module docstring reference; tests use MAX_FOR_OVERFLOW_TEST)
+    WS_PRIMARY_PORTS,
 )
 from provider_simulator.domain.call_log import CallLog
 from stubs import ERROR_STUBS
@@ -732,6 +734,34 @@ class TestStats:
         assert body["providers"]["eth-sim:1"]["total_calls"] >= 2
         assert body["providers"]["eth-sim:2"]["total_calls"] == 0
         assert body["providers"]["eth-sim:3"]["total_calls"] == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /topology
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestTopology:
+
+    def test_get_topology_returns_pool_and_provider_endpoints(self, sim):
+        """Wiring check, not just a unit-test duplicate: this goes through
+        server.py's do_GET over a real socket, so a typo'd route branch would
+        show up here as a 404 (test_control_api.py's topology tests call
+        ControlApi.get_topology() directly and would never see that).
+
+        Pins the exact endpoint list for eth-sim:1 AND for btc-sim:1 — a
+        second, non-eth pool — so a wiring bug that only breaks non-default
+        pools can't hide behind a single-pool assertion."""
+        status, body = _get(_ctrl(sim, "/topology"))
+        assert status == 200
+        assert "topology" in body
+        assert body["topology"]["eth-sim"]["providers"]["1"] == [
+            {"interface": "jsonrpc", "transport": "http", "port": ETH_PRIMARY_PORTS["1"]},
+            {"interface": "jsonrpc", "transport": "ws", "port": WS_PRIMARY_PORTS["1"]},
+        ]
+        assert body["topology"]["btc-sim"]["providers"]["1"] == [
+            {"interface": "jsonrpc", "transport": "http", "port": BTC_PRIMARY_PORTS["1"]},
+        ]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
