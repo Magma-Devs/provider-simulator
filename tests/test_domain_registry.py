@@ -42,6 +42,19 @@ def test_eth_and_btc_provider_1_are_distinct_objects():
     assert reg.provider("eth-sim", "1") is not reg.provider("btc-sim", "1")
 
 
+def test_eth_duo_sim_providers_resolve_and_are_distinct_from_eth_sim():
+    reg = build_registry()
+    high = reg.provider("eth-duo-sim", "1")
+    low = reg.provider("eth-duo-sim", "2")
+    assert high.key == "eth-duo-sim:1"
+    assert low.key == "eth-duo-sim:2"
+    # Distinct objects from eth-sim's pid 1/2 — a /scenario flip on one pool
+    # can no longer leak into the other's provider state (the isolation gap
+    # dedicated ports close).
+    assert high is not reg.provider("eth-sim", "1")
+    assert low is not reg.provider("eth-sim", "2")
+
+
 def test_build_registry_reads_patched_topology(monkeypatch):
     small = (("eth-sim", "eth", "1", (("jsonrpc", "http", 18545),)),)
     monkeypatch.setattr(topology_module, "TOPOLOGY", small)

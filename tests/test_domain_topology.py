@@ -9,6 +9,7 @@ from provider_simulator.topology import TOPOLOGY
 EXPECTED_POOLS = {
     "eth-sim",
     "eth-solo-sim",
+    "eth-duo-sim",
     "btc-sim",
     "ln-sim",
     "solana-sim",
@@ -53,6 +54,22 @@ def test_eth_sim_provider_1_has_http_and_ws():
     assert len(rows) == 1
     eps = rows[0][3]
     assert (("jsonrpc", "http", 18545) in eps) and (("jsonrpc", "ws", 18557) in eps)
+
+
+def test_eth_duo_sim_has_two_dedicated_providers():
+    """Regression guard: eth-duo-sim used to have no row of its own and
+    pointed its two upstreams straight at eth-sim's pid 1/2 listeners
+    (18545/18546), so a /scenario flip on eth-sim's pid 1 or 2 leaked into
+    eth-duo-sim traffic too. It now has its own dedicated pool and ports."""
+    rows = {r[2]: r for r in TOPOLOGY if r[0] == "eth-duo-sim"}
+    assert set(rows) == {"1", "2"}
+    assert rows["1"][3] == (("jsonrpc", "http", 18586),)
+    assert rows["2"][3] == (("jsonrpc", "http", 18587),)
+    eth_sim_ports = {
+        port for pool, _c, _pid, eps in TOPOLOGY if pool == "eth-sim" for (_i, _t, port) in eps
+    }
+    duo_ports = {port for eps in (rows["1"][3], rows["2"][3]) for (_i, _t, port) in eps}
+    assert duo_ports.isdisjoint(eth_sim_ports), "eth-duo-sim must not share ports with eth-sim"
 
 
 def test_lava_rest_and_grpc_provider_1_are_distinct_pools():
