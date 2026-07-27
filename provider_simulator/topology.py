@@ -5,11 +5,11 @@ A pool is one router's provider set (one router = one chain + one application
 protocol). Pool names equal the router ids in the router-side values_sim.yml
 wherever a router is wired (eth-sim, eth-solo-sim, btc-sim, solana-sim,
 lava-sim-grpc, lava-sim-rest, lava-sim-tm), or in the k3d-only
-tools/local-cluster/routers.yml for eth-duo-sim (the stake-weight experiment
-router — canonical has no router wired to this pool). Two pools exist as
-bound listeners only, with no router wired yet: ln-sim (upstream LN router
-pending) and solana-solo-sim (the Solana analogue of eth-solo-sim; named by
-that pattern).
+tools/local-cluster/routers.yml in smart_router_automation for eth-duo-sim (the
+stake-weight experiment router — canonical has no router wired to this pool).
+Two pools exist as bound listeners only, with no router wired yet: ln-sim
+(upstream LN router pending) and solana-solo-sim (the Solana analogue of
+eth-solo-sim; named by that pattern).
 The listener ports themselves mirror constants.py — the port set the running
 server binds — and a unit test cross-checks the two so they cannot drift.
 

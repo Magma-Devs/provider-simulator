@@ -49,7 +49,7 @@ ETH_SOLO_PORTS = {"19": 18581}
 # stake-weight experiment topology (k3d-only router; see
 # tools/local-cluster/routers.yml in smart_router_automation). Pids 21/22
 # continue the global numbering after the Solana solo pid (20). Ports
-# 18586/18587 sit one above the Solana solo listener (18585) — previously
+# 18586/18587 sit just above the Solana solo listener (18585) — previously
 # this router pointed its two upstreams directly at ETH_PRIMARY_PORTS'
 # pids 1/2 (18545/18546) with no listener of its own, so a /scenario flip
 # on eth-sim's pid 1 or 2 also reached this router's traffic. Dedicated
