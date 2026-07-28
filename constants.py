@@ -65,7 +65,6 @@ ETH_ALL_PORTS = {**ETH_PRIMARY_PORTS, **ETH_BACKUP_PORTS, **ETH_SOLO_PORTS, **ET
 
 PROVIDER_PORTS = ETH_PRIMARY_PORTS  # deprecated alias — migrate callers, then remove
 BACKUP_PROVIDER_PORTS = ETH_BACKUP_PORTS  # deprecated alias — migrate callers, then remove
-SOLO_PROVIDER_PORTS = ETH_SOLO_PORTS  # deprecated alias — migrate callers, then remove
 ALL_PROVIDER_PORTS = ETH_ALL_PORTS  # deprecated alias — migrate callers, then remove
 
 # Bitcoin JSON-RPC primary pool (MAG-2089). Each listener routes the

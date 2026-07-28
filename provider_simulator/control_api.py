@@ -234,7 +234,7 @@ class ControlApi:
             head.bump(body["blocks"])
         return 200, {"status": "ok", "chain": chain_name, "head": head.current()}
 
-    # ── GET /scenario, /stats ─────────────────────────────────────────────────
+    # ── GET /scenario, /stats, /topology ──────────────────────────────────────
     def get_scenario(self) -> tuple[int, dict]:
         providers = {}
         for provider in self.registry.all_providers():
@@ -248,6 +248,23 @@ class ControlApi:
 
     def get_stats(self) -> tuple[int, dict]:
         return 200, {"providers": {p.key: p.log.stats() for p in self.registry.all_providers()}}
+
+    def get_topology(self) -> tuple[int, dict]:
+        """Every pool, its chain, and each provider's endpoints — the
+        validated Registry built at startup, read back as-is. Pure read: no
+        parameters, no state, nothing to validate (build_registry already did
+        that)."""
+        topology = {}
+        for pool_name, pool in self.registry.pools.items():
+            providers = {
+                pid: [
+                    {"interface": ep.interface, "transport": ep.transport, "port": ep.port}
+                    for ep in provider.endpoints
+                ]
+                for pid, provider in pool.providers.items()
+            }
+            topology[pool_name] = {"chain": pool.chain, "providers": providers}
+        return 200, {"topology": topology}
 
     # ── GET /history ──────────────────────────────────────────────────────────
     def get_history(self, query: dict) -> tuple[int, dict]:
