@@ -238,3 +238,17 @@ spec:
       port: 18585
       targetPort: 18585
       protocol: TCP
+    # eth-duo-sim dedicated JSON-RPC ports (2026-07-27) — mirrors the
+    # deployment's provider-duo-1/2 container ports. A 2-provider pool with
+    # its own stake weights, no longer sharing eth-sim's 18545/18546. Until
+    # this entry existed, the pod listened on these ports but the Service
+    # had no route to them — confirmed via a live in-cluster connection
+    # test that timed out before this fix.
+    - name: provider-duo-1
+      port: 18586
+      targetPort: 18586
+      protocol: TCP
+    - name: provider-duo-2
+      port: 18587
+      targetPort: 18587
+      protocol: TCP
