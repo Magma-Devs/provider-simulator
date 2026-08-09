@@ -48,6 +48,7 @@ from constants import (
     ETH_BACKUP_PORTS,
     ETH_DUO_PORTS,
     ETH_SOLO_PORTS,
+    ETH_TWIN_PORTS,
     GRPC_BACKUP_PORTS,
     GRPC_PROVIDER_PORTS,
     LN_PRIMARY_PORTS,
@@ -122,21 +123,23 @@ def clean_state(sim):
 
 def test_all_provider_ports_is_union_of_primary_and_backup():
     """ALL_PROVIDER_PORTS must equal the union of PROVIDER_PORTS,
-    BACKUP_PROVIDER_PORTS, ETH_SOLO_PORTS, and ETH_DUO_PORTS — the ETH
-    pool's port allocation the topology mirrors."""
+    BACKUP_PROVIDER_PORTS, ETH_SOLO_PORTS, ETH_DUO_PORTS, and
+    ETH_TWIN_PORTS — the ETH pool's port allocation the topology mirrors."""
     expected = {
         **PROVIDER_PORTS,
         **BACKUP_PROVIDER_PORTS,
         **ETH_SOLO_PORTS,
         **ETH_DUO_PORTS,
+        **ETH_TWIN_PORTS,
     }
     assert ALL_PROVIDER_PORTS == expected, (
-        f"ALL_PROVIDER_PORTS must equal "
-        f"PROVIDER_PORTS ∪ BACKUP_PROVIDER_PORTS ∪ ETH_SOLO_PORTS ∪ ETH_DUO_PORTS.\n"
+        f"ALL_PROVIDER_PORTS must equal PROVIDER_PORTS ∪ BACKUP_PROVIDER_PORTS "
+        f"∪ ETH_SOLO_PORTS ∪ ETH_DUO_PORTS ∪ ETH_TWIN_PORTS.\n"
         f"  PROVIDER_PORTS        : {PROVIDER_PORTS}\n"
         f"  BACKUP_PROVIDER_PORTS : {BACKUP_PROVIDER_PORTS}\n"
         f"  ETH_SOLO_PORTS        : {ETH_SOLO_PORTS}\n"
         f"  ETH_DUO_PORTS         : {ETH_DUO_PORTS}\n"
+        f"  ETH_TWIN_PORTS        : {ETH_TWIN_PORTS}\n"
         f"  expected union        : {expected}\n"
         f"  ALL_PROVIDER_PORTS    : {dict(ALL_PROVIDER_PORTS)}"
     )
