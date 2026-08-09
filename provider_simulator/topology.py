@@ -6,7 +6,8 @@ protocol). Pool names equal the router ids in the router-side values_sim.yml
 wherever a router is wired (eth-sim, eth-solo-sim, btc-sim, solana-sim,
 lava-sim-grpc, lava-sim-rest, lava-sim-tm), or in the k3d-only
 tools/local-cluster/routers.yml in smart_router_automation for eth-duo-sim (the
-stake-weight experiment router — canonical has no router wired to this pool).
+stake-weight experiment router) and eth-twin-sim (the same-name-providers
+regression router) — canonical has no router wired to either pool.
 Two pools exist as bound listeners only, with no router wired yet: ln-sim
 (upstream LN router pending) and solana-solo-sim (the Solana analogue of
 eth-solo-sim; named by that pattern).
@@ -41,6 +42,16 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
     # leak into the other's provider state.
     ("eth-duo-sim", "eth", "1", (("jsonrpc", "http", 18586),)),
     ("eth-duo-sim", "eth", "2", (("jsonrpc", "http", 18587),)),
+    # eth-twin-sim: the same-name-providers regression topology (k3d-only; see
+    # tools/local-cluster/routers.yml in smart_router_automation). The router
+    # configures TWO providers that share one name, but only ONE of them —
+    # this listener — is ever bound. The router's second same-name provider
+    # deliberately points at 18589, which nothing listens on, so it fails the
+    # router's startup validation while this one passes. That asymmetry is the
+    # regression: a router that drops the healthy twin along with the failing
+    # one is the bug the test guards. Dedicated listener for the same isolation
+    # reason as eth-duo-sim above.
+    ("eth-twin-sim", "eth", "1", (("jsonrpc", "http", 18588),)),
     ("btc-sim", "btc", "1", (("jsonrpc", "http", 18575),)),
     ("btc-sim", "btc", "2", (("jsonrpc", "http", 18576),)),
     ("btc-sim", "btc", "3", (("jsonrpc", "http", 18577),)),

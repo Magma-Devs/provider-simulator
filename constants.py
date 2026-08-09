@@ -57,11 +57,30 @@ ETH_SOLO_PORTS = {"19": 18581}
 # same as ETH_SOLO_PORTS above — adding the entry to ETH_ALL_PORTS is
 # sufficient; no separate listener block is required.
 ETH_DUO_PORTS = {"21": 18586, "22": 18587}
-# Union of the four ETH JSON-RPC pools above (primary + backup + solo + duo) —
-# the pid/port set the ETH-default bootstrap loop in server.py binds. The
-# other chains' pools (BTC / LN / Solana / gRPC / REST / TM / WS) are NOT
+# eth-twin-sim pool (MAG-1745). ONE bound listener, deliberately — the router
+# that consumes it (k3d-only; see tools/local-cluster/routers.yml in
+# smart_router_automation) configures TWO providers sharing one name, and
+# points the second at 18589, which nothing binds. The second provider
+# therefore fails the router's startup validation while this one passes, which
+# is exactly the asymmetry the same-name regression needs. Pid 23 continues the
+# global numbering after the eth-duo pids (21/22); port 18588 sits just above
+# the eth-duo listeners (18586/18587). Dedicated listener, like eth-duo-sim, so
+# a /scenario flip on one pool cannot reach another's providers. Handler
+# dispatch is the default ETH path, same as ETH_SOLO_PORTS/ETH_DUO_PORTS above
+# — adding the entry to ETH_ALL_PORTS is sufficient; no separate listener
+# block needed.
+ETH_TWIN_PORTS = {"23": 18588}
+# Union of the five ETH JSON-RPC pools above (primary + backup + solo + duo +
+# twin) — the pid/port set the ETH-default bootstrap loop in server.py binds.
+# The other chains' pools (BTC / LN / Solana / gRPC / REST / TM / WS) are NOT
 # part of this union; each is bound by its own dedicated loop.
-ETH_ALL_PORTS = {**ETH_PRIMARY_PORTS, **ETH_BACKUP_PORTS, **ETH_SOLO_PORTS, **ETH_DUO_PORTS}
+ETH_ALL_PORTS = {
+    **ETH_PRIMARY_PORTS,
+    **ETH_BACKUP_PORTS,
+    **ETH_SOLO_PORTS,
+    **ETH_DUO_PORTS,
+    **ETH_TWIN_PORTS,
+}
 
 PROVIDER_PORTS = ETH_PRIMARY_PORTS  # deprecated alias — migrate callers, then remove
 BACKUP_PROVIDER_PORTS = ETH_BACKUP_PORTS  # deprecated alias — migrate callers, then remove

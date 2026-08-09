@@ -10,6 +10,7 @@ EXPECTED_POOLS = {
     "eth-sim",
     "eth-solo-sim",
     "eth-duo-sim",
+    "eth-twin-sim",
     "btc-sim",
     "ln-sim",
     "solana-sim",
