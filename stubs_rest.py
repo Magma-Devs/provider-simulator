@@ -203,16 +203,37 @@ def _validators_response() -> Dict[str, Any]:
     }
 
 
+def _simulate_response() -> Dict[str, Any]:
+    """POST /cosmos/tx/v1beta1/simulate — the gas estimate a real Cosmos REST
+    node answers with. ``gas_info`` carries the wanted/used pair a caller reads
+    to price the transaction; ``result`` is the (empty here) execution echo the
+    cosmos-sdk simulate endpoint returns alongside it."""
+    return {
+        "gas_info": {
+            "gas_wanted": "200000",
+            "gas_used": "85432",
+        },
+        "result": {
+            "data": "",
+            "log": "",
+            "events": [],
+            "msg_responses": [],
+        },
+    }
+
+
 # ── Method (path) defaults ────────────────────────────────────────────────────
 #
 # Keyed by (verb, template_str). The template carries ``{var}`` placeholders;
 # ``handlers_rest`` matches a live URL against the compiled regex and passes
 # path params as a dict.
 #
-# v1 contract: only GET paths are populated. POST / PUT / DELETE return 404
-# (no-match) unless a test injects an explicit ``responses`` override per the
-# Q9 design — that path keeps full-CRUD wiring testable today and leaves room
-# for write-verb stubs to land in a follow-up.
+# The GET entries are the original v1 catalogue. Write verbs joined later:
+# real Cosmos REST nodes accept POST on paths like /cosmos/tx/v1beta1/simulate,
+# and the GET-only catalogue made the simulator answer 404 where a real node
+# answers 200 — so POST-path router tests could never run against the sim.
+# Any verb/path still outside this catalogue returns 404 (no-match) unless a
+# test injects an explicit ``responses`` override per the Q9 design.
 
 REST_METHOD_DEFAULTS: Dict[Tuple[str, str], Any] = {
     ("GET", "/cosmos/base/tendermint/v1beta1/blocks/latest"): _block_response(REST_LATEST_HEIGHT),
@@ -220,6 +241,7 @@ REST_METHOD_DEFAULTS: Dict[Tuple[str, str], Any] = {
     ("GET", "/cosmos/base/tendermint/v1beta1/node_info"): _node_info_response(),
     ("GET", "/cosmos/bank/v1beta1/balances/{address}"): _balances_response("lava-sim-address"),
     ("GET", "/cosmos/staking/v1beta1/validators"): _validators_response(),
+    ("POST", "/cosmos/tx/v1beta1/simulate"): _simulate_response(),
 }
 
 
