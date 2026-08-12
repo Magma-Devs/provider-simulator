@@ -321,14 +321,27 @@ class TestLNFaultInjection:
     def test_drop_connection_at_each_point_on_ln(self, sim, drop_at):
         """All 3 drop points close the connection on an LN provider.
 
-        before_headers closes the socket before any HTTP headers are written —
-        the client sees a URLError or ConnectionResetError. after_headers /
-        mid_body surface as IncompleteRead via urllib's response object, or
-        ConnectionResetError depending on platform. All variants are valid.
+        The failure must be one of the connection-drop manifestations the eth
+        reference suite (test_simulator.py::TestDropConnection) pins — an
+        unrelated failure class (a helper bug, a parse error) must not pass.
         """
         _set_ln(sim, "2", mode="drop_connection", drop_at=drop_at)
-        with pytest.raises((urllib.error.URLError, ConnectionResetError, OSError, Exception)):
+        try:
             _rpc(_LN_URLS["2"], "getinfo")
+            observed = "OK"
+        except Exception as exc:  # capture the class name; asserted below
+            observed = type(exc).__name__
+        assert observed != "OK", "expected a connection-drop error, got a valid response"
+        assert any(
+            name in observed
+            for name in (
+                "RemoteDisconnected",
+                "BadStatusLine",
+                "URLError",
+                "ConnectionResetError",
+                "IncompleteRead",
+            )
+        ), f"unexpected error class for {drop_at} drop: {observed}"
 
     @pytest.mark.parametrize(
         "drop_at,expect",

@@ -36,7 +36,13 @@ from typing import Any, Dict, Optional, Tuple
 
 import pytest
 
-from constants import BTC_PRIMARY_PORTS, ETH_PRIMARY_PORTS, REST_PRIMARY_PORTS, TM_PRIMARY_PORTS
+from constants import (
+    BTC_PRIMARY_PORTS,
+    ETH_PRIMARY_PORTS,
+    REST_PRIMARY_PORTS,
+    TM_LATEST_HEIGHT,
+    TM_PRIMARY_PORTS,
+)
 from stubs_tendermintrpc import TENDERMINT_ERROR_STUBS, TENDERMINT_METHOD_DEFAULTS
 
 _TM_URLS = {pid: f"http://127.0.0.1:{port}" for pid, port in TM_PRIMARY_PORTS.items()}
@@ -387,29 +393,46 @@ class TestTmFaults:
 
     @pytest.mark.parametrize("drop_at", ["before_headers", "after_headers", "mid_body"])
     def test_drop_connection_at_each_point(self, sim, drop_at):
-        """All 3 drop points close the connection on a TM provider."""
+        """All 3 drop points close the connection on a TM provider.
+
+        The failure must be one of the connection-drop manifestations the eth
+        reference suite (test_simulator.py::TestDropConnection) pins — an
+        unrelated failure class (a helper bug, a parse error) must not pass.
+        """
         _set_tm(sim, "1", mode="drop_connection", drop_at=drop_at)
-        # before_headers raises URLError; after_headers / mid_body raise
-        # IncompleteRead via urllib's response object, or ConnectionResetError
-        # depending on platform. All variants are valid for this test.
-        with pytest.raises((urllib.error.URLError, ConnectionResetError, OSError, Exception)):
+        try:
             _tm_post(sim, "1", "status")
+            observed = "OK"
+        except Exception as exc:  # capture the class name; asserted below
+            observed = type(exc).__name__
+        assert observed != "OK", "expected a connection-drop error, got a valid response"
+        assert any(
+            name in observed
+            for name in (
+                "RemoteDisconnected",
+                "BadStatusLine",
+                "URLError",
+                "ConnectionResetError",
+                "IncompleteRead",
+            )
+        ), f"unexpected error class for {drop_at} drop: {observed}"
 
     def test_blocks_behind_shifts_block_height(self, sim):
         """blocks_behind=100 shifts the height of `block` with no height param.
 
-        The TM head constant is 5_000_000 (constants.TM_LATEST_HEIGHT); heights
-        serialise as string-ints, so the shifted head reads "4999900".
+        Asserted against constants.TM_LATEST_HEIGHT (the same convention the
+        gRPC and REST suites use for their head constants); Tendermint heights
+        serialise as string-ints.
         """
         _set_tm(sim, "1", blocks_behind=100)
         _, body, _ = _tm_post(sim, "1", "block")
-        assert body["result"]["block"]["header"]["height"] == str(5_000_000 - 100)
+        assert body["result"]["block"]["header"]["height"] == str(TM_LATEST_HEIGHT - 100)
 
     def test_blocks_behind_zero_reports_canonical_head(self, sim):
         """At blocks_behind=0 `block` with no height param reports the head."""
         _set_tm(sim, "1", blocks_behind=0)
         _, body, _ = _tm_post(sim, "1", "block")
-        assert body["result"]["block"]["header"]["height"] == str(5_000_000)
+        assert body["result"]["block"]["header"]["height"] == str(TM_LATEST_HEIGHT)
 
     def test_explicit_height_unaffected_by_blocks_behind(self, sim):
         """`block` with an explicit height echoes it regardless of blocks_behind."""
