@@ -13,8 +13,9 @@ Coverage:
                                query strings preserved, 404 for unknown paths.
   Happy-path per seed path   — every (verb, template) in REST_METHOD_DEFAULTS
                                returns a non-empty 200 body.
-  Fault primitives           — hang / drop / stale / corrupt / status all
-                               apply identically on a REST provider.
+  Fault primitives           — hang / drop / stale / corrupt / status /
+                               latency_ms / error_probability all apply
+                               identically on a REST provider.
   Per-(verb, template) overrides — body/status/error/error_stub + the fault
                                keys (mode / latency_ms), list-of-pairs wire
                                format.
@@ -399,6 +400,55 @@ class TestRestFaultStale:
         _set_rest(sim, "1", blocks_behind=100)
         _, body, _ = _get(_REST_URLS["1"] + "/cosmos/base/tendermint/v1beta1/blocks/19000000")
         assert body["block"]["header"]["height"] == "19000000"
+
+
+class TestRestFaultLatency:
+
+    def test_provider_wide_latency_ms_delays_reply(self, sim):
+        """latency_ms=300 on the provider block delays every route by ≥300ms.
+
+        Distinct from the per-path override in TestRestPerPathFaultOverrides:
+        this is the provider-wide field on the scenario block itself.
+        """
+        _set_rest(sim, "1", latency_ms=300)
+        t0 = time.monotonic()
+        status, _, _ = _get(_REST_URLS["1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
+        elapsed = time.monotonic() - t0
+        assert status == 200
+        assert elapsed >= 0.28, f"latency floor not paid: elapsed={elapsed:.3f}s"
+
+
+class TestRestFaultErrorProbability:
+
+    def test_error_probability_1_always_errors(self, sim):
+        """error_probability=1.0 on mode=success errors every one of 5 requests.
+
+        REST errors are a bare {code, message} object, no JSON-RPC envelope.
+        """
+        _set_rest(
+            sim,
+            "1",
+            mode="success",
+            error_probability=1.0,
+            error_code=-32077,
+            error_message="Forced by test",
+        )
+        errored = 0
+        for _ in range(5):
+            _, body, _ = _get(_REST_URLS["1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
+            if isinstance(body, dict) and body.get("code") == -32077:
+                errored += 1
+        assert errored == 5, f"expected 5/5 errors at probability 1.0, got {errored}/5"
+
+    def test_error_probability_0_never_errors(self, sim):
+        """error_probability=0.0 on mode=success succeeds every one of 5 requests."""
+        _set_rest(sim, "1", mode="success", error_probability=0.0)
+        succeeded = 0
+        for _ in range(5):
+            _, body, _ = _get(_REST_URLS["1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
+            if isinstance(body, dict) and "block" in body:
+                succeeded += 1
+        assert succeeded == 5, f"expected 5/5 successes at probability 0.0, got {succeeded}/5"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

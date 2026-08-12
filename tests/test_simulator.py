@@ -1234,6 +1234,24 @@ class TestScenarioValidation:
         assert status == 400
         assert "mode" in body["error"]
 
+    def test_mode_corrupt_is_rejected_not_silently_ignored(self, sim):
+        """mode="corrupt" must be a 400, never a silent no-op.
+
+        Corruption is configured through the separate ``corruption_mode``
+        field, not ``mode``. The old flat simulator accepted mode="corrupt"
+        and ignored it, so tests that wrote it silently ran the success path
+        and proved nothing. This test pins the rejection so that trap cannot
+        come back if the mode allow-list is ever widened.
+        """
+        status, body = _post(
+            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"mode": "corrupt"}}}
+        )
+        assert status == 400
+        assert "mode" in body["error"]
+        # The provider must be untouched: a follow-up request still succeeds.
+        _, reply = _rpc(_PROVIDER_URLS["1"], "eth_blockNumber")
+        assert "result" in reply, f"rejected scenario must not alter the provider: {reply}"
+
     def test_chain_family_field_is_rejected_with_400(self, sim):
         """The old chain_family field is gone — sending it fails loudly with a
         message that points at the pool + transports replacement."""

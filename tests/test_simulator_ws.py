@@ -109,6 +109,32 @@ class TestRequestResponse:
         assert reply["result"].startswith("0x")
 
 
+class TestWsBlocksBehind:
+
+    def test_blocks_behind_shifts_block_height_over_ws(self, sim):
+        """blocks_behind=100 shifts the eth_blockNumber result on the ws wire.
+
+        Baseline-then-shifted on the same connection: the difference between
+        the two replies must be exactly the configured shift, independent of
+        the head constant's literal value.
+        """
+        with WsClient(_WS_HOST, _WS_PORTS["1"], "/ws") as c:
+            c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1})
+            baseline = int(c.recv_json(timeout=2.0)["result"], 16)
+            _control(
+                sim,
+                "POST",
+                "/scenario",
+                {"providers": {"eth-sim:1": {"blocks_behind": 100}}},
+            )
+            c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 2})
+            shifted = int(c.recv_json(timeout=2.0)["result"], 16)
+        assert baseline - shifted == 100, (
+            f"expected the ws-served head to drop by exactly 100, "
+            f"got baseline={baseline} shifted={shifted}"
+        )
+
+
 class TestPingPong:
 
     def test_client_ping_gets_pong_with_same_payload(self, sim):

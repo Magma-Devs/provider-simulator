@@ -24,6 +24,7 @@ Run with:
 
 import json
 import re
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -73,6 +74,31 @@ def _get(url: str) -> tuple[int, dict]:
 def _rpc(url: str, method: str, params: list | None = None) -> tuple[int, dict]:
     """Send a JSON-RPC request, return (http_status, response_body)."""
     return _post(url, {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []})
+
+
+def _raw_post_bytes(port: int, method: str) -> bytes:
+    """POST over a raw socket and return every byte the server sends before EOF.
+
+    Used by the drop-point tests: urllib collapses every drop variant into an
+    exception, while the raw bytes show exactly where the connection ended.
+    """
+    payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": []}).encode()
+    s = socket.create_connection(("127.0.0.1", port), timeout=5)
+    try:
+        s.sendall(
+            b"POST / HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+            + f"Content-Length: {len(payload)}\r\n\r\n".encode()
+            + payload
+        )
+        chunks = []
+        while True:
+            block = s.recv(4096)
+            if not block:
+                break
+            chunks.append(block)
+        return b"".join(chunks)
+    finally:
+        s.close()
 
 
 def _ctrl(sim: dict, path: str) -> str:
@@ -268,10 +294,50 @@ class TestBTCFaultInjection:
         # the latency_ms=0 fast path) — actual cap is the urlopen timeout.
         assert elapsed >= 4, f"hang should block at least the client timeout, got {elapsed:.2f}s"
 
-    def test_drop_connection_before_headers_on_btc(self, sim):
-        _set_btc(sim, "1", mode="drop_connection", drop_at="before_headers")
-        with pytest.raises((urllib.error.URLError, ConnectionResetError, OSError)):
+    @pytest.mark.parametrize("drop_at", ["before_headers", "after_headers", "mid_body"])
+    def test_drop_connection_at_each_point_on_btc(self, sim, drop_at):
+        """All 3 drop points close the connection on a BTC provider."""
+        _set_btc(sim, "1", mode="drop_connection", drop_at=drop_at)
+        # before_headers raises URLError; after_headers / mid_body raise
+        # IncompleteRead via urllib's response object, or ConnectionResetError
+        # depending on platform. All variants are valid for this test.
+        with pytest.raises((urllib.error.URLError, ConnectionResetError, OSError, Exception)):
             _rpc(_BTC1, "getblockcount")
+
+    @pytest.mark.parametrize(
+        "drop_at,expect",
+        [
+            ("before_headers", "no_bytes"),
+            ("after_headers", "headers_only"),
+            ("mid_body", "partial_body"),
+        ],
+    )
+    def test_drop_point_visible_on_the_socket_btc(self, sim, drop_at, expect):
+        """Each drop point emits its documented byte shape before closing.
+
+        before_headers: EOF with zero bytes — no status line is ever sent.
+        after_headers: a complete header block promising a 100-byte body,
+        then EOF with no body byte. mid_body: the same header block plus a
+        partial body strictly shorter than the promised length, then EOF.
+        A raw socket is used because urllib collapses all three into an
+        exception, which cannot tell the points apart.
+        """
+        _set_btc(sim, "1", mode="drop_connection", drop_at=drop_at)
+        raw = _raw_post_bytes(BTC_PRIMARY_PORTS["1"], "getblockcount")
+        if expect == "no_bytes":
+            assert raw == b"", f"before_headers must emit nothing, got {raw[:80]!r}"
+            return
+        head, sep, body_part = raw.partition(b"\r\n\r\n")
+        assert sep, f"expected a complete header block, got {raw[:80]!r}"
+        assert b" 200 " in head.split(b"\r\n", 1)[0], f"no 200 status line in {head[:80]!r}"
+        assert b"Content-Length: 100" in head, f"promised length missing from {head!r}"
+        if expect == "headers_only":
+            assert body_part == b"", f"after_headers must send no body byte, got {body_part!r}"
+        else:
+            assert 0 < len(body_part) < 100, (
+                f"mid_body must send a strict subset of the promised 100 bytes, "
+                f"got {len(body_part)} bytes"
+            )
 
     def test_stale_blocks_behind_on_btc(self, sim):
         """blocks_behind=100 → BTC head reports 100 below the canonical chain head."""

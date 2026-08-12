@@ -144,6 +144,10 @@ class GrpcListener:
 
         # ── Corruption → proto-level or abort ──
         corruption = scenario.get("corruption_mode") if self._targeted(scenario) else None
+        # wrong_type aborts immediately by design: proto3 fields are typed, so
+        # a wrong-typed value cannot be serialized into the response message
+        # the way a JSON body can carry one. The INTERNAL abort is the closest
+        # wire-visible stand-in for "the provider answered with garbage types".
         if corruption == "wrong_type":
             _finalize("error", latency)
             return GrpcPlan(

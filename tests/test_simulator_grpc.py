@@ -10,8 +10,9 @@ Coverage:
   Happy-path                 — GetLatestBlock / GetNodeInfo respond with a
                                 well-formed protobuf.
   Metadata capture            — lava-* request metadata shows up in /history.
-  Fault primitives            — hang / status / dropped / corrupt / stale all
-                                behave correctly over gRPC.
+  Fault primitives            — hang / status / dropped / corrupt / stale /
+                                latency_ms / error_probability all behave
+                                correctly over gRPC.
   Cross-pool isolation        — faults on eth-sim / btc-sim / lava-sim-rest
                                 never abort the gRPC pool.
   History tracking            — gRPC requests show up in /history exactly
@@ -398,6 +399,60 @@ class TestGrpcFaultStale:
         _set_grpc(sim, "1", blocks_behind=1_000_000)
         resp = _call_get_latest_block(_GRPC_ADDRS["1"])
         assert resp.block.header.height == GRPC_LATEST_BLOCK - 1_000_000
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fault: latency (provider-wide latency_ms floor)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestGrpcFaultLatency:
+    """latency_ms on the provider block delays the reply on the gRPC wire."""
+
+    def test_latency_ms_delays_reply(self, sim):
+        """latency_ms=300 inserts at least 300ms between request and reply."""
+        _set_grpc(sim, "1", latency_ms=300)
+        t0 = time.monotonic()
+        resp = _call_get_latest_block(_GRPC_ADDRS["1"])
+        elapsed = time.monotonic() - t0
+        assert resp.block.header.height == GRPC_LATEST_BLOCK  # reply is still valid
+        assert elapsed >= 0.28, f"latency floor not paid: elapsed={elapsed:.3f}s"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fault: error_probability (probabilistic error on mode=success)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestGrpcFaultErrorProbability:
+    """error_probability rolls on the shared fault ladder for gRPC calls too.
+
+    On gRPC an error verdict is a status abort. The default error_message
+    ("Internal error") names no grpc.StatusCode and the default error_code
+    (-32000) is no valid status int, so the abort resolves to UNKNOWN.
+    """
+
+    def test_error_probability_1_always_errors(self, sim):
+        """error_probability=1.0 on mode=success aborts every one of 5 calls."""
+        _set_grpc(sim, "1", mode="success", error_probability=1.0)
+        errored = 0
+        for _ in range(5):
+            try:
+                _call_get_latest_block(_GRPC_ADDRS["1"])
+            except grpc.RpcError as e:
+                assert e.code() == grpc.StatusCode.UNKNOWN
+                errored += 1
+        assert errored == 5, f"expected 5/5 aborts at probability 1.0, got {errored}/5"
+
+    def test_error_probability_0_never_errors(self, sim):
+        """error_probability=0.0 on mode=success answers every one of 5 calls."""
+        _set_grpc(sim, "1", mode="success", error_probability=0.0)
+        succeeded = 0
+        for _ in range(5):
+            resp = _call_get_latest_block(_GRPC_ADDRS["1"])
+            if resp.block.header.height == GRPC_LATEST_BLOCK:
+                succeeded += 1
+        assert succeeded == 5, f"expected 5/5 replies at probability 0.0, got {succeeded}/5"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
