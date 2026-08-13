@@ -102,3 +102,42 @@ def test_corruption_directive_carried_on_success():
 
 def _listener_provider_update(listener, cfg):
     listener.provider.scenario.update(cfg)
+
+
+def _post(path, body=b"", headers=None):
+    return RawRequest(verb="POST", path=path, body=body, headers=headers or {})
+
+
+_TX_SIMULATE = "/cosmos/tx/v1beta1/simulate"
+
+
+def test_post_tx_simulate_success_and_history():
+    # Real Cosmos REST nodes accept POST on the simulate path; the GET-only
+    # catalogue used to answer 404 here, blocking every POST-path router test.
+    listener, provider = _listener()
+    res = listener.serve(_post(_TX_SIMULATE, body=b'{"tx_bytes": "AA==", "gas_adjustment": "1.5"}'))
+    assert res.action == "respond"
+    assert res.status == 200
+    assert res.body["gas_info"]["gas_wanted"] == "200000"
+    assert res.body["gas_info"]["gas_used"] == "85432"
+    assert res.body["result"]["msg_responses"] == []
+    hist = provider.log.get_history()[0]
+    assert hist["status"] == "success"
+    assert hist["method"] == f"POST {_TX_SIMULATE}"
+
+
+def test_post_unknown_path_still_404():
+    # Only catalogued write routes exist — an uncatalogued POST path keeps the
+    # no-match contract.
+    listener, provider = _listener()
+    res = listener.serve(_post("/cosmos/tx/v1beta1/thisdoesnotexist"))
+    assert res.status == 404
+    assert provider.log.get_history()[0]["status"] == "not_found"
+
+
+def test_get_on_simulate_path_is_404():
+    # Routes are verb-scoped: registering POST /simulate must not create a GET
+    # twin. A real node rejects GET here too.
+    listener, _ = _listener()
+    res = listener.serve(_get(_TX_SIMULATE))
+    assert res.status == 404
