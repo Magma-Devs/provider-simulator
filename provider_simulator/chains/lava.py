@@ -161,7 +161,18 @@ class LavaChain(Chain):
                 )
 
         if key not in REST_METHOD_DEFAULTS:
-            return 404, {"code": "not_found", "method": verb, "path": template}
+            # Report the path the caller actually asked for, not the matched
+            # template. An uncatalogued path matches no route, so the template
+            # is None — and a 404 body reading "path": null tells a reader
+            # nothing about what they got wrong. The OPTIONS handler already
+            # answers its own 404 with the concrete path (server.py), so this
+            # keeps the two consistent. Falls back to the template for callers
+            # that pass no path (the chain's own unit tests).
+            return 404, {
+                "code": "not_found",
+                "method": verb,
+                "path": request.get("path") or template,
+            }
         result = deepcopy(REST_METHOD_DEFAULTS[key])
 
         blocks_behind = scenario.get("blocks_behind", 0)
