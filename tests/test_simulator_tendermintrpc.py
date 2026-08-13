@@ -16,7 +16,9 @@ Coverage:
                                 produce the same handler input.
   Echo / pagination           — block echoes the requested height; validators
                                 paginates by page/per_page.
-  Fault primitives            — down / error / corruption_mode all apply on
+  Fault primitives            — down / error / rate_limit / hang / drop (all
+                                3 points) / corruption_mode / blocks_behind /
+                                latency_ms / error_probability all apply on
                                 a Tendermint provider.
   Cross-pool isolation        — faults on eth-sim / btc-sim / lava-sim-rest
                                 never leak onto the TM pool.
@@ -26,6 +28,7 @@ Run with:
 """
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -33,7 +36,13 @@ from typing import Any, Dict, Optional, Tuple
 
 import pytest
 
-from constants import BTC_PRIMARY_PORTS, ETH_PRIMARY_PORTS, REST_PRIMARY_PORTS, TM_PRIMARY_PORTS
+from constants import (
+    BTC_PRIMARY_PORTS,
+    ETH_PRIMARY_PORTS,
+    REST_PRIMARY_PORTS,
+    TM_LATEST_HEIGHT,
+    TM_PRIMARY_PORTS,
+)
 from stubs_tendermintrpc import TENDERMINT_ERROR_STUBS, TENDERMINT_METHOD_DEFAULTS
 
 _TM_URLS = {pid: f"http://127.0.0.1:{port}" for pid, port in TM_PRIMARY_PORTS.items()}
@@ -364,6 +373,101 @@ class TestTmFaults:
         status, body, _ = _tm_post(sim, "1", "status")
         assert status == 200
         assert isinstance(body, (bytes, str)), f"expected raw garbage, got {body!r}"
+
+    def test_hang_blocks_until_client_timeout(self, sim):
+        """mode=hang on a TM provider accepts the connection and never replies."""
+        _set_tm(sim, "1", mode="hang")
+        t0 = time.monotonic()
+        timed_out = False
+        try:
+            _tm_post(sim, "1", "status")
+        except (urllib.error.URLError, ConnectionResetError, OSError):
+            timed_out = True  # 30s sleep → client times out at 5s
+        elapsed = time.monotonic() - t0
+        # We don't wait 30s; just confirm the client timed out (≥4s, well above
+        # the latency_ms=0 fast path) — actual cap is the urlopen timeout.
+        # timed_out distinguishes a hang from a merely slow reply: a provider
+        # that answers after 4s would satisfy the elapsed floor alone.
+        assert timed_out, "hang mode replied instead of timing out"
+        assert elapsed >= 4, f"hang should block at least client timeout, got {elapsed:.2f}s"
+
+    @pytest.mark.parametrize("drop_at", ["before_headers", "after_headers", "mid_body"])
+    def test_drop_connection_at_each_point(self, sim, drop_at):
+        """All 3 drop points close the connection on a TM provider.
+
+        The failure must be one of the connection-drop manifestations the eth
+        reference suite (test_simulator.py::TestDropConnection) pins — an
+        unrelated failure class (a helper bug, a parse error) must not pass.
+        """
+        _set_tm(sim, "1", mode="drop_connection", drop_at=drop_at)
+        try:
+            _tm_post(sim, "1", "status")
+            observed = "OK"
+        except Exception as exc:  # capture the class name; asserted below
+            observed = type(exc).__name__
+        assert observed != "OK", "expected a connection-drop error, got a valid response"
+        assert any(
+            name in observed
+            for name in (
+                "RemoteDisconnected",
+                "BadStatusLine",
+                "URLError",
+                "ConnectionResetError",
+                "IncompleteRead",
+            )
+        ), f"unexpected error class for {drop_at} drop: {observed}"
+
+    def test_blocks_behind_shifts_block_height(self, sim):
+        """blocks_behind=100 shifts the height of `block` with no height param.
+
+        Asserted against constants.TM_LATEST_HEIGHT (the same convention the
+        gRPC and REST suites use for their head constants); Tendermint heights
+        serialise as string-ints.
+        """
+        _set_tm(sim, "1", blocks_behind=100)
+        _, body, _ = _tm_post(sim, "1", "block")
+        assert body["result"]["block"]["header"]["height"] == str(TM_LATEST_HEIGHT - 100)
+
+    def test_blocks_behind_zero_reports_canonical_head(self, sim):
+        """At blocks_behind=0 `block` with no height param reports the head."""
+        _set_tm(sim, "1", blocks_behind=0)
+        _, body, _ = _tm_post(sim, "1", "block")
+        assert body["result"]["block"]["header"]["height"] == str(TM_LATEST_HEIGHT)
+
+    def test_explicit_height_unaffected_by_blocks_behind(self, sim):
+        """`block` with an explicit height echoes it regardless of blocks_behind."""
+        _set_tm(sim, "1", blocks_behind=100)
+        _, body, _ = _tm_post(sim, "1", "block", params={"height": "4500000"})
+        assert body["result"]["block"]["header"]["height"] == "4500000"
+
+    def test_latency_ms_delays_reply(self, sim):
+        """latency_ms=300 inserts at least 300ms between request and reply."""
+        _set_tm(sim, "1", latency_ms=300)
+        t0 = time.monotonic()
+        status, _, _ = _tm_post(sim, "1", "status")
+        elapsed = time.monotonic() - t0
+        assert status == 200
+        assert elapsed >= 0.28, f"latency floor not paid: elapsed={elapsed:.3f}s"
+
+    def test_error_probability_1_always_errors(self, sim):
+        """error_probability=1.0 on mode=success errors every one of 5 requests."""
+        _set_tm(sim, "1", mode="success", error_probability=1.0)
+        errored = 0
+        for i in range(5):
+            status, body, _ = _tm_post(sim, "1", "status", request_id=100 + i)
+            if isinstance(body, dict) and "error" in body:
+                errored += 1
+        assert errored == 5, f"expected 5/5 errors at probability 1.0, got {errored}/5"
+
+    def test_error_probability_0_never_errors(self, sim):
+        """error_probability=0.0 on mode=success succeeds every one of 5 requests."""
+        _set_tm(sim, "1", mode="success", error_probability=0.0)
+        succeeded = 0
+        for i in range(5):
+            status, body, _ = _tm_post(sim, "1", "status", request_id=200 + i)
+            if isinstance(body, dict) and "result" in body:
+                succeeded += 1
+        assert succeeded == 5, f"expected 5/5 successes at probability 0.0, got {succeeded}/5"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
