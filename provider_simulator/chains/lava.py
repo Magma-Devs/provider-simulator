@@ -64,6 +64,43 @@ def _to_int(value: Any, default: int) -> int:
     return default
 
 
+# The query parameter a Cosmos REST caller pages with: the opaque cursor the
+# node handed back with the previous page.
+_PAGE_KEY_PARAM = "pagination.key"
+
+
+def _first_value(value: Any) -> Any:
+    """Take a query parameter's value whether it arrived as a list or bare.
+
+    A live request goes through ``parse_qs``, which wraps every value in a list;
+    a request dict built by hand in a test may carry the bare value.
+    """
+    if isinstance(value, (list, tuple)):
+        return value[0] if value else None
+    return value
+
+
+def _echo_page_key(result: Any, query: Any) -> None:
+    """Mirror the requested page cursor into the response's pagination block.
+
+    A real Cosmos node has no ``inbound_key`` field. The simulator adds one for
+    the same reason the balances stub echoes the requested address: every page
+    of the stub looks identical, so without an echo a caller cannot tell a
+    cursor that survived the trip from one that was dropped or rewritten along
+    the way. The value is None when the caller sent no cursor.
+
+    Mutates ``result`` in place; does nothing for a response with no pagination
+    block (``/blocks/latest``, ``/node_info``).
+    """
+    if not isinstance(result, dict) or not isinstance(query, dict):
+        return
+    pagination = result.get("pagination")
+    if not isinstance(pagination, dict):
+        return
+    cursor = _first_value(query.get(_PAGE_KEY_PARAM))
+    pagination["inbound_key"] = None if cursor is None else str(cursor)
+
+
 def _pick_status(cfg: dict, primary: str, secondary: str, default: int) -> int:
     """Resolve an HTTP status from a per-method override, honoring precedence.
 
@@ -98,9 +135,14 @@ class LavaChain(Chain):
     # http_status wins over the deprecated `status` fallback.
     def _build_rest(self, request: dict, scenario: dict) -> tuple[int, dict]:
         verb = request.get("verb", "GET")
+        # A HEAD borrows the GET route, so the stub is looked up under GET while
+        # the 404 body still names the verb the caller sent. Callers that don't
+        # set route_verb (the chain's own tests) fall back to verb.
+        route_verb = request.get("route_verb") or verb
         template = request.get("template")
         path_params = request.get("path_params") or {}
-        key = (verb, template)
+        query = request.get("query") or {}
+        key = (route_verb, template)
         responses = scenario.get("responses") or {}
         method_cfg = responses.get(key) or responses.get("default", {})
 
@@ -119,7 +161,18 @@ class LavaChain(Chain):
                 )
 
         if key not in REST_METHOD_DEFAULTS:
-            return 404, {"code": "not_found", "method": verb, "path": template}
+            # Report the path the caller actually asked for, not the matched
+            # template. An uncatalogued path matches no route, so the template
+            # is None — and a 404 body reading "path": null tells a reader
+            # nothing about what they got wrong. The OPTIONS handler already
+            # answers its own 404 with the concrete path (server.py), so this
+            # keeps the two consistent. Falls back to the template for callers
+            # that pass no path (the chain's own unit tests).
+            return 404, {
+                "code": "not_found",
+                "method": verb,
+                "path": request.get("path") or template,
+            }
         result = deepcopy(REST_METHOD_DEFAULTS[key])
 
         blocks_behind = scenario.get("blocks_behind", 0)
@@ -147,6 +200,8 @@ class LavaChain(Chain):
             requested = path_params.get("address")
             if requested is not None and isinstance(result, dict):
                 result["address"] = requested
+
+        _echo_page_key(result, query)
 
         return scenario.get("http_status", 200), result
 

@@ -10,7 +10,8 @@ Coverage:
   Verb dispatch              — each of GET/POST/PUT/DELETE/HEAD/OPTIONS hits
                                the right pipeline.
   Path-template matching     — {address} and {height} placeholders parse,
-                               query strings preserved, 404 for unknown paths.
+                               query strings preserved, the pagination cursor
+                               echoed back, 404 for unknown paths.
   Happy-path per seed path   — every (verb, template) in REST_METHOD_DEFAULTS
                                returns a non-empty 200 body.
   Fault primitives           — hang / drop / stale / corrupt / status /
@@ -190,6 +191,31 @@ class TestRestRouting:
         # Content-Length still announces the would-be body size.
         assert int(headers.get("Content-Length", "0")) > 0
 
+    def test_head_content_length_matches_the_get_body(self, sim):
+        """The HEAD contract: identical status and headers to the GET, no bytes.
+
+        Asserting only ``Content-Length > 0`` would pass on any non-empty
+        response; this pins it to the exact size the GET sends, which is the
+        promise a caller sizing a download relies on.
+        """
+        url = _REST_URLS["1"] + "/cosmos/staking/v1beta1/validators"
+        get_status, _, get_headers = _get(url)
+        head_status, head_body, head_headers = _request("HEAD", url)
+        assert head_status == get_status == 200
+        assert head_body is None or head_body == b"" or head_body == {}
+        assert head_headers["Content-Length"] == get_headers["Content-Length"]
+        assert head_headers["Content-Type"] == get_headers["Content-Type"]
+
+    def test_head_unknown_path_returns_404(self, sim):
+        """HEAD borrows the GET route table; it does not invent routes."""
+        status, _, _ = _request("HEAD", _REST_URLS["1"] + "/cosmos/unknown/path")
+        assert status == 404
+
+    def test_head_post_only_path_returns_404(self, sim):
+        """/simulate is catalogued for POST, so there is no GET route to borrow."""
+        status, _, _ = _request("HEAD", _REST_URLS["1"] + "/cosmos/tx/v1beta1/simulate")
+        assert status == 404
+
     def test_options_returns_allow_header(self, sim):
         """OPTIONS on a known path lists the registered verbs."""
         status, _, headers = _request(
@@ -236,6 +262,36 @@ class TestRestPathTemplates:
         )
         assert status == 200
         assert "validators" in body
+
+    def test_page_key_is_echoed_back(self, sim):
+        """``?pagination.key=<cursor>`` comes back as ``pagination.inbound_key``.
+
+        Every page of the stub is identical, so this echo is the only way a
+        caller can see that the cursor it sent is the cursor that arrived.
+        """
+        status, body, _ = _get(
+            _REST_URLS["1"] + "/cosmos/staking/v1beta1/validators?pagination.key=sentinel-abc"
+        )
+        assert status == 200
+        assert body["pagination"]["inbound_key"] == "sentinel-abc"
+
+    def test_page_key_echo_is_none_without_a_cursor(self, sim):
+        """No cursor sent, no cursor echoed — and the rest of the body is intact."""
+        status, body, _ = _get(_REST_URLS["1"] + "/cosmos/staking/v1beta1/validators")
+        assert status == 200
+        assert body["pagination"]["inbound_key"] is None
+        assert body["validators"][0]["status"] == "BOND_STATUS_BONDED"
+
+    def test_page_key_echo_is_per_request(self, sim):
+        """A cursor from one request must not linger on the next one's body."""
+        _, first, _ = _get(
+            _REST_URLS["1"] + "/cosmos/staking/v1beta1/validators?pagination.key=cursor-1"
+        )
+        _, second, _ = _get(
+            _REST_URLS["1"] + "/cosmos/staking/v1beta1/validators?pagination.key=cursor-2"
+        )
+        assert first["pagination"]["inbound_key"] == "cursor-1"
+        assert second["pagination"]["inbound_key"] == "cursor-2"
 
     def test_trailing_slash_doesnt_match(self, sim):
         """Exact-end regex anchor — ``/...validators/`` is not the same path."""
@@ -946,6 +1002,16 @@ class TestRestHistory:
         last = hist["history"][-1]
         assert last["method"] == "GET /totally/unknown"
         assert last["status"] == "not_found"
+
+    def test_head_recorded_under_its_own_verb(self, sim):
+        """A HEAD is served by the GET route but logged as the HEAD it was, so
+        a caller reading /history can tell the two apart."""
+        _request("HEAD", _REST_URLS["1"] + "/cosmos/staking/v1beta1/validators")
+        _, hist, _ = _get(_ctrl(sim, "/history?pool=lava-sim-rest&pid=1"))
+        assert hist["count"] >= 1
+        last = hist["history"][-1]
+        assert last["method"] == "HEAD /cosmos/staking/v1beta1/validators"
+        assert last["status"] == "success"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

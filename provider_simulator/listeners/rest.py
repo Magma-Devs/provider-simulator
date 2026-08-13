@@ -6,6 +6,11 @@ REST carries the request in the URL (verb + path), not a JSON-RPC body, so
 envelope). A rate_limit / error fault is a small ``{"code", "message"}`` object,
 not an envelope, and an unmatched path is a 404 recorded in history as
 ``not_found`` — both matching the flat RestHandler.
+
+HEAD has no route of its own. HTTP defines a HEAD response as the GET response
+with the body dropped — same status, same headers, same faults — so a HEAD is
+matched against the GET route table and the plan it returns carries
+``suppress_body``. History still records the verb the caller actually sent.
 """
 
 import json
@@ -27,6 +32,12 @@ def _compile_route(template: str) -> "re.Pattern[str]":
 _REST_ROUTES = [
     (verb.upper(), _compile_route(template), template) for (verb, template) in REST_METHOD_DEFAULTS
 ]
+
+# Verbs served by another verb's routes. HEAD asks for a GET's status and
+# headers without its body, so it is looked up under GET: every GET path gets
+# HEAD for free, and a path with no GET route (the POST-only simulate endpoint,
+# or anything uncatalogued) still answers 404 to a HEAD.
+_ROUTE_VERB = {"HEAD": "GET"}
 
 _ID_LOCK = threading.Lock()
 _ID = 0
@@ -52,15 +63,26 @@ def allowed_verbs(path: str) -> list[str]:
 
 
 class RestListener(Listener):
+    def serve(self, request: RawRequest, entry: dict | None = None) -> ServeResult:
+        result = super().serve(request, entry=entry)
+        # A HEAD pays for everything a GET pays for — the fault ladder, the
+        # latency, the history row, the Content-Length — and then withholds the
+        # bytes. Saying so on the plan keeps the socket adapter free of its own
+        # notion of what HEAD means.
+        if request.verb.upper() == "HEAD" and result.action == "respond":
+            result.suppress_body = True
+        return result
+
     def parse_request(self, request: RawRequest) -> dict:
         verb = request.verb.upper()
+        route_verb = _ROUTE_VERB.get(verb, verb)
         path = request.path
         req_id = request.headers.get("X-Request-Id") or _next_request_id()
 
         template = None
         path_params: dict = {}
-        for route_verb, regex, tmpl in _REST_ROUTES:
-            if route_verb != verb:
+        for known_verb, regex, tmpl in _REST_ROUTES:
+            if known_verb != route_verb:
                 continue
             match = regex.match(path)
             if match is not None:
@@ -75,7 +97,12 @@ class RestListener(Listener):
                 body = None
 
         return {
+            # ``verb`` is what the caller sent (history and the 404 body report
+            # it); ``route_verb`` is the verb the route table was searched
+            # under, which is what selects the stub and any per-route override.
+            # They differ only for HEAD.
             "verb": verb,
+            "route_verb": route_verb,
             "template": template,
             "path": path,
             "path_params": path_params,
@@ -102,9 +129,11 @@ class RestListener(Listener):
     def method_key(self, request: dict) -> object:
         # REST per-method fault overrides are keyed by the matched route:
         # the (verb, template) pair. Unmatched paths have no template and
-        # therefore no override.
+        # therefore no override. A HEAD keys off the GET route it borrowed, so
+        # a fault set on a GET path is felt by a HEAD to the same path.
         template = request.get("template")
-        return (request.get("verb"), template) if template else None
+        route_verb = request.get("route_verb") or request.get("verb")
+        return (route_verb, template) if template else None
 
     def success_label(self, status: int, body: object) -> str:
         if status == 404:

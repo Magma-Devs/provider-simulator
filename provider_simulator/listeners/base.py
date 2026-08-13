@@ -121,6 +121,12 @@ class ServeResult:
     ``latency_ms`` is the delay the adapter waits before emitting (0 = none).
     ``corruption_mode`` / ``missing_field`` tell the adapter how to break the
     serialized body on a ``respond`` response (None = clean).
+
+    ``suppress_body`` says "send this response's status and headers, then stop"
+    — the body is still built and still sized (Content-Length announces what a
+    body-carrying request would have received), only the bytes are withheld.
+    That is what an HTTP HEAD gets. It differs from ``no_body``, which is the
+    dead-node 503: no Content-Type, no Content-Length, nothing to size.
     """
 
     action: str  # respond | no_body | hang | drop
@@ -130,6 +136,7 @@ class ServeResult:
     latency_ms: int = 0
     corruption_mode: str | None = None
     missing_field: str | None = None
+    suppress_body: bool = False
 
 
 class Listener(ABC):
