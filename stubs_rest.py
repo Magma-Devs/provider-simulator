@@ -232,8 +232,14 @@ def _simulate_response() -> Dict[str, Any]:
 # real Cosmos REST nodes accept POST on paths like /cosmos/tx/v1beta1/simulate,
 # and the GET-only catalogue made the simulator answer 404 where a real node
 # answers 200 — so POST-path router tests could never run against the sim.
-# Any verb/path still outside this catalogue returns 404 (no-match) unless a
-# test injects an explicit ``responses`` override per the Q9 design.
+#
+# This table is also the route table: the listener compiles its routes from
+# these keys, so a verb/path absent here matches no route, gets no template,
+# and answers 404. A per-(verb, template) ``responses`` override cannot reach
+# it either — ``RestListener.method_key`` returns None without a template, so
+# only the catch-all ``responses["default"]`` applies to an unknown path.
+# Serving a new path therefore means adding it here, not overriding it per
+# test.
 
 REST_METHOD_DEFAULTS: Dict[Tuple[str, str], Any] = {
     ("GET", "/cosmos/base/tendermint/v1beta1/blocks/latest"): _block_response(REST_LATEST_HEIGHT),
