@@ -35,6 +35,14 @@ a handful of fields.
 | ``/balances/{address}`` | balances list (1 entry) + pagination | Single ulava balance covers the happy-path classifier check; address is echoed via path param. |
 | ``/validators`` | validators list (1 entry) + pagination | One active validator is enough to verify the router decoded the list shape. |
 
+Every response carrying a ``pagination`` block also carries
+``pagination.inbound_key``: the ``?pagination.key=`` cursor the request arrived
+with, echoed back (None when none was sent). Real Cosmos nodes have no such
+field — it exists so a caller can see that the cursor it sent is the cursor that
+reached the node, which is otherwise invisible because every page of a
+single-page stub looks the same. ``pagination.next_key`` stays None: the stub
+has one page, so there is no next one to point at.
+
 Adding a new path
 -----------------
 1. Add an entry to ``REST_METHOD_DEFAULTS`` below keyed by ``(verb, path_template)``.
@@ -163,7 +171,12 @@ def _balances_response(address: str = "lava-sim-address") -> Dict[str, Any]:
 
 
 def _validators_response() -> Dict[str, Any]:
-    """Minimal valid Cosmos ``/validators`` body — single active bonded validator."""
+    """Minimal valid Cosmos ``/validators`` body — single active bonded validator.
+
+    The ``pagination`` block gains an ``inbound_key`` at request time in
+    ``LavaChain._build_rest``, echoing the ``?pagination.key=`` cursor the
+    request carried.
+    """
     return {
         "validators": [
             {
@@ -240,6 +253,12 @@ def _simulate_response() -> Dict[str, Any]:
 # only the catch-all ``responses["default"]`` applies to an unknown path.
 # Serving a new path therefore means adding it here, not overriding it per
 # test.
+#
+# HEAD is the one verb with no entries, deliberately. HTTP defines a HEAD
+# response as the GET response minus the body, so the listener matches a HEAD
+# against the GET route and withholds the bytes on the way out. Every GET path
+# below answers HEAD for free — a HEAD twin per path would only duplicate five
+# bodies that HEAD never sends.
 
 REST_METHOD_DEFAULTS: Dict[Tuple[str, str], Any] = {
     ("GET", "/cosmos/base/tendermint/v1beta1/blocks/latest"): _block_response(REST_LATEST_HEIGHT),

@@ -28,14 +28,20 @@ def _sc(**kw):
     return sc.snapshot()
 
 
-def _rest(template, verb="GET", path_params=None, query=None, body=None):
-    return {
+def _rest(template, verb="GET", path_params=None, query=None, body=None, route_verb=None):
+    """A parsed REST request. ``route_verb`` is the verb the route table was
+    searched under — it differs from ``verb`` only for HEAD, which borrows GET's
+    route; leaving it None mirrors a caller that never sets it."""
+    request = {
         "verb": verb,
         "template": template,
         "path_params": path_params or {},
         "query": query or {},
         "body": body,
     }
+    if route_verb is not None:
+        request["route_verb"] = route_verb
+    return request
 
 
 def _tm(method, params=None, req_id=1):
@@ -117,6 +123,84 @@ def test_rest_body_override_http_status_wins_over_status():
     )
     assert st == 201  # REST: http_status wins over the deprecated status fallback
     assert body == {"x": 1}
+
+
+def test_rest_head_reads_the_get_stub():
+    # A HEAD carries route_verb GET, so the catalogue lookup finds the GET stub
+    # even though the request's own verb is HEAD.
+    st, body = _chain().build_success(
+        _rest(_BLOCKS_LATEST, verb="HEAD", route_verb="GET"), _sc(), {}, "rest"
+    )
+    assert st == 200
+    assert body["block"]["header"]["height"] == str(REST_HEIGHT)
+
+
+def test_rest_head_404_names_the_verb_the_caller_sent():
+    st, body = _chain().build_success(
+        _rest("/nope", verb="HEAD", route_verb="GET"), _sc(), {}, "rest"
+    )
+    assert st == 404
+    assert body["method"] == "HEAD"  # not the GET route it tried to borrow
+
+
+def test_rest_validators_echoes_inbound_page_key():
+    st, body = _chain().build_success(
+        _rest(_VALIDATORS, query={"pagination.key": ["sentinel-cursor-abc"]}), _sc(), {}, "rest"
+    )
+    assert st == 200
+    assert body["pagination"]["inbound_key"] == "sentinel-cursor-abc"
+
+
+def test_rest_validators_echoes_bare_page_key_value():
+    # parse_qs wraps values in lists; a hand-built request may not.
+    _st, body = _chain().build_success(
+        _rest(_VALIDATORS, query={"pagination.key": "bare-cursor"}), _sc(), {}, "rest"
+    )
+    assert body["pagination"]["inbound_key"] == "bare-cursor"
+
+
+def test_rest_validators_without_page_key_echoes_none():
+    _st, body = _chain().build_success(_rest(_VALIDATORS), _sc(), {}, "rest")
+    assert body["pagination"]["inbound_key"] is None
+    assert body["pagination"]["next_key"] is None  # single-page stub: no next page
+    assert body["validators"][0]["status"] == "BOND_STATUS_BONDED"
+
+
+def test_rest_balances_echoes_inbound_page_key_too():
+    # The other paginated Cosmos path gets the same echo — the cursor is a
+    # property of pagination, not of one endpoint.
+    _st, body = _chain().build_success(
+        _rest(
+            _BALANCES,
+            path_params={"address": "cosmos1abc"},
+            query={"pagination.key": ["cursor-9"]},
+        ),
+        _sc(),
+        {},
+        "rest",
+    )
+    assert body["pagination"]["inbound_key"] == "cursor-9"
+    assert body["address"] == "cosmos1abc"
+
+
+def test_rest_unpaginated_path_gains_no_pagination_block():
+    # /blocks/latest has no pagination block; a cursor on the query string must
+    # not conjure one.
+    _st, body = _chain().build_success(
+        _rest(_BLOCKS_LATEST, query={"pagination.key": ["cursor-9"]}), _sc(), {}, "rest"
+    )
+    assert "pagination" not in body
+
+
+def test_rest_page_key_echo_does_not_leak_into_the_shared_stub():
+    # The catalogue entry is deep-copied per request; a cursor from one call
+    # must not show up on the next.
+    _st, first = _chain().build_success(
+        _rest(_VALIDATORS, query={"pagination.key": ["cursor-1"]}), _sc(), {}, "rest"
+    )
+    _st, second = _chain().build_success(_rest(_VALIDATORS), _sc(), {}, "rest")
+    assert first["pagination"]["inbound_key"] == "cursor-1"
+    assert second["pagination"]["inbound_key"] is None
 
 
 # ── Tendermint-RPC ───────────────────────────────────────────────────────────

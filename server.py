@@ -159,7 +159,10 @@ class _HttpListenerHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        if raw and not getattr(self, "_head_mode", False):
+        # suppress_body: the listener sized a body but told us to withhold it
+        # (an HTTP HEAD). Content-Length above still announces the size a
+        # body-carrying request would have received.
+        if raw and not result.suppress_body:
             self.wfile.write(raw)
 
     def _drop(self, drop_at: str) -> None:
@@ -232,13 +235,11 @@ class _RestHttpHandler(_HttpListenerHandler):
         self._run("DELETE")
 
     def do_HEAD(self):
-        # HEAD = GET without the body: run the full GET pipeline (fault
-        # evaluation, history, headers) and skip only the body write.
-        self._head_mode = True
-        try:
-            self._run("GET")
-        finally:
-            self._head_mode = False
+        # HEAD reaches the listener as HEAD: it borrows the GET route there and
+        # comes back with a plan that says "headers only". History records the
+        # HEAD, and dropping the body is the plan's instruction, not a rule the
+        # socket layer invents.
+        self._run("HEAD")
 
     def do_OPTIONS(self):
         # RFC 7231: answer with the verbs registered for this path. Not routed
