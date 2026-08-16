@@ -151,13 +151,20 @@ def test_port_of_raises_on_an_unknown_pool_and_names_the_known_ones():
         port_of("eth-sim-typo", "1")
     message = str(excinfo.value)
     assert "eth-sim-typo" in message
-    assert "eth-sim" in message, "the error must list the known pools"
+    assert "known pools" in message, "an unknown pool must answer with the pool list"
+    assert "eth-sim" in message, "the pool list must name the real pools"
 
 
-def test_port_of_raises_on_an_unknown_slot():
+def test_port_of_raises_on_an_unknown_slot_and_names_that_pools_slots():
+    """The message must answer the question the caller asked. The pool was
+    right and the slot was wrong, so listing the known pools would send the
+    reader looking in the wrong place."""
     with pytest.raises(KeyError) as excinfo:
         port_of("eth-sim", "99")
-    assert "eth-sim:99" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "eth-sim:99" in message
+    assert "slots" in message and "'1'" in message, f"must list eth-sim's slots, got: {message}"
+    assert "known pools" not in message, f"an unknown slot must not answer with pools: {message}"
 
 
 def test_port_of_raises_when_the_provider_does_not_serve_that_door():

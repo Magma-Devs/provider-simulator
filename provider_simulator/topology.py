@@ -156,10 +156,17 @@ def port_of(
     default transport is wrong for gRPC, which uses http2.
 
     Raises KeyError on any miss. A miss is a typo or a stale reference, and a
-    silent fallback would hand the caller some other provider's port.
+    silent fallback would hand the caller some other provider's port. Each miss
+    names what the caller got wrong: an unknown pool lists the known pools, an
+    unknown slot lists that pool's slots, and a wrong door lists the doors the
+    provider does serve.
     """
+    pool_pids = []
     for row_pool, _chain, row_pid, endpoints in TOPOLOGY:
-        if row_pool != pool or row_pid != pid:
+        if row_pool != pool:
+            continue
+        pool_pids.append(row_pid)
+        if row_pid != pid:
             continue
         for row_interface, row_transport, port in endpoints:
             if row_interface == interface and row_transport == transport:
@@ -168,5 +175,7 @@ def port_of(
         raise KeyError(
             f"provider {pool}:{pid} does not serve {interface}/{transport}; it serves {served}"
         )
+    if pool_pids:
+        raise KeyError(f"no provider {pool}:{pid} in the topology; {pool} has slots {pool_pids}")
     known = sorted({row_pool for row_pool, _c, _p, _e in TOPOLOGY})
-    raise KeyError(f"no provider {pool}:{pid} in the topology; known pools: {known}")
+    raise KeyError(f"no pool {pool!r} in the topology; known pools: {known}")

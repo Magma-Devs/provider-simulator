@@ -136,7 +136,10 @@ def test_each_surface_allocates_three_primary_and_three_backup(
         for row_interface, row_transport, _port in endpoints
         if row_interface == interface and row_transport == transport
     ]
-    assert pids == ["1", "2", "3", "4", "5", "6"], (
+    # Sorted: which slots exist is the contract, the order of the rows in the
+    # table is not. A reorder that changes no allocation must not fail here.
+    # Duplicates still fail, because a repeated slot makes the list too long.
+    assert sorted(pids, key=int) == ["1", "2", "3", "4", "5", "6"], (
         f"{surface}: expected pool-local pids 1-6 (3 primary + 3 backup) on "
         f"{pool}/{interface}/{transport}, got {pids}"
     )
