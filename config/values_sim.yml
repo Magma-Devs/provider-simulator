@@ -40,13 +40,24 @@ routers:
   - id: "eth-sim"
     network: "eth1"
     cross_validation_policies:
+      # Mandates CV with operator floors. Absent caller headers, the floor
+      # is the effective value. A caller may raise a field within its
+      # [floor, cap] range (e.g. agreement_threshold 2 -> 3); a field with
+      # floor == cap (max_participants) is pinned, and min_groups has no cap.
       - method: "eth_getBlockByNumber"
         enabled: true
-        agreement_threshold: 2
-        max_participants: 3
-        min_groups: 2
+        agreement_threshold:
+          floor: 2
+          cap: 3
+        max_participants:
+          floor: 3
+          cap: 3
+        min_groups:
+          floor: 2
+      # Operator forbids CV outright for eth_chainId — caller
+      # lava-cross-validation-* headers are ignored for this method.
       - method: "eth_chainId"
-        enabled: false
+        forbid_caller_cv: true
     nodes:
       - name: "SimProvider1"
         group_label: "tier-1"
