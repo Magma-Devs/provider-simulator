@@ -29,12 +29,15 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from ws_client import WsClient
 
-from constants import ETH_PRIMARY_PORTS, WS_PRIMARY_PORTS
 from provider_simulator.listeners import ws_protocol
+from provider_simulator.topology import port_of
 
 _WS_HOST = "127.0.0.1"
-_WS_PORTS = dict(WS_PRIMARY_PORTS)  # eth-sim:1-3 ws endpoints
-_HTTP_URLS = {pid: f"http://127.0.0.1:{port}" for pid, port in ETH_PRIMARY_PORTS.items()}
+# eth-sim providers 1-3 — each serves http and ws on separate ports, so the
+# same pid appears in both maps with different port numbers.
+_PRIMARY_PIDS = ("1", "2", "3")
+_WS_PORTS = {pid: port_of("eth-sim", pid, transport="ws") for pid in _PRIMARY_PIDS}
+_HTTP_URLS = {pid: f"http://127.0.0.1:{port_of('eth-sim', pid)}" for pid in _PRIMARY_PIDS}
 
 
 def _control(sim, method, path, body=None):

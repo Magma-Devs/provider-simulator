@@ -60,17 +60,15 @@ import pytest
 
 import server as server_module
 from constants import (
-    BTC_PRIMARY_PORTS,
-    ETH_PRIMARY_PORTS,
     HISTORY_MAX,  # noqa: F401  (kept for module docstring reference; tests use MAX_FOR_OVERFLOW_TEST)
-    WS_PRIMARY_PORTS,
 )
 from provider_simulator.domain.call_log import CallLog
+from provider_simulator.topology import port_of
 from stubs import ERROR_STUBS
 
-_P1 = f"http://127.0.0.1:{ETH_PRIMARY_PORTS['1']}"
-_P2 = f"http://127.0.0.1:{ETH_PRIMARY_PORTS['2']}"
-_P3 = f"http://127.0.0.1:{ETH_PRIMARY_PORTS['3']}"
+_P1 = f"http://127.0.0.1:{port_of('eth-sim', '1')}"
+_P2 = f"http://127.0.0.1:{port_of('eth-sim', '2')}"
+_P3 = f"http://127.0.0.1:{port_of('eth-sim', '3')}"
 _PROVIDER_URLS = {"1": _P1, "2": _P2, "3": _P3}
 
 # ── Overflow-test cap ─────────────────────────────────────────────────────────
@@ -755,12 +753,17 @@ class TestTopology:
         status, body = _get(_ctrl(sim, "/topology"))
         assert status == 200
         assert "topology" in body
+        # Deliberate literals, not port_of(...). The endpoint reads the same
+        # topology table port_of reads, so deriving the expected value from it
+        # would compare the table against itself and pass on a wrong port.
+        # These numbers are a deployed contract — the routers' values files
+        # point at them — so a change here must be a conscious edit.
         assert body["topology"]["eth-sim"]["providers"]["1"] == [
-            {"interface": "jsonrpc", "transport": "http", "port": ETH_PRIMARY_PORTS["1"]},
-            {"interface": "jsonrpc", "transport": "ws", "port": WS_PRIMARY_PORTS["1"]},
+            {"interface": "jsonrpc", "transport": "http", "port": 18545},
+            {"interface": "jsonrpc", "transport": "ws", "port": 18557},
         ]
         assert body["topology"]["btc-sim"]["providers"]["1"] == [
-            {"interface": "jsonrpc", "transport": "http", "port": BTC_PRIMARY_PORTS["1"]},
+            {"interface": "jsonrpc", "transport": "http", "port": 18575},
         ]
 
 
@@ -803,7 +806,7 @@ class TestHistory:
         assert entry["pid"] == "1"
         assert entry["interface"] == "jsonrpc"
         assert entry["transport"] == "http"
-        assert entry["port"] == ETH_PRIMARY_PORTS["1"]
+        assert entry["port"] == port_of("eth-sim", "1")
 
     def test_request_id_echoed_in_history(self, sim):
         """The history entry must carry the JSON-RPC id that was sent in the request."""

@@ -31,11 +31,11 @@ import urllib.request
 
 import pytest
 
-from constants import BTC_PRIMARY_PORTS, ETH_PRIMARY_PORTS
+from provider_simulator.topology import port_of
 from stubs_btc import BTC_METHOD_DEFAULTS
 
-_BTC1 = f"http://127.0.0.1:{BTC_PRIMARY_PORTS['1']}"
-_ETH1 = f"http://127.0.0.1:{ETH_PRIMARY_PORTS['1']}"
+_BTC1 = f"http://127.0.0.1:{port_of('btc-sim', '1')}"
+_ETH1 = f"http://127.0.0.1:{port_of('eth-sim', '1')}"
 
 # 29 BTC methods covered by the stub set. Source of truth: stubs_btc.py.
 ALL_BTC_METHODS = sorted(BTC_METHOD_DEFAULTS.keys())
@@ -339,7 +339,7 @@ class TestBTCFaultInjection:
         exception, which cannot tell the points apart.
         """
         _set_btc(sim, "1", mode="drop_connection", drop_at=drop_at)
-        raw = _raw_post_bytes(BTC_PRIMARY_PORTS["1"], "getblockcount")
+        raw = _raw_post_bytes(port_of("btc-sim", "1"), "getblockcount")
         if expect == "no_bytes":
             assert raw == b"", f"before_headers must emit nothing, got {raw[:80]!r}"
             return
@@ -490,7 +490,7 @@ class TestBTCHistoryTracking:
         assert last["method"] == "getblockcount"
         assert last["status"] == "success"
         assert last["pool"] == "btc-sim"
-        assert last["port"] == BTC_PRIMARY_PORTS["1"]
+        assert last["port"] == port_of("btc-sim", "1")
 
     def test_btc_history_filter_by_method(self, sim):
         """?method= filters work for BTC method names just like ETH ones."""

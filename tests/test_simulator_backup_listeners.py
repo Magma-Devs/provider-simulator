@@ -9,14 +9,13 @@ those suites do NOT exercise is the backup tier's *registration*: every
 backup provider row in the topology must produce a bound listener AND a
 control-API address. The bootstrap binds one listener per endpoint straight
 from the registry, so the regression class this file guards is a topology row
-going missing (or drifting from constants.py): the port silently never binds
-and /scenario 400s on the provider.
+going missing: the port silently never binds and /scenario 400s on the
+provider.
 
 What it tests
 -------------
-1. The port-allocation constants keep their shape (distinct pids across the
-   legacy dicts, no port collisions, unions consistent) — these mirror the
-   values_sim.yml allocation the routers point at.
+1. Every surface with a backup tier allocates 3 primary + 3 backup providers,
+   as pool-local pids 1-6 — the shape the routers' values_sim.yml points at.
 2. For every backup provider in every pool, the full round-trip works:
      a. POST /scenario {"providers": {"pool:pid": {"mode": "down"}}} → 200
      b. GET  /scenario → snapshot["pool:pid"]["mode"] == "down"
@@ -41,35 +40,16 @@ import urllib.request
 
 import pytest
 
-from constants import (
-    ALL_PROVIDER_PORTS,
-    BACKUP_PROVIDER_PORTS,
-    BTC_PRIMARY_PORTS,
-    ETH_BACKUP_PORTS,
-    ETH_DUO_PORTS,
-    ETH_SOLO_PORTS,
-    GRPC_BACKUP_PORTS,
-    GRPC_PROVIDER_PORTS,
-    LN_PRIMARY_PORTS,
-    PROVIDER_PORTS,
-    REST_BACKUP_PORTS,
-    REST_PORTS,
-    SOLANA_PRIMARY_PORTS,
-    SOLO_SOLANA_PROVIDER_PORTS,
-    TM_BACKUP_PORTS,
-    TM_PORTS,
-    WS_BACKUP_PORTS,
-    WS_PORTS,
-)
+from provider_simulator.topology import TOPOLOGY, port_of
 
-# Backup providers under the pool:pid model: local pids 4-6 in each pool.
-# The port lists mirror the legacy per-surface backup dicts (constants.py),
-# whose values are the deployed allocation.
-_ETH_BACKUPS = list(zip(("4", "5", "6"), sorted(ETH_BACKUP_PORTS.values())))
-_GRPC_BACKUPS = list(zip(("4", "5", "6"), sorted(GRPC_BACKUP_PORTS.values())))
-_REST_BACKUPS = list(zip(("4", "5", "6"), sorted(REST_BACKUP_PORTS.values())))
-_TM_BACKUPS = list(zip(("4", "5", "6"), sorted(TM_BACKUP_PORTS.values())))
-_WS_BACKUPS = list(zip(("4", "5", "6"), sorted(WS_BACKUP_PORTS.values())))
+# Backup providers are pool-local pids 4-6. The pid is the address the control
+# API takes; port_of turns it into the port this test connects to.
+_BACKUP_PIDS = ("4", "5", "6")
+_ETH_BACKUPS = [(pid, port_of("eth-sim", pid)) for pid in _BACKUP_PIDS]
+_GRPC_BACKUPS = [(pid, port_of("lava-sim-grpc", pid, "grpc", "http2")) for pid in _BACKUP_PIDS]
+_REST_BACKUPS = [(pid, port_of("lava-sim-rest", pid, "rest")) for pid in _BACKUP_PIDS]
+_TM_BACKUPS = [(pid, port_of("lava-sim-tm", pid, "tendermintrpc")) for pid in _BACKUP_PIDS]
+_WS_BACKUPS = [(pid, port_of("eth-sim", pid, transport="ws")) for pid in _BACKUP_PIDS]
 
 
 # ── HTTP helpers (same shape as test_simulator.py — inline keeps this file
@@ -117,173 +97,83 @@ def clean_state(sim):
     _post(f"{sim['control']}/reset/all", {})
 
 
-# ── Constants shape (cheap; catches typos at import time) ────────────────────
-
-
-def test_all_provider_ports_is_union_of_primary_and_backup():
-    """ALL_PROVIDER_PORTS must equal the union of PROVIDER_PORTS,
-    BACKUP_PROVIDER_PORTS, ETH_SOLO_PORTS, and ETH_DUO_PORTS — the ETH
-    pool's port allocation the topology mirrors."""
-    expected = {
-        **PROVIDER_PORTS,
-        **BACKUP_PROVIDER_PORTS,
-        **ETH_SOLO_PORTS,
-        **ETH_DUO_PORTS,
-    }
-    assert ALL_PROVIDER_PORTS == expected, (
-        f"ALL_PROVIDER_PORTS must equal "
-        f"PROVIDER_PORTS ∪ BACKUP_PROVIDER_PORTS ∪ ETH_SOLO_PORTS ∪ ETH_DUO_PORTS.\n"
-        f"  PROVIDER_PORTS        : {PROVIDER_PORTS}\n"
-        f"  BACKUP_PROVIDER_PORTS : {BACKUP_PROVIDER_PORTS}\n"
-        f"  ETH_SOLO_PORTS        : {ETH_SOLO_PORTS}\n"
-        f"  ETH_DUO_PORTS         : {ETH_DUO_PORTS}\n"
-        f"  expected union        : {expected}\n"
-        f"  ALL_PROVIDER_PORTS    : {dict(ALL_PROVIDER_PORTS)}"
-    )
-
-    all_port_values = list(ALL_PROVIDER_PORTS.values())
-    assert len(all_port_values) == len(set(all_port_values)), (
-        f"ALL_PROVIDER_PORTS contains duplicate port numbers: " f"{all_port_values}"
-    )
-
-    primary_pids = set(PROVIDER_PORTS.keys())
-    backup_pids = set(BACKUP_PROVIDER_PORTS.keys())
-    assert primary_pids.isdisjoint(backup_pids), (
-        f"PROVIDER_PORTS and BACKUP_PROVIDER_PORTS share provider ids: "
-        f"{primary_pids & backup_pids}"
-    )
-
-
-def test_backup_port_dicts_have_no_pid_collisions():
-    """The legacy per-surface dicts keep disjoint pid namespaces (their pids
-    document the historical global numbering the migration mapped from)."""
-    pid_sources = [
-        ("PROVIDER_PORTS", PROVIDER_PORTS),
-        ("BACKUP_PROVIDER_PORTS", BACKUP_PROVIDER_PORTS),
-        ("GRPC_BACKUP_PORTS", GRPC_BACKUP_PORTS),
-        ("REST_BACKUP_PORTS", REST_BACKUP_PORTS),
-        ("TM_BACKUP_PORTS", TM_BACKUP_PORTS),
-        ("WS_BACKUP_PORTS", WS_BACKUP_PORTS),
-    ]
-    seen: dict[str, str] = {}
-    for source_name, port_dict in pid_sources:
-        for pid in port_dict:
-            if pid in seen and seen[pid] != source_name:
-                # Primary-tier pids 1-3 are shared across surface dicts on
-                # purpose; only flag collisions that involve a BACKUP dict.
-                if source_name.endswith("_BACKUP_PORTS") or seen[pid].endswith("_BACKUP_PORTS"):
-                    pytest.fail(
-                        f"pid {pid!r} appears in both {seen[pid]} and "
-                        f"{source_name} — backup pids must be disjoint "
-                        f"from every other pool"
-                    )
-            seen[pid] = source_name
-
-
-def test_backup_port_dicts_have_no_port_collisions():
-    """Every primary + backup port across every surface must be unique.
-
-    A port collision would make two listeners try to bind the same port at
-    startup — the registry refuses such a topology, and this keeps the
-    constants that document the allocation in line."""
-    pool_sources = [
-        ("PROVIDER_PORTS", PROVIDER_PORTS),
-        ("BACKUP_PROVIDER_PORTS", BACKUP_PROVIDER_PORTS),
-        ("GRPC_PROVIDER_PORTS", GRPC_PROVIDER_PORTS),
-        ("GRPC_BACKUP_PORTS", GRPC_BACKUP_PORTS),
-        ("REST_PORTS", REST_PORTS),
-        ("REST_BACKUP_PORTS", REST_BACKUP_PORTS),
-        ("TM_PORTS", TM_PORTS),
-        ("TM_BACKUP_PORTS", TM_BACKUP_PORTS),
-        ("WS_PORTS", WS_PORTS),
-        ("WS_BACKUP_PORTS", WS_BACKUP_PORTS),
-    ]
-    seen: dict[int, str] = {}
-    for source_name, port_dict in pool_sources:
-        for pid, port in port_dict.items():
-            owner = f"{source_name}[{pid!r}]"
-            if port in seen:
-                pytest.fail(
-                    f"port {port} bound by both {seen[port]} and "
-                    f"{owner} — two listeners cannot share a port"
-                )
-            seen[port] = owner
+# ── Topology shape (cheap; catches an allocation mistake at import time) ─────
+#
+# These used to compare constants.py's port dicts against each other. They now
+# read the topology, the table the server binds from, so they measure the thing
+# that actually decides what exists. Port uniqueness and pool:pid uniqueness are
+# covered by test_domain_topology.py and enforced at startup by build_registry.
 
 
 @pytest.mark.parametrize(
-    "surface,primary_dict,backup_dict",
+    "surface,pool,interface,transport",
     [
-        ("jsonrpc", PROVIDER_PORTS, BACKUP_PROVIDER_PORTS),
-        ("grpc", GRPC_PROVIDER_PORTS, GRPC_BACKUP_PORTS),
-        ("rest", REST_PORTS, REST_BACKUP_PORTS),
-        ("tendermintrpc", TM_PORTS, TM_BACKUP_PORTS),
-        ("ws", WS_PORTS, WS_BACKUP_PORTS),
+        ("jsonrpc-http", "eth-sim", "jsonrpc", "http"),
+        ("jsonrpc-ws", "eth-sim", "jsonrpc", "ws"),
+        ("grpc", "lava-sim-grpc", "grpc", "http2"),
+        ("rest", "lava-sim-rest", "rest", "http"),
+        ("tendermintrpc", "lava-sim-tm", "tendermintrpc", "http"),
     ],
 )
-def test_each_surface_has_three_primary_and_three_backup(
+def test_each_surface_allocates_three_primary_and_three_backup(
     surface,
-    primary_dict,
-    backup_dict,
+    pool,
+    interface,
+    transport,
 ):
-    """Every surface allocates a 3+3 pool. Catches an accidental drop of one
-    entry (e.g. a 2-node backup pool silently shipping when the router
-    expects 3)."""
-    assert (
-        len(primary_dict) == 3
-    ), f"{surface} primary pool has {len(primary_dict)} entries, expected 3"
-    assert (
-        len(backup_dict) == 3
-    ), f"{surface} backup pool has {len(backup_dict)} entries, expected 3"
+    """Every surface that has a backup tier allocates 3 primary + 3 backup, as
+    pool-local pids 1-3 and 4-6.
 
-
-def test_solo_solana_provider_ports_shape_and_uniqueness():
-    """The Solana solo listener constant is exactly port 18585, and neither
-    the legacy pid nor the port collides with any other listener pool. The
-    topology binds it as solana-solo-sim:1 with its own provider state, so a
-    /scenario POST on the solo router can't reconfigure the primary pool."""
-    # 1) Exact shape.
-    assert SOLO_SOLANA_PROVIDER_PORTS == {"20": 18585}, (
-        f"SOLO_SOLANA_PROVIDER_PORTS must be exactly {{'20': 18585}}; "
-        f"got {SOLO_SOLANA_PROVIDER_PORTS}"
-    )
-
-    other_pid_sources = [
-        ("PROVIDER_PORTS", PROVIDER_PORTS),
-        ("BACKUP_PROVIDER_PORTS", BACKUP_PROVIDER_PORTS),
-        ("ETH_SOLO_PORTS", ETH_SOLO_PORTS),
-        ("BTC_PRIMARY_PORTS", BTC_PRIMARY_PORTS),
-        ("LN_PRIMARY_PORTS", LN_PRIMARY_PORTS),
-        ("SOLANA_PRIMARY_PORTS", SOLANA_PRIMARY_PORTS),
-        ("GRPC_PROVIDER_PORTS", GRPC_PROVIDER_PORTS),
-        ("GRPC_BACKUP_PORTS", GRPC_BACKUP_PORTS),
-        ("REST_PORTS", REST_PORTS),
-        ("REST_BACKUP_PORTS", REST_BACKUP_PORTS),
-        ("TM_PORTS", TM_PORTS),
-        ("TM_BACKUP_PORTS", TM_BACKUP_PORTS),
-        ("WS_PORTS", WS_PORTS),
-        ("WS_BACKUP_PORTS", WS_BACKUP_PORTS),
+    Catches an accidental drop of one entry. A 2-provider backup pool shipping
+    while the router's values file still lists three fails much later, at relay
+    time, as an endpoint the router cannot reach — and that failure reads like a
+    router bug rather than a missing listener.
+    """
+    pids = [
+        pid
+        for row_pool, _chain, pid, endpoints in TOPOLOGY
+        if row_pool == pool
+        for row_interface, row_transport, _port in endpoints
+        if row_interface == interface and row_transport == transport
     ]
-    solo_pid = "20"
-    for source_name, port_dict in other_pid_sources:
-        assert solo_pid not in port_dict, (
-            f"Solana solo legacy pid {solo_pid!r} also appears in {source_name} — "
-            f"the solo Solana provider owns a distinct address"
-        )
-
-    solo_port = 18585
-    for source_name, port_dict in other_pid_sources:
-        assert solo_port not in port_dict.values(), (
-            f"Solana solo port {solo_port} also bound by {source_name} — "
-            f"two listeners cannot share a port"
-        )
-
-    assert solo_port not in ALL_PROVIDER_PORTS.values(), (
-        f"Port {solo_port} must NOT be in ALL_PROVIDER_PORTS — it belongs to "
-        f"the solana-solo-sim pool, not the ETH pool"
+    assert pids == ["1", "2", "3", "4", "5", "6"], (
+        f"{surface}: expected pool-local pids 1-6 (3 primary + 3 backup) on "
+        f"{pool}/{interface}/{transport}, got {pids}"
     )
 
 
-# ── Listener wire-up per pool ────────────────────────────────────────────────
+def test_solana_solo_pool_is_isolated_from_the_solana_primary_pool():
+    """The Solana solo router owns its own pool, its own provider and its own
+    port, so a /scenario POST aimed at it cannot reconfigure solana-sim.
+
+    Isolation is the point. A shared pool or a shared port would let one
+    router's fault injection change another router's traffic, and the failure
+    that followed would look like a router bug.
+
+    The port literal is deliberate: 18585 is a deployed contract, named in the
+    routers' values files, so a change to it must be a conscious edit rather
+    than something a derived expected value absorbs silently.
+    """
+    solo_rows = [row for row in TOPOLOGY if row[0] == "solana-solo-sim"]
+    assert (
+        len(solo_rows) == 1
+    ), f"solana-solo-sim must hold exactly one provider, got {len(solo_rows)}"
+
+    _pool, chain, pid, endpoints = solo_rows[0]
+    assert chain == "solana", f"solana-solo-sim must serve the solana chain, got {chain!r}"
+    assert pid == "1", f"the solo provider is its pool's slot 1, got {pid!r}"
+    assert endpoints == (("jsonrpc", "http", 18585),), f"unexpected endpoints: {endpoints}"
+
+    primary_ports = {
+        port
+        for row_pool, _c, _p, eps in TOPOLOGY
+        if row_pool == "solana-sim"
+        for (_i, _t, port) in eps
+    }
+    assert 18585 not in primary_ports, (
+        f"the solo listener shares port 18585 with solana-sim ({sorted(primary_ports)}) — "
+        f"a scenario on one router would reach the other"
+    )
 
 
 class TestBackupListenersWired:
@@ -349,13 +239,13 @@ class TestBackupListenersWired:
         ), f"backup eth-sim:4 mode not applied; snapshot={snapshot.get('eth-sim:4')}"
 
         # Both listeners answer per their own state.
-        status1, _ = _rpc(f"http://127.0.0.1:{PROVIDER_PORTS['1']}", "eth_blockNumber")
+        status1, _ = _rpc(f"http://127.0.0.1:{port_of('eth-sim', '1')}", "eth_blockNumber")
         assert status1 == 503, (
             f"primary eth-sim:1 returned {status1}, expected 503 (down). "
             "Either state cross-contamination, or the mixed-tier POST "
             "stomped on the primary configuration."
         )
-        status4, body4 = _rpc(f"http://127.0.0.1:{ETH_BACKUP_PORTS['4']}", "eth_blockNumber")
+        status4, body4 = _rpc(f"http://127.0.0.1:{port_of('eth-sim', '4')}", "eth_blockNumber")
         assert status4 == 200, (
             f"backup eth-sim:4 returned {status4}, expected 200 (success). "
             "Either listener missing or state cross-contamination."
@@ -485,7 +375,7 @@ class TestWsBackupListenersWired:
 
         # The transports filter scopes the down to the ws endpoint only:
         # the same provider's http endpoint keeps serving success.
-        http_port = ETH_BACKUP_PORTS[pid]
+        http_port = port_of("eth-sim", pid)
         http_status, http_body = _rpc(f"http://127.0.0.1:{http_port}", "eth_blockNumber")
         assert http_status == 200, (
             f"{key}'s http endpoint (port {http_port}) must stay up when the "
@@ -558,7 +448,7 @@ class TestBackupListenerFaults:
     _KEY = "eth-sim:4"
 
     def _backup_url(self) -> str:
-        return f"http://127.0.0.1:{ETH_BACKUP_PORTS['4']}"
+        return f"http://127.0.0.1:{port_of('eth-sim', '4')}"
 
     def _set_scenario(self, sim, scenario: dict) -> None:
         status, body = _post(

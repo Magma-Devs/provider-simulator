@@ -33,7 +33,7 @@ import urllib.request
 
 import pytest
 
-from constants import ETH_PRIMARY_PORTS, SOLANA_PRIMARY_PORTS
+from provider_simulator.topology import port_of
 from stubs_solana import (
     SOLANA_BASE_SLOT,
     SOLANA_CORE_VERSION,
@@ -41,8 +41,8 @@ from stubs_solana import (
     SOLANA_FEATURE_SET,
 )
 
-_SOL_URLS = {pid: f"http://127.0.0.1:{port}" for pid, port in SOLANA_PRIMARY_PORTS.items()}
-_ETH1 = f"http://127.0.0.1:{ETH_PRIMARY_PORTS['1']}"
+_SOL_URLS = {pid: f"http://127.0.0.1:{port_of('solana-sim', pid)}" for pid in ("1", "2", "3")}
+_ETH1 = f"http://127.0.0.1:{port_of('eth-sim', '1')}"
 
 
 # ── HTTP helpers (kept independent of the sibling files — duplication is
@@ -401,7 +401,7 @@ class TestSolanaHistoryTracking:
         assert last["method"] == "getSlot"
         assert last["status"] == "success"
         assert last["pool"] == "solana-sim"
-        assert last["port"] == SOLANA_PRIMARY_PORTS["1"]
+        assert last["port"] == port_of("solana-sim", "1")
 
     def test_solana_history_filter_by_method(self, sim):
         """?method= filters work for Solana method names just like ETH ones."""

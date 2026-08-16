@@ -42,11 +42,16 @@ import cosmos_pb2  # noqa: F401  isort: split
 
 from cosmos.base.tendermint.v1beta1 import query_pb2, query_pb2_grpc  # isort: skip
 
-from constants import ETH_PRIMARY_PORTS, GRPC_PRIMARY_PORTS
 from provider_simulator.chains.lava import GRPC_LATEST_BLOCK
+from provider_simulator.topology import port_of
 
-_GRPC_ADDRS = {pid: f"127.0.0.1:{port}" for pid, port in GRPC_PRIMARY_PORTS.items()}
-_ETH_URLS = {pid: f"http://127.0.0.1:{port}" for pid, port in ETH_PRIMARY_PORTS.items()}
+# Primary tier only — pids 4-6 of each pool are the backup listeners, covered
+# by test_simulator_backup_listeners.py.
+_PRIMARY_PIDS = ("1", "2", "3")
+_GRPC_ADDRS = {
+    pid: f"127.0.0.1:{port_of('lava-sim-grpc', pid, 'grpc', 'http2')}" for pid in _PRIMARY_PIDS
+}
+_ETH_URLS = {pid: f"http://127.0.0.1:{port_of('eth-sim', pid)}" for pid in _PRIMARY_PIDS}
 
 
 # ── HTTP helpers for the control plane ──────────────────────────────────────
