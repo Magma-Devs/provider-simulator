@@ -533,3 +533,23 @@ routers:
       maxReplicas: 1
       targetCPUUtilizationPercentage: 75
       targetMemoryUtilizationPercentage: 75
+  # solana-solo-sim — single-provider simulator router, the Solana analogue
+  # of eth-solo-sim. One provider, no backup tier. Wired to a dedicated
+  # provider-simulator listener (pid 20 / port 18585) so a /scenario flip
+  # on this pid cannot collide with solana-sim's primary-pool state.
+  # skip_verifications mirrors solana-sim.
+  - id: "solana-solo-sim"
+    network: "solana"
+    nodes:
+      - name: "SimSolanaSoloProvider1"
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18585"
+            interface: "jsonrpc"
+            addons: []
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 1
+      targetCPUUtilizationPercentage: 75
+      targetMemoryUtilizationPercentage: 75
