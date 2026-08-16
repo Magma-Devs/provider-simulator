@@ -58,9 +58,14 @@ def test_eth_duo_sim_providers_resolve_and_are_distinct_from_eth_sim():
 def test_best_priority_precedence_sim_providers_are_distinct_from_each_other_and_eth_sim():
     """eth-best-sim, eth-priority-sim, and eth-precedence-sim each get their
     own Provider objects — none of them share state with eth-sim, eth-duo-sim,
-    or each other. Mirrors test_eth_duo_sim_providers_resolve_and_are_distinct
-    _from_eth_sim above: a /scenario flip meant for one router's test must not
-    leak into another router's traffic just because they'd share a pid."""
+    or each other.
+
+    Mirrors ``test_eth_duo_sim_providers_resolve_and_are_distinct_from_eth_sim``
+    above: a /scenario flip meant for one router's test must not leak into
+    another router's traffic. Each pool owns its own listeners, so the
+    ``pool:pid`` key the control API uses resolves to a different Provider for
+    each — the bare pid ``1`` repeating across pools is expected and harmless.
+    """
     reg = build_registry()
     best = [reg.provider("eth-best-sim", pid) for pid in ("1", "2", "3")]
     priority = [reg.provider("eth-priority-sim", pid) for pid in ("1", "2", "3")]
