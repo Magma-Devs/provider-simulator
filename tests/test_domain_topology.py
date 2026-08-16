@@ -11,6 +11,7 @@ EXPECTED_POOLS = {
     "eth-sim",
     "eth-solo-sim",
     "eth-duo-sim",
+    "eth-cv-sim",
     "btc-sim",
     "ln-sim",
     "solana-sim",
@@ -71,6 +72,37 @@ def test_eth_duo_sim_has_two_dedicated_providers():
     }
     duo_ports = {port for eps in (rows["1"][6], rows["2"][6]) for (_i, _t, port) in eps}
     assert duo_ports.isdisjoint(eth_sim_ports), "eth-duo-sim must not share ports with eth-sim"
+
+
+def test_eth_cv_sim_has_six_dedicated_providers():
+    """eth-cv-sim carries six providers on its own listeners.
+
+    Six is not a round number picked for comfort. Cross-validation can be
+    configured so each provider group must reach its own agreement before the
+    groups are compared, and the router rejects such a policy at startup
+    unless max-participants >= min-groups * agreement-threshold. Three groups
+    each needing two matching answers therefore needs six providers. Drop this
+    pool below six and those policies stop being loadable — the router
+    crash-loops rather than failing a test, so the guard belongs here.
+
+    The ports must also be disjoint from every other pool: the control API
+    keys an injected fault by provider id, so a shared listener would let one
+    router's fault reach another router's traffic, and the resulting failure
+    would look exactly like a router bug.
+    """
+    rows = {r[2]: r for r in TOPOLOGY if r[0] == "eth-cv-sim"}
+    assert set(rows) == {"1", "2", "3", "4", "5", "6"}
+    for pid, expected_port in zip(
+        ("1", "2", "3", "4", "5", "6"), (18596, 18597, 18598, 18599, 18600, 18601)
+    ):
+        assert rows[pid][3] == (("jsonrpc", "http", expected_port),)
+        assert rows[pid][1] == "eth"
+
+    cv_ports = {port for r in rows.values() for (_i, _t, port) in r[3]}
+    other_ports = {
+        port for pool, _c, _pid, eps in TOPOLOGY if pool != "eth-cv-sim" for (_i, _t, port) in eps
+    }
+    assert cv_ports.isdisjoint(other_ports), "eth-cv-sim must not share ports with any other pool"
 
 
 def test_lava_rest_and_grpc_provider_1_are_distinct_pools():
