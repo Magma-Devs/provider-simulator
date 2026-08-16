@@ -36,19 +36,19 @@ from typing import Any, Dict, Optional, Tuple
 
 import pytest
 
-from constants import (
-    BTC_PRIMARY_PORTS,
-    ETH_PRIMARY_PORTS,
-    REST_PRIMARY_PORTS,
-    TM_LATEST_HEIGHT,
-    TM_PRIMARY_PORTS,
-)
+from constants import TM_LATEST_HEIGHT
+from provider_simulator.topology import port_of
 from stubs_tendermintrpc import TENDERMINT_ERROR_STUBS, TENDERMINT_METHOD_DEFAULTS
 
-_TM_URLS = {pid: f"http://127.0.0.1:{port}" for pid, port in TM_PRIMARY_PORTS.items()}
-_ETH1 = f"http://127.0.0.1:{ETH_PRIMARY_PORTS['1']}"
-_BTC1 = f"http://127.0.0.1:{BTC_PRIMARY_PORTS['1']}"
-_REST1 = f"http://127.0.0.1:{REST_PRIMARY_PORTS['1']}"
+# Primary tier only — pids 4-6 are the backup listeners, covered by
+# test_simulator_backup_listeners.py.
+_PRIMARY_PIDS = ("1", "2", "3")
+_TM_URLS = {
+    pid: f"http://127.0.0.1:{port_of('lava-sim-tm', pid, 'tendermintrpc')}" for pid in _PRIMARY_PIDS
+}
+_ETH1 = f"http://127.0.0.1:{port_of('eth-sim', '1')}"
+_BTC1 = f"http://127.0.0.1:{port_of('btc-sim', '1')}"
+_REST1 = f"http://127.0.0.1:{port_of('lava-sim-rest', '1', 'rest')}"
 
 
 # ── HTTP helpers (independent of the other test files — duplication intentional) ──

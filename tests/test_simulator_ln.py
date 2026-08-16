@@ -33,11 +33,11 @@ import urllib.request
 
 import pytest
 
-from constants import ETH_PRIMARY_PORTS, LN_PRIMARY_PORTS
+from provider_simulator.topology import port_of
 from stubs_lnd import LND_METHOD_DEFAULTS
 
-_LN_URLS = {pid: f"http://127.0.0.1:{port}" for pid, port in LN_PRIMARY_PORTS.items()}
-_ETH1 = f"http://127.0.0.1:{ETH_PRIMARY_PORTS['1']}"
+_LN_URLS = {pid: f"http://127.0.0.1:{port_of('ln-sim', pid)}" for pid in ("1", "2", "3")}
+_ETH1 = f"http://127.0.0.1:{port_of('eth-sim', '1')}"
 
 # 6 LN methods covered by the stub set. Source of truth: stubs_lnd.py.
 ALL_LND_METHODS = sorted(LND_METHOD_DEFAULTS.keys())
@@ -362,7 +362,7 @@ class TestLNFaultInjection:
         exception, which cannot tell the points apart.
         """
         _set_ln(sim, "2", mode="drop_connection", drop_at=drop_at)
-        raw = _raw_post_bytes(LN_PRIMARY_PORTS["2"], "getinfo")
+        raw = _raw_post_bytes(port_of("ln-sim", "2"), "getinfo")
         if expect == "no_bytes":
             assert raw == b"", f"before_headers must emit nothing, got {raw[:80]!r}"
             return
@@ -507,7 +507,7 @@ class TestLNHistoryTracking:
         assert last["method"] == "getinfo"
         assert last["status"] == "success"
         assert last["pool"] == "ln-sim"
-        assert last["port"] == LN_PRIMARY_PORTS["1"]
+        assert last["port"] == port_of("ln-sim", "1")
 
     def test_ln_history_filter_by_method(self, sim):
         """?method= filters work for LN method names just like ETH/BTC ones."""

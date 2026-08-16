@@ -38,11 +38,16 @@ from typing import Any, Dict, Optional, Tuple
 
 import pytest
 
-from constants import ETH_PRIMARY_PORTS, REST_PRIMARY_PORTS
+from provider_simulator.topology import port_of
 from stubs_rest import REST_ERROR_STUBS, REST_LATEST_HEIGHT, REST_METHOD_DEFAULTS
 
-_REST_URLS = {pid: f"http://127.0.0.1:{port}" for pid, port in REST_PRIMARY_PORTS.items()}
-_ETH_URLS = {pid: f"http://127.0.0.1:{port}" for pid, port in ETH_PRIMARY_PORTS.items()}
+# Primary tier only — pids 4-6 are the backup listeners, covered by
+# test_simulator_backup_listeners.py.
+_PRIMARY_PIDS = ("1", "2", "3")
+_REST_URLS = {
+    pid: f"http://127.0.0.1:{port_of('lava-sim-rest', pid, 'rest')}" for pid in _PRIMARY_PIDS
+}
+_ETH_URLS = {pid: f"http://127.0.0.1:{port_of('eth-sim', pid)}" for pid in _PRIMARY_PIDS}
 
 # All (verb, template) pairs covered by the seed stub set.
 ALL_REST_ROUTES = sorted(REST_METHOD_DEFAULTS.keys())
@@ -960,7 +965,7 @@ class TestRestHistory:
         assert last["method"] == "GET /cosmos/base/tendermint/v1beta1/blocks/latest"
         assert last["status"] == "success"
         assert last["interface"] == "rest"
-        assert last["port"] == REST_PRIMARY_PORTS["1"]
+        assert last["port"] == port_of("lava-sim-rest", "1", "rest")
 
     def test_rest_history_filter_by_method(self, sim):
         """?method= filters work for the REST method label (``<VERB> <template>``)."""

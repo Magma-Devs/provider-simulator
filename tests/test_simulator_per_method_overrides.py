@@ -37,9 +37,9 @@ import urllib.request
 
 import pytest
 
-from constants import ETH_PRIMARY_PORTS
+from provider_simulator.topology import port_of
 
-_P1 = f"http://127.0.0.1:{ETH_PRIMARY_PORTS['1']}"
+_P1 = f"http://127.0.0.1:{port_of('eth-sim', '1')}"
 
 
 # ── HTTP helpers (same shape as tests/test_simulator.py) ──────────────────────

@@ -1,6 +1,7 @@
-import constants
+import pytest
+
 from provider_simulator.domain.quirks import known_chains
-from provider_simulator.topology import TOPOLOGY
+from provider_simulator.topology import TOPOLOGY, port_of
 
 # The one deployment pin: this literal set mirrors the router-side
 # values_sim.yml ids (plus the two listener-only pools named in the topology
@@ -80,31 +81,104 @@ def test_lava_rest_and_grpc_provider_1_are_distinct_pools():
     assert grpc1[0][3] == (("grpc", "http2", 18548),)
 
 
-def test_topology_ports_match_the_listener_ports_the_server_binds():
-    """Cross-validate the table against constants.py — the port truth server.py
-    actually binds from. Without this check the two sources drift silently:
-    a listener added to constants.py but not here would serve traffic the
-    registry can't resolve."""
-    constants_ports = set()
-    for dct in (
-        constants.ETH_ALL_PORTS,  # eth primary + backup + solo
-        constants.BTC_PRIMARY_PORTS,
-        constants.LN_PRIMARY_PORTS,
-        constants.SOLANA_PRIMARY_PORTS,
-        constants.SOLANA_SOLO_PORTS,
-        constants.GRPC_PRIMARY_PORTS,
-        constants.GRPC_BACKUP_PORTS,
-        constants.REST_PRIMARY_PORTS,
-        constants.REST_BACKUP_PORTS,
-        constants.TM_PRIMARY_PORTS,
-        constants.TM_BACKUP_PORTS,
-        constants.WS_PRIMARY_PORTS,
-        constants.WS_BACKUP_PORTS,
-    ):
-        constants_ports.update(dct.values())
-    topology_ports = {port for _p, _c, _pid, eps in TOPOLOGY for (_i, _t, port) in eps}
-    assert topology_ports == constants_ports, (
-        f"TOPOLOGY and constants.py disagree: only in topology "
-        f"{sorted(topology_ports - constants_ports)}, only in constants "
-        f"{sorted(constants_ports - topology_ports)}"
-    )
+# ── port_of — the one way a caller turns a provider address into a port ──────
+#
+# Ports used to live in a second table in constants.py, keyed by an older
+# provider numbering that disagreed with the pool-local pids here for six
+# pools. Nothing read those keys as identity and the tests that did import them
+# discarded the keys and re-typed the pool-local pids by hand. The table below
+# is now the only source, and port_of is the only reader.
+
+
+def test_port_of_returns_the_port_the_table_declares():
+    """The literals are deliberate. Deriving them from TOPOLOGY would compare
+    the table against itself and pass on a wrong port. These numbers are a
+    deployed contract — the routers' values files point at them."""
+    assert port_of("eth-sim", "1") == 18545
+    assert port_of("eth-sim", "3") == 18547
+    assert port_of("btc-sim", "2") == 18576
+    assert port_of("solana-solo-sim", "1") == 18585
+    assert port_of("eth-duo-sim", "2") == 18587
+
+
+def test_port_of_separates_the_two_transports_of_one_jsonrpc_provider():
+    """A JSON-RPC provider serves http and ws on different ports. One pid, two
+    answers — so a caller that wants the websocket door must say so."""
+    assert port_of("eth-sim", "1", transport="http") == 18545
+    assert port_of("eth-sim", "1", transport="ws") == 18557
+    assert port_of("eth-sim", "1") == port_of("eth-sim", "1", transport="http")
+
+
+def test_port_of_distinguishes_the_same_slot_in_different_pools():
+    """Slot 1 exists in every pool and means a different machine in each. This
+    is the defect the change exists to remove: a lookup keyed on the number
+    alone cannot tell these apart."""
+    slot_one_ports = {
+        pool: port_of(pool, "1", interface, transport)
+        for pool, interface, transport in (
+            ("eth-sim", "jsonrpc", "http"),
+            ("eth-solo-sim", "jsonrpc", "http"),
+            ("btc-sim", "jsonrpc", "http"),
+            ("ln-sim", "jsonrpc", "http"),
+            ("solana-sim", "jsonrpc", "http"),
+            ("solana-solo-sim", "jsonrpc", "http"),
+            ("lava-sim-grpc", "grpc", "http2"),
+            ("lava-sim-rest", "rest", "http"),
+            ("lava-sim-tm", "tendermintrpc", "http"),
+        )
+    }
+    assert len(set(slot_one_ports.values())) == len(
+        slot_one_ports
+    ), f"two pools' slot 1 resolved to the same port: {slot_one_ports}"
+
+
+def test_port_of_reaches_every_endpoint_in_the_table():
+    """Completeness: every listener the server binds is addressable through
+    port_of. A row shape port_of cannot read would bind a port no test can
+    reach, and the gap would look like a dead listener rather than a lookup
+    that cannot express it."""
+    for pool, _chain, pid, endpoints in TOPOLOGY:
+        for interface, transport, port in endpoints:
+            assert (
+                port_of(pool, pid, interface, transport) == port
+            ), f"port_of could not resolve {pool}:{pid} {interface}/{transport}"
+
+
+def test_port_of_raises_on_an_unknown_pool_and_names_the_known_ones():
+    """A miss must fail loudly. A silent fallback would hand the caller some
+    other provider's port and the test would measure the wrong machine."""
+    with pytest.raises(KeyError) as excinfo:
+        port_of("eth-sim-typo", "1")
+    message = str(excinfo.value)
+    assert "eth-sim-typo" in message
+    assert "known pools" in message, "an unknown pool must answer with the pool list"
+    assert "eth-sim" in message, "the pool list must name the real pools"
+
+
+def test_port_of_raises_on_an_unknown_slot_and_names_that_pools_slots():
+    """The message must answer the question the caller asked. The pool was
+    right and the slot was wrong, so listing the known pools would send the
+    reader looking in the wrong place."""
+    with pytest.raises(KeyError) as excinfo:
+        port_of("eth-sim", "99")
+    message = str(excinfo.value)
+    assert "eth-sim:99" in message
+    assert "slots" in message and "'1'" in message, f"must list eth-sim's slots, got: {message}"
+    assert "known pools" not in message, f"an unknown slot must not answer with pools: {message}"
+
+
+def test_port_of_raises_when_the_provider_does_not_serve_that_door():
+    """gRPC rides http2, so the default http transport must not silently
+    resolve to something else. The error names what the provider does serve."""
+    with pytest.raises(KeyError) as excinfo:
+        port_of("lava-sim-grpc", "1")
+    message = str(excinfo.value)
+    assert "lava-sim-grpc:1" in message
+    assert "grpc/http2" in message, "the error must name the endpoints it does serve"
+
+
+def test_port_of_raises_when_a_provider_has_no_websocket_door():
+    """Only eth-sim's providers have a ws endpoint. Asking any other pool for
+    one is a mistake, not an empty answer."""
+    with pytest.raises(KeyError):
+        port_of("btc-sim", "1", transport="ws")
