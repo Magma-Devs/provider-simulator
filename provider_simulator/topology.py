@@ -153,17 +153,18 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
     #     needs four providers, and three groups needing two needs six. The
     #     three-provider eth-sim pool cannot satisfy either, and a policy that
     #     asks for it is rejected at startup, crash-looping the router
-    #     (smart-router protocol/rpcsmartrouter/cross_validation_policy.go
+    #     (smart-router/protocol/rpcsmartrouter/cross_validation_policy.go
     #     Validate).
     #   - a two-against-two split, where the router must refuse rather than
     #     pick a side, needs four providers answering at once.
     #   - a minimum of three distinct groups, and the "too few groups"
     #     refusal, need three groups to exist in the first place.
-    # Dedicated listeners for the same isolation reason as eth-duo-sim: the
-    # control API keys a fault by provider id, so two pools sharing a listener
-    # would let a fault injected for one router's test reach the other
-    # router's traffic, and the resulting failure would look exactly like a
-    # router bug.
+    # Dedicated listeners for the same isolation reason as eth-duo-sim. The
+    # control API keys a fault by "pool:pid", so two pools each having a pid
+    # "1" is fine — they resolve to different providers. What is not fine is
+    # two pools sharing a listener: that is one provider under one key, so a
+    # fault injected for one router's test reaches the other router's traffic,
+    # and the resulting failure would look exactly like a router bug.
     ("eth-cv-sim", "eth", "1", "EthCvPrimaryProvider1", False, "tier-1", (("jsonrpc", "http", 18596),)),
     ("eth-cv-sim", "eth", "2", "EthCvPrimaryProvider2", False, "tier-1", (("jsonrpc", "http", 18597),)),
     ("eth-cv-sim", "eth", "3", "EthCvPrimaryProvider3", False, "tier-2", (("jsonrpc", "http", 18598),)),
