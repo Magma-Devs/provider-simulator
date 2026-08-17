@@ -188,9 +188,7 @@ def _block_response(height: int = TM_LATEST_HEIGHT) -> Dict[str, Any]:
     }
 
 
-def _validators_response(
-    height: int = TM_LATEST_HEIGHT, page: int = 1, per_page: int = 30
-) -> Dict[str, Any]:
+def _validators_response(height: int = TM_LATEST_HEIGHT, page: int = 1, per_page: int = 30) -> Dict[str, Any]:
     """validators — paginated slice of the validator pool.
 
     ``page`` and ``per_page`` slice the validator pool. CometBFT contract:

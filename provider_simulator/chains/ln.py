@@ -22,9 +22,7 @@ class LnChain(Chain):
     def error_stub(self, name: str) -> dict:
         return LND_ERROR_STUBS[name]
 
-    def build_success(
-        self, request: dict, scenario: dict, quirks: dict, interface: str = ""
-    ) -> tuple[int, dict]:
+    def build_success(self, request: dict, scenario: dict, quirks: dict, interface: str = "") -> tuple[int, dict]:
         req_id = request.get("id", 1)
         method = request.get("method", "unknown")
         params = request.get("params", [])
@@ -57,34 +55,19 @@ class LnChain(Chain):
                 result["block_height"] = LN_BLOCK_HEIGHT - blocks_behind
                 result["synced_to_chain"] = False
 
-        if (
-            method == "decodepayreq"
-            and params
-            and method not in responses
-            and isinstance(result, dict)
-        ):
+        if method == "decodepayreq" and params and method not in responses and isinstance(result, dict):
             invoice = params[0] if params else ""
             if isinstance(invoice, str) and invoice:
                 result = dict(result)
                 result["payment_request"] = invoice
 
-        if (
-            method == "openchannel"
-            and params
-            and method not in responses
-            and isinstance(result, dict)
-        ):
+        if method == "openchannel" and params and method not in responses and isinstance(result, dict):
             node_pubkey = params[0] if params else ""
             if isinstance(node_pubkey, str) and node_pubkey:
                 result = dict(result)
                 result["node_pubkey"] = node_pubkey
 
-        if (
-            method == "payinvoice"
-            and params
-            and method not in responses
-            and isinstance(result, dict)
-        ):
+        if method == "payinvoice" and params and method not in responses and isinstance(result, dict):
             invoice = params[0] if params else ""
             if isinstance(invoice, str) and invoice:
                 result = dict(result)

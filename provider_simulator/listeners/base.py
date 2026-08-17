@@ -146,9 +146,7 @@ class Listener(ABC):
 
     def serve(self, request: RawRequest, entry: dict | None = None) -> ServeResult:
         if entry is None:
-            lava = {
-                k: v for k, v in (request.headers or {}).items() if k.lower().startswith("lava-")
-            }
+            lava = {k: v for k, v in (request.headers or {}).items() if k.lower().startswith("lava-")}
             entry = self.provider.log.record_arrival(
                 self.endpoint.interface,
                 self.endpoint.transport,

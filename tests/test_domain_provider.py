@@ -8,9 +8,7 @@ from provider_simulator.domain.scenario import ScenarioConfig
 
 def test_add_provider_wires_config_quirks_log_for_eth():
     pool = Pool(name="eth-sim", chain="eth")
-    p = pool.add_provider(
-        "1", [Endpoint("jsonrpc", "http", 18545), Endpoint("jsonrpc", "ws", 18557)]
-    )
+    p = pool.add_provider("1", [Endpoint("jsonrpc", "http", 18545), Endpoint("jsonrpc", "ws", 18557)])
     assert isinstance(p, Provider)
     assert isinstance(p.scenario, ScenarioConfig)
     assert isinstance(p.quirks, EthQuirks)  # eth pool -> EthQuirks

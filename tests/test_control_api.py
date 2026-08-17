@@ -30,9 +30,7 @@ def test_old_bare_pid_is_400():
 
 def test_chain_family_field_is_400():
     api = _api()
-    st, resp = api.apply_scenario(
-        {"providers": {"eth-sim:1": {"chain_family": "eth", "mode": "down"}}}
-    )
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"chain_family": "eth", "mode": "down"}}})
     assert st == 400
     assert "chain_family" in resp["error"]
 
@@ -66,9 +64,7 @@ def test_invalid_mode_value_is_400():
 
 def test_scenario_is_staged_all_or_nothing():
     api = _api()
-    st, resp = api.apply_scenario(
-        {"providers": {"eth-sim:1": {"mode": "down"}, "eth-sim:2": {"mode": "bogus"}}}
-    )
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down"}, "eth-sim:2": {"mode": "bogus"}}})
     assert st == 400
     _, scen = api.get_scenario()
     assert scen["providers"]["eth-sim:1"]["mode"] == "success"  # first block not applied
@@ -86,9 +82,7 @@ def test_rest_responses_are_retupled():
 
 def test_per_method_mode_error_is_rejected():
     api = _api()
-    st, resp = api.apply_scenario(
-        {"providers": {"eth-sim:1": {"responses": {"eth_call": {"mode": "error"}}}}}
-    )
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"responses": {"eth_call": {"mode": "error"}}}}})
     assert st == 400
 
 
@@ -121,9 +115,7 @@ def test_history_merges_filters_and_orders():
         port=18545,
         request_id=1,
     )
-    p2.log.push(
-        "eth_call", "error", 0, interface="jsonrpc", transport="http", port=18546, request_id=2
-    )
+    p2.log.push("eth_call", "error", 0, interface="jsonrpc", transport="http", port=18546, request_id=2)
     _, hist = api.get_history({})
     assert hist["count"] == 2
     assert all("call_order" in e for e in hist["history"])
@@ -136,9 +128,7 @@ def test_history_max_caps_and_rejects_negative():
     api = _api()
     p = api.registry.provider("eth-sim", "1")
     for i in range(5):
-        p.log.push(
-            "m", "success", 0, interface="jsonrpc", transport="http", port=18545, request_id=i
-        )
+        p.log.push("m", "success", 0, interface="jsonrpc", transport="http", port=18545, request_id=i)
     _, hist = api.get_history({"max": "2"})
     assert hist["count"] == 2
     st, resp = api.get_history({"max": "-1"})

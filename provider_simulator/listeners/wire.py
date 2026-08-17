@@ -31,9 +31,7 @@ def serialize(
     if isinstance(data, dict):
         if corruption_mode == "missing_field" and missing_field:
             data = (
-                _remove_dotted(data, missing_field)
-                if dotted
-                else {k: v for k, v in data.items() if k != missing_field}
+                _remove_dotted(data, missing_field) if dotted else {k: v for k, v in data.items() if k != missing_field}
             )
         elif corruption_mode == "empty_response":
             return status, b"", False

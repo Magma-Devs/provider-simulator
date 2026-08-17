@@ -113,9 +113,7 @@ class _HttpListenerHandler(BaseHTTPRequestHandler):
         lava = {k: v for k, v in self.headers.items() if k.lower().startswith("lava-")}
         # Record the arrival BEFORE the body read: a client that cancels while
         # sending the body still leaves an in_flight history row.
-        entry = provider.log.record_arrival(
-            endpoint.interface, endpoint.transport, endpoint.port, lava_headers=lava
-        )
+        entry = provider.log.record_arrival(endpoint.interface, endpoint.transport, endpoint.port, lava_headers=lava)
         length = int(self.headers.get("Content-Length", 0) or 0)
         body = self.rfile.read(length) if length > 0 else b""
         parsed = urlparse(self.path)
@@ -280,9 +278,7 @@ def _ws_writer_loop(connection, out_queue: "queue.Queue") -> None:
 def _ws_text_frame(payload_obj, corruption_mode=None, missing_field=None) -> bytes:
     """Encode a dict as a WS TEXT frame, applying the same corruption
     transforms the HTTP adapters apply (empty_response = zero-payload frame)."""
-    _status, raw, emit_body = wire.serialize(
-        200, payload_obj, corruption_mode, missing_field, dotted=False
-    )
+    _status, raw, emit_body = wire.serialize(200, payload_obj, corruption_mode, missing_field, dotted=False)
     return ws_protocol.encode_frame(ws_protocol.OPCODE_TEXT, raw if emit_body else b"", mask=False)
 
 
@@ -304,9 +300,7 @@ class _WireSubscriptions(WsSubscriptions):
         sub = self.get(sub_id)
         if sub is None or sub.closed:
             return "unknown"
-        envelope = stubs_ws.SUBSCRIBE_METHODS.get(sub.method, {}).get(
-            "envelope", "eth_subscription"
-        )
+        envelope = stubs_ws.SUBSCRIBE_METHODS.get(sub.method, {}).get("envelope", "eth_subscription")
         payload = event if isinstance(event, dict) else {}
         frame = _ws_text_frame(stubs_ws.build_event_frame(envelope, sub_id, payload))
         try:
@@ -480,9 +474,7 @@ class _WsHandler(BaseHTTPRequestHandler):
                 if frame.opcode == ws_protocol.OPCODE_PING:
                     try:
                         out_queue.put_nowait(
-                            ws_protocol.encode_frame(
-                                ws_protocol.OPCODE_PONG, frame.payload, mask=False
-                            )
+                            ws_protocol.encode_frame(ws_protocol.OPCODE_PONG, frame.payload, mask=False)
                         )
                     except queue.Full:
                         return
@@ -525,9 +517,7 @@ class _WsHandler(BaseHTTPRequestHandler):
         provider, endpoint = listener.provider, listener.endpoint
         method = body.get("method")
         req_id = body.get("id")
-        entry = provider.log.record_arrival(
-            endpoint.interface, endpoint.transport, endpoint.port, lava_headers=lava
-        )
+        entry = provider.log.record_arrival(endpoint.interface, endpoint.transport, endpoint.port, lava_headers=lava)
         scenario = provider.scenario.snapshot()
         targeted, mode = fault_policy.resolve_mode(scenario, endpoint, provider)
         merged = scenario
@@ -547,9 +537,7 @@ class _WsHandler(BaseHTTPRequestHandler):
         verdict = fault_policy.ladder(mode, merged) if targeted else fault_policy.NONE_VERDICT
 
         if verdict.kind == "down":
-            provider.log.finalize(
-                entry, method=str(method), status="down", latency_ms=latency, request_id=req_id
-            )
+            provider.log.finalize(entry, method=str(method), status="down", latency_ms=latency, request_id=req_id)
             return "close"
         if verdict.kind != "none":
             result = listener.build_fault(verdict, body)
@@ -568,9 +556,7 @@ class _WsHandler(BaseHTTPRequestHandler):
 
         if method in stubs_ws.SUBSCRIBE_METHODS:
             sub_id = "0x" + secrets.token_hex(16)
-            subscriptions.register(
-                sub_id, provider.pool.name, provider.pid, method, out_queue=out_queue
-            )
+            subscriptions.register(sub_id, provider.pool.name, provider.pid, method, out_queue=out_queue)
             connection_subs.add(sub_id)
             response = {"jsonrpc": "2.0", "id": req_id, "result": sub_id}
         else:
@@ -582,9 +568,7 @@ class _WsHandler(BaseHTTPRequestHandler):
                 removed = True
             response = {"jsonrpc": "2.0", "id": req_id, "result": removed}
 
-        provider.log.finalize(
-            entry, method=str(method), status="success", latency_ms=latency, request_id=req_id
-        )
+        provider.log.finalize(entry, method=str(method), status="success", latency_ms=latency, request_id=req_id)
         if latency > 0:
             time.sleep(latency / 1000.0)
         try:
@@ -616,9 +600,7 @@ class _WsHandler(BaseHTTPRequestHandler):
                 pass
             return "close"
         try:
-            out_queue.put_nowait(
-                _ws_text_frame(result.body, result.corruption_mode, result.missing_field)
-            )
+            out_queue.put_nowait(_ws_text_frame(result.body, result.corruption_mode, result.missing_field))
         except queue.Full:
             return "close"
         return "continue"
@@ -658,9 +640,7 @@ class _ControlHandler(BaseHTTPRequestHandler):
             self._reply(400, {"error": f"request body is not valid JSON: {exc}"})
             return
         if not isinstance(body, dict):
-            self._reply(
-                400, {"error": f"request body must be a JSON object, got {type(body).__name__}"}
-            )
+            self._reply(400, {"error": f"request body must be a JSON object, got {type(body).__name__}"})
             return
 
         control = self.server.control
@@ -876,9 +856,7 @@ def _scenario_ttl_sweep(registry: Registry, ttl_s: int, interval_s: float = 120.
             if provider.scenario.snapshot().get("mode") == "success":
                 continue
             provider.scenario.reset()
-            _log.info(
-                f"[ttl-sweep] reverted provider {provider.key} (idle {age:.0f}s > {ttl_s}s TTL)"
-            )
+            _log.info(f"[ttl-sweep] reverted provider {provider.key} (idle {age:.0f}s > {ttl_s}s TTL)")
 
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
@@ -937,9 +915,7 @@ class SimulatorServer:
         ctrl.registry = self.registry
         self._servers.append(ctrl)
 
-        self._threads = [
-            threading.Thread(target=srv.serve_forever, daemon=True) for srv in self._servers
-        ]
+        self._threads = [threading.Thread(target=srv.serve_forever, daemon=True) for srv in self._servers]
 
         # gRPC endpoints — optional dependency: a missing grpcio downgrades
         # them to a warning instead of killing the HTTP-only simulator.
@@ -1007,9 +983,7 @@ def _log_topology(registry: Registry, control_port: int) -> None:
     _log.info("Provider simulator started")
     for pool in registry.pools.values():
         for provider in pool.providers.values():
-            endpoints = ", ".join(
-                f"{ep.interface}/{ep.transport} :{ep.port}" for ep in provider.endpoints
-            )
+            endpoints = ", ".join(f"{ep.interface}/{ep.transport} :{ep.port}" for ep in provider.endpoints)
             _log.info(f"  {provider.key:<20} ({pool.chain:<6}) → {endpoints}")
     _log.info(f"  control API  → :{control_port}")
     _log.info("  GET /stats   → call counts per provider")

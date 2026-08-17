@@ -239,18 +239,14 @@ class TestScenario:
         assert status == 400
         assert "pool:pid" in body["error"]
         _, snap = _get(_ctrl(sim, "/scenario"))
-        assert (
-            snap["providers"]["eth-sim:3"]["mode"] == "success"
-        ), "a rejected scenario must not mutate the provider"
+        assert snap["providers"]["eth-sim:3"]["mode"] == "success", "a rejected scenario must not mutate the provider"
 
     def test_scenario_success_response_shape_includes_applied(self, sim):
         # Pin the exact /scenario success response body, including the
         # "applied" receipt content, so a change to any key or value fails
         # here first. This compares the parsed JSON body (key/value
         # equality), not the raw response bytes.
-        status, body = _post(
-            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"mode": "error"}}}
-        )
+        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"mode": "error"}}})
         assert status == 200
         assert body == {"status": "ok", "applied": {"eth-sim:1": {"mode": "error"}}}
 
@@ -470,12 +466,8 @@ class TestReset:
         _post(_ctrl(sim, "/reset"), {})  # scenario reset only
 
         _, after = _get(_ctrl(sim, "/history"))
-        assert (
-            after["count"] == 3
-        ), f"/reset must not touch history — expected 3, got {after['count']}"
-        assert (
-            after["history"] == before["history"]
-        ), "/reset must not modify existing history entries"
+        assert after["count"] == 3, f"/reset must not touch history — expected 3, got {after['count']}"
+        assert after["history"] == before["history"], "/reset must not modify existing history entries"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -491,9 +483,7 @@ class TestHistoryClear:
             _rpc(url, "eth_blockNumber")
 
         _, before = _get(_ctrl(sim, "/history"))
-        assert (
-            before["count"] == 3
-        ), f"precondition failed — expected 3 entries before clear, got {before['count']}"
+        assert before["count"] == 3, f"precondition failed — expected 3 entries before clear, got {before['count']}"
 
         status, body = _post(_ctrl(sim, "/history/clear"), {})
         assert status == 200
@@ -514,9 +504,7 @@ class TestHistoryClear:
         _rpc(_P1, "eth_blockNumber")  # exactly one new call
 
         _, after = _get(_ctrl(sim, "/history"))
-        assert (
-            after["count"] == 1
-        ), f"expected exactly 1 entry after clear + 1 call, got {after['count']}"
+        assert after["count"] == 1, f"expected exactly 1 entry after clear + 1 call, got {after['count']}"
         assert after["history"][0]["call_order"] == 1
 
     def test_clear_wipes_all_three_providers(self, sim):
@@ -572,8 +560,7 @@ class TestHistoryClear:
         assert body["count"] == 2, f"expected exactly 2 post-clear entries, got {body['count']}"
         for entry in body["history"]:
             assert entry["ts"] >= t_clear, (
-                f"pre-clear entry leaked into history: "
-                f"entry ts={entry['ts']:.3f} < clear ts={t_clear:.3f}"
+                f"pre-clear entry leaked into history: " f"entry ts={entry['ts']:.3f} < clear ts={t_clear:.3f}"
             )
 
 
@@ -590,9 +577,7 @@ class TestResetAll:
             _rpc(url, "eth_blockNumber")
 
         _, before = _get(_ctrl(sim, "/history"))
-        assert (
-            before["count"] == 3
-        ), f"precondition failed — expected 3 entries before reset/all, got {before['count']}"
+        assert before["count"] == 3, f"precondition failed — expected 3 entries before reset/all, got {before['count']}"
 
         status, body = _post(_ctrl(sim, "/reset/all"), {})
         assert status == 200
@@ -613,9 +598,7 @@ class TestResetAll:
         _rpc(_P2, "eth_blockNumber")  # exactly one new call
 
         _, after = _get(_ctrl(sim, "/history"))
-        assert (
-            after["count"] == 1
-        ), f"expected exactly 1 entry after reset/all + 1 call, got {after['count']}"
+        assert after["count"] == 1, f"expected exactly 1 entry after reset/all + 1 call, got {after['count']}"
         assert after["history"][0]["call_order"] == 1
 
     def test_reset_all_clears_all_three_providers(self, sim):
@@ -660,8 +643,7 @@ class TestResetAll:
         assert body["count"] == 2, f"expected exactly 2 post-reset entries, got {body['count']}"
         for entry in body["history"]:
             assert entry["ts"] >= t_reset, (
-                f"pre-reset entry leaked into history: "
-                f"entry ts={entry['ts']:.3f} < reset ts={t_reset:.3f}"
+                f"pre-reset entry leaked into history: " f"entry ts={entry['ts']:.3f} < reset ts={t_reset:.3f}"
             )
 
     def test_history_max_cap_per_provider(self, sim, shrink_history):
@@ -814,9 +796,7 @@ class TestHistory:
         _, hist = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1"))
         assert hist["count"] >= 1
         last = hist["history"][-1]
-        assert (
-            last["request_id"] == 99
-        ), f"history entry should record request_id=99, got {last['request_id']!r}"
+        assert last["request_id"] == 99, f"history entry should record request_id=99, got {last['request_id']!r}"
 
     def test_request_id_string_echoed_in_history(self, sim):
         """String JSON-RPC ids must also be echoed correctly in history."""
@@ -1001,9 +981,7 @@ class TestHistory:
         _rpc(_P1, "eth_blockNumber")
         status, body = _get(_ctrl(sim, "/history?to=0"))
         assert status == 200
-        assert (
-            body["count"] == 0
-        ), f"?to=0 must exclude all calls (none predate the epoch), got count={body['count']}"
+        assert body["count"] == 0, f"?to=0 must exclude all calls (none predate the epoch), got count={body['count']}"
 
     # ── combined filters ──────────────────────────────────────────────────────
 
@@ -1034,9 +1012,7 @@ class TestHistory:
         for url in (_P1, _P2, _P3):
             _rpc(url, "eth_blockNumber")
         _, before = _get(_ctrl(sim, "/history"))
-        assert (
-            before["count"] == 3
-        ), f"precondition failed — expected 3 entries, got {before['count']}"
+        assert before["count"] == 3, f"precondition failed — expected 3 entries, got {before['count']}"
         _post(_ctrl(sim, "/reset/all"), {})
         _, body = _get(_ctrl(sim, "/history"))
         assert body == {
@@ -1069,9 +1045,7 @@ class TestHistory:
         _rpc(_P1, "eth_gasPrice")  # signal — 1 call
 
         _, body = _get(_ctrl(sim, "/history?method=eth_gasPrice"))
-        assert (
-            body["count"] == 1
-        ), f"method filter should return exactly 1 entry, got {body['count']}"
+        assert body["count"] == 1, f"method filter should return exactly 1 entry, got {body['count']}"
         assert body["history"][0]["method"] == "eth_gasPrice"
         assert body["history"][0]["pid"] == "1"
 
@@ -1092,9 +1066,7 @@ class TestJSONRPCProtocol:
             urllib.request.urlopen(
                 urllib.request.Request(
                     _P1,
-                    data=json.dumps(
-                        {"jsonrpc": "2.0", "id": 42, "method": "eth_blockNumber", "params": []}
-                    ).encode(),
+                    data=json.dumps({"jsonrpc": "2.0", "id": 42, "method": "eth_blockNumber", "params": []}).encode(),
                     headers={"Content-Type": "application/json"},
                 ),
                 timeout=5,
@@ -1224,16 +1196,12 @@ class TestScenarioValidation:
     def test_unknown_field_returns_400(self, sim):
         """A misspelled field (e.g. 'latencyms') is a typo — reject it so the
         test doesn't pass green against an unconfigured provider."""
-        status, body = _post(
-            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"latencyms": 500}}}
-        )
+        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"latencyms": 500}}})
         assert status == 400
         assert "latencyms" in body["error"]
 
     def test_invalid_mode_returns_400(self, sim):
-        status, body = _post(
-            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"mode": "boom"}}}
-        )
+        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"mode": "boom"}}})
         assert status == 400
         assert "mode" in body["error"]
 
@@ -1246,9 +1214,7 @@ class TestScenarioValidation:
         and proved nothing. This test pins the rejection so that trap cannot
         come back if the mode allow-list is ever widened.
         """
-        status, body = _post(
-            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"mode": "corrupt"}}}
-        )
+        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"mode": "corrupt"}}})
         assert status == 400
         assert "mode" in body["error"]
         # The provider must be untouched: a follow-up request still succeeds.
@@ -1258,9 +1224,7 @@ class TestScenarioValidation:
     def test_chain_family_field_is_rejected_with_400(self, sim):
         """The old chain_family field is gone — sending it fails loudly with a
         message that points at the pool + transports replacement."""
-        status, body = _post(
-            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"chain_family": "eth"}}}
-        )
+        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"chain_family": "eth"}}})
         assert status == 400
         assert "chain_family" in body["error"]
 
@@ -1273,18 +1237,14 @@ class TestScenarioValidation:
 
     def test_unknown_pool_returns_400_listing_pools(self, sim):
         """An unknown pool name gets a 400 that lists the valid pools."""
-        status, body = _post(
-            _ctrl(sim, "/scenario"), {"providers": {"nope-sim:1": {"mode": "down"}}}
-        )
+        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"nope-sim:1": {"mode": "down"}}})
         assert status == 400
         assert "nope-sim" in body["error"]
         assert "eth-sim" in body["error"]  # the valid-pool list is in the message
 
     def test_unknown_pid_returns_400_listing_pids(self, sim):
         """A pid the pool doesn't have gets a 400 that lists the valid pids."""
-        status, body = _post(
-            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:99": {"mode": "down"}}}
-        )
+        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"eth-sim:99": {"mode": "down"}}})
         assert status == 400
         assert "eth-sim:99" in body["error"]
 
@@ -1315,25 +1275,19 @@ class TestScenarioValidation:
         ), "eth-sim:1 must not be mutated when the sibling block is rejected"
 
     def test_invalid_corruption_mode_returns_400(self, sim):
-        status, body = _post(
-            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"corruption_mode": "shred"}}}
-        )
+        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"corruption_mode": "shred"}}})
         assert status == 400
         assert "corruption_mode" in body["error"]
 
     def test_error_probability_out_of_range_returns_400(self, sim):
-        status, body = _post(
-            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"error_probability": 2.0}}}
-        )
+        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"error_probability": 2.0}}})
         assert status == 400
         assert "error_probability" in body["error"]
 
     def test_negative_latency_returns_400(self, sim):
         """A negative latency reaches time.sleep(-x) → ValueError at request
         time. Reject it up front so the fault primitive stays clean."""
-        status, body = _post(
-            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"latency_ms": -5}}}
-        )
+        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"latency_ms": -5}}})
         assert status == 400
         assert "latency_ms" in body["error"]
 
@@ -1357,25 +1311,19 @@ class TestScenarioValidation:
         assert "error" in body
 
     def test_invalid_then_mode_returns_400(self, sim):
-        status, body = _post(
-            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"then_mode": "sucess"}}}
-        )
+        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"then_mode": "sucess"}}})
         assert status == 400
         assert "then_mode" in body["error"]
 
     def test_negative_fail_first_n_returns_400(self, sim):
-        status, body = _post(
-            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"fail_first_n": -1}}}
-        )
+        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"fail_first_n": -1}}})
         assert status == 400
         assert "fail_first_n" in body["error"]
 
     def test_wrong_chain_quirk_returns_400(self, sim):
         """A Solana quirk sent to an eth provider is a 400 naming the field —
         never silently ignored."""
-        status, body = _post(
-            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"unknown_method_mode": "error"}}}
-        )
+        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"unknown_method_mode": "error"}}})
         assert status == 400
         assert "unknown_method_mode" in body["error"]
 
@@ -1467,18 +1415,13 @@ class TestSequencedFaults:
         exactly its first 2 calls and recovers on the 3rd."""
         _post(
             _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "btc-sim:1": {"mode": "down", "fail_first_n": 2, "then_mode": "success"}
-                }
-            },
+            {"providers": {"btc-sim:1": {"mode": "down", "fail_first_n": 2, "then_mode": "success"}}},
         )
         # eth traffic cannot consume another pool's window (and is unaffected).
         for attempt in range(1, 5):
             status, _ = _rpc(_P1, "eth_blockNumber")
             assert status == 200, (
-                f"eth-sim call {attempt} must stay healthy while btc's window "
-                f"is pending; got {status}"
+                f"eth-sim call {attempt} must stay healthy while btc's window " f"is pending; got {status}"
             )
         btc_url = "http://127.0.0.1:18575"
         for i in (1, 2):
@@ -1544,9 +1487,7 @@ class TestScenarioEdgeCases:
         Reject it with a clean 400 — not a crash, and not a silent 200 that
         would let a test run green against an unconfigured provider — and leave
         the real providers untouched, so the rejection is atomic."""
-        status, body = _post(
-            _ctrl(sim, "/scenario"), {"providers": {"eth-sim:99": {"mode": "error"}}}
-        )
+        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"eth-sim:99": {"mode": "error"}}})
         assert status == 400
         assert "99" in body["error"]
         # real providers unchanged — the whole call was rejected, not partially applied
@@ -1623,9 +1564,7 @@ class TestRingBufferRollover:
         assert (
             hist_after["count"] == MAX_FOR_OVERFLOW_TEST
         ), f"ring buffer should stay at MAX_FOR_OVERFLOW_TEST after overflow, got {hist_after['count']}"
-        assert (
-            hist_after["history"][0]["ts"] > oldest_ts
-        ), "oldest entry should have been dropped after overflow"
+        assert hist_after["history"][0]["ts"] > oldest_ts, "oldest entry should have been dropped after overflow"
 
     def test_all_time_counter_survives_rollover(self, sim, shrink_history):
         """total_calls must keep counting past the ring buffer cap."""
@@ -1642,9 +1581,7 @@ class TestRingBufferRollover:
         assert (
             total == MAX_FOR_OVERFLOW_TEST + extra
         ), f"all-time counter should be {MAX_FOR_OVERFLOW_TEST + extra}, got {total}"
-        assert (
-            ring == MAX_FOR_OVERFLOW_TEST
-        ), f"ring buffer should be capped at {MAX_FOR_OVERFLOW_TEST}, got {ring}"
+        assert ring == MAX_FOR_OVERFLOW_TEST, f"ring buffer should be capped at {MAX_FOR_OVERFLOW_TEST}, got {ring}"
 
     def test_newest_entry_always_survives_rollover(self, sim, shrink_history):
         """The most recently pushed entry must always be present after rollover."""
@@ -1687,9 +1624,7 @@ class TestHistoryMaxEnvConfig:
         monkeypatch.delenv("SIM_HISTORY_MAX", raising=False)
         constants = self._reload_constants()
         try:
-            assert (
-                constants.HISTORY_MAX == 2000
-            ), f"expected default 2000, got {constants.HISTORY_MAX}"
+            assert constants.HISTORY_MAX == 2000, f"expected default 2000, got {constants.HISTORY_MAX}"
         finally:
             # Restore the constants module to whatever state the rest of the
             # suite expects (default again, since monkeypatch will undo the env
@@ -1701,9 +1636,7 @@ class TestHistoryMaxEnvConfig:
         monkeypatch.setenv("SIM_HISTORY_MAX", "777")
         constants = self._reload_constants()
         try:
-            assert (
-                constants.HISTORY_MAX == 777
-            ), f"expected SIM_HISTORY_MAX=777 to win, got {constants.HISTORY_MAX}"
+            assert constants.HISTORY_MAX == 777, f"expected SIM_HISTORY_MAX=777 to win, got {constants.HISTORY_MAX}"
         finally:
             # monkeypatch.undo runs in teardown; reload once more so the
             # constants module reflects the post-undo env (default 2000).
@@ -1879,11 +1812,7 @@ class TestConcurrency:
             status, _ = _rpc(url, "eth_blockNumber")
             results.append(status)
 
-        threads = [
-            threading.Thread(target=call, args=(url,))
-            for url in (_P1, _P2, _P3)
-            for _ in range(n_per_provider)
-        ]
+        threads = [threading.Thread(target=call, args=(url,)) for url in (_P1, _P2, _P3) for _ in range(n_per_provider)]
         for t in threads:
             t.start()
         for t in threads:
@@ -1892,9 +1821,7 @@ class TestConcurrency:
         assert all(s == 200 for s in results)
 
         _, hist = _get(_ctrl(sim, "/history"))
-        assert (
-            hist["count"] == n_per_provider * 3
-        ), f"expected {n_per_provider * 3} total entries, got {hist['count']}"
+        assert hist["count"] == n_per_provider * 3, f"expected {n_per_provider * 3} total entries, got {hist['count']}"
 
     def test_concurrent_scenario_update_and_requests_no_crash(self, sim):
         """Updating the scenario mid-flight must not corrupt state or crash."""
@@ -1959,8 +1886,7 @@ class TestConcurrency:
         _, stats = _get(_ctrl(sim, "/stats"))
         p = stats["providers"]["eth-sim:2"]
         assert p["history_entries"] <= p["total_calls"], (
-            f"ring entries ({p['history_entries']}) > "
-            f"total calls ({p['total_calls']}) — state corrupted"
+            f"ring entries ({p['history_entries']}) > " f"total calls ({p['total_calls']}) — state corrupted"
         )
 
 
@@ -2001,9 +1927,7 @@ class TestStatsEdgeCases:
         _rpc(_P1, "eth_blockNumber")
         _post(_ctrl(sim, "/reset"), {})
         _, stats = _get(_ctrl(sim, "/stats"))
-        assert (
-            stats["providers"]["eth-sim:1"]["total_calls"] >= 1
-        ), "/reset must not touch all-time counters"
+        assert stats["providers"]["eth-sim:1"]["total_calls"] >= 1, "/reset must not touch all-time counters"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2142,13 +2066,9 @@ class TestCorrelationGroup:
 
         assert len(entries) >= 2
         # Different methods with same id should have different correlation_groups
-        cg_blockNum = [e for e in entries if e["method"] == "eth_blockNumber"][0][
-            "correlation_group"
-        ]
+        cg_blockNum = [e for e in entries if e["method"] == "eth_blockNumber"][0]["correlation_group"]
         cg_gasPrice = [e for e in entries if e["method"] == "eth_gasPrice"][0]["correlation_group"]
-        assert (
-            cg_blockNum != cg_gasPrice
-        ), "different methods should have different correlation_groups"
+        assert cg_blockNum != cg_gasPrice, "different methods should have different correlation_groups"
 
     def test_correlation_group_survives_filter_operations(self, sim):
         """correlation_group field survives filtering by pool/pid/method/status."""
@@ -2256,9 +2176,7 @@ class TestLavaHeadersFilter:
         assert hist["count"] == 0
 
         # But without the lava_header filter, we should get the entries
-        status, hist = _get(
-            _ctrl(sim, "/history?last=60&pool=eth-sim&pid=1&method=eth_blockNumber")
-        )
+        status, hist = _get(_ctrl(sim, "/history?last=60&pool=eth-sim&pid=1&method=eth_blockNumber"))
         assert status == 200
         assert hist["count"] >= 1
 
@@ -2412,15 +2330,12 @@ class TestCorruptionMode:
     def test_wrong_type_missing_target_field_is_noop(self, sim):
         # If the configured target field isn't present on the response, the
         # response shape is left alone (no crash, no other fields touched).
-        _set_eth(
-            sim, "1", mode="success", corruption_mode="wrong_type", missing_field="no_such_field"
-        )
+        _set_eth(sim, "1", mode="success", corruption_mode="wrong_type", missing_field="no_such_field")
         status, body = _rpc(_P1, "eth_blockNumber")
         assert status == 200
         assert "result" in body
         assert isinstance(body["result"], str), (
-            f"expected unchanged str result when target field absent, "
-            f"got {type(body['result']).__name__}"
+            f"expected unchanged str result when target field absent, " f"got {type(body['result']).__name__}"
         )
 
 
@@ -2521,9 +2436,7 @@ class TestHangMode:
         # We expect at least one entry recording the hang attempt
         entries = history.get("history", [])
         statuses = {e["status"] for e in entries}
-        assert (
-            "hang" in statuses or "down" in statuses
-        ), f"expected 'hang' status in history, got {statuses}"
+        assert "hang" in statuses or "down" in statuses, f"expected 'hang' status in history, got {statuses}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2606,9 +2519,7 @@ class TestDropConnection:
         _, history = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1"))
         entries = history.get("history", [])
         statuses = {e["status"] for e in entries}
-        assert (
-            "drop_connection" in statuses or "drop" in statuses
-        ), f"expected drop in history, got {statuses}"
+        assert "drop_connection" in statuses or "drop" in statuses, f"expected drop in history, got {statuses}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2712,9 +2623,7 @@ class TestJsonRpcCrossPoolIsolation:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _force_rst_mid_handler(
-    url: str, content_length: int = 100, pre_close_delay_s: float = 0.02
-) -> None:
+def _force_rst_mid_handler(url: str, content_length: int = 100, pre_close_delay_s: float = 0.02) -> None:
     """Open a TCP socket to ``url``, send POST headers that promise a body of
     ``content_length`` bytes, briefly let the server's handler thread start
     reading, then close the socket with SO_LINGER=0 so the kernel emits a
@@ -2770,9 +2679,7 @@ class TestCancelDuringResponseRecordsArrival:
         """
         # baseline: history is empty (autouse clean_state reset just ran)
         _, before = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1"))
-        assert (
-            before["count"] == 0
-        ), f"expected empty history before the RST request, got {before['count']}"
+        assert before["count"] == 0, f"expected empty history before the RST request, got {before['count']}"
 
         _force_rst_mid_handler(_P1)
 
@@ -2792,8 +2699,7 @@ class TestCancelDuringResponseRecordsArrival:
             "cancellation; the cancel-during-response race regressed"
         )
         assert len(entries) == 1, (
-            f"expected exactly one entry for one cancelled request, got "
-            f"{len(entries)}: {entries}"
+            f"expected exactly one entry for one cancelled request, got " f"{len(entries)}: {entries}"
         )
         # The entry's status depends on how far the handler got before the RST
         # raised. Any of the legitimate "this request existed" statuses is
@@ -2889,16 +2795,10 @@ class TestCancelDuringResponseRecordsArrival:
 
         log.finalize(stub, method="eth_blockNumber", status="success", latency_ms=0, request_id=42)
         stats = log.stats()
-        assert (
-            stats["total_calls"] == 1
-        ), "finalize must not bump total_calls — the entry is the same entry"
+        assert stats["total_calls"] == 1, "finalize must not bump total_calls — the entry is the same entry"
         assert stats["history_entries"] == 1, "finalize must not append a new entry"
-        assert (
-            stats["calls_by_status"].get("in_flight", 0) == 0
-        ), "in_flight counter must be decremented on finalize"
-        assert (
-            stats["calls_by_status"].get("success") == 1
-        ), "final status must be reflected in calls_by_status"
+        assert stats["calls_by_status"].get("in_flight", 0) == 0, "in_flight counter must be decremented on finalize"
+        assert stats["calls_by_status"].get("success") == 1, "final status must be reflected in calls_by_status"
         entry = log.get_history()[0]
         assert entry["status"] == "success"
         assert entry["method"] == "eth_blockNumber"
@@ -2916,9 +2816,7 @@ class TestCancelDuringResponseRecordsArrival:
         log = provider.log
         log.clear()
 
-        stub = log.record_arrival(
-            "jsonrpc", "http", 18545, lava_headers={"Lava-Guid": "g-reset-mid"}
-        )
+        stub = log.record_arrival("jsonrpc", "http", 18545, lava_headers={"Lava-Guid": "g-reset-mid"})
         stats = log.stats()
         assert stats["total_calls"] == 1
         assert stats["history_entries"] == 1
@@ -2936,13 +2834,9 @@ class TestCancelDuringResponseRecordsArrival:
         log.finalize(stub, method="eth_blockNumber", status="success", latency_ms=0, request_id=99)
 
         stats = log.stats()
-        assert (
-            stats["history_entries"] == 1
-        ), "stub must be re-appended to history after detached finalize"
+        assert stats["history_entries"] == 1, "stub must be re-appended to history after detached finalize"
         assert stats["total_calls"] == 1, "total_calls must be re-bumped so it matches the buffer"
-        assert (
-            stats["calls_by_status"].get("success") == 1
-        ), "final status must be reflected in calls_by_status"
+        assert stats["calls_by_status"].get("success") == 1, "final status must be reflected in calls_by_status"
         assert stats["calls_by_status"].get("in_flight", 0) == 0, (
             "stale in_flight counter must NOT be revived — the clear zeroed it "
             "and the re-append path only bumps the final status"

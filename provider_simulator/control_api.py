@@ -47,11 +47,7 @@ def _bad_number(field_name: str, value: object) -> str:
     bool is rejected explicitly — it subclasses int and would masquerade as
     a number."""
     if field_name == "error_probability":
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not 0.0 <= value <= 1.0
-        ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0:
             return f"error_probability must be a number in [0.0, 1.0], got {value!r}"
     if field_name in ("latency_ms", "fail_first_n"):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -92,19 +88,11 @@ def _normalise_responses(responses: object) -> object:
             # 2xx — non-2xx shapes are what mode='error' + http_status is for.
             if isinstance(method_name, str) and "body" in cfg:
                 if not isinstance(cfg["body"], dict):
-                    raise ValueError(
-                        f"per-method body override must be a dict (method={method_name!r})"
-                    )
+                    raise ValueError(f"per-method body override must be a dict (method={method_name!r})")
                 if "mode" in cfg:
-                    raise ValueError(
-                        f"per-method body and mode are mutually exclusive (method={method_name!r})"
-                    )
+                    raise ValueError(f"per-method body and mode are mutually exclusive (method={method_name!r})")
                 status_val = cfg.get("status", 200)
-                if not (
-                    isinstance(status_val, int)
-                    and not isinstance(status_val, bool)
-                    and 200 <= status_val <= 299
-                ):
+                if not (isinstance(status_val, int) and not isinstance(status_val, bool) and 200 <= status_val <= 299):
                     raise ValueError(
                         f"per-method body override status must be a 2xx int "
                         f"(method={method_name!r}), got {status_val!r}"
@@ -258,8 +246,7 @@ class ControlApi:
         for pool_name, pool in self.registry.pools.items():
             providers = {
                 pid: [
-                    {"interface": ep.interface, "transport": ep.transport, "port": ep.port}
-                    for ep in provider.endpoints
+                    {"interface": ep.interface, "transport": ep.transport, "port": ep.port} for ep in provider.endpoints
                 ]
                 for pid, provider in pool.providers.items()
             }

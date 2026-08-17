@@ -98,9 +98,7 @@ TM_PROPOSER_ADDR = "D" * 40  # 40-char hex, proposer addr shape
 # so REST / gRPC / TM / WS fault-primitive gating keeps working — it just
 # stops being decisive for BTC / LN JSON-RPC handler selection (MAG-2089).
 LN_NETWORK = "regtest"  # LND's network field — "mainnet" | "testnet" | "regtest" | "signet"
-LN_IDENTITY_PUBKEY = (
-    "02" + "ab" * 32
-)  # 33-byte secp256k1 compressed pubkey: 0x02-prefix + 32-byte X coord
+LN_IDENTITY_PUBKEY = "02" + "ab" * 32  # 33-byte secp256k1 compressed pubkey: 0x02-prefix + 32-byte X coord
 LN_PEER_PUBKEY = "02" + "cd" * 32  # distinct peer pubkey for listpeers / openchannel responses
 LN_BLOCK_HEIGHT = 850_000  # LN nodes track the underlying BTC chain head
 LN_NUM_PEERS = 1

@@ -55,9 +55,7 @@ class SolanaChain(Chain):
     def error_stub(self, name: str) -> dict:
         return SOLANA_ERROR_STUBS[name]
 
-    def build_success(
-        self, request: dict, scenario: dict, quirks: dict, interface: str = ""
-    ) -> tuple[int, dict]:
+    def build_success(self, request: dict, scenario: dict, quirks: dict, interface: str = "") -> tuple[int, dict]:
         req_id = request.get("id", 1)
         method = request.get("method", "unknown")
         responses = scenario.get("responses") or {}

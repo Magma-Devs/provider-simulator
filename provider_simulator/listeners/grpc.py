@@ -84,9 +84,7 @@ class GrpcListener:
             return GrpcPlan(action="abort", status_code="UNAVAILABLE", message="provider down")
         if verdict.kind == "hang":
             _finalize("hang", 0)
-            return GrpcPlan(
-                action="abort", status_code="CANCELLED", message="hang timeout", hang=True
-            )
+            return GrpcPlan(action="abort", status_code="CANCELLED", message="hang timeout", hang=True)
         if verdict.kind == "drop":
             _finalize("drop_connection", latency)
             return GrpcPlan(

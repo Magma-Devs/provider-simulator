@@ -374,8 +374,7 @@ class TestLNFaultInjection:
             assert body_part == b"", f"after_headers must send no body byte, got {body_part!r}"
         else:
             assert 0 < len(body_part) < 100, (
-                f"mid_body must send a strict subset of the promised 100 bytes, "
-                f"got {len(body_part)} bytes"
+                f"mid_body must send a strict subset of the promised 100 bytes, " f"got {len(body_part)} bytes"
             )
 
     def test_corrupt_response_on_ln(self, sim):
@@ -384,9 +383,7 @@ class TestLNFaultInjection:
         # Build the request manually so we read raw bytes without json.loads.
         req = urllib.request.Request(
             f"{_LN_URLS['3']}/",
-            data=json.dumps(
-                {"jsonrpc": "2.0", "id": 1, "method": "getinfo", "params": []}
-            ).encode(),
+            data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "getinfo", "params": []}).encode(),
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=5) as resp:

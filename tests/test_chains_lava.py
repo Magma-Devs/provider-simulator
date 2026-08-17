@@ -78,16 +78,12 @@ def test_rest_blocks_latest_blocks_behind_shifts_head():
 
 
 def test_rest_block_by_height_echoes_requested_height():
-    st, body = _chain().build_success(
-        _rest(_BLOCKS_HEIGHT, path_params={"height": "12345"}), _sc(), {}, "rest"
-    )
+    st, body = _chain().build_success(_rest(_BLOCKS_HEIGHT, path_params={"height": "12345"}), _sc(), {}, "rest")
     assert body["block"]["header"]["height"] == "12345"
 
 
 def test_rest_balances_echoes_address():
-    st, body = _chain().build_success(
-        _rest(_BALANCES, path_params={"address": "cosmos1abc"}), _sc(), {}, "rest"
-    )
+    st, body = _chain().build_success(_rest(_BALANCES, path_params={"address": "cosmos1abc"}), _sc(), {}, "rest")
     assert body["address"] == "cosmos1abc"
     assert body["balances"][0]["denom"] == "ulava"
 
@@ -128,17 +124,13 @@ def test_rest_body_override_http_status_wins_over_status():
 def test_rest_head_reads_the_get_stub():
     # A HEAD carries route_verb GET, so the catalogue lookup finds the GET stub
     # even though the request's own verb is HEAD.
-    st, body = _chain().build_success(
-        _rest(_BLOCKS_LATEST, verb="HEAD", route_verb="GET"), _sc(), {}, "rest"
-    )
+    st, body = _chain().build_success(_rest(_BLOCKS_LATEST, verb="HEAD", route_verb="GET"), _sc(), {}, "rest")
     assert st == 200
     assert body["block"]["header"]["height"] == str(REST_HEIGHT)
 
 
 def test_rest_head_404_names_the_verb_the_caller_sent():
-    st, body = _chain().build_success(
-        _rest("/nope", verb="HEAD", route_verb="GET"), _sc(), {}, "rest"
-    )
+    st, body = _chain().build_success(_rest("/nope", verb="HEAD", route_verb="GET"), _sc(), {}, "rest")
     assert st == 404
     assert body["method"] == "HEAD"  # not the GET route it tried to borrow
 
@@ -153,9 +145,7 @@ def test_rest_validators_echoes_inbound_page_key():
 
 def test_rest_validators_echoes_bare_page_key_value():
     # parse_qs wraps values in lists; a hand-built request may not.
-    _st, body = _chain().build_success(
-        _rest(_VALIDATORS, query={"pagination.key": "bare-cursor"}), _sc(), {}, "rest"
-    )
+    _st, body = _chain().build_success(_rest(_VALIDATORS, query={"pagination.key": "bare-cursor"}), _sc(), {}, "rest")
     assert body["pagination"]["inbound_key"] == "bare-cursor"
 
 
@@ -186,18 +176,14 @@ def test_rest_balances_echoes_inbound_page_key_too():
 def test_rest_unpaginated_path_gains_no_pagination_block():
     # /blocks/latest has no pagination block; a cursor on the query string must
     # not conjure one.
-    _st, body = _chain().build_success(
-        _rest(_BLOCKS_LATEST, query={"pagination.key": ["cursor-9"]}), _sc(), {}, "rest"
-    )
+    _st, body = _chain().build_success(_rest(_BLOCKS_LATEST, query={"pagination.key": ["cursor-9"]}), _sc(), {}, "rest")
     assert "pagination" not in body
 
 
 def test_rest_page_key_echo_does_not_leak_into_the_shared_stub():
     # The catalogue entry is deep-copied per request; a cursor from one call
     # must not show up on the next.
-    _st, first = _chain().build_success(
-        _rest(_VALIDATORS, query={"pagination.key": ["cursor-1"]}), _sc(), {}, "rest"
-    )
+    _st, first = _chain().build_success(_rest(_VALIDATORS, query={"pagination.key": ["cursor-1"]}), _sc(), {}, "rest")
     _st, second = _chain().build_success(_rest(_VALIDATORS), _sc(), {}, "rest")
     assert first["pagination"]["inbound_key"] == "cursor-1"
     assert second["pagination"]["inbound_key"] is None
@@ -213,9 +199,7 @@ def test_tm_status_wrapped_in_jsonrpc_envelope():
 
 
 def test_tm_block_echoes_requested_height():
-    st, body = _chain().build_success(
-        _tm("block", params={"height": "99"}), _sc(), {}, "tendermintrpc"
-    )
+    st, body = _chain().build_success(_tm("block", params={"height": "99"}), _sc(), {}, "tendermintrpc")
     assert body["result"]["block"]["header"]["height"] == "99"
 
 
@@ -225,17 +209,13 @@ def test_tm_block_default_head_shifts_by_blocks_behind():
 
 
 def test_tm_validators_pagination():
-    st, body = _chain().build_success(
-        _tm("validators", params={"page": 1, "per_page": 2}), _sc(), {}, "tendermintrpc"
-    )
+    st, body = _chain().build_success(_tm("validators", params={"page": 1, "per_page": 2}), _sc(), {}, "tendermintrpc")
     assert body["result"]["count"] == "2"
     assert body["result"]["total"] == "12"
 
 
 def test_tm_abci_query_echoes_height():
-    st, body = _chain().build_success(
-        _tm("abci_query", params={"height": "77"}), _sc(), {}, "tendermintrpc"
-    )
+    st, body = _chain().build_success(_tm("abci_query", params={"height": "77"}), _sc(), {}, "tendermintrpc")
     assert body["result"]["response"]["height"] == "77"
 
 
@@ -264,9 +244,7 @@ def test_grpc_latest_block_reports_head_and_chain_id():
 
 
 def test_grpc_latest_block_blocks_behind_shifts_head():
-    st, body = _chain().build_success(
-        {"method": "GetLatestBlock"}, _sc(blocks_behind=5), {}, "grpc"
-    )
+    st, body = _chain().build_success({"method": "GetLatestBlock"}, _sc(blocks_behind=5), {}, "grpc")
     assert body["height"] == GRPC_LATEST_BLOCK - 5
 
 
