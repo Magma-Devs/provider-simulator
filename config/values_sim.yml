@@ -450,13 +450,17 @@ routers:
             addons: []
   # Bitcoin JSON-RPC simulator-backed — unblocks MAG-1744 (the BTC suite
   # at smart_router_automation/tests/simulator/btc/). Mirrors eth-sim's
-  # shape; the upstream simulator pod dispatches each request through
-  # handlers_btc.py vs handlers_eth.py based on the chain_family field
-  # in the per-test scenario (per-provider config via
-  # sim_control.ProviderConfig.chain_family, MAG-1716). That dispatching
-  # is why we can safely reuse the existing JSON-RPC sim ports
-  # 18545–18547 alongside eth-sim — the simulator process is the same;
-  # only the chain_family selected per-request differs.
+  # shape, but on its own listeners: btc-sim binds 18575-18577 (MAG-2089),
+  # NOT eth-sim's 18545-18547. The topology table in
+  # provider_simulator/topology.py declares those same three ports; if the
+  # urls below and that table ever disagree, the table is correct.
+  #
+  # Handler dispatch is port-derived: the listener a request arrives on
+  # decides whether handlers_btc.py or handlers_eth.py serves it. There is
+  # no per-provider chain_family check on the success path. chain_family
+  # still gates the content fault primitives (error / rate_limit / hang /
+  # drop_connection / corruption), and mode="down" ignores it and fires on
+  # every listener (MAG-2092).
   #
   # Rendered ingress (chain-interface convention):
   # ``btc-sim-jsonrpc.<host>``.
