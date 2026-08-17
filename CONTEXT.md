@@ -28,10 +28,48 @@ pools may both hold slot `1`; the pool name is what keeps them apart.
 _Avoid_: provider address, provider name, pid string
 
 **Provider name**:
-Not a simulator concept. The simulator never sees one. A name such as
-`SimProvider1` is chosen by the router's values file, and the router reports it
-in the `Lava-Provider-Address` response header.
+What the router calls one provider. It lives in the topology table now, not
+only in a values file. The router reports it in the `Lava-Provider-Address`
+response header. It is not an address: the control API will not accept it.
+Use the provider key for that.
+
+The form is `<Pool><Role>Provider<slot>`, for example `EthPrimaryProvider1` and
+`LavaRestBackupProvider4`. Three rules go with it:
+
+- **The number is the pool slot**, so the number in the name is the same number
+  the control API accepts. A test that reads a name from a header already knows
+  the address to send a fault to.
+- **No word is said twice.** Some pool names already contain their own role
+  word. `eth-solo-sim` plus the role `Solo` would read `EthSoloSolo`, so the
+  pool word is dropped and the name is `EthSoloProvider1`.
+- **A name must be unique per chain and api-interface.** Two providers on one
+  chain and interface cannot share a name or the router exits at startup. The
+  chart lowercases every name first, so two names that differ only in case
+  arrive identical and collide.
+
+The chart lowercases the name and turns spaces into hyphens before the router
+reads it, so `EthPrimaryProvider1` reaches a test as `ethprimaryprovider1`.
+Compare lowercased, always.
 _Avoid_: using a name to address a provider through the control API
+
+**Role**:
+The middle part of a provider's name, between the pool and the word `Provider`.
+The full list: `Primary`, `Backup`, `Solo`, `DuoHigh`, `DuoLow`, `Best`,
+`Priority`, `Precedence`.
+
+It exists to tell a person what that provider is for, so it is chosen rather
+than derived. That it cannot be worked out from the slot number is the point of
+the field, not a gap in it.
+
+**Every provider carries one, and an empty role is not allowed.** A pool with
+nothing to tell its providers apart, such as `btc-sim`, uses `Primary`. A row
+with no role is a row someone did not finish, so it is rejected rather than
+quietly building a name with a hole in it.
+
+The role is the middle part of the name. It is not a column of its own. It is
+visible inside the `name` column of the topology table. In `EthBackupProvider4`,
+the role is Backup, but nothing stores that word separately.
+_Avoid_: type, kind, label, category
 
 **Endpoint**:
 One door a provider listens on: an interface, the transport that carries it, and
@@ -56,7 +94,11 @@ _Avoid_: network, chain id, chain family
 
 **Topology**:
 The table in `provider_simulator/topology.py`. It is the one place that says what
-exists — every pool, every provider, every endpoint.
+exists — every pool, every provider, every endpoint. Each row also carries the
+provider's `name` and its `is_backup` flag. That makes six fields per row.
+Four of them, pool, chain, pid and endpoints, decide what the simulator runs.
+The other two, `name` and `is_backup`, are only recorded. A caller reads them
+instead of guessing.
 _Avoid_: config, port map, provider list
 
 **Registry**:
@@ -115,4 +157,5 @@ _Avoid_: metrics, counts, totals
 **Tier**:
 Primary or backup. A router decides which providers it tries first. The simulator
 treats every pool the same way, so a tier is never a simulator behaviour.
+`Primary` and `Backup` are two of the values a Role can take.
 _Avoid_: level, priority, rank

@@ -59,7 +59,7 @@ routers:
       - method: "eth_chainId"
         forbid_caller_cv: true
     nodes:
-      - name: "SimProvider1"
+      - name: "EthPrimaryProvider1"
         group_label: "tier-1"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18545"
@@ -67,7 +67,7 @@ routers:
             addons: ["archive", "trace", "debug"]
           - url: "ws://provider-simulator.lava-infra.svc.cluster.local:18557/ws"
             interface: "jsonrpc"
-      - name: "SimProvider2"
+      - name: "EthPrimaryProvider2"
         group_label: "tier-1"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18546"
@@ -75,7 +75,7 @@ routers:
             addons: ["archive", "trace", "debug"]
           - url: "ws://provider-simulator.lava-infra.svc.cluster.local:18558/ws"
             interface: "jsonrpc"
-      - name: "SimProvider3"
+      - name: "EthPrimaryProvider3"
         group_label: "external"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18547"
@@ -83,16 +83,16 @@ routers:
             addons: ["archive", "trace", "debug"]
           - url: "ws://provider-simulator.lava-infra.svc.cluster.local:18559/ws"
             interface: "jsonrpc"
-      # Backup tier — consulted only when the primary pool (SimProvider1-3)
+      # Backup tier — consulted only when the primary pool
       # is exhausted on a request (PairingListEmptyError → backup fallback
       # in smart-router consumer_session_manager.go:826). Listeners on
       # 18560-18562 are added by provider-simulator's PR #20; the WS-backup
       # endpoints on 18572-18574 are added by the MAG-18xx surface-backup
-      # PR (mirrors the primary tier's http+ws pairing on SimProvider1-3).
+      # PR (mirrors the primary tier's http+ws pairing).
       # This entry wires both into the chart's `backup-direct-rpc:` section
       # via is_backup: true.
       #
-      # Port history: SimBackup1-3 originally targeted 18554-18556 but those
+      # Port history: the backup slots originally targeted 18554-18556 but those
       # ports got reused by the Tendermint-RPC primary listeners (MAG-1841);
       # the JSON-RPC backup pool moved to 18560-18562 in provider-simulator
       # commit dc65672. Updating these URLs here is required — without the
@@ -101,7 +101,7 @@ routers:
       # Addons must match the primary tier or `lava-extension: archive`
       # requests skip the backup pool silently via IsSupportingAddon
       # (consumer_session_manager.go:1361).
-      - name: "SimBackup1"
+      - name: "EthBackupProvider4"
         is_backup: true
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18560"
@@ -109,7 +109,7 @@ routers:
             addons: ["archive", "trace", "debug"]
           - url: "ws://provider-simulator.lava-infra.svc.cluster.local:18572/ws"
             interface: "jsonrpc"
-      - name: "SimBackup2"
+      - name: "EthBackupProvider5"
         is_backup: true
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18561"
@@ -117,7 +117,7 @@ routers:
             addons: ["archive", "trace", "debug"]
           - url: "ws://provider-simulator.lava-infra.svc.cluster.local:18573/ws"
             interface: "jsonrpc"
-      - name: "SimBackup3"
+      - name: "EthBackupProvider6"
         is_backup: true
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18562"
@@ -144,7 +144,7 @@ routers:
   - id: "eth-solo-sim"
     network: "eth1"
     nodes:
-      - name: "SimProvider19"
+      - name: "EthSoloProvider1"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18581"
             interface: "jsonrpc"
@@ -183,19 +183,19 @@ routers:
   - id: "lava-sim-rest"
     network: "lava"
     nodes:
-      - name: "SimProvider1"
+      - name: "LavaRestPrimaryProvider1"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18551"
             interface: "rest"
             addons: []
-      - name: "SimProvider2"
+      - name: "LavaRestPrimaryProvider2"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18552"
             interface: "rest"
             addons: []
-      - name: "SimProvider3"
+      - name: "LavaRestPrimaryProvider3"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18553"
@@ -204,23 +204,23 @@ routers:
       # Backup tier (provider-simulator MAG-18xx surface-backup PR).
       # Distinct ProviderState pids 10-12 → 18566-18568 in the simulator;
       # the smart-router consults this pool only after the primary
-      # SimProvider1-3 pool is exhausted on a request. Addons must match
+      # pool is exhausted on a request. Addons must match
       # the primary tier (empty here) — see IsSupportingAddon note above.
-      - name: "SimRestBackup1"
+      - name: "LavaRestBackupProvider4"
         is_backup: true
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18566"
             interface: "rest"
             addons: []
-      - name: "SimRestBackup2"
+      - name: "LavaRestBackupProvider5"
         is_backup: true
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18567"
             interface: "rest"
             addons: []
-      - name: "SimRestBackup3"
+      - name: "LavaRestBackupProvider6"
         is_backup: true
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
@@ -250,39 +250,39 @@ routers:
   - id: "lava-sim-grpc"
     network: "lava"
     nodes:
-      - name: "SimGrpcProvider1"
+      - name: "LavaGrpcPrimaryProvider1"
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: "grpc://provider-simulator.lava-infra.svc.cluster.local:18548"
             interface: "grpc"
             addons: []
-      - name: "SimGrpcProvider2"
+      - name: "LavaGrpcPrimaryProvider2"
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: "grpc://provider-simulator.lava-infra.svc.cluster.local:18549"
             interface: "grpc"
             addons: []
-      - name: "SimGrpcProvider3"
+      - name: "LavaGrpcPrimaryProvider3"
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: "grpc://provider-simulator.lava-infra.svc.cluster.local:18550"
             interface: "grpc"
             addons: []
-      - name: "SimGrpcBackup1"
+      - name: "LavaGrpcBackupProvider4"
         is_backup: true
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: "grpc://provider-simulator.lava-infra.svc.cluster.local:18563"
             interface: "grpc"
             addons: []
-      - name: "SimGrpcBackup2"
+      - name: "LavaGrpcBackupProvider5"
         is_backup: true
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: "grpc://provider-simulator.lava-infra.svc.cluster.local:18564"
             interface: "grpc"
             addons: []
-      - name: "SimGrpcBackup3"
+      - name: "LavaGrpcBackupProvider6"
         is_backup: true
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
@@ -340,19 +340,19 @@ routers:
   - id: "lava-sim-tm"
     network: "lava"
     nodes:
-      - name: "SimProvider1"
+      - name: "LavaTmPrimaryProvider1"
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18554"
             interface: "tendermintrpc"
             addons: []
-      - name: "SimProvider2"
+      - name: "LavaTmPrimaryProvider2"
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18555"
             interface: "tendermintrpc"
             addons: []
-      - name: "SimProvider3"
+      - name: "LavaTmPrimaryProvider3"
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18556"
@@ -362,21 +362,21 @@ routers:
       # Distinct ProviderState pids 13-15 → 18569-18571. skip_verifications
       # repeats per-node because chain-id verification runs per-endpoint
       # during the router's BackupProviders validation pass.
-      - name: "SimTmBackup1"
+      - name: "LavaTmBackupProvider4"
         is_backup: true
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18569"
             interface: "tendermintrpc"
             addons: []
-      - name: "SimTmBackup2"
+      - name: "LavaTmBackupProvider5"
         is_backup: true
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18570"
             interface: "tendermintrpc"
             addons: []
-      - name: "SimTmBackup3"
+      - name: "LavaTmBackupProvider6"
         is_backup: true
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
@@ -476,19 +476,19 @@ routers:
   - id: "btc-sim"
     network: "btc"
     nodes:
-      - name: "SimBtcProvider1"
+      - name: "BtcPrimaryProvider1"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18575"
             interface: "jsonrpc"
             addons: []
-      - name: "SimBtcProvider2"
+      - name: "BtcPrimaryProvider2"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18576"
             interface: "jsonrpc"
             addons: []
-      - name: "SimBtcProvider3"
+      - name: "BtcPrimaryProvider3"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18577"
@@ -512,19 +512,19 @@ routers:
   - id: "solana-sim"
     network: "solana"
     nodes:
-      - name: "SimSolanaProvider1"
+      - name: "SolanaPrimaryProvider1"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18582"
             interface: "jsonrpc"
             addons: []
-      - name: "SimSolanaProvider2"
+      - name: "SolanaPrimaryProvider2"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18583"
             interface: "jsonrpc"
             addons: []
-      - name: "SimSolanaProvider3"
+      - name: "SolanaPrimaryProvider3"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18584"
@@ -544,7 +544,7 @@ routers:
   - id: "solana-solo-sim"
     network: "solana"
     nodes:
-      - name: "SimSolanaSoloProvider1"
+      - name: "SolanaSoloProvider1"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18585"

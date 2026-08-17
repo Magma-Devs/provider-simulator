@@ -114,9 +114,7 @@ def _read_values_routers() -> tuple[ValuesRouter, ...]:
             continue
 
     return tuple(
-        ValuesRouter(
-            router_id, tuple(ValuesProvider(name, tuple(urls)) for name, urls in providers)
-        )
+        ValuesRouter(router_id, tuple(ValuesProvider(name, tuple(urls)) for name, urls in providers))
         for router_id, providers in parsed
     )
 
@@ -134,20 +132,18 @@ def _port_of_url(url: str) -> int | None:
 
 VALUES_ROUTERS = _read_values_routers()
 
-POOLS = {pool for pool, _chain, _pid, _eps in TOPOLOGY}
+POOLS = {pool for pool, _chain, _pid, _name, _backup, _eps in TOPOLOGY}
 
 # port -> the provider key that owns it, so a mismatch can name the pool and
 # the pool slot the port actually belongs to.
 POOL_SLOT_OF_PORT = {
-    port: f"{pool}:{pid}" for pool, _chain, pid, eps in TOPOLOGY for (_i, _t, port) in eps
+    port: f"{pool}:{pid}" for pool, _chain, pid, _name, _backup, eps in TOPOLOGY for (_i, _t, port) in eps
 }
 
 # pool -> how many providers the topology gives it. A plain dict, not a
 # Counter: an unknown pool must raise, not answer zero and read as an entry
 # that legitimately lists no providers.
-PROVIDERS_PER_POOL = {
-    pool: sum(1 for row_pool, _c, _p, _e in TOPOLOGY if row_pool == pool) for pool in POOLS
-}
+PROVIDERS_PER_POOL = {pool: sum(1 for row_pool, _c, _p, _n, _b, _e in TOPOLOGY if row_pool == pool) for pool in POOLS}
 
 # The router entries this file checks: every values entry whose id is a pool.
 # Derived, never listed — a new sim router is covered as soon as its pool row
@@ -197,8 +193,7 @@ def test_every_sim_router_url_dials_a_port_the_topology_declares(router):
             port = _port_of_url(url)
             assert port is not None, f"router {router.router_id!r} url {url!r} names no port"
             assert port in POOL_SLOT_OF_PORT, (
-                f"router {router.router_id!r} dials port {port} ({url!r}), "
-                f"which no pool in the topology listens on"
+                f"router {router.router_id!r} dials port {port} ({url!r}), " f"which no pool in the topology listens on"
             )
 
 
@@ -215,8 +210,7 @@ def test_every_sim_router_url_dials_a_port_inside_its_own_pool(router):
             assert port is not None, f"router {router.router_id!r} url {url!r} names no port"
             owner = POOL_SLOT_OF_PORT.get(port)
             assert owner is not None, (
-                f"router {router.router_id!r} dials port {port} ({url!r}), "
-                f"which belongs to no pool in the topology"
+                f"router {router.router_id!r} dials port {port} ({url!r}), " f"which belongs to no pool in the topology"
             )
             assert owner.split(":")[0] == router.router_id, (
                 f"router {router.router_id!r} dials port {port} ({url!r}), "
@@ -243,8 +237,7 @@ def test_a_router_entry_is_skipped_only_when_no_pool_carries_its_name():
     written — which is how the drift this file guards against started."""
     for router in REAL_NODE_ROUTERS:
         assert router.router_id not in POOLS, (
-            f"router {router.router_id!r} was skipped, but pool {router.router_id!r} "
-            f"exists in the topology"
+            f"router {router.router_id!r} was skipped, but pool {router.router_id!r} " f"exists in the topology"
         )
     for router in SIM_ROUTERS:
         assert router.router_id in POOLS
