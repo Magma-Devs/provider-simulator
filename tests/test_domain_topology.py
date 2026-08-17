@@ -92,15 +92,13 @@ def test_eth_cv_sim_has_six_dedicated_providers():
     """
     rows = {r[2]: r for r in TOPOLOGY if r[0] == "eth-cv-sim"}
     assert set(rows) == {"1", "2", "3", "4", "5", "6"}
-    for pid, expected_port in zip(
-        ("1", "2", "3", "4", "5", "6"), (18596, 18597, 18598, 18599, 18600, 18601)
-    ):
-        assert rows[pid][3] == (("jsonrpc", "http", expected_port),)
+    for pid, expected_port in zip(("1", "2", "3", "4", "5", "6"), (18596, 18597, 18598, 18599, 18600, 18601)):
+        assert rows[pid][6] == (("jsonrpc", "http", expected_port),)
         assert rows[pid][1] == "eth"
 
-    cv_ports = {port for r in rows.values() for (_i, _t, port) in r[3]}
+    cv_ports = {port for r in rows.values() for (_i, _t, port) in r[6]}
     other_ports = {
-        port for pool, _c, _pid, eps in TOPOLOGY if pool != "eth-cv-sim" for (_i, _t, port) in eps
+        port for pool, _c, _pid, _n, _b, _g, eps in TOPOLOGY if pool != "eth-cv-sim" for (_i, _t, port) in eps
     }
     assert cv_ports.isdisjoint(other_ports), "eth-cv-sim must not share ports with any other pool"
 
@@ -220,6 +218,14 @@ def test_port_of_raises_when_a_provider_has_no_websocket_door():
 # the only honest check is the chosen name against the one in the table.
 # Deriving the expected value would compare the table against itself.
 AGREED_NAMES = {
+    # Cross-validation pool: six providers, nothing to tell them apart, so
+    # Primary — the same choice btc-sim, ln-sim and solana-sim make.
+    ("eth-cv-sim", "1"): "EthCvPrimaryProvider1",
+    ("eth-cv-sim", "2"): "EthCvPrimaryProvider2",
+    ("eth-cv-sim", "3"): "EthCvPrimaryProvider3",
+    ("eth-cv-sim", "4"): "EthCvPrimaryProvider4",
+    ("eth-cv-sim", "5"): "EthCvPrimaryProvider5",
+    ("eth-cv-sim", "6"): "EthCvPrimaryProvider6",
     ("eth-sim", "1"): "EthPrimaryProvider1",
     ("eth-sim", "2"): "EthPrimaryProvider2",
     ("eth-sim", "3"): "EthPrimaryProvider3",
