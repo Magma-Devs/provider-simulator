@@ -161,7 +161,7 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
     #     refusal, need three groups to exist in the first place.
     # Dedicated listeners for the same isolation reason as eth-duo-sim. The
     # control API keys a fault by "pool:pid", so two pools each having a pid
-    # "1" is fine — they resolve to different providers. What is not fine is
+    # "1" is fine. They resolve to different providers. What is not fine is
     # two pools sharing a listener: that is one provider under one key, so a
     # fault injected for one router's test reaches the other router's traffic,
     # and the resulting failure would look exactly like a router bug.
