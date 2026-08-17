@@ -414,31 +414,30 @@ routers:
               auth_headers:
                 x-api-key: "YOUR_TATUM_API_KEY"
   # Solana testnet JSON-RPC. Three independent testnet upstreams: PublicNode
-  # (keyless), Lava gateway solanat path, QuickNode (keyed). skip_verifications
-  # enabled on every node: the SOLANA spec's chain-id probe (getGenesisHash) is
-  # pinned to mainnet genesis, so a testnet upstream would otherwise fail
-  # startup verification and crash-loop the router.
+  # (keyless), Lava gateway solanat path, QuickNode (keyed).
   - id: "solana-testnet"
     network: "solana"
+    # Solana runs version and tokens-owner-indexed verifications, both of which
+    # pass on testnet providers — nothing needs skipping. skip_verifications
+    # matches a verification name from the chain spec; "enabled" and "chain-id"
+    # are names from other chains' specs, so they matched nothing here.
+    # genesis-hash is only in the devnet spec index, not testnet.
     nodes:
       - name: "PublicNode"
         endpoints:
           - url: "https://solana-testnet-rpc.publicnode.com"
             interface: "jsonrpc"
             addons: []
-        skip_verifications: "chain-id"
       - name: "LavaGateway"
         endpoints:
           - url: "https://g.w.lavanet.xyz:443/gateway/solanat/rpc-http/YOUR_LAVA_GATEWAY_KEY"
             interface: "jsonrpc"
             addons: []
-        skip_verifications: "chain-id"
       - name: "QuickNode1"
         endpoints:
           - url: "YOUR_SOLANA_TESTNET_QUICKNODE_URL"
             interface: "jsonrpc"
             addons: []
-        skip_verifications: "chain-id"
   # Bitcoin JSON-RPC (Phase 4 bonus — unblocks Group 13 tier-2 classifier tests)
   - id: "btc"
     network: "btc"
