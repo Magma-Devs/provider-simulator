@@ -115,19 +115,14 @@ def _pick_status(cfg: dict, primary: str, secondary: str, default: int) -> int:
 class LavaChain(Chain):
     name = "lava"
 
-    def build_success(
-        self, request: dict, scenario: dict, quirks: dict, interface: str = ""
-    ) -> tuple[int, dict]:
+    def build_success(self, request: dict, scenario: dict, quirks: dict, interface: str = "") -> tuple[int, dict]:
         if interface == "rest":
             return self._build_rest(request, scenario)
         if interface == "tendermintrpc":
             return self._build_tm(request, scenario)
         if interface == "grpc":
             return self._build_grpc(request, scenario)
-        raise ValueError(
-            "LavaChain requires a rest / tendermintrpc / grpc endpoint, "
-            f"got interface {interface!r}"
-        )
+        raise ValueError("LavaChain requires a rest / tendermintrpc / grpc endpoint, " f"got interface {interface!r}")
 
     # ── REST ────────────────────────────────────────────────────────────────
     # Ports handlers_rest.handle. request = {verb, template, path_params, query,
@@ -179,10 +174,7 @@ class LavaChain(Chain):
 
         if template == "/cosmos/base/tendermint/v1beta1/blocks/latest":
             if blocks_behind != 0 and isinstance(result, dict):
-                shifted = str(
-                    _int_height(REST_METHOD_DEFAULTS[key]["block"]["header"]["height"])
-                    - blocks_behind
-                )
+                shifted = str(_int_height(REST_METHOD_DEFAULTS[key]["block"]["header"]["height"]) - blocks_behind)
                 result["block"]["header"]["height"] = shifted
                 try:
                     result["block"]["last_commit"]["height"] = str(max(int(shifted) - 1, 0))

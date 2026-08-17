@@ -133,8 +133,7 @@ class TestWsBlocksBehind:
             c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 2})
             shifted = int(c.recv_json(timeout=2.0)["result"], 16)
         assert baseline - shifted == 100, (
-            f"expected the ws-served head to drop by exactly 100, "
-            f"got baseline={baseline} shifted={shifted}"
+            f"expected the ws-served head to drop by exactly 100, " f"got baseline={baseline} shifted={shifted}"
         )
 
 
@@ -224,9 +223,7 @@ class TestWsEmit:
         """POST /ws/emit with a live sub_id delivers a wrapped event frame
         on the matching connection within 1s."""
         with WsClient(_WS_HOST, _WS_PORTS["1"], "/ws") as c:
-            c.send_json(
-                {"jsonrpc": "2.0", "method": "eth_subscribe", "params": ["newHeads"], "id": 1}
-            )
+            c.send_json({"jsonrpc": "2.0", "method": "eth_subscribe", "params": ["newHeads"], "id": 1})
             sub_id = c.recv_json(timeout=2.0)["result"]
 
             status, _ = _control(
@@ -282,9 +279,7 @@ class TestWsSubscriptionsIntrospection:
             WsClient(_WS_HOST, _WS_PORTS["1"], "/ws") as c1,
             WsClient(_WS_HOST, _WS_PORTS["2"], "/ws") as c2,
         ):
-            c1.send_json(
-                {"jsonrpc": "2.0", "method": "eth_subscribe", "params": ["newHeads"], "id": 1}
-            )
+            c1.send_json({"jsonrpc": "2.0", "method": "eth_subscribe", "params": ["newHeads"], "id": 1})
             sid1 = c1.recv_json(timeout=2.0)["result"]
             c2.send_json({"jsonrpc": "2.0", "method": "accountSubscribe", "params": [], "id": 1})
             sid2 = c2.recv_json(timeout=2.0)["result"]
@@ -717,9 +712,7 @@ class TestAllSubscribeMethods:
             ("logsSubscribe", "logsNotification"),
         ],
     )
-    def test_subscribe_then_emit_delivers_chain_correct_envelope(
-        self, sim, method, expected_envelope_method
-    ):
+    def test_subscribe_then_emit_delivers_chain_correct_envelope(self, sim, method, expected_envelope_method):
         with WsClient(_WS_HOST, _WS_PORTS["1"], "/ws") as c:
             c.send_json({"jsonrpc": "2.0", "method": method, "params": [], "id": 1})
             sub_id = c.recv_json(timeout=2.0)["result"]
@@ -752,9 +745,7 @@ class TestConcurrentSubscriptions:
     def test_two_subs_on_one_connection_receive_their_own_events(self, sim):
         """Each subscription gets its own pushed events, not the other's."""
         with WsClient(_WS_HOST, _WS_PORTS["1"], "/ws") as c:
-            c.send_json(
-                {"jsonrpc": "2.0", "method": "eth_subscribe", "params": ["newHeads"], "id": 1}
-            )
+            c.send_json({"jsonrpc": "2.0", "method": "eth_subscribe", "params": ["newHeads"], "id": 1})
             sid1 = c.recv_json(timeout=2.0)["result"]
             c.send_json({"jsonrpc": "2.0", "method": "eth_subscribe", "params": ["logs"], "id": 2})
             sid2 = c.recv_json(timeout=2.0)["result"]
@@ -800,9 +791,7 @@ class TestLavaHeaderCapture:
                 break
             buf += chunk
         # Now send a TEXT frame with eth_blockNumber.
-        payload = json.dumps(
-            {"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1}
-        ).encode()
+        payload = json.dumps({"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1}).encode()
         s.sendall(ws_protocol.encode_frame(ws_protocol.OPCODE_TEXT, payload, mask=True))
         # Drain the response frame so the handler completes the history push.
         s.settimeout(2.0)
@@ -814,9 +803,7 @@ class TestLavaHeaderCapture:
         s.close()
 
         # Now confirm /history shows the lava-* headers we sent.
-        _, body = _control(
-            sim, "GET", "/history?pool=eth-sim&pid=1&method=eth_blockNumber&transport=ws"
-        )
+        _, body = _control(sim, "GET", "/history?pool=eth-sim&pid=1&method=eth_blockNumber&transport=ws")
         assert body["count"] >= 1
         entry = body["history"][-1]
         assert entry["lava_headers"].get("lava-stateful-api") == "true"
@@ -959,9 +946,7 @@ class TestWsPerMethodFaultOverrides:
         )
         with WsClient(_WS_HOST, _WS_PORTS["1"], "/ws") as c:
             c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1})
-            with pytest.raises(
-                (ConnectionError, ws_protocol.FrameParseError, socket.timeout, OSError)
-            ):
+            with pytest.raises((ConnectionError, ws_protocol.FrameParseError, socket.timeout, OSError)):
                 c.recv_json(timeout=1.0)
 
     def test_per_method_eth_subscribe_mode_down_closes_before_registration(self, sim):
@@ -993,20 +978,15 @@ class TestWsPerMethodFaultOverrides:
             },
         )
         with WsClient(_WS_HOST, _WS_PORTS["1"], "/ws") as c:
-            c.send_json(
-                {"jsonrpc": "2.0", "method": "eth_subscribe", "params": ["newHeads"], "id": 1}
-            )
-            with pytest.raises(
-                (ConnectionError, ws_protocol.FrameParseError, socket.timeout, OSError)
-            ):
+            c.send_json({"jsonrpc": "2.0", "method": "eth_subscribe", "params": ["newHeads"], "id": 1})
+            with pytest.raises((ConnectionError, ws_protocol.FrameParseError, socket.timeout, OSError)):
                 c.recv_json(timeout=1.0)
 
         # No subscription should have been registered for the dropped
         # attempt — the down branch returns before the registration path.
         _, subs = _control(sim, "GET", "/ws/subscriptions")
         assert subs["subscriptions"] == [], (
-            f"down override should drop before subscribe registers, "
-            f"got {subs['subscriptions']!r}"
+            f"down override should drop before subscribe registers, " f"got {subs['subscriptions']!r}"
         )
 
     def test_per_method_other_methods_unaffected_by_down_override(self, sim):
@@ -1102,9 +1082,7 @@ class TestWsPerMethodFaultOverrides:
             c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 2})
             c.recv_json(timeout=2.0)
             elapsed_other_ms = (time.monotonic() - t1) * 1000
-            assert (
-                elapsed_other_ms < 200
-            ), f"non-overridden method should not sleep, elapsed={elapsed_other_ms:.0f}ms"
+            assert elapsed_other_ms < 200, f"non-overridden method should not sleep, elapsed={elapsed_other_ms:.0f}ms"
 
     def test_per_key_fallback_inherits_provider_wide_latency(self, sim):
         """A partial per-method entry inherits provider-wide latency_ms it doesn't override."""
@@ -1132,9 +1110,7 @@ class TestWsPerMethodFaultOverrides:
             elapsed_ms = (time.monotonic() - t0) * 1000
         assert "error" in reply
         assert reply["error"]["code"] == 429
-        assert (
-            elapsed_ms >= 80
-        ), f"provider-wide latency_ms=100 should still apply, elapsed={elapsed_ms:.0f}ms"
+        assert elapsed_ms >= 80, f"provider-wide latency_ms=100 should still apply, elapsed={elapsed_ms:.0f}ms"
 
     def test_composition_order_latency_first_then_fault(self, sim):
         """Per-method ``{latency_ms: 200, mode: rate_limit}`` → 429 frame after ~200ms."""
@@ -1161,9 +1137,7 @@ class TestWsPerMethodFaultOverrides:
             elapsed_ms = (time.monotonic() - t0) * 1000
         assert "error" in reply
         assert reply["error"]["code"] == 429
-        assert (
-            elapsed_ms >= 180
-        ), f"per-method latency should fire before fault, elapsed={elapsed_ms:.0f}ms"
+        assert elapsed_ms >= 180, f"per-method latency should fire before fault, elapsed={elapsed_ms:.0f}ms"
 
     def test_per_method_mode_error_rejected_with_400(self, sim):
         """Per-method ``mode: error`` is rejected at /scenario time."""
@@ -1300,9 +1274,7 @@ class TestWsCrossPoolIsolation:
             },
         )
         data = _raw_ws_upgrade(_WS_HOST, _WS_PORTS["1"])
-        assert (
-            b" 101 " in data.split(b"\r\n", 1)[0]
-        ), f"WS upgrade should complete (101); got {data[:80]!r}"
+        assert b" 101 " in data.split(b"\r\n", 1)[0], f"WS upgrade should complete (101); got {data[:80]!r}"
 
     def test_ws_reader_loop_unaffected_by_btc_error_fault(self, sim):
         """mode=error on btc-sim:1 set AFTER handshake must not produce an
@@ -1357,18 +1329,14 @@ class TestWsCrossPoolIsolation:
         upgrade completes."""
         _control(sim, "POST", "/scenario", {"providers": {"btc-sim:1": {"mode": "down"}}})
         data = _raw_ws_upgrade(_WS_HOST, _WS_PORTS["1"])
-        assert (
-            b" 101 " in data.split(b"\r\n", 1)[0]
-        ), f"WS upgrade must ignore a btc-sim down; got {data[:80]!r}"
+        assert b" 101 " in data.split(b"\r\n", 1)[0], f"WS upgrade must ignore a btc-sim down; got {data[:80]!r}"
 
     def test_ws_handshake_unaffected_by_tendermintrpc_down_fault(self, sim):
         """mode=down on lava-sim-tm:1 downs only that provider — eth-sim:1's
         WS upgrade completes."""
         _control(sim, "POST", "/scenario", {"providers": {"lava-sim-tm:1": {"mode": "down"}}})
         data = _raw_ws_upgrade(_WS_HOST, _WS_PORTS["1"])
-        assert (
-            b" 101 " in data.split(b"\r\n", 1)[0]
-        ), f"WS upgrade must ignore a lava-sim-tm down; got {data[:80]!r}"
+        assert b" 101 " in data.split(b"\r\n", 1)[0], f"WS upgrade must ignore a lava-sim-tm down; got {data[:80]!r}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

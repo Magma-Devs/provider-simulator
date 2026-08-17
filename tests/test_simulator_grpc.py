@@ -48,9 +48,7 @@ from provider_simulator.topology import port_of
 # Primary tier only — pids 4-6 of each pool are the backup listeners, covered
 # by test_simulator_backup_listeners.py.
 _PRIMARY_PIDS = ("1", "2", "3")
-_GRPC_ADDRS = {
-    pid: f"127.0.0.1:{port_of('lava-sim-grpc', pid, 'grpc', 'http2')}" for pid in _PRIMARY_PIDS
-}
+_GRPC_ADDRS = {pid: f"127.0.0.1:{port_of('lava-sim-grpc', pid, 'grpc', 'http2')}" for pid in _PRIMARY_PIDS}
 _ETH_URLS = {pid: f"http://127.0.0.1:{port_of('eth-sim', pid)}" for pid in _PRIMARY_PIDS}
 
 
@@ -131,9 +129,7 @@ def _call_get_latest_block(
     return asyncio.run(_do())
 
 
-def _call_get_node_info(
-    address: str, timeout: float = 5.0, metadata: tuple = ()
-) -> query_pb2.GetNodeInfoResponse:
+def _call_get_node_info(address: str, timeout: float = 5.0, metadata: tuple = ()) -> query_pb2.GetNodeInfoResponse:
     """Open an insecure channel, call GetNodeInfo, return the response."""
 
     async def _do():
@@ -493,9 +489,7 @@ class TestGrpcAddressing:
         assert resp.block.header.height > 0
 
         # ETH side: rate-limited HTTP/JSON-RPC request returns 429.
-        status, _ = _post(
-            _ETH_URLS["2"], {"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []}
-        )
+        status, _ = _post(_ETH_URLS["2"], {"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []})
         assert status == 429
 
     def test_reset_restores_grpc_defaults(self, sim):
@@ -563,9 +557,7 @@ class TestGrpcCrossPoolIsolation:
         """mode=down on eth-sim:1 downs only eth-sim:1 — the gRPC pool keeps
         serving the clean stub."""
         _post(_ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"mode": "down"}}})
-        eth_status, _ = _post(
-            _ETH_URLS["1"], {"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []}
-        )
+        eth_status, _ = _post(_ETH_URLS["1"], {"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []})
         assert eth_status == 503, f"eth-sim:1 must be down; got {eth_status}"
         resp = _call_get_latest_block(_GRPC_ADDRS["1"])
         assert resp.block.header.height > 0, "lava-sim-grpc:1 must ignore an eth-sim down"
@@ -647,11 +639,7 @@ class TestGrpcCrossPoolCorruptionIsolation:
         ``block`` field on the gRPC response."""
         _post(
             _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "eth-sim:1": {"corruption_mode": "missing_field", "missing_field": "block"}
-                }
-            },
+            {"providers": {"eth-sim:1": {"corruption_mode": "missing_field", "missing_field": "block"}}},
         )
         resp = _call_get_latest_block(_GRPC_ADDRS["1"])
         # block field is populated normally — height should be > 0 and
@@ -664,11 +652,7 @@ class TestGrpcCrossPoolCorruptionIsolation:
         port with INTERNAL."""
         _post(
             _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "eth-sim:1": {"corruption_mode": "wrong_type", "missing_field": "block"}
-                }
-            },
+            {"providers": {"eth-sim:1": {"corruption_mode": "wrong_type", "missing_field": "block"}}},
         )
         resp = _call_get_latest_block(_GRPC_ADDRS["1"])
         assert resp.block.header.chain_id == "lava-sim"
@@ -698,11 +682,7 @@ class TestGrpcSequencedFaultIsolation:
         pool's window."""
         _post(
             _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "eth-sim:1": {"mode": "down", "fail_first_n": 2, "then_mode": "success"}
-                }
-            },
+            {"providers": {"eth-sim:1": {"mode": "down", "fail_first_n": 2, "then_mode": "success"}}},
         )
 
         resp = _call_get_latest_block(_GRPC_ADDRS["1"])
@@ -713,13 +693,9 @@ class TestGrpcSequencedFaultIsolation:
                 _ETH_URLS["1"],
                 {"jsonrpc": "2.0", "id": i, "method": "eth_blockNumber", "params": []},
             )
-            assert (
-                eth_status == 503
-            ), f"eth-sim:1 call {i} is inside the down window; got {eth_status}"
+            assert eth_status == 503, f"eth-sim:1 call {i} is inside the down window; got {eth_status}"
 
-        eth_status, _ = _post(
-            _ETH_URLS["1"], {"jsonrpc": "2.0", "id": 3, "method": "eth_blockNumber", "params": []}
-        )
+        eth_status, _ = _post(_ETH_URLS["1"], {"jsonrpc": "2.0", "id": 3, "method": "eth_blockNumber", "params": []})
         assert eth_status == 200, f"eth-sim:1 must recover after the window; got {eth_status}"
 
         resp = _call_get_latest_block(_GRPC_ADDRS["1"])

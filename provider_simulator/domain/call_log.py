@@ -155,9 +155,7 @@ class CallLog:
         the entry so a caller may still finalize() it later (e.g. to upgrade
         a provisional status); it carries the generation stamp, so finalize
         updates in place instead of double-counting."""
-        entry = self._new_entry(
-            interface, transport, port, method, status, latency_ms, request_id, lava_headers
-        )
+        entry = self._new_entry(interface, transport, port, method, status, latency_ms, request_id, lava_headers)
         with self._lock:
             entry["_reset_gen"] = self._reset_generation
             self._history.append(entry)

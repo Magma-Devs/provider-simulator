@@ -26,17 +26,13 @@ def test_getblockcount_default_and_shift():
 
 def test_getblockhash_echoes_requested_height():
     chain = BtcChain()
-    _, body = chain.build_success(
-        {"id": 1, "method": "getblockhash", "params": [700000]}, _sc(), {}
-    )
+    _, body = chain.build_success({"id": 1, "method": "getblockhash", "params": [700000]}, _sc(), {})
     assert body["result"] == btc_block_hash(700000)
 
 
 def test_getblockhash_bad_param_returns_invalid_parameter():
     chain = BtcChain()
-    _, body = chain.build_success(
-        {"id": 1, "method": "getblockhash", "params": ["not-an-int"]}, _sc(), {}
-    )
+    _, body = chain.build_success({"id": 1, "method": "getblockhash", "params": ["not-an-int"]}, _sc(), {})
     assert body["error"] == BTC_ERROR_STUBS["invalid_parameter"]
 
 

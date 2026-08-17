@@ -44,9 +44,7 @@ from stubs_rest import REST_ERROR_STUBS, REST_LATEST_HEIGHT, REST_METHOD_DEFAULT
 # Primary tier only — pids 4-6 are the backup listeners, covered by
 # test_simulator_backup_listeners.py.
 _PRIMARY_PIDS = ("1", "2", "3")
-_REST_URLS = {
-    pid: f"http://127.0.0.1:{port_of('lava-sim-rest', pid, 'rest')}" for pid in _PRIMARY_PIDS
-}
+_REST_URLS = {pid: f"http://127.0.0.1:{port_of('lava-sim-rest', pid, 'rest')}" for pid in _PRIMARY_PIDS}
 _ETH_URLS = {pid: f"http://127.0.0.1:{port_of('eth-sim', pid)}" for pid in _PRIMARY_PIDS}
 
 # All (verb, template) pairs covered by the seed stub set.
@@ -170,9 +168,7 @@ class TestRestRouting:
 
     def test_post_unknown_path_returns_404(self, sim):
         """v1 seeds only GET paths, so any POST is a 404 unless overridden."""
-        status, body, _ = _post(
-            _REST_URLS["1"] + "/cosmos/staking/v1beta1/validators", body={"name": "test"}
-        )
+        status, body, _ = _post(_REST_URLS["1"] + "/cosmos/staking/v1beta1/validators", body={"name": "test"})
         assert status == 404
         assert body["method"] == "POST"
 
@@ -262,9 +258,7 @@ class TestRestPathTemplates:
 
     def test_query_string_does_not_break_match(self, sim):
         """``?pagination.limit=10`` is preserved as query, doesn't affect routing."""
-        status, body, _ = _get(
-            _REST_URLS["1"] + "/cosmos/staking/v1beta1/validators?pagination.limit=10"
-        )
+        status, body, _ = _get(_REST_URLS["1"] + "/cosmos/staking/v1beta1/validators?pagination.limit=10")
         assert status == 200
         assert "validators" in body
 
@@ -274,9 +268,7 @@ class TestRestPathTemplates:
         Every page of the stub is identical, so this echo is the only way a
         caller can see that the cursor it sent is the cursor that arrived.
         """
-        status, body, _ = _get(
-            _REST_URLS["1"] + "/cosmos/staking/v1beta1/validators?pagination.key=sentinel-abc"
-        )
+        status, body, _ = _get(_REST_URLS["1"] + "/cosmos/staking/v1beta1/validators?pagination.key=sentinel-abc")
         assert status == 200
         assert body["pagination"]["inbound_key"] == "sentinel-abc"
 
@@ -289,12 +281,8 @@ class TestRestPathTemplates:
 
     def test_page_key_echo_is_per_request(self, sim):
         """A cursor from one request must not linger on the next one's body."""
-        _, first, _ = _get(
-            _REST_URLS["1"] + "/cosmos/staking/v1beta1/validators?pagination.key=cursor-1"
-        )
-        _, second, _ = _get(
-            _REST_URLS["1"] + "/cosmos/staking/v1beta1/validators?pagination.key=cursor-2"
-        )
+        _, first, _ = _get(_REST_URLS["1"] + "/cosmos/staking/v1beta1/validators?pagination.key=cursor-1")
+        _, second, _ = _get(_REST_URLS["1"] + "/cosmos/staking/v1beta1/validators?pagination.key=cursor-2")
         assert first["pagination"]["inbound_key"] == "cursor-1"
         assert second["pagination"]["inbound_key"] == "cursor-2"
 
@@ -388,9 +376,7 @@ class TestRestFaultStatus:
 
     def test_status_override_sets_http_code(self, sim):
         """mode=error + http_status=502 propagates to the wire."""
-        _set_rest(
-            sim, "1", mode="error", http_status=502, error_code=-1, error_message="upstream down"
-        )
+        _set_rest(sim, "1", mode="error", http_status=502, error_code=-1, error_message="upstream down")
         status, body, _ = _get(_REST_URLS["1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
         assert status == 502
         # REST error body shape: {"code": ..., "message": ...}, no JSON-RPC envelope.
@@ -403,9 +389,7 @@ class TestRestFaultCorrupt:
     def test_corrupt_truncated(self, sim):
         """corruption_mode=truncated strips trailing bytes."""
         _set_rest(sim, "1", corruption_mode="truncated")
-        req = urllib.request.Request(
-            _REST_URLS["1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest"
-        )
+        req = urllib.request.Request(_REST_URLS["1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
         with urllib.request.urlopen(req, timeout=5) as resp:
             raw = resp.read()
         with pytest.raises(json.JSONDecodeError):
@@ -413,9 +397,7 @@ class TestRestFaultCorrupt:
 
     def test_corrupt_invalid_json(self, sim):
         _set_rest(sim, "1", corruption_mode="invalid_json")
-        req = urllib.request.Request(
-            _REST_URLS["1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest"
-        )
+        req = urllib.request.Request(_REST_URLS["1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
         with urllib.request.urlopen(req, timeout=5) as resp:
             raw = resp.read()
         with pytest.raises(json.JSONDecodeError):
@@ -423,9 +405,7 @@ class TestRestFaultCorrupt:
 
     def test_corrupt_empty_response(self, sim):
         _set_rest(sim, "1", corruption_mode="empty_response")
-        req = urllib.request.Request(
-            _REST_URLS["1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest"
-        )
+        req = urllib.request.Request(_REST_URLS["1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
         with urllib.request.urlopen(req, timeout=5) as resp:
             raw = resp.read()
             assert raw == b""
@@ -677,9 +657,7 @@ class TestRestErrorStubs:
         assert err_status == 500
         assert "error" in err_body
 
-        ok_status, ok_body, _ = _get(
-            _REST_URLS["1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest"
-        )
+        ok_status, ok_body, _ = _get(_REST_URLS["1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
         assert ok_status == 200
         assert "block" in ok_body
         assert "error" not in ok_body
@@ -695,9 +673,7 @@ class TestRestErrorStubs:
         )
         _get(_REST_URLS["1"] + "/cosmos/staking/v1beta1/validators")
         _, hist, _ = _get(_ctrl(sim, "/history?pool=lava-sim-rest&pid=1"))
-        entries = [
-            e for e in hist["history"] if e["method"] == "GET /cosmos/staking/v1beta1/validators"
-        ]
+        entries = [e for e in hist["history"] if e["method"] == "GET /cosmos/staking/v1beta1/validators"]
         assert len(entries) == 1
         assert entries[0]["status"] == "error"
 
@@ -732,9 +708,7 @@ class TestRestPerPathFaultOverrides:
         status_down, _, _ = _get(_REST_URLS["1"] + "/cosmos/staking/v1beta1/validators")
         assert status_down == 503, f"expected 503 on overridden route, got {status_down}"
 
-        status_ok, body_ok, _ = _get(
-            _REST_URLS["1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest"
-        )
+        status_ok, body_ok, _ = _get(_REST_URLS["1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
         assert status_ok == 200, f"non-overridden route should succeed, got {status_ok}"
         assert "block" in body_ok
 
@@ -772,9 +746,7 @@ class TestRestPerPathFaultOverrides:
         t1 = time.monotonic()
         _get(_REST_URLS["1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
         elapsed_other_ms = (time.monotonic() - t1) * 1000
-        assert (
-            elapsed_other_ms < 200
-        ), f"non-overridden route should not sleep, elapsed={elapsed_other_ms:.0f}ms"
+        assert elapsed_other_ms < 200, f"non-overridden route should not sleep, elapsed={elapsed_other_ms:.0f}ms"
 
     def test_per_key_fallback_inherits_provider_wide_latency(self, sim):
         """A partial per-path entry inherits provider-wide latency_ms it doesn't override."""
@@ -790,9 +762,7 @@ class TestRestPerPathFaultOverrides:
         status, _, _ = _get(_REST_URLS["1"] + "/cosmos/staking/v1beta1/validators")
         elapsed_ms = (time.monotonic() - t0) * 1000
         assert status == 503
-        assert (
-            elapsed_ms >= 80
-        ), f"provider-wide latency_ms=100 should still apply, elapsed={elapsed_ms:.0f}ms"
+        assert elapsed_ms >= 80, f"provider-wide latency_ms=100 should still apply, elapsed={elapsed_ms:.0f}ms"
 
     def test_composition_order_latency_first_then_fault(self, sim):
         """Per-path ``{latency_ms: 200, mode: rate_limit}`` → 429 with >=180ms delay."""
@@ -811,9 +781,7 @@ class TestRestPerPathFaultOverrides:
         elapsed_ms = (time.monotonic() - t0) * 1000
         assert status == 429
         assert body["code"] == 429
-        assert (
-            elapsed_ms >= 180
-        ), f"per-path latency should fire before fault, elapsed={elapsed_ms:.0f}ms"
+        assert elapsed_ms >= 180, f"per-path latency should fire before fault, elapsed={elapsed_ms:.0f}ms"
 
     def test_per_path_mode_error_rejected_with_400(self, sim):
         """``mode: error`` is rejected at /scenario POST time."""
@@ -840,9 +808,7 @@ class TestRestPerPathFaultOverrides:
         )
         _get(_REST_URLS["1"] + "/cosmos/staking/v1beta1/validators")
         _, hist, _ = _get(_ctrl(sim, "/history?pool=lava-sim-rest&pid=1"))
-        entries = [
-            e for e in hist["history"] if e["method"] == "GET /cosmos/staking/v1beta1/validators"
-        ]
+        entries = [e for e in hist["history"] if e["method"] == "GET /cosmos/staking/v1beta1/validators"]
         assert len(entries) == 1
         assert entries[0]["status"] == "rate_limit"
 
@@ -871,9 +837,7 @@ class TestRestPerPathFaultOverrides:
         assert rpc_status == 503
 
         # REST pool stays healthy — a different provider entirely.
-        rest_status, rest_body, _ = _get(
-            _REST_URLS["1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest"
-        )
+        rest_status, rest_body, _ = _get(_REST_URLS["1"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
         assert rest_status == 200
         assert "block" in rest_body
 
@@ -919,9 +883,7 @@ class TestRestMixedChainScenario:
             body={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber"},
         )
         # REST side: GET on lava-sim-rest:2's port.
-        rest_status, rest_body, _ = _get(
-            _REST_URLS["2"] + "/cosmos/base/tendermint/v1beta1/blocks/latest"
-        )
+        rest_status, rest_body, _ = _get(_REST_URLS["2"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
         assert eth_status == 200
         assert eth_body["result"].startswith("0x")
         assert rest_status == 200
@@ -942,9 +904,7 @@ class TestRestMixedChainScenario:
             _ETH_URLS["1"],
             body={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber"},
         )
-        rest_status, rest_body, _ = _get(
-            _REST_URLS["2"] + "/cosmos/base/tendermint/v1beta1/blocks/latest"
-        )
+        rest_status, rest_body, _ = _get(_REST_URLS["2"] + "/cosmos/base/tendermint/v1beta1/blocks/latest")
         assert eth_status == 429
         assert rest_status == 200
         assert rest_body["block"]["header"]["height"] == str(REST_LATEST_HEIGHT - 50)
@@ -1037,9 +997,7 @@ class TestRestCrossPoolIsolation:
         """mode=down on eth-sim:1 kills eth-sim:1 and nothing else — the REST
         port keeps serving success."""
         _post(_ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"mode": "down"}}})
-        eth_status, _, _ = _post(
-            _ETH_URLS["1"], body={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber"}
-        )
+        eth_status, _, _ = _post(_ETH_URLS["1"], body={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber"})
         assert eth_status == 503, f"eth-sim:1 must be down; got {eth_status}"
         status, body, _ = _get(_REST_URLS["1"] + self._LATEST)
         assert status == 200, f"lava-sim-rest:1 must ignore an eth-sim down; got {status}"
@@ -1138,31 +1096,20 @@ class TestRestSequencedFaults:
         first 2 calls."""
         _post(
             _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "eth-sim:1": {"mode": "down", "fail_first_n": 2, "then_mode": "success"}
-                }
-            },
+            {"providers": {"eth-sim:1": {"mode": "down", "fail_first_n": 2, "then_mode": "success"}}},
         )
 
         for attempt in range(1, 5):
             status, _, _ = _get(_REST_URLS["1"] + self._LATEST)
             assert status == 200, (
-                f"REST call {attempt} must stay healthy — another pool's "
-                f"window can't touch it; got {status}"
+                f"REST call {attempt} must stay healthy — another pool's " f"window can't touch it; got {status}"
             )
 
         # eth-sim:1's window is still fully un-consumed.
         for i in (1, 2):
-            eth_status, _, _ = _post(
-                _ETH_URLS["1"], body={"jsonrpc": "2.0", "id": i, "method": "eth_blockNumber"}
-            )
-            assert (
-                eth_status == 503
-            ), f"eth-sim:1 call {i} is inside the down window; got {eth_status}"
-        eth_status, _, _ = _post(
-            _ETH_URLS["1"], body={"jsonrpc": "2.0", "id": 3, "method": "eth_blockNumber"}
-        )
+            eth_status, _, _ = _post(_ETH_URLS["1"], body={"jsonrpc": "2.0", "id": i, "method": "eth_blockNumber"})
+            assert eth_status == 503, f"eth-sim:1 call {i} is inside the down window; got {eth_status}"
+        eth_status, _, _ = _post(_ETH_URLS["1"], body={"jsonrpc": "2.0", "id": 3, "method": "eth_blockNumber"})
         assert eth_status == 200, f"eth-sim:1 must recover after the window; got {eth_status}"
 
     def test_rest_sequenced_success_then_down(self, sim):

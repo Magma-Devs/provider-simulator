@@ -131,7 +131,7 @@ def test_each_surface_allocates_three_primary_and_three_backup(
     """
     pids = [
         pid
-        for row_pool, _chain, pid, endpoints in TOPOLOGY
+        for row_pool, _chain, pid, _name, _backup, endpoints in TOPOLOGY
         if row_pool == pool
         for row_interface, row_transport, _port in endpoints
         if row_interface == interface and row_transport == transport
@@ -158,20 +158,17 @@ def test_solana_solo_pool_is_isolated_from_the_solana_primary_pool():
     than something a derived expected value absorbs silently.
     """
     solo_rows = [row for row in TOPOLOGY if row[0] == "solana-solo-sim"]
-    assert (
-        len(solo_rows) == 1
-    ), f"solana-solo-sim must hold exactly one provider, got {len(solo_rows)}"
+    assert len(solo_rows) == 1, f"solana-solo-sim must hold exactly one provider, got {len(solo_rows)}"
 
-    _pool, chain, pid, endpoints = solo_rows[0]
+    _pool, chain, pid, name, is_backup, endpoints = solo_rows[0]
     assert chain == "solana", f"solana-solo-sim must serve the solana chain, got {chain!r}"
     assert pid == "1", f"the solo provider is its pool's slot 1, got {pid!r}"
+    assert name == "SolanaSoloProvider1", f"unexpected name: {name!r}"
+    assert is_backup is False, "the solo provider is not a backup tier"
     assert endpoints == (("jsonrpc", "http", 18585),), f"unexpected endpoints: {endpoints}"
 
     primary_ports = {
-        port
-        for row_pool, _c, _p, eps in TOPOLOGY
-        if row_pool == "solana-sim"
-        for (_i, _t, port) in eps
+        port for row_pool, _c, _p, _n, _b, eps in TOPOLOGY if row_pool == "solana-sim" for (_i, _t, port) in eps
     }
     assert 18585 not in primary_ports, (
         f"the solo listener shares port 18585 with solana-sim ({sorted(primary_ports)}) — "
@@ -201,8 +198,7 @@ class TestBackupListenersWired:
         assert status == 200, f"GET /scenario failed: status={status}"
         snapshot = response.get("providers", {})
         assert snapshot.get(key, {}).get("mode") == "down", (
-            f"GET /scenario doesn't echo back the mode for {key}. "
-            f"snapshot[{key!r}]={snapshot.get(key)!r}."
+            f"GET /scenario doesn't echo back the mode for {key}. " f"snapshot[{key!r}]={snapshot.get(key)!r}."
         )
 
         # 3) The listener bound on this provider's backup port answers per
@@ -264,9 +260,7 @@ class TestRestBackupListenersWired:
     def test_rest_backup_port_wired(self, sim, pid, port):
         key = f"lava-sim-rest:{pid}"
         status, body = _post(f"{sim['control']}/scenario", {"providers": {key: {"mode": "down"}}})
-        assert status == 200, (
-            f"Control API rejected REST /scenario for {key}: " f"status={status} body={body}"
-        )
+        assert status == 200, f"Control API rejected REST /scenario for {key}: " f"status={status} body={body}"
 
         status, response = _get(f"{sim['control']}/scenario")
         assert status == 200
@@ -288,8 +282,7 @@ class TestRestBackupListenersWired:
                 )
         except urllib.error.HTTPError as e:
             assert e.code == 503, (
-                f"REST backup listener on port {port} ({key}) "
-                f"returned HTTP {e.code} instead of 503"
+                f"REST backup listener on port {port} ({key}) " f"returned HTTP {e.code} instead of 503"
             )
 
 
@@ -301,9 +294,7 @@ class TestTmBackupListenersWired:
     def test_tm_backup_port_wired(self, sim, pid, port):
         key = f"lava-sim-tm:{pid}"
         status, body = _post(f"{sim['control']}/scenario", {"providers": {key: {"mode": "down"}}})
-        assert status == 200, (
-            f"Control API rejected TM /scenario for {key}: " f"status={status} body={body}"
-        )
+        assert status == 200, f"Control API rejected TM /scenario for {key}: " f"status={status} body={body}"
 
         status, response = _get(f"{sim['control']}/scenario")
         assert status == 200
@@ -316,15 +307,9 @@ class TestTmBackupListenersWired:
         # shape). Any URI works because down is checked before URI parsing.
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/status", timeout=5) as resp:
-                pytest.fail(
-                    f"TM backup listener on port {port} ({key}) returned "
-                    f"{resp.status} instead of 503"
-                )
+                pytest.fail(f"TM backup listener on port {port} ({key}) returned " f"{resp.status} instead of 503")
         except urllib.error.HTTPError as e:
-            assert e.code == 503, (
-                f"TM backup listener on port {port} ({key}) "
-                f"returned HTTP {e.code} instead of 503"
-            )
+            assert e.code == 503, f"TM backup listener on port {port} ({key}) " f"returned HTTP {e.code} instead of 503"
 
 
 class TestWsBackupListenersWired:
@@ -340,9 +325,7 @@ class TestWsBackupListenersWired:
             f"{sim['control']}/scenario",
             {"providers": {key: {"mode": "down", "transports": ["ws"]}}},
         )
-        assert status == 200, (
-            f"Control API rejected WS /scenario for {key}: " f"status={status} body={body}"
-        )
+        assert status == 200, f"Control API rejected WS /scenario for {key}: " f"status={status} body={body}"
 
         status, response = _get(f"{sim['control']}/scenario")
         assert status == 200
@@ -403,9 +386,7 @@ class TestGrpcBackupListenersWired:
 
         key = f"lava-sim-grpc:{pid}"
         status, body = _post(f"{sim['control']}/scenario", {"providers": {key: {"mode": "down"}}})
-        assert status == 200, (
-            f"Control API rejected gRPC /scenario for {key}: " f"status={status} body={body}"
-        )
+        assert status == 200, f"Control API rejected gRPC /scenario for {key}: " f"status={status} body={body}"
 
         status, response = _get(f"{sim['control']}/scenario")
         assert status == 200
@@ -454,12 +435,8 @@ class TestBackupListenerFaults:
         return f"http://127.0.0.1:{port_of('eth-sim', '4')}"
 
     def _set_scenario(self, sim, scenario: dict) -> None:
-        status, body = _post(
-            f"{sim['control']}/scenario", {"providers": {self._KEY: dict(scenario)}}
-        )
-        assert status == 200, (
-            f"Control API rejected /scenario for {self._KEY}: " f"status={status} body={body}"
-        )
+        status, body = _post(f"{sim['control']}/scenario", {"providers": {self._KEY: dict(scenario)}})
+        assert status == 200, f"Control API rejected /scenario for {self._KEY}: " f"status={status} body={body}"
 
     # ------------------------------------------------------------------
     # error mode
@@ -480,8 +457,7 @@ class TestBackupListenerFaults:
             f"expected={{'error': {{'code': -32000, ...}}}}, actual={body}"
         )
         assert body["error"]["code"] == -32000, (
-            f"error mode: expected error code -32000, "
-            f"got {body['error']['code']!r}. full body={body}"
+            f"error mode: expected error code -32000, " f"got {body['error']['code']!r}. full body={body}"
         )
 
     # ------------------------------------------------------------------
@@ -494,8 +470,7 @@ class TestBackupListenerFaults:
         status, body = _rpc(self._backup_url(), "eth_blockNumber")
         assert status == 429, f"rate_limit mode: expected HTTP 429, got {status}. " f"body={body}"
         assert body.get("error", {}).get("code") == 429, (
-            f"rate_limit mode: expected error code 429 in body, "
-            f"got {body.get('error')}. full body={body}"
+            f"rate_limit mode: expected error code 429 in body, " f"got {body.get('error')}. full body={body}"
         )
 
     # ------------------------------------------------------------------

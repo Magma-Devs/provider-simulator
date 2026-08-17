@@ -72,9 +72,7 @@ def test_down_is_503_no_body():
 
 def test_error_fault_is_bare_code_message():
     listener, provider = _listener()
-    provider.scenario.update(
-        {"mode": "error", "error_code": -1, "error_message": "boom", "http_status": 502}
-    )
+    provider.scenario.update({"mode": "error", "error_code": -1, "error_message": "boom", "http_status": 502})
     res = listener.serve(_get(_BLOCKS_LATEST))
     assert res.status == 502
     assert res.body == {"code": -1, "message": "boom"}  # no JSON-RPC envelope
@@ -92,9 +90,7 @@ def test_rate_limit_is_429():
 
 def test_corruption_directive_carried_on_success():
     listener, provider = _listener()
-    provider.scenario.update(
-        {"corruption_mode": "missing_field", "missing_field": "block.header.height"}
-    )
+    provider.scenario.update({"corruption_mode": "missing_field", "missing_field": "block.header.height"})
     res = listener.serve(_get(_BLOCKS_LATEST))
     assert res.corruption_mode == "missing_field"
     assert res.missing_field == "block.header.height"

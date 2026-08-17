@@ -205,10 +205,7 @@ class TestGetLatestBlockhashGap:
         _, body2 = _rpc(_SOL_URLS["2"], "getLatestBlockhash")
         r1, r2 = body1["result"], body2["result"]
         assert r1["context"]["slot"] - r1["value"]["lastValidBlockHeight"] == 25
-        assert (
-            r2["context"]["slot"] - r2["value"]["lastValidBlockHeight"]
-            == SOLANA_DEFAULT_SLOT_BLOCK_GAP
-        )
+        assert r2["context"]["slot"] - r2["value"]["lastValidBlockHeight"] == SOLANA_DEFAULT_SLOT_BLOCK_GAP
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -261,10 +258,7 @@ class TestSolanaSlotOffset:
         _, bh_body = _rpc(_SOL_URLS["1"], "getLatestBlockhash")
         result = bh_body["result"]
         assert result["context"]["slot"] == SOLANA_BASE_SLOT + offset
-        assert (
-            result["value"]["lastValidBlockHeight"]
-            == SOLANA_BASE_SLOT + offset - SOLANA_DEFAULT_SLOT_BLOCK_GAP
-        )
+        assert result["value"]["lastValidBlockHeight"] == SOLANA_BASE_SLOT + offset - SOLANA_DEFAULT_SLOT_BLOCK_GAP
 
     def test_per_provider_offsets_are_independent(self, sim):
         """Distinct offsets on solana-sim:1/2/3 each report their OWN slot —
@@ -357,9 +351,7 @@ class TestSolanaPerMethodOverrides:
     def test_solana_error_override_raw_envelope(self, sim):
         """responses[method] = {"error": {...}} emits the JSON-RPC error envelope
         directly — the raw escape-hatch, alongside the named error_stub path."""
-        _set_solana(
-            sim, "1", responses={"getSlot": {"error": {"code": -32007, "message": "Slot skipped"}}}
-        )
+        _set_solana(sim, "1", responses={"getSlot": {"error": {"code": -32007, "message": "Slot skipped"}}})
         _, body = _rpc(_SOL_URLS["1"], "getSlot")
         assert "error" in body
         assert body["error"]["code"] == -32007
@@ -378,9 +370,7 @@ class TestSolanaPerMethodOverrides:
     def test_solana_method_unaffected_by_other_method_override(self, sim):
         """Per-method overrides scope strictly to that method — an override on
         getSlot must not change getHealth."""
-        _set_solana(
-            sim, "1", responses={"getSlot": {"error": {"code": -32007, "message": "Slot skipped"}}}
-        )
+        _set_solana(sim, "1", responses={"getSlot": {"error": {"code": -32007, "message": "Slot skipped"}}})
         _, body = _rpc(_SOL_URLS["1"], "getHealth")
         assert "error" not in body
         assert body["result"] == "ok"
@@ -414,9 +404,7 @@ class TestSolanaHistoryTracking:
     def test_solana_error_status_recorded(self, sim):
         """A per-method error override on a Solana method produces status=error
         in history."""
-        _set_solana(
-            sim, "1", responses={"getSlot": {"error": {"code": -32007, "message": "Slot skipped"}}}
-        )
+        _set_solana(sim, "1", responses={"getSlot": {"error": {"code": -32007, "message": "Slot skipped"}}})
         _rpc(_SOL_URLS["1"], "getSlot")
         _, hist = _get(_ctrl(sim, "/history?pool=solana-sim&pid=1&status=error"))
         assert hist["count"] >= 1
@@ -505,15 +493,9 @@ class TestSolanaFaultInjection:
         envelope. The default error_code is -32000."""
         _set_solana(sim, "1", mode="error")
         status, body = _rpc(_SOL_URLS["1"], "getSlot")
-        assert (
-            status == 200
-        ), f"mode=error returns HTTP 200 with a JSON-RPC error body; got {status}"
-        assert (
-            "error" in body
-        ), f"expected a JSON-RPC error envelope in the response body; got {body}"
-        assert (
-            body["error"]["code"] == -32000
-        ), f"default error_code is -32000; got {body['error']['code']}"
+        assert status == 200, f"mode=error returns HTTP 200 with a JSON-RPC error body; got {status}"
+        assert "error" in body, f"expected a JSON-RPC error envelope in the response body; got {body}"
+        assert body["error"]["code"] == -32000, f"default error_code is -32000; got {body['error']['code']}"
 
     def test_rate_limit_mode_returns_429(self, sim):
         """mode=rate_limit on solana-sim:1 returns HTTP 429 with a JSON-RPC
@@ -521,12 +503,8 @@ class TestSolanaFaultInjection:
         _set_solana(sim, "1", mode="rate_limit")
         status, body = _rpc(_SOL_URLS["1"], "getSlot")
         assert status == 429, f"mode=rate_limit must return HTTP 429; got {status}"
-        assert (
-            "error" in body
-        ), f"expected a JSON-RPC error envelope in the 429 response; got {body}"
-        assert (
-            body["error"]["code"] == 429
-        ), f"rate_limit error_code is 429; got {body['error'].get('code')}"
+        assert "error" in body, f"expected a JSON-RPC error envelope in the 429 response; got {body}"
+        assert body["error"]["code"] == 429, f"rate_limit error_code is 429; got {body['error'].get('code')}"
 
     def test_hang_mode_times_out_client(self, sim):
         """mode=hang on solana-sim:1 holds the TCP connection open without
@@ -536,9 +514,7 @@ class TestSolanaFaultInjection:
         _set_solana(sim, "1", mode="hang")
         req = urllib.request.Request(
             _SOL_URLS["1"],
-            data=json.dumps(
-                {"jsonrpc": "2.0", "id": 1, "method": "getSlot", "params": []}
-            ).encode(),
+            data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "getSlot", "params": []}).encode(),
             headers={"Content-Type": "application/json"},
         )
         t0 = time.monotonic()
@@ -548,15 +524,9 @@ class TestSolanaFaultInjection:
         except (urllib.error.URLError, TimeoutError, OSError):
             timed_out = True
         elapsed = time.monotonic() - t0
-        assert (
-            timed_out
-        ), "mode=hang should cause a client timeout rather than a successful response"
-        assert (
-            elapsed >= 0.9
-        ), f"hang must block for at least the client timeout (~1s); got {elapsed:.2f}s"
-        assert (
-            elapsed < 3.0
-        ), f"hang must exit at the ~1s client timeout, not a delayed success; got {elapsed:.2f}s"
+        assert timed_out, "mode=hang should cause a client timeout rather than a successful response"
+        assert elapsed >= 0.9, f"hang must block for at least the client timeout (~1s); got {elapsed:.2f}s"
+        assert elapsed < 3.0, f"hang must exit at the ~1s client timeout, not a delayed success; got {elapsed:.2f}s"
 
     def test_drop_connection_before_headers_on_solana(self, sim):
         """mode=drop_connection with drop_at=before_headers on solana-sim:1
@@ -575,9 +545,7 @@ class TestSolanaFaultInjection:
         _set_solana(sim, "1", corruption_mode="invalid_json")
         req = urllib.request.Request(
             _SOL_URLS["1"],
-            data=json.dumps(
-                {"jsonrpc": "2.0", "id": 1, "method": "getSlot", "params": []}
-            ).encode(),
+            data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "getSlot", "params": []}).encode(),
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -596,6 +564,4 @@ class TestSolanaFaultInjection:
         t0 = time.monotonic()
         _rpc(_SOL_URLS["1"], "getSlot")
         elapsed_ms = (time.monotonic() - t0) * 1000
-        assert (
-            elapsed_ms >= 180
-        ), f"latency_ms=200 must delay the response by at least 180ms; got {elapsed_ms:.1f}ms"
+        assert elapsed_ms >= 180, f"latency_ms=200 must delay the response by at least 180ms; got {elapsed_ms:.1f}ms"

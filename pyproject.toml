@@ -1,5 +1,5 @@
 [tool.black]
-line-length = 100
+line-length = 120
 target-version = ['py312']
 # Vendored, generated protobuf stubs (MAG-1780) — regenerated, never edited.
 extend-exclude = '''
@@ -9,7 +9,7 @@ extend-exclude = '''
 '''
 
 [tool.ruff]
-line-length = 100
+line-length = 120
 target-version = "py312"
 extend-exclude = ["cosmos_pb2"]
 
@@ -42,7 +42,7 @@ ignore = ["E402", "E501"]
 
 [tool.isort]
 profile = "black"
-line_length = 100
+line_length = 120
 skip = ["cosmos_pb2"]
 
 [tool.mypy]

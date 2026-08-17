@@ -43,9 +43,7 @@ from stubs_tendermintrpc import TENDERMINT_ERROR_STUBS, TENDERMINT_METHOD_DEFAUL
 # Primary tier only — pids 4-6 are the backup listeners, covered by
 # test_simulator_backup_listeners.py.
 _PRIMARY_PIDS = ("1", "2", "3")
-_TM_URLS = {
-    pid: f"http://127.0.0.1:{port_of('lava-sim-tm', pid, 'tendermintrpc')}" for pid in _PRIMARY_PIDS
-}
+_TM_URLS = {pid: f"http://127.0.0.1:{port_of('lava-sim-tm', pid, 'tendermintrpc')}" for pid in _PRIMARY_PIDS}
 _ETH1 = f"http://127.0.0.1:{port_of('eth-sim', '1')}"
 _BTC1 = f"http://127.0.0.1:{port_of('btc-sim', '1')}"
 _REST1 = f"http://127.0.0.1:{port_of('lava-sim-rest', '1', 'rest')}"
@@ -106,9 +104,7 @@ def _tm_get(sim: dict, pid: str, method: str, params: Optional[Dict[str, str]] =
 
 def _set_tm(sim, pid: str = "1", **extra):
     """POST /scenario for one lava-sim-tm provider."""
-    return _request(
-        "POST", _ctrl(sim, "/scenario"), body={"providers": {f"lava-sim-tm:{pid}": dict(extra)}}
-    )
+    return _request("POST", _ctrl(sim, "/scenario"), body={"providers": {f"lava-sim-tm:{pid}": dict(extra)}})
 
 
 # ── Function-scoped autouse: clean slate before/after every test ──────────────
@@ -305,8 +301,7 @@ class TestTmRequestTimeLogic:
         addrs1 = {v["address"] for v in body1["result"]["validators"]}
         addrs2 = {v["address"] for v in body2["result"]["validators"]}
         assert addrs1.isdisjoint(addrs2), (
-            f"page 1 and page 2 share validators — pagination broken. "
-            f"page1={addrs1!r}  page2={addrs2!r}"
+            f"page 1 and page 2 share validators — pagination broken. " f"page1={addrs1!r}  page2={addrs2!r}"
         )
 
 
@@ -567,9 +562,7 @@ class TestTmHistory:
     def test_post_request_appears_in_history(self, sim):
         """A successful TM POST shows up in /history with status=success."""
         _tm_post(sim, "1", "status", request_id=42)
-        _, body, _ = _request(
-            "GET", _ctrl(sim, "/history") + "?pool=lava-sim-tm&pid=1&method=status"
-        )
+        _, body, _ = _request("GET", _ctrl(sim, "/history") + "?pool=lava-sim-tm&pid=1&method=status")
         entries = body.get("history", [])
         assert len(entries) >= 1, f"expected at least 1 history entry, got body={body!r}"
         latest = entries[-1]
@@ -581,9 +574,7 @@ class TestTmHistory:
     def test_get_request_uses_sim_counter_for_request_id(self, sim):
         """GET URI form has no native id; sim assigns a monotonic counter."""
         _tm_get(sim, "1", "status")
-        _, body, _ = _request(
-            "GET", _ctrl(sim, "/history") + "?pool=lava-sim-tm&pid=1&method=status"
-        )
+        _, body, _ = _request("GET", _ctrl(sim, "/history") + "?pool=lava-sim-tm&pid=1&method=status")
         entries = body.get("history", [])
         assert len(entries) >= 1, f"expected at least 1 history entry, got body={body!r}"
         latest = entries[-1]
@@ -611,9 +602,7 @@ class TestTmCrossPoolIsolation:
             _ctrl(sim, "/scenario"),
             body={"providers": {"eth-sim:1": {"mode": "down"}}},
         )
-        eth_status, _, _ = _request(
-            "POST", _ETH1, body={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber"}
-        )
+        eth_status, _, _ = _request("POST", _ETH1, body={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber"})
         assert eth_status == 503, f"eth-sim:1 must be down; got {eth_status}"
         status, body, _ = _tm_get(sim, "1", "status")
         assert status == 200, f"lava-sim-tm:1 must ignore an eth-sim down; got {status}"
@@ -668,9 +657,7 @@ class TestTmCrossPoolIsolation:
             _ctrl(sim, "/scenario"),
             body={"providers": {"btc-sim:1": {"mode": "down"}}},
         )
-        btc_status, _, _ = _request(
-            "POST", _BTC1, body={"jsonrpc": "2.0", "id": 1, "method": "getblockcount"}
-        )
+        btc_status, _, _ = _request("POST", _BTC1, body={"jsonrpc": "2.0", "id": 1, "method": "getblockcount"})
         assert btc_status == 503, f"btc-sim:1 must be down; got {btc_status}"
         status, body, _ = _tm_get(sim, "1", "status")
         assert status == 200, f"lava-sim-tm:1 must ignore a btc-sim down; got {status}"
@@ -684,9 +671,7 @@ class TestTmCrossPoolIsolation:
             _ctrl(sim, "/scenario"),
             body={"providers": {"lava-sim-rest:1": {"mode": "down"}}},
         )
-        rest_status, _, _ = _request(
-            "GET", _REST1 + "/cosmos/base/tendermint/v1beta1/blocks/latest"
-        )
+        rest_status, _, _ = _request("GET", _REST1 + "/cosmos/base/tendermint/v1beta1/blocks/latest")
         assert rest_status == 503, f"lava-sim-rest:1 must be down; got {rest_status}"
         status, body, _ = _tm_get(sim, "1", "status")
         assert status == 200, f"lava-sim-tm:1 must ignore a lava-sim-rest down; got {status}"
@@ -708,11 +693,7 @@ class TestTmSequencedFaultIsolation:
         _request(
             "POST",
             _ctrl(sim, "/scenario"),
-            body={
-                "providers": {
-                    "eth-sim:1": {"mode": "down", "fail_first_n": 2, "then_mode": "success"}
-                }
-            },
+            body={"providers": {"eth-sim:1": {"mode": "down", "fail_first_n": 2, "then_mode": "success"}}},
         )
 
         status, body, _ = _tm_get(sim, "1", "status")
@@ -725,13 +706,9 @@ class TestTmSequencedFaultIsolation:
                 _ETH1,
                 body={"jsonrpc": "2.0", "id": i, "method": "eth_blockNumber"},
             )
-            assert (
-                eth_status == 503
-            ), f"eth-sim:1 call {i} is inside the down window; got {eth_status}"
+            assert eth_status == 503, f"eth-sim:1 call {i} is inside the down window; got {eth_status}"
 
-        eth_status, _, _ = _request(
-            "POST", _ETH1, body={"jsonrpc": "2.0", "id": 3, "method": "eth_blockNumber"}
-        )
+        eth_status, _, _ = _request("POST", _ETH1, body={"jsonrpc": "2.0", "id": 3, "method": "eth_blockNumber"})
         assert eth_status == 200, f"eth-sim:1 must recover after the window; got {eth_status}"
 
         status, body, _ = _tm_get(sim, "1", "status")

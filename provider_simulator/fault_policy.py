@@ -86,9 +86,7 @@ def ladder(mode: str, scenario: dict) -> Verdict:
     if mode == "drop_connection":
         return Verdict(kind="drop", drop_at=scenario.get("drop_at", "before_headers"))
     if mode == "rate_limit":
-        return Verdict(
-            kind="rate_limit", status=429, error_code=429, error_message="Too many requests"
-        )
+        return Verdict(kind="rate_limit", status=429, error_code=429, error_message="Too many requests")
     if mode == "error" or random.random() < scenario.get("error_probability", 0.0):
         return Verdict(
             kind="error",

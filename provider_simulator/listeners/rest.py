@@ -29,9 +29,7 @@ def _compile_route(template: str) -> "re.Pattern[str]":
 
 
 # Compiled once: (verb_upper, regex, template) for every known REST route.
-_REST_ROUTES = [
-    (verb.upper(), _compile_route(template), template) for (verb, template) in REST_METHOD_DEFAULTS
-]
+_REST_ROUTES = [(verb.upper(), _compile_route(template), template) for (verb, template) in REST_METHOD_DEFAULTS]
 
 # Verbs served by another verb's routes. HEAD asks for a GET's status and
 # headers without its body, so it is looked up under GET: every GET path gets

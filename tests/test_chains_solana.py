@@ -44,9 +44,7 @@ def test_latest_blockhash_carries_the_gap():
 
 def test_latest_blockhash_custom_gap():
     chain = SolanaChain()
-    _, body = chain.build_success(
-        {"id": 1, "method": "getLatestBlockhash"}, _sc(), _q(slot_block_gap=10)
-    )
+    _, body = chain.build_success({"id": 1, "method": "getLatestBlockhash"}, _sc(), _q(slot_block_gap=10))
     assert body["result"]["value"]["lastValidBlockHeight"] == BASE - 10
 
 
@@ -62,9 +60,7 @@ def test_unknown_method_null_by_default_error_on_optin():
     chain = SolanaChain()
     _, body = chain.build_success({"id": 1, "method": "getFoo"}, _sc(), _q())
     assert body["result"] is None
-    _, body = chain.build_success(
-        {"id": 1, "method": "getFoo"}, _sc(), _q(unknown_method_mode="error")
-    )
+    _, body = chain.build_success({"id": 1, "method": "getFoo"}, _sc(), _q(unknown_method_mode="error"))
     assert body["error"] == SOLANA_ERROR_STUBS["method_not_found"]
 
 

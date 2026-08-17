@@ -169,9 +169,7 @@ def parse_frame(recv) -> Frame:
         # else: keep reading continuation frames
 
 
-def build_handshake_response(
-    client_key: str, extra_headers: "dict[str, str] | None" = None
-) -> bytes:
+def build_handshake_response(client_key: str, extra_headers: "dict[str, str] | None" = None) -> bytes:
     """Build the full HTTP 101 response bytes for a successful WS upgrade.
 
     Caller is responsible for writing this to the socket via sendall(). After

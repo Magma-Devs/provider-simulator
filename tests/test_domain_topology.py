@@ -22,17 +22,17 @@ EXPECTED_POOLS = {
 
 
 def test_every_port_is_unique():
-    ports = [port for _pool, _chain, _pid, eps in TOPOLOGY for (_i, _t, port) in eps]
+    ports = [port for _pool, _chain, _pid, _n, _b, eps in TOPOLOGY for (_i, _t, port) in eps]
     assert len(ports) == len(set(ports)), "duplicate port in TOPOLOGY"
 
 
 def test_every_pool_pid_is_unique():
-    keys = [(pool, pid) for pool, _chain, pid, _eps in TOPOLOGY]
+    keys = [(pool, pid) for pool, _chain, pid, _n, _b, _eps in TOPOLOGY]
     assert len(keys) == len(set(keys)), "duplicate (pool, pid) in TOPOLOGY"
 
 
 def test_every_chain_is_known():
-    for _pool, chain, _pid, _eps in TOPOLOGY:
+    for _pool, chain, _pid, _n, _b, _eps in TOPOLOGY:
         assert chain in known_chains(), f"unknown chain {chain!r}"
 
 
@@ -45,15 +45,15 @@ def test_rows_are_structurally_immutable():
     assert isinstance(TOPOLOGY, tuple)
     for row in TOPOLOGY:
         assert isinstance(row, tuple)
-        assert isinstance(row[3], tuple)
-        for spec in row[3]:
+        assert isinstance(row[5], tuple)
+        for spec in row[5]:
             assert isinstance(spec, tuple)
 
 
 def test_eth_sim_provider_1_has_http_and_ws():
     rows = [r for r in TOPOLOGY if r[0] == "eth-sim" and r[2] == "1"]
     assert len(rows) == 1
-    eps = rows[0][3]
+    eps = rows[0][5]
     assert (("jsonrpc", "http", 18545) in eps) and (("jsonrpc", "ws", 18557) in eps)
 
 
@@ -64,12 +64,10 @@ def test_eth_duo_sim_has_two_dedicated_providers():
     eth-duo-sim traffic too. It now has its own dedicated pool and ports."""
     rows = {r[2]: r for r in TOPOLOGY if r[0] == "eth-duo-sim"}
     assert set(rows) == {"1", "2"}
-    assert rows["1"][3] == (("jsonrpc", "http", 18586),)
-    assert rows["2"][3] == (("jsonrpc", "http", 18587),)
-    eth_sim_ports = {
-        port for pool, _c, _pid, eps in TOPOLOGY if pool == "eth-sim" for (_i, _t, port) in eps
-    }
-    duo_ports = {port for eps in (rows["1"][3], rows["2"][3]) for (_i, _t, port) in eps}
+    assert rows["1"][5] == (("jsonrpc", "http", 18586),)
+    assert rows["2"][5] == (("jsonrpc", "http", 18587),)
+    eth_sim_ports = {port for pool, _c, _pid, _n, _b, eps in TOPOLOGY if pool == "eth-sim" for (_i, _t, port) in eps}
+    duo_ports = {port for eps in (rows["1"][5], rows["2"][5]) for (_i, _t, port) in eps}
     assert duo_ports.isdisjoint(eth_sim_ports), "eth-duo-sim must not share ports with eth-sim"
 
 
@@ -77,8 +75,8 @@ def test_lava_rest_and_grpc_provider_1_are_distinct_pools():
     rest1 = [r for r in TOPOLOGY if r[0] == "lava-sim-rest" and r[2] == "1"]
     grpc1 = [r for r in TOPOLOGY if r[0] == "lava-sim-grpc" and r[2] == "1"]
     assert rest1 and grpc1
-    assert rest1[0][3] == (("rest", "http", 18551),)
-    assert grpc1[0][3] == (("grpc", "http2", 18548),)
+    assert rest1[0][5] == (("rest", "http", 18551),)
+    assert grpc1[0][5] == (("grpc", "http2", 18548),)
 
 
 # ── port_of — the one way a caller turns a provider address into a port ──────
@@ -137,7 +135,7 @@ def test_port_of_reaches_every_endpoint_in_the_table():
     port_of. A row shape port_of cannot read would bind a port no test can
     reach, and the gap would look like a dead listener rather than a lookup
     that cannot express it."""
-    for pool, _chain, pid, endpoints in TOPOLOGY:
+    for pool, _chain, pid, _n, _b, endpoints in TOPOLOGY:
         for interface, transport, port in endpoints:
             assert (
                 port_of(pool, pid, interface, transport) == port
@@ -182,3 +180,101 @@ def test_port_of_raises_when_a_provider_has_no_websocket_door():
     one is a mistake, not an empty answer."""
     with pytest.raises(KeyError):
         port_of("btc-sim", "1", transport="ws")
+
+
+# The names agreed on 2026-08-17. Literals on purpose: a person chose these, so
+# the only honest check is the chosen name against the one in the table.
+# Deriving the expected value would compare the table against itself.
+AGREED_NAMES = {
+    ("eth-sim", "1"): "EthPrimaryProvider1",
+    ("eth-sim", "2"): "EthPrimaryProvider2",
+    ("eth-sim", "3"): "EthPrimaryProvider3",
+    ("eth-sim", "4"): "EthBackupProvider4",
+    ("eth-sim", "5"): "EthBackupProvider5",
+    ("eth-sim", "6"): "EthBackupProvider6",
+    ("eth-solo-sim", "1"): "EthSoloProvider1",
+    ("eth-duo-sim", "1"): "EthDuoHighProvider1",
+    ("eth-duo-sim", "2"): "EthDuoLowProvider2",
+    ("btc-sim", "1"): "BtcPrimaryProvider1",
+    ("btc-sim", "2"): "BtcPrimaryProvider2",
+    ("btc-sim", "3"): "BtcPrimaryProvider3",
+    ("ln-sim", "1"): "LnPrimaryProvider1",
+    ("ln-sim", "2"): "LnPrimaryProvider2",
+    ("ln-sim", "3"): "LnPrimaryProvider3",
+    ("solana-sim", "1"): "SolanaPrimaryProvider1",
+    ("solana-sim", "2"): "SolanaPrimaryProvider2",
+    ("solana-sim", "3"): "SolanaPrimaryProvider3",
+    ("solana-solo-sim", "1"): "SolanaSoloProvider1",
+    ("lava-sim-grpc", "1"): "LavaGrpcPrimaryProvider1",
+    ("lava-sim-grpc", "2"): "LavaGrpcPrimaryProvider2",
+    ("lava-sim-grpc", "3"): "LavaGrpcPrimaryProvider3",
+    ("lava-sim-grpc", "4"): "LavaGrpcBackupProvider4",
+    ("lava-sim-grpc", "5"): "LavaGrpcBackupProvider5",
+    ("lava-sim-grpc", "6"): "LavaGrpcBackupProvider6",
+    ("lava-sim-rest", "1"): "LavaRestPrimaryProvider1",
+    ("lava-sim-rest", "2"): "LavaRestPrimaryProvider2",
+    ("lava-sim-rest", "3"): "LavaRestPrimaryProvider3",
+    ("lava-sim-rest", "4"): "LavaRestBackupProvider4",
+    ("lava-sim-rest", "5"): "LavaRestBackupProvider5",
+    ("lava-sim-rest", "6"): "LavaRestBackupProvider6",
+    ("lava-sim-tm", "1"): "LavaTmPrimaryProvider1",
+    ("lava-sim-tm", "2"): "LavaTmPrimaryProvider2",
+    ("lava-sim-tm", "3"): "LavaTmPrimaryProvider3",
+    ("lava-sim-tm", "4"): "LavaTmBackupProvider4",
+    ("lava-sim-tm", "5"): "LavaTmBackupProvider5",
+    ("lava-sim-tm", "6"): "LavaTmBackupProvider6",
+}
+
+# Slots 4 to 6 of the four six-provider pools. The router consults these only
+# after the primary tier is exhausted. The values file marks them is_backup.
+AGREED_BACKUPS = {
+    (pool, pid) for pool in ("eth-sim", "lava-sim-grpc", "lava-sim-rest", "lava-sim-tm") for pid in ("4", "5", "6")
+}
+
+
+def test_every_row_carries_the_agreed_name():
+    """The name is what the router reports in Lava-Provider-Address, and it is
+    the only thing a test can use to learn which provider served a request.
+    Until it lived here it was written by hand in three repositories, and no
+    two copies were ever compared."""
+    named = {(pool, pid): name for pool, _chain, pid, name, _backup, _eps in TOPOLOGY}
+    assert named == AGREED_NAMES
+
+
+def test_no_two_providers_share_a_name_once_lowercased():
+    """The helm chart renders every name through lower before the router reads
+    it, so two names differing only in case arrive identical. A router refuses
+    to start when two of its providers share a name, so comparing the names as
+    written would miss the collision that actually stops a deploy."""
+    seen: dict[str, str] = {}
+    for pool, _chain, pid, name, _backup, _eps in TOPOLOGY:
+        low = name.lower()
+        clash = seen.get(low)
+        assert clash is None, f"{pool}:{pid} and {clash} both lowercase to {low!r}"
+        seen[low] = f"{pool}:{pid}"
+
+
+def test_every_name_is_non_empty_and_carries_no_space():
+    """The chart renders the name through lower and a space-to-hyphen replace.
+    A space would silently become a hyphen, so the deployed name would differ
+    from the one written here and every comparison against it would miss."""
+    for pool, _chain, pid, name, _backup, _eps in TOPOLOGY:
+        assert name, f"{pool}:{pid} has no name"
+        assert " " not in name, f"{pool}:{pid} has a space in its name {name!r}"
+
+
+def test_the_backup_rows_are_the_ones_the_values_file_marks():
+    """Which providers sit in the backup tier is a fact about the deployment,
+    not something the simulator can work out. Nothing in this package behaves
+    differently for a backup provider, so this column exists only to record
+    the fact for a caller that needs it."""
+    flagged = {(pool, pid) for pool, _c, pid, _n, is_backup, _e in TOPOLOGY if is_backup}
+    assert flagged == AGREED_BACKUPS
+
+
+def test_every_backup_flag_is_a_real_boolean():
+    """A truthy string would pass an ``if`` and read as a backup for ever."""
+    for pool, _chain, pid, _name, is_backup, _eps in TOPOLOGY:
+        assert (
+            is_backup is True or is_backup is False
+        ), f"{pool}:{pid} has is_backup={is_backup!r}, which is not True or False"

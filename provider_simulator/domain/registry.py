@@ -26,8 +26,7 @@ class Registry:
             raise KeyError(f"no pool {pool!r}; pools are {sorted(self.pools)}")
         if pid not in self.pools[pool].providers:
             raise KeyError(
-                f"no provider {pool}:{pid}; providers in {pool!r} are "
-                f"{sorted(self.pools[pool].providers)}"
+                f"no provider {pool}:{pid}; providers in {pool!r} are " f"{sorted(self.pools[pool].providers)}"
             )
         return self.pools[pool].providers[pid]
 
@@ -55,13 +54,11 @@ def _validate_row(pool_name: str, chain: str, pid: str, endpoint_specs) -> None:
     for interface, transport, port in endpoint_specs:
         if interface not in INTERFACES:
             raise ValueError(
-                f"provider {pool_name}:{pid}: unknown interface {interface!r}; "
-                f"valid: {list(INTERFACES)}"
+                f"provider {pool_name}:{pid}: unknown interface {interface!r}; " f"valid: {list(INTERFACES)}"
             )
         if transport not in TRANSPORTS:
             raise ValueError(
-                f"provider {pool_name}:{pid}: unknown transport {transport!r}; "
-                f"valid: {list(TRANSPORTS)}"
+                f"provider {pool_name}:{pid}: unknown transport {transport!r}; " f"valid: {list(TRANSPORTS)}"
             )
         if not isinstance(port, int) or port <= 0:
             raise ValueError(f"provider {pool_name}:{pid}: bad port {port!r}")
@@ -74,7 +71,7 @@ def build_registry(rows=None) -> Registry:
     if rows is None:
         rows = topology.TOPOLOGY
     reg = Registry()
-    for pool_name, chain, pid, endpoint_specs in rows:
+    for pool_name, chain, pid, _name, _is_backup, endpoint_specs in rows:
         _validate_row(pool_name, chain, pid, endpoint_specs)
         pool = reg.pools.get(pool_name)
         if pool is None:

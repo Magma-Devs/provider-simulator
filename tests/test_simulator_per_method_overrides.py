@@ -164,9 +164,7 @@ class TestPerMethodOverrides:
         t1 = time.monotonic()
         _rpc(_P1, "eth_blockNumber")
         elapsed_other_ms = (time.monotonic() - t1) * 1000
-        assert (
-            elapsed_other_ms < 200
-        ), f"non-overridden method should not sleep, elapsed={elapsed_other_ms:.0f}ms"
+        assert elapsed_other_ms < 200, f"non-overridden method should not sleep, elapsed={elapsed_other_ms:.0f}ms"
 
     @pytest.mark.timeout(10)
     def test_per_key_fallback_inherits_provider_wide_keys(self, sim):
@@ -203,9 +201,7 @@ class TestPerMethodOverrides:
 
         assert status == 503, f"per-method mode=down should win, got {status}"
         assert body == {}, f"down emits no body, got {body!r}"
-        assert (
-            elapsed_ms >= 80
-        ), f"provider-wide latency_ms=100 should still apply, elapsed={elapsed_ms:.0f}ms"
+        assert elapsed_ms >= 80, f"provider-wide latency_ms=100 should still apply, elapsed={elapsed_ms:.0f}ms"
 
     @pytest.mark.timeout(10)
     def test_per_method_mode_error_is_rejected_with_400(self, sim):
@@ -308,9 +304,7 @@ class TestPerMethodOverrides:
         # /history returns {"count": N, "history": [...]} — peel out the list.
         entries = hist["history"]
         assert isinstance(entries, list), f"unexpected /history shape: {hist!r}"
-        assert (
-            len(entries) == 1
-        ), f"expected exactly 1 history entry for eth-sim:1, got {len(entries)}: {entries!r}"
+        assert len(entries) == 1, f"expected exactly 1 history entry for eth-sim:1, got {len(entries)}: {entries!r}"
 
         entry = entries[0]
         assert entry["method"] == "eth_blockNumber", (
@@ -381,9 +375,7 @@ class TestPerMethodOverrides:
         assert status == 429, f"expected rate_limit (429), got {status}"
         assert "error" in body, f"rate_limit body should carry an error envelope, got {body!r}"
         assert body["error"]["code"] == 429
-        assert (
-            elapsed_ms >= 180
-        ), f"per-method latency should fire before fault, elapsed={elapsed_ms:.0f}ms"
+        assert elapsed_ms >= 180, f"per-method latency should fire before fault, elapsed={elapsed_ms:.0f}ms"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -493,9 +485,7 @@ class TestPerMethodBodyOverride:
         assert status == 400, f"expected 400 for non-2xx body override status, got {status}"
         assert "error" in body, f"expected error payload, got {body!r}"
         err_msg = body["error"].lower()
-        assert (
-            "status" in err_msg or "2xx" in err_msg
-        ), f"error should mention status / 2xx, got {body['error']!r}"
+        assert "status" in err_msg or "2xx" in err_msg, f"error should mention status / 2xx, got {body['error']!r}"
 
     @pytest.mark.timeout(10)
     def test_body_override_with_latency_applies_latency_first(self, sim):
@@ -561,9 +551,7 @@ class TestPerMethodBodyOverride:
         err_msg = body["error"].lower()
         assert (
             "body" in err_msg and "mode" in err_msg
-        ) or "mutually exclusive" in err_msg, (
-            f"error should mention body+mode conflict, got {body['error']!r}"
-        )
+        ) or "mutually exclusive" in err_msg, f"error should mention body+mode conflict, got {body['error']!r}"
 
     @pytest.mark.timeout(10)
     def test_body_override_bypasses_healthy_stub(self, sim):
@@ -652,20 +640,15 @@ class TestPerMethodBodyOverride:
                 f"'error': body-content inference has been re-introduced."
             )
 
-        with urllib.request.urlopen(
-            _ctrl(sim, "/history?pool=eth-sim&pid=1&status=success"), timeout=5
-        ) as resp:
+        with urllib.request.urlopen(_ctrl(sim, "/history?pool=eth-sim&pid=1&status=success"), timeout=5) as resp:
             success_entries = json.loads(resp.read())["history"]
         assert len(success_entries) == 2, (
             f"/history?status=success must return both body-override entries; "
             f"got {len(success_entries)}: {success_entries!r}"
         )
 
-        with urllib.request.urlopen(
-            _ctrl(sim, "/history?pool=eth-sim&pid=1&status=error"), timeout=5
-        ) as resp:
+        with urllib.request.urlopen(_ctrl(sim, "/history?pool=eth-sim&pid=1&status=error"), timeout=5) as resp:
             error_entries = json.loads(resp.read())["history"]
         assert error_entries == [], (
-            f"/history?status=error must not match HTTP-200 body overrides; "
-            f"got {error_entries!r}"
+            f"/history?status=error must not match HTTP-200 body overrides; " f"got {error_entries!r}"
         )

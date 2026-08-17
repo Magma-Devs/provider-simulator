@@ -351,8 +351,7 @@ class TestBTCFaultInjection:
             assert body_part == b"", f"after_headers must send no body byte, got {body_part!r}"
         else:
             assert 0 < len(body_part) < 100, (
-                f"mid_body must send a strict subset of the promised 100 bytes, "
-                f"got {len(body_part)} bytes"
+                f"mid_body must send a strict subset of the promised 100 bytes, " f"got {len(body_part)} bytes"
             )
 
     def test_stale_blocks_behind_on_btc(self, sim):
@@ -367,9 +366,7 @@ class TestBTCFaultInjection:
         # Build the request manually so we read raw bytes without json.loads.
         req = urllib.request.Request(
             f"{_BTC1}/",
-            data=json.dumps(
-                {"jsonrpc": "2.0", "id": 1, "method": "getblockcount", "params": []}
-            ).encode(),
+            data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "getblockcount", "params": []}).encode(),
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
@@ -379,9 +376,7 @@ class TestBTCFaultInjection:
 
     def test_status_override_on_btc(self, sim):
         """mode=error + http_status=502 must propagate the custom HTTP status."""
-        _set_btc(
-            sim, "1", mode="error", http_status=502, error_code=-5, error_message="Block not found"
-        )
+        _set_btc(sim, "1", mode="error", http_status=502, error_code=-5, error_message="Block not found")
         status, body = _rpc(_BTC1, "getblockhash", [999_999_999])
         assert status == 502
         assert body["error"]["code"] == -5
@@ -528,9 +523,7 @@ class TestBTCCrossPoolIsolation:
         assert eth_status == 503, f"eth-sim:1 must be down; got {eth_status}"
 
         btc_status, btc_body = _rpc(_BTC1, "getblockcount")
-        assert (
-            btc_status == 200
-        ), f"btc-sim:1 must be untouched by an eth-sim down; got {btc_status}"
+        assert btc_status == 200, f"btc-sim:1 must be untouched by an eth-sim down; got {btc_status}"
         assert btc_body["result"] == 850_000
 
     def test_btc_stays_healthy_through_eth_down_window(self, sim):
@@ -539,11 +532,7 @@ class TestBTCCrossPoolIsolation:
         and after — it neither observes nor advances another pool's window."""
         _post(
             _ctrl(sim, "/scenario"),
-            {
-                "providers": {
-                    "eth-sim:1": {"mode": "down", "fail_first_n": 2, "then_mode": "success"}
-                }
-            },
+            {"providers": {"eth-sim:1": {"mode": "down", "fail_first_n": 2, "then_mode": "success"}}},
         )
 
         status, body = _rpc(_BTC1, "getblockcount")
@@ -552,9 +541,7 @@ class TestBTCCrossPoolIsolation:
 
         for i in (1, 2):
             eth_status, _ = _rpc(_ETH1, "eth_blockNumber")
-            assert (
-                eth_status == 503
-            ), f"eth-sim:1 call {i} is inside the down window; got {eth_status}"
+            assert eth_status == 503, f"eth-sim:1 call {i} is inside the down window; got {eth_status}"
 
         eth_status, _ = _rpc(_ETH1, "eth_blockNumber")
         assert eth_status == 200, f"eth-sim:1 must recover after the window; got {eth_status}"

@@ -27,9 +27,7 @@ class BtcChain(Chain):
     def error_stub(self, name: str) -> dict:
         return BTC_ERROR_STUBS[name]
 
-    def build_success(
-        self, request: dict, scenario: dict, quirks: dict, interface: str = ""
-    ) -> tuple[int, dict]:
+    def build_success(self, request: dict, scenario: dict, quirks: dict, interface: str = "") -> tuple[int, dict]:
         req_id = request.get("id", 1)
         method = request.get("method", "unknown")
         params = request.get("params", [])
@@ -90,12 +88,7 @@ class BtcChain(Chain):
             result = btc_block_hash(height)
 
         # getblock / getblockheader take a HASH and echo it back.
-        if (
-            method in ("getblock", "getblockheader")
-            and params
-            and isinstance(result, dict)
-            and method not in responses
-        ):
+        if method in ("getblock", "getblockheader") and params and isinstance(result, dict) and method not in responses:
             block_hash = params[0]
             if isinstance(block_hash, str):
                 result = dict(result)

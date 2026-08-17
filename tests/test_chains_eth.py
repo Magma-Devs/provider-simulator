@@ -37,9 +37,7 @@ def test_block_number_shifts_by_blocks_behind():
     chain = EthChain()
     sc = ScenarioConfig()
     sc.update({"blocks_behind": 5})
-    status, body = chain.build_success(
-        {"id": 1, "method": "eth_blockNumber"}, sc.snapshot(), EthQuirks().snapshot()
-    )
+    status, body = chain.build_success({"id": 1, "method": "eth_blockNumber"}, sc.snapshot(), EthQuirks().snapshot())
     assert body["result"] == "0x" + format(BASE - 5, "X")
 
 
@@ -61,9 +59,7 @@ def test_response_override_wins():
     chain = EthChain()
     sc = ScenarioConfig()
     sc.update({"responses": {"eth_call": {"result": "0xABC"}}})
-    _, body = chain.build_success(
-        {"id": 7, "method": "eth_call"}, sc.snapshot(), EthQuirks().snapshot()
-    )
+    _, body = chain.build_success({"id": 7, "method": "eth_call"}, sc.snapshot(), EthQuirks().snapshot())
     assert body["result"] == "0xABC"
     assert body["id"] == 7
 
@@ -72,9 +68,7 @@ def test_error_stub_override():
     chain = EthChain()
     sc = ScenarioConfig()
     sc.update({"responses": {"eth_call": {"error_stub": "revert"}}})
-    status, body = chain.build_success(
-        {"id": 1, "method": "eth_call"}, sc.snapshot(), EthQuirks().snapshot()
-    )
+    status, body = chain.build_success({"id": 1, "method": "eth_call"}, sc.snapshot(), EthQuirks().snapshot())
     assert status == 200
     assert body["error"] == ETH_ERROR_STUBS["revert"]
 
@@ -83,9 +77,7 @@ def test_raw_error_override():
     chain = EthChain()
     sc = ScenarioConfig()
     sc.update({"responses": {"eth_call": {"error": {"code": -32099, "message": "synthetic"}}}})
-    _, body = chain.build_success(
-        {"id": 1, "method": "eth_call"}, sc.snapshot(), EthQuirks().snapshot()
-    )
+    _, body = chain.build_success({"id": 1, "method": "eth_call"}, sc.snapshot(), EthQuirks().snapshot())
     assert body["error"] == {"code": -32099, "message": "synthetic"}
 
 
@@ -105,13 +97,7 @@ def test_get_logs_partial_keeps_only_indexed():
     q = EthQuirks()
     q.update({"logs_indexed_up_to": 0x150, "logs_lag_mode": "partial"})
     sc = ScenarioConfig()
-    sc.update(
-        {
-            "responses": {
-                "eth_getLogs": {"result": [{"blockNumber": "0x100"}, {"blockNumber": "0x200"}]}
-            }
-        }
-    )
+    sc.update({"responses": {"eth_getLogs": {"result": [{"blockNumber": "0x100"}, {"blockNumber": "0x200"}]}}})
     req = {"id": 1, "method": "eth_getLogs", "params": [{"toBlock": "0x300"}]}
     _, body = chain.build_success(req, sc.snapshot(), q.snapshot())
     assert body["result"] == [{"blockNumber": "0x100"}]
@@ -131,7 +117,5 @@ def test_http_status_from_scenario():
     chain = EthChain()
     sc = ScenarioConfig()
     sc.update({"http_status": 418})
-    status, _ = chain.build_success(
-        {"id": 1, "method": "eth_blockNumber"}, sc.snapshot(), EthQuirks().snapshot()
-    )
+    status, _ = chain.build_success({"id": 1, "method": "eth_blockNumber"}, sc.snapshot(), EthQuirks().snapshot())
     assert status == 418

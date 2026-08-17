@@ -32,24 +32,18 @@ def test_getinfo_default_is_synced_at_head():
 
 def test_decodepayreq_echoes_invoice():
     chain = LnChain()
-    _, body = chain.build_success(
-        {"id": 1, "method": "decodepayreq", "params": ["lnbcrt1u1psim"]}, _sc(), {}
-    )
+    _, body = chain.build_success({"id": 1, "method": "decodepayreq", "params": ["lnbcrt1u1psim"]}, _sc(), {})
     assert body["result"]["payment_request"] == "lnbcrt1u1psim"
 
 
 def test_openchannel_echoes_pubkey():
     chain = LnChain()
-    _, body = chain.build_success(
-        {"id": 1, "method": "openchannel", "params": ["02deadbeef", 100000]}, _sc(), {}
-    )
+    _, body = chain.build_success({"id": 1, "method": "openchannel", "params": ["02deadbeef", 100000]}, _sc(), {})
     assert body["result"]["node_pubkey"] == "02deadbeef"
 
 
 def test_error_stub_override():
     chain = LnChain()
     name = next(iter(LND_ERROR_STUBS))
-    _, body = chain.build_success(
-        {"id": 1, "method": "getinfo"}, _sc(responses={"getinfo": {"error_stub": name}}), {}
-    )
+    _, body = chain.build_success({"id": 1, "method": "getinfo"}, _sc(responses={"getinfo": {"error_stub": name}}), {})
     assert body["error"] == LND_ERROR_STUBS[name]
