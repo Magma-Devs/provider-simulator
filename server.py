@@ -676,6 +676,8 @@ class _ControlHandler(BaseHTTPRequestHandler):
             status, payload = control.get_stats()
         elif path == "/topology":
             status, payload = control.get_topology()
+        elif path == "/providers":
+            status, payload = control.get_providers(query)
         elif path == "/history":
             status, payload = control.get_history(query)
         elif path == "/ws/subscriptions":

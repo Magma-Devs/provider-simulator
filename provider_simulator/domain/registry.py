@@ -71,7 +71,7 @@ def build_registry(rows=None) -> Registry:
     if rows is None:
         rows = topology.TOPOLOGY
     reg = Registry()
-    for pool_name, chain, pid, _name, _is_backup, endpoint_specs in rows:
+    for pool_name, chain, pid, name, is_backup, group_label, endpoint_specs in rows:
         _validate_row(pool_name, chain, pid, endpoint_specs)
         pool = reg.pools.get(pool_name)
         if pool is None:
@@ -86,7 +86,9 @@ def build_registry(rows=None) -> Registry:
         for ep in endpoints:
             if ep.port in reg._by_port:
                 raise ValueError(f"duplicate port {ep.port} in topology")
-        provider = pool.add_provider(pid, endpoints)  # raises on duplicate pool:pid
+        provider = pool.add_provider(
+            pid, endpoints, name=name, is_backup=is_backup, group_label=group_label
+        )  # raises on duplicate pool:pid
         for ep in endpoints:
             reg._by_port[ep.port] = (provider, ep)
     return reg

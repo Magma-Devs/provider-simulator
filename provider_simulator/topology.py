@@ -94,76 +94,100 @@ consumer_session_manager.go). The simulator process is identical across both —
 package behaves differently for a backup provider.
 """
 
-TopologyRow = tuple[str, str, str, str, bool, tuple[tuple[str, str, int], ...]]
+TopologyRow = tuple[str, str, str, str, bool, str, tuple[tuple[str, str, int], ...]]
 
 TOPOLOGY: tuple[TopologyRow, ...] = (
     # eth-sim: 3 primary + 3 backup, each http + ws.
-    ("eth-sim", "eth", "1", "EthPrimaryProvider1", False, (("jsonrpc", "http", 18545), ("jsonrpc", "ws", 18557))),
-    ("eth-sim", "eth", "2", "EthPrimaryProvider2", False, (("jsonrpc", "http", 18546), ("jsonrpc", "ws", 18558))),
-    ("eth-sim", "eth", "3", "EthPrimaryProvider3", False, (("jsonrpc", "http", 18547), ("jsonrpc", "ws", 18559))),
-    ("eth-sim", "eth", "4", "EthBackupProvider4", True, (("jsonrpc", "http", 18560), ("jsonrpc", "ws", 18572))),
-    ("eth-sim", "eth", "5", "EthBackupProvider5", True, (("jsonrpc", "http", 18561), ("jsonrpc", "ws", 18573))),
-    ("eth-sim", "eth", "6", "EthBackupProvider6", True, (("jsonrpc", "http", 18562), ("jsonrpc", "ws", 18574))),
+    (
+        "eth-sim",
+        "eth",
+        "1",
+        "EthPrimaryProvider1",
+        False,
+        "tier-1",
+        (("jsonrpc", "http", 18545), ("jsonrpc", "ws", 18557)),
+    ),
+    (
+        "eth-sim",
+        "eth",
+        "2",
+        "EthPrimaryProvider2",
+        False,
+        "tier-1",
+        (("jsonrpc", "http", 18546), ("jsonrpc", "ws", 18558)),
+    ),
+    (
+        "eth-sim",
+        "eth",
+        "3",
+        "EthPrimaryProvider3",
+        False,
+        "external",
+        (("jsonrpc", "http", 18547), ("jsonrpc", "ws", 18559)),
+    ),
+    ("eth-sim", "eth", "4", "EthBackupProvider4", True, "", (("jsonrpc", "http", 18560), ("jsonrpc", "ws", 18572))),
+    ("eth-sim", "eth", "5", "EthBackupProvider5", True, "", (("jsonrpc", "http", 18561), ("jsonrpc", "ws", 18573))),
+    ("eth-sim", "eth", "6", "EthBackupProvider6", True, "", (("jsonrpc", "http", 18562), ("jsonrpc", "ws", 18574))),
     # eth-solo-sim (MAG-2061): one provider, no backup — the customer-outage
     # deployment shape. Handler dispatch is the default ETH path.
-    ("eth-solo-sim", "eth", "1", "EthSoloProvider1", False, (("jsonrpc", "http", 18581),)),
+    ("eth-solo-sim", "eth", "1", "EthSoloProvider1", False, "", (("jsonrpc", "http", 18581),)),
     # eth-duo-sim (MAG-2464 follow-up): 2 primaries, no backup tier — the
     # stake-weight experiment topology (k3d-only; see
     # tools/local-cluster/routers.yml in smart_router_automation). Dedicated
     # listeners, distinct from eth-sim's pids 1/2 (18545/18546) — previously
     # this router pointed its two upstreams straight at those, so a /scenario
     # flip on one pool leaked into the other's provider state.
-    ("eth-duo-sim", "eth", "1", "EthDuoHighProvider1", False, (("jsonrpc", "http", 18586),)),
-    ("eth-duo-sim", "eth", "2", "EthDuoLowProvider2", False, (("jsonrpc", "http", 18587),)),
+    ("eth-duo-sim", "eth", "1", "EthDuoHighProvider1", False, "", (("jsonrpc", "http", 18586),)),
+    ("eth-duo-sim", "eth", "2", "EthDuoLowProvider2", False, "", (("jsonrpc", "http", 18587),)),
     # btc-sim (MAG-2089): dedicated BTC listeners; the success branch routes
     # unconditionally through handlers_btc. Primary tier only — a backup tier,
     # if ever needed, extends contiguously upward.
-    ("btc-sim", "btc", "1", "BtcPrimaryProvider1", False, (("jsonrpc", "http", 18575),)),
-    ("btc-sim", "btc", "2", "BtcPrimaryProvider2", False, (("jsonrpc", "http", 18576),)),
-    ("btc-sim", "btc", "3", "BtcPrimaryProvider3", False, (("jsonrpc", "http", 18577),)),
+    ("btc-sim", "btc", "1", "BtcPrimaryProvider1", False, "", (("jsonrpc", "http", 18575),)),
+    ("btc-sim", "btc", "2", "BtcPrimaryProvider2", False, "", (("jsonrpc", "http", 18576),)),
+    ("btc-sim", "btc", "3", "BtcPrimaryProvider3", False, "", (("jsonrpc", "http", 18577),)),
     # ln-sim (MAG-2089): dedicated LN listeners, handlers_lnd on the success
     # branch. No router routes traffic here yet (MAG-1726 tracks the router-side
     # wire-up); the ports are allocated so the pattern stays symmetric.
-    ("ln-sim", "ln", "1", "LnPrimaryProvider1", False, (("jsonrpc", "http", 18578),)),
-    ("ln-sim", "ln", "2", "LnPrimaryProvider2", False, (("jsonrpc", "http", 18579),)),
-    ("ln-sim", "ln", "3", "LnPrimaryProvider3", False, (("jsonrpc", "http", 18580),)),
+    ("ln-sim", "ln", "1", "LnPrimaryProvider1", False, "", (("jsonrpc", "http", 18578),)),
+    ("ln-sim", "ln", "2", "LnPrimaryProvider2", False, "", (("jsonrpc", "http", 18579),)),
+    ("ln-sim", "ln", "3", "LnPrimaryProvider3", False, "", (("jsonrpc", "http", 18580),)),
     # solana-sim (MAG-2231): handlers_solana on the success branch. Reproduces
     # the Solana consistency-filter bug (MAG-1591) — the success handler emits
     # result.context.slot and result.value.lastValidBlockHeight separated by a
     # configurable gap (solana_slot_block_gap), so the router's per-user
     # seenBlock diverges from the endpoint chain-tracker value by more than the
     # 50-block consistency threshold.
-    ("solana-sim", "solana", "1", "SolanaPrimaryProvider1", False, (("jsonrpc", "http", 18582),)),
-    ("solana-sim", "solana", "2", "SolanaPrimaryProvider2", False, (("jsonrpc", "http", 18583),)),
-    ("solana-sim", "solana", "3", "SolanaPrimaryProvider3", False, (("jsonrpc", "http", 18584),)),
+    ("solana-sim", "solana", "1", "SolanaPrimaryProvider1", False, "", (("jsonrpc", "http", 18582),)),
+    ("solana-sim", "solana", "2", "SolanaPrimaryProvider2", False, "", (("jsonrpc", "http", 18583),)),
+    ("solana-sim", "solana", "3", "SolanaPrimaryProvider3", False, "", (("jsonrpc", "http", 18584),)),
     # solana-solo-sim (MAG-2239): the Solana analogue of eth-solo-sim, one
     # provider and no backup. Deliberately a separate pool from solana-sim so a
     # /scenario call on the solo router cannot collide with the solana-sim
     # router's primary-pool state.
-    ("solana-solo-sim", "solana", "1", "SolanaSoloProvider1", False, (("jsonrpc", "http", 18585),)),
+    ("solana-solo-sim", "solana", "1", "SolanaSoloProvider1", False, "", (("jsonrpc", "http", 18585),)),
     # lava-sim-grpc (MAG-1780): pids 1-3 primary, 4-6 backup. Shares the same
     # ProviderState the JSON-RPC listeners use — a /scenario call with
     # chain_family="grpc" reconfigures the matching servicer.
-    ("lava-sim-grpc", "lava", "1", "LavaGrpcPrimaryProvider1", False, (("grpc", "http2", 18548),)),
-    ("lava-sim-grpc", "lava", "2", "LavaGrpcPrimaryProvider2", False, (("grpc", "http2", 18549),)),
-    ("lava-sim-grpc", "lava", "3", "LavaGrpcPrimaryProvider3", False, (("grpc", "http2", 18550),)),
-    ("lava-sim-grpc", "lava", "4", "LavaGrpcBackupProvider4", True, (("grpc", "http2", 18563),)),
-    ("lava-sim-grpc", "lava", "5", "LavaGrpcBackupProvider5", True, (("grpc", "http2", 18564),)),
-    ("lava-sim-grpc", "lava", "6", "LavaGrpcBackupProvider6", True, (("grpc", "http2", 18565),)),
+    ("lava-sim-grpc", "lava", "1", "LavaGrpcPrimaryProvider1", False, "", (("grpc", "http2", 18548),)),
+    ("lava-sim-grpc", "lava", "2", "LavaGrpcPrimaryProvider2", False, "", (("grpc", "http2", 18549),)),
+    ("lava-sim-grpc", "lava", "3", "LavaGrpcPrimaryProvider3", False, "", (("grpc", "http2", 18550),)),
+    ("lava-sim-grpc", "lava", "4", "LavaGrpcBackupProvider4", True, "", (("grpc", "http2", 18563),)),
+    ("lava-sim-grpc", "lava", "5", "LavaGrpcBackupProvider5", True, "", (("grpc", "http2", 18564),)),
+    ("lava-sim-grpc", "lava", "6", "LavaGrpcBackupProvider6", True, "", (("grpc", "http2", 18565),)),
     # lava-sim-rest (MAG-1777): pids 1-3 primary, 4-6 backup.
-    ("lava-sim-rest", "lava", "1", "LavaRestPrimaryProvider1", False, (("rest", "http", 18551),)),
-    ("lava-sim-rest", "lava", "2", "LavaRestPrimaryProvider2", False, (("rest", "http", 18552),)),
-    ("lava-sim-rest", "lava", "3", "LavaRestPrimaryProvider3", False, (("rest", "http", 18553),)),
-    ("lava-sim-rest", "lava", "4", "LavaRestBackupProvider4", True, (("rest", "http", 18566),)),
-    ("lava-sim-rest", "lava", "5", "LavaRestBackupProvider5", True, (("rest", "http", 18567),)),
-    ("lava-sim-rest", "lava", "6", "LavaRestBackupProvider6", True, (("rest", "http", 18568),)),
+    ("lava-sim-rest", "lava", "1", "LavaRestPrimaryProvider1", False, "", (("rest", "http", 18551),)),
+    ("lava-sim-rest", "lava", "2", "LavaRestPrimaryProvider2", False, "", (("rest", "http", 18552),)),
+    ("lava-sim-rest", "lava", "3", "LavaRestPrimaryProvider3", False, "", (("rest", "http", 18553),)),
+    ("lava-sim-rest", "lava", "4", "LavaRestBackupProvider4", True, "", (("rest", "http", 18566),)),
+    ("lava-sim-rest", "lava", "5", "LavaRestBackupProvider5", True, "", (("rest", "http", 18567),)),
+    ("lava-sim-rest", "lava", "6", "LavaRestBackupProvider6", True, "", (("rest", "http", 18568),)),
     # lava-sim-tm (MAG-1841): pids 1-3 primary, 4-6 backup.
-    ("lava-sim-tm", "lava", "1", "LavaTmPrimaryProvider1", False, (("tendermintrpc", "http", 18554),)),
-    ("lava-sim-tm", "lava", "2", "LavaTmPrimaryProvider2", False, (("tendermintrpc", "http", 18555),)),
-    ("lava-sim-tm", "lava", "3", "LavaTmPrimaryProvider3", False, (("tendermintrpc", "http", 18556),)),
-    ("lava-sim-tm", "lava", "4", "LavaTmBackupProvider4", True, (("tendermintrpc", "http", 18569),)),
-    ("lava-sim-tm", "lava", "5", "LavaTmBackupProvider5", True, (("tendermintrpc", "http", 18570),)),
-    ("lava-sim-tm", "lava", "6", "LavaTmBackupProvider6", True, (("tendermintrpc", "http", 18571),)),
+    ("lava-sim-tm", "lava", "1", "LavaTmPrimaryProvider1", False, "", (("tendermintrpc", "http", 18554),)),
+    ("lava-sim-tm", "lava", "2", "LavaTmPrimaryProvider2", False, "", (("tendermintrpc", "http", 18555),)),
+    ("lava-sim-tm", "lava", "3", "LavaTmPrimaryProvider3", False, "", (("tendermintrpc", "http", 18556),)),
+    ("lava-sim-tm", "lava", "4", "LavaTmBackupProvider4", True, "", (("tendermintrpc", "http", 18569),)),
+    ("lava-sim-tm", "lava", "5", "LavaTmBackupProvider5", True, "", (("tendermintrpc", "http", 18570),)),
+    ("lava-sim-tm", "lava", "6", "LavaTmBackupProvider6", True, "", (("tendermintrpc", "http", 18571),)),
 )
 
 
@@ -190,7 +214,7 @@ def port_of(
     provider does serve.
     """
     pool_pids = []
-    for row_pool, _chain, row_pid, _name, _is_backup, endpoints in TOPOLOGY:
+    for row_pool, _chain, row_pid, _name, _is_backup, _group, endpoints in TOPOLOGY:
         if row_pool != pool:
             continue
         pool_pids.append(row_pid)
@@ -203,5 +227,5 @@ def port_of(
         raise KeyError(f"provider {pool}:{pid} does not serve {interface}/{transport}; it serves {served}")
     if pool_pids:
         raise KeyError(f"no provider {pool}:{pid} in the topology; {pool} has slots {pool_pids}")
-    known = sorted({row_pool for row_pool, _c, _p, _n, _b, _e in TOPOLOGY})
+    known = sorted({row_pool for row_pool, _c, _p, _n, _b, _g, _e in TOPOLOGY})
     raise KeyError(f"no pool {pool!r} in the topology; known pools: {known}")

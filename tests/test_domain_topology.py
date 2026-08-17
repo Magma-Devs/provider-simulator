@@ -22,17 +22,17 @@ EXPECTED_POOLS = {
 
 
 def test_every_port_is_unique():
-    ports = [port for _pool, _chain, _pid, _n, _b, eps in TOPOLOGY for (_i, _t, port) in eps]
+    ports = [port for _pool, _chain, _pid, _n, _b, _group, eps in TOPOLOGY for (_i, _t, port) in eps]
     assert len(ports) == len(set(ports)), "duplicate port in TOPOLOGY"
 
 
 def test_every_pool_pid_is_unique():
-    keys = [(pool, pid) for pool, _chain, pid, _n, _b, _eps in TOPOLOGY]
+    keys = [(pool, pid) for pool, _chain, pid, _n, _b, _group, _eps in TOPOLOGY]
     assert len(keys) == len(set(keys)), "duplicate (pool, pid) in TOPOLOGY"
 
 
 def test_every_chain_is_known():
-    for _pool, chain, _pid, _n, _b, _eps in TOPOLOGY:
+    for _pool, chain, _pid, _n, _b, _group, _eps in TOPOLOGY:
         assert chain in known_chains(), f"unknown chain {chain!r}"
 
 
@@ -45,15 +45,15 @@ def test_rows_are_structurally_immutable():
     assert isinstance(TOPOLOGY, tuple)
     for row in TOPOLOGY:
         assert isinstance(row, tuple)
-        assert isinstance(row[5], tuple)
-        for spec in row[5]:
+        assert isinstance(row[6], tuple)
+        for spec in row[6]:
             assert isinstance(spec, tuple)
 
 
 def test_eth_sim_provider_1_has_http_and_ws():
     rows = [r for r in TOPOLOGY if r[0] == "eth-sim" and r[2] == "1"]
     assert len(rows) == 1
-    eps = rows[0][5]
+    eps = rows[0][6]
     assert (("jsonrpc", "http", 18545) in eps) and (("jsonrpc", "ws", 18557) in eps)
 
 
@@ -64,10 +64,12 @@ def test_eth_duo_sim_has_two_dedicated_providers():
     eth-duo-sim traffic too. It now has its own dedicated pool and ports."""
     rows = {r[2]: r for r in TOPOLOGY if r[0] == "eth-duo-sim"}
     assert set(rows) == {"1", "2"}
-    assert rows["1"][5] == (("jsonrpc", "http", 18586),)
-    assert rows["2"][5] == (("jsonrpc", "http", 18587),)
-    eth_sim_ports = {port for pool, _c, _pid, _n, _b, eps in TOPOLOGY if pool == "eth-sim" for (_i, _t, port) in eps}
-    duo_ports = {port for eps in (rows["1"][5], rows["2"][5]) for (_i, _t, port) in eps}
+    assert rows["1"][6] == (("jsonrpc", "http", 18586),)
+    assert rows["2"][6] == (("jsonrpc", "http", 18587),)
+    eth_sim_ports = {
+        port for pool, _c, _pid, _n, _b, _group, eps in TOPOLOGY if pool == "eth-sim" for (_i, _t, port) in eps
+    }
+    duo_ports = {port for eps in (rows["1"][6], rows["2"][6]) for (_i, _t, port) in eps}
     assert duo_ports.isdisjoint(eth_sim_ports), "eth-duo-sim must not share ports with eth-sim"
 
 
@@ -75,8 +77,8 @@ def test_lava_rest_and_grpc_provider_1_are_distinct_pools():
     rest1 = [r for r in TOPOLOGY if r[0] == "lava-sim-rest" and r[2] == "1"]
     grpc1 = [r for r in TOPOLOGY if r[0] == "lava-sim-grpc" and r[2] == "1"]
     assert rest1 and grpc1
-    assert rest1[0][5] == (("rest", "http", 18551),)
-    assert grpc1[0][5] == (("grpc", "http2", 18548),)
+    assert rest1[0][6] == (("rest", "http", 18551),)
+    assert grpc1[0][6] == (("grpc", "http2", 18548),)
 
 
 # ── port_of — the one way a caller turns a provider address into a port ──────
@@ -135,7 +137,7 @@ def test_port_of_reaches_every_endpoint_in_the_table():
     port_of. A row shape port_of cannot read would bind a port no test can
     reach, and the gap would look like a dead listener rather than a lookup
     that cannot express it."""
-    for pool, _chain, pid, _n, _b, endpoints in TOPOLOGY:
+    for pool, _chain, pid, _n, _b, _group, endpoints in TOPOLOGY:
         for interface, transport, port in endpoints:
             assert (
                 port_of(pool, pid, interface, transport) == port
@@ -237,7 +239,7 @@ def test_every_row_carries_the_agreed_name():
     the only thing a test can use to learn which provider served a request.
     Until it lived here it was written by hand in three repositories, and no
     two copies were ever compared."""
-    named = {(pool, pid): name for pool, _chain, pid, name, _backup, _eps in TOPOLOGY}
+    named = {(pool, pid): name for pool, _chain, pid, name, _backup, _group, _eps in TOPOLOGY}
     assert named == AGREED_NAMES
 
 
@@ -247,7 +249,7 @@ def test_no_two_providers_share_a_name_once_lowercased():
     to start when two of its providers share a name, so comparing the names as
     written would miss the collision that actually stops a deploy."""
     seen: dict[str, str] = {}
-    for pool, _chain, pid, name, _backup, _eps in TOPOLOGY:
+    for pool, _chain, pid, name, _backup, _group, _eps in TOPOLOGY:
         low = name.lower()
         clash = seen.get(low)
         assert clash is None, f"{pool}:{pid} and {clash} both lowercase to {low!r}"
@@ -258,7 +260,7 @@ def test_every_name_is_non_empty_and_carries_no_space():
     """The chart renders the name through lower and a space-to-hyphen replace.
     A space would silently become a hyphen, so the deployed name would differ
     from the one written here and every comparison against it would miss."""
-    for pool, _chain, pid, name, _backup, _eps in TOPOLOGY:
+    for pool, _chain, pid, name, _backup, _group, _eps in TOPOLOGY:
         assert name, f"{pool}:{pid} has no name"
         assert " " not in name, f"{pool}:{pid} has a space in its name {name!r}"
 
@@ -268,13 +270,13 @@ def test_the_backup_rows_are_the_ones_the_values_file_marks():
     not something the simulator can work out. Nothing in this package behaves
     differently for a backup provider, so this column exists only to record
     the fact for a caller that needs it."""
-    flagged = {(pool, pid) for pool, _c, pid, _n, is_backup, _e in TOPOLOGY if is_backup}
+    flagged = {(pool, pid) for pool, _c, pid, _n, is_backup, _group, _e in TOPOLOGY if is_backup}
     assert flagged == AGREED_BACKUPS
 
 
 def test_every_backup_flag_is_a_real_boolean():
     """A truthy string would pass an ``if`` and read as a backup for ever."""
-    for pool, _chain, pid, _name, is_backup, _eps in TOPOLOGY:
+    for pool, _chain, pid, _name, is_backup, _group, _eps in TOPOLOGY:
         assert (
             is_backup is True or is_backup is False
         ), f"{pool}:{pid} has is_backup={is_backup!r}, which is not True or False"

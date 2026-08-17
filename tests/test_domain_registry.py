@@ -10,7 +10,7 @@ def test_build_registry_maps_topology_rows_one_to_one():
     # Derived from the table, not hardcoded: the property this test owns is
     # "every row becomes exactly one provider, no silent drop or merge".
     assert set(reg.pools) == {row[0] for row in TOPOLOGY}
-    assert len(reg.all_providers()) == len({(pool, pid) for pool, _c, pid, _n, _b, _e in TOPOLOGY})
+    assert len(reg.all_providers()) == len({(pool, pid) for pool, _c, pid, _n, _b, _group, _e in TOPOLOGY})
 
 
 def test_provider_lookup_by_pool_and_pid():
@@ -56,7 +56,7 @@ def test_eth_duo_sim_providers_resolve_and_are_distinct_from_eth_sim():
 
 
 def test_build_registry_reads_patched_topology(monkeypatch):
-    small = (("eth-sim", "eth", "1", "EthProvider1", False, (("jsonrpc", "http", 18545),)),)
+    small = (("eth-sim", "eth", "1", "EthProvider1", False, "", (("jsonrpc", "http", 18545),)),)
     monkeypatch.setattr(topology_module, "TOPOLOGY", small)
     reg = build_registry()  # default path must see the patched table
     assert len(reg.all_providers()) == 1
@@ -64,8 +64,8 @@ def test_build_registry_reads_patched_topology(monkeypatch):
 
 def test_build_registry_rejects_duplicate_port():
     rows = [
-        ("eth-sim", "eth", "1", "EthProvider1", False, [("jsonrpc", "http", 18545)]),
-        ("btc-sim", "btc", "1", "BtcProvider1", False, [("jsonrpc", "http", 18545)]),  # dup port
+        ("eth-sim", "eth", "1", "EthProvider1", False, "", [("jsonrpc", "http", 18545)]),
+        ("btc-sim", "btc", "1", "BtcProvider1", False, "", [("jsonrpc", "http", 18545)]),  # dup port
     ]
     with pytest.raises(ValueError, match="18545"):
         build_registry(rows)
@@ -73,47 +73,47 @@ def test_build_registry_rejects_duplicate_port():
 
 def test_build_registry_rejects_duplicate_pool_pid():
     rows = [
-        ("eth-sim", "eth", "1", "EthProvider1", False, [("jsonrpc", "http", 18545)]),
-        ("eth-sim", "eth", "1", "EthProvider1", False, [("jsonrpc", "http", 18546)]),  # dup pool:pid
+        ("eth-sim", "eth", "1", "EthProvider1", False, "", [("jsonrpc", "http", 18545)]),
+        ("eth-sim", "eth", "1", "EthProvider1", False, "", [("jsonrpc", "http", 18546)]),  # dup pool:pid
     ]
     with pytest.raises(ValueError, match="eth-sim:1"):
         build_registry(rows)
 
 
 def test_build_registry_rejects_unknown_chain():
-    rows = [("mystery-sim", "dogecoin", "1", "MysteryProvider1", False, [("jsonrpc", "http", 19999)])]
+    rows = [("mystery-sim", "dogecoin", "1", "MysteryProvider1", False, "", [("jsonrpc", "http", 19999)])]
     with pytest.raises(ValueError, match="dogecoin"):
         build_registry(rows)
 
 
 def test_build_registry_rejects_two_chains_under_one_pool():
     rows = [
-        ("x-sim", "solana", "1", "XProvider1", False, [("jsonrpc", "http", 19991)]),
-        ("x-sim", "eth", "2", "XProvider2", False, [("jsonrpc", "http", 19992)]),  # chain conflict
+        ("x-sim", "solana", "1", "XProvider1", False, "", [("jsonrpc", "http", 19991)]),
+        ("x-sim", "eth", "2", "XProvider2", False, "", [("jsonrpc", "http", 19992)]),  # chain conflict
     ]
     with pytest.raises(ValueError, match="two chains"):
         build_registry(rows)
 
 
 def test_build_registry_rejects_empty_endpoint_list():
-    rows = [("btc-sim", "btc", "4", "BtcProvider4", False, [])]
+    rows = [("btc-sim", "btc", "4", "BtcProvider4", False, "", [])]
     with pytest.raises(ValueError, match="no endpoints"):
         build_registry(rows)
 
 
 def test_build_registry_rejects_bad_port_and_bad_names():
     with pytest.raises(ValueError, match="bad port"):
-        build_registry([("btc-sim", "btc", "1", "BtcProvider1", False, [("jsonrpc", "http", 0)])])
+        build_registry([("btc-sim", "btc", "1", "BtcProvider1", False, "", [("jsonrpc", "http", 0)])])
     with pytest.raises(ValueError, match="bad pid"):
-        build_registry([("btc-sim", "btc", "", "BtcProvider0", False, [("jsonrpc", "http", 19993)])])
+        build_registry([("btc-sim", "btc", "", "BtcProvider0", False, "", [("jsonrpc", "http", 19993)])])
     with pytest.raises(ValueError, match="no ':'"):
-        build_registry([("btc-sim", "btc", "grpc:1", "BtcProvidergrpc:1", False, [("jsonrpc", "http", 19994)])])
+        build_registry([("btc-sim", "btc", "grpc:1", "BtcProvidergrpc:1", False, "", [("jsonrpc", "http", 19994)])])
     with pytest.raises(ValueError, match="bad pool name"):
-        build_registry([("lava:grpc", "lava", "1", "LavaGrpcProvider1", False, [("grpc", "http2", 19995)])])
+        build_registry([("lava:grpc", "lava", "1", "LavaGrpcProvider1", False, "", [("grpc", "http2", 19995)])])
 
 
 def test_build_registry_rejects_unknown_interface_and_transport():
     with pytest.raises(ValueError, match="unknown interface"):
-        build_registry([("btc-sim", "btc", "1", "BtcProvider1", False, [("bitcoinrpc", "http", 19996)])])
+        build_registry([("btc-sim", "btc", "1", "BtcProvider1", False, "", [("bitcoinrpc", "http", 19996)])])
     with pytest.raises(ValueError, match="unknown transport"):
-        build_registry([("btc-sim", "btc", "1", "BtcProvider1", False, [("jsonrpc", "grpc", 19997)])])
+        build_registry([("btc-sim", "btc", "1", "BtcProvider1", False, "", [("jsonrpc", "grpc", 19997)])])

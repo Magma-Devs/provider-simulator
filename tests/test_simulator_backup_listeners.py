@@ -131,7 +131,7 @@ def test_each_surface_allocates_three_primary_and_three_backup(
     """
     pids = [
         pid
-        for row_pool, _chain, pid, _name, _backup, endpoints in TOPOLOGY
+        for row_pool, _chain, pid, _name, _backup, _group, endpoints in TOPOLOGY
         if row_pool == pool
         for row_interface, row_transport, _port in endpoints
         if row_interface == interface and row_transport == transport
@@ -160,7 +160,7 @@ def test_solana_solo_pool_is_isolated_from_the_solana_primary_pool():
     solo_rows = [row for row in TOPOLOGY if row[0] == "solana-solo-sim"]
     assert len(solo_rows) == 1, f"solana-solo-sim must hold exactly one provider, got {len(solo_rows)}"
 
-    _pool, chain, pid, name, is_backup, endpoints = solo_rows[0]
+    _pool, chain, pid, name, is_backup, _group, endpoints = solo_rows[0]
     assert chain == "solana", f"solana-solo-sim must serve the solana chain, got {chain!r}"
     assert pid == "1", f"the solo provider is its pool's slot 1, got {pid!r}"
     assert name == "SolanaSoloProvider1", f"unexpected name: {name!r}"
@@ -168,7 +168,7 @@ def test_solana_solo_pool_is_isolated_from_the_solana_primary_pool():
     assert endpoints == (("jsonrpc", "http", 18585),), f"unexpected endpoints: {endpoints}"
 
     primary_ports = {
-        port for row_pool, _c, _p, _n, _b, eps in TOPOLOGY if row_pool == "solana-sim" for (_i, _t, port) in eps
+        port for row_pool, _c, _p, _n, _b, _group, eps in TOPOLOGY if row_pool == "solana-sim" for (_i, _t, port) in eps
     }
     assert 18585 not in primary_ports, (
         f"the solo listener shares port 18585 with solana-sim ({sorted(primary_ports)}) — "
