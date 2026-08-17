@@ -132,18 +132,20 @@ def _port_of_url(url: str) -> int | None:
 
 VALUES_ROUTERS = _read_values_routers()
 
-POOLS = {pool for pool, _chain, _pid, _name, _backup, _eps in TOPOLOGY}
+POOLS = {pool for pool, _chain, _pid, _name, _backup, _group, _eps in TOPOLOGY}
 
 # port -> the provider key that owns it, so a mismatch can name the pool and
 # the pool slot the port actually belongs to.
 POOL_SLOT_OF_PORT = {
-    port: f"{pool}:{pid}" for pool, _chain, pid, _name, _backup, eps in TOPOLOGY for (_i, _t, port) in eps
+    port: f"{pool}:{pid}" for pool, _chain, pid, _name, _backup, _group, eps in TOPOLOGY for (_i, _t, port) in eps
 }
 
 # pool -> how many providers the topology gives it. A plain dict, not a
 # Counter: an unknown pool must raise, not answer zero and read as an entry
 # that legitimately lists no providers.
-PROVIDERS_PER_POOL = {pool: sum(1 for row_pool, _c, _p, _n, _b, _e in TOPOLOGY if row_pool == pool) for pool in POOLS}
+PROVIDERS_PER_POOL = {
+    pool: sum(1 for row_pool, _c, _p, _n, _b, _group, _e in TOPOLOGY if row_pool == pool) for pool in POOLS
+}
 
 # The router entries this file checks: every values entry whose id is a pool.
 # Derived, never listed — a new sim router is covered as soon as its pool row

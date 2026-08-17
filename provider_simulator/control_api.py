@@ -237,6 +237,61 @@ class ControlApi:
     def get_stats(self) -> tuple[int, dict]:
         return 200, {"providers": {p.key: p.log.stats() for p in self.registry.all_providers()}}
 
+    def get_providers(self, query: dict) -> tuple[int, dict]:
+        """Every fact about every provider, keyed pool then colon then slot.
+
+        A test could ask this simulator which ports a provider listens on and
+        nothing else. Everything else it needed — what a provider is called,
+        which pool a router uses, which cross-validation group a provider is
+        in — was written by hand in the test code, and a written copy can be
+        wrong while staying quiet.
+
+        Four filters, in the style /history already accepts. A filter only ever
+        narrows the set; the shape of an entry never changes, so a caller does
+        not have to handle two shapes.
+
+        ``name`` is the one a test actually needs: it reads a name out of a
+        response header and has to learn which slot that was, so it can send
+        that provider a fault. It matches case-insensitively, because the chart
+        lowercases every name before the router sees it.
+
+        An unknown pool is an error rather than an empty set. A pool name that
+        does not exist is a typo, and answering nothing would let a test believe
+        it had filtered correctly and found nothing — the exact silence this
+        endpoint exists to end.
+        """
+        pool_filter = query.get("pool")
+        if pool_filter is not None and pool_filter not in self.registry.pools:
+            return 400, {"error": (f"no pool {pool_filter!r}; pools are {sorted(self.registry.pools)!r}")}
+
+        pid_filter = query.get("pid")
+        name_filter = query.get("name")
+        backup_filter = query.get("is_backup")
+        want_backup = None if backup_filter is None else str(backup_filter).lower() == "true"
+
+        providers = {}
+        for provider in self.registry.all_providers():
+            if pool_filter is not None and provider.pool.name != pool_filter:
+                continue
+            if pid_filter is not None and provider.pid != str(pid_filter):
+                continue
+            if want_backup is not None and provider.is_backup is not want_backup:
+                continue
+            if name_filter is not None and provider.name.lower() != str(name_filter).lower():
+                continue
+            providers[provider.key] = {
+                "pool": provider.pool.name,
+                "pid": provider.pid,
+                "chain": provider.pool.chain,
+                "name": provider.name,
+                "is_backup": provider.is_backup,
+                "group_label": provider.group_label,
+                "endpoints": [
+                    {"interface": ep.interface, "transport": ep.transport, "port": ep.port} for ep in provider.endpoints
+                ],
+            }
+        return 200, {"providers": providers}
+
     def get_topology(self) -> tuple[int, dict]:
         """Every pool, its chain, and each provider's endpoints — the
         validated Registry built at startup, read back as-is. Pure read: no

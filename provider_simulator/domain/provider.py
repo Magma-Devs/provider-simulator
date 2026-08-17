@@ -30,14 +30,34 @@ class Pool:
     chain: str  # chain name; becomes a Chain object in a later story
     providers: dict[str, "Provider"] = field(default_factory=dict, init=False)
 
-    def add_provider(self, pid: str, endpoints: list[Endpoint]) -> "Provider":
+    def add_provider(
+        self,
+        pid: str,
+        endpoints: list[Endpoint],
+        *,
+        name: str = "",
+        is_backup: bool = False,
+        group_label: str = "",
+    ) -> "Provider":
         """Build a provider, refuse duplicates, and register it — one atomic
-        step, so no caller can create a provider its pool doesn't know about."""
+        step, so no caller can create a provider its pool doesn't know about.
+
+        ``name``, ``is_backup`` and ``group_label`` are facts about the
+        DEPLOYMENT rather than about how this process runs. Nothing here reads
+        them; they are carried so a caller can ask the simulator instead of
+        writing them down. They default to empty so the tests that build a
+        provider directly to check quirks or duplicate pids stay untouched —
+        every row describing a real deployed provider comes through
+        ``build_registry``, which always passes them.
+        """
         if pid in self.providers:
             raise ValueError(f"duplicate provider {self.name}:{pid}")
         provider = Provider(
             pool=self,
             pid=pid,
+            name=name,
+            is_backup=is_backup,
+            group_label=group_label,
             scenario=ScenarioConfig(),
             quirks=quirks_for(self.chain)(),
             log=CallLog(pool=self.name, pid=pid),
@@ -51,6 +71,13 @@ class Pool:
 class Provider:
     pool: Pool
     pid: str
+    # What the router calls this provider, whether it sits in the backup tier,
+    # and which cross-validation group it belongs to. Recorded here and read by
+    # nobody in this package — they are served on GET /providers so a test can
+    # ask rather than keep its own copy.
+    name: str
+    is_backup: bool
+    group_label: str
     scenario: ScenarioConfig
     quirks: Quirks
     log: CallLog
