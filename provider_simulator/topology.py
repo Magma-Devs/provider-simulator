@@ -35,11 +35,16 @@ that reads them is ``ControlApi.get_providers``, which serves them on GET
     provider in. A cross-validation policy can demand that the answers agree
     across a minimum number of distinct groups (``min_groups`` in the
     router-side values_sim.yml), so a test checking group diversity has to
-    know which provider sits in which group. Only eth-sim labels its providers
-    today — pids 1 and 2 are ``tier-1`` and pid 3 is ``external``. Every other
-    row carries the empty string rather than nothing at all, so a caller
-    grouping by label gets one bucket of unlabelled providers instead of a
-    missing key.
+    know which provider sits in which group. The label is written
+    ``voting-group-<n>``: cross-validation is a vote, and providers sharing a
+    label are one bloc that would cast the same wrong vote together, so the
+    router only counts agreement that spans different blocs. The number
+    identifies the bloc and means nothing else; no policy and no test names a
+    particular one. Two pools label their providers today. eth-sim puts pids 1
+    and 2 in ``voting-group-1`` and pid 3 in ``voting-group-2``. eth-cv-sim
+    puts its six providers in three blocs of two. Every other row carries the
+    empty string rather than nothing at all, so a caller grouping by label
+    gets one bucket of unlabelled providers instead of a missing key.
 
 A pool is one router's provider set (one router = one chain + one application
 protocol). Pool names equal the router ids in the router-side values_sim.yml
@@ -117,7 +122,7 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
         "1",
         "EthPrimaryProvider1",
         False,
-        "tier-1",
+        "voting-group-1",
         (("jsonrpc", "http", 18545), ("jsonrpc", "ws", 18557)),
     ),
     (
@@ -126,7 +131,7 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
         "2",
         "EthPrimaryProvider2",
         False,
-        "tier-1",
+        "voting-group-1",
         (("jsonrpc", "http", 18546), ("jsonrpc", "ws", 18558)),
     ),
     (
@@ -135,7 +140,7 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
         "3",
         "EthPrimaryProvider3",
         False,
-        "external",
+        "voting-group-2",
         (("jsonrpc", "http", 18547), ("jsonrpc", "ws", 18559)),
     ),
     ("eth-sim", "eth", "4", "EthBackupProvider4", True, "", (("jsonrpc", "http", 18560), ("jsonrpc", "ws", 18572))),
@@ -176,12 +181,12 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
     # two pools sharing a listener: that is one provider under one key, so a
     # fault injected for one router's test reaches the other router's traffic,
     # and the resulting failure would look exactly like a router bug.
-    ("eth-cv-sim", "eth", "1", "EthCvPrimaryProvider1", False, "tier-1", (("jsonrpc", "http", 18596),)),
-    ("eth-cv-sim", "eth", "2", "EthCvPrimaryProvider2", False, "tier-1", (("jsonrpc", "http", 18597),)),
-    ("eth-cv-sim", "eth", "3", "EthCvPrimaryProvider3", False, "tier-2", (("jsonrpc", "http", 18598),)),
-    ("eth-cv-sim", "eth", "4", "EthCvPrimaryProvider4", False, "tier-2", (("jsonrpc", "http", 18599),)),
-    ("eth-cv-sim", "eth", "5", "EthCvPrimaryProvider5", False, "external", (("jsonrpc", "http", 18600),)),
-    ("eth-cv-sim", "eth", "6", "EthCvPrimaryProvider6", False, "external", (("jsonrpc", "http", 18601),)),
+    ("eth-cv-sim", "eth", "1", "EthCvPrimaryProvider1", False, "voting-group-1", (("jsonrpc", "http", 18596),)),
+    ("eth-cv-sim", "eth", "2", "EthCvPrimaryProvider2", False, "voting-group-1", (("jsonrpc", "http", 18597),)),
+    ("eth-cv-sim", "eth", "3", "EthCvPrimaryProvider3", False, "voting-group-2", (("jsonrpc", "http", 18598),)),
+    ("eth-cv-sim", "eth", "4", "EthCvPrimaryProvider4", False, "voting-group-2", (("jsonrpc", "http", 18599),)),
+    ("eth-cv-sim", "eth", "5", "EthCvPrimaryProvider5", False, "voting-group-3", (("jsonrpc", "http", 18600),)),
+    ("eth-cv-sim", "eth", "6", "EthCvPrimaryProvider6", False, "voting-group-3", (("jsonrpc", "http", 18601),)),
     # btc-sim (MAG-2089): dedicated BTC listeners; the success branch routes
     # unconditionally through handlers_btc. Primary tier only — a backup tier,
     # if ever needed, extends contiguously upward.
