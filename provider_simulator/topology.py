@@ -44,12 +44,12 @@ that reads them is ``ControlApi.get_providers``, which serves them on GET
 A pool is one router's provider set (one router = one chain + one application
 protocol). Pool names equal the router ids in the router-side values_sim.yml
 wherever a router is wired (eth-sim, eth-solo-sim, btc-sim, solana-sim,
-lava-sim-grpc, lava-sim-rest, lava-sim-tm), or in the k3d-only
+lava-sim-grpc, lava-sim-rest, lava-sim-tm, eth-cv-sim), or in the k3d-only
 tools/local-cluster/routers.yml in smart_router_automation for eth-duo-sim (the
 stake-weight experiment router — canonical has no router wired to this pool).
-Two pools exist as bound listeners only, with no router wired yet: ln-sim
-(upstream LN router pending) and solana-solo-sim (the Solana analogue of
-eth-solo-sim; named by that pattern).
+One pool exists as a bound listener only, with no router wired yet: ln-sim
+(upstream LN router pending). eth-cv-sim is the cross-validation topology —
+six providers in three groups, wired in values_sim.yml like the rest.
 
 This table is the only source of port numbers. ``constants.py`` used to carry a
 parallel set of port dicts keyed by a second, older numbering; those keys
@@ -152,6 +152,36 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
     # flip on one pool leaked into the other's provider state.
     ("eth-duo-sim", "eth", "1", "EthDuoHighProvider1", False, "", (("jsonrpc", "http", 18586),)),
     ("eth-duo-sim", "eth", "2", "EthDuoLowProvider2", False, "", (("jsonrpc", "http", 18587),)),
+    # eth-cv-sim: 6 primaries, no backup tier — the cross-validation topology.
+    # Wired in values_sim.yml, the file that deploys the simulator routers to
+    # the shared cluster. Cross-validation asks several providers the
+    # same question and only answers when enough of them agree; the router
+    # config can also demand that the agreeing providers come from different
+    # groups. Six providers in three groups of two is the smallest shape that
+    # can exercise every rule the router enforces:
+    #   - per-group quorum needs max-participants >= min-groups *
+    #     agreement-threshold, so two groups needing two matching answers each
+    #     needs four providers, and three groups needing two needs six. The
+    #     three-provider eth-sim pool cannot satisfy either, and a policy that
+    #     asks for it is rejected at startup, crash-looping the router
+    #     (smart-router/protocol/rpcsmartrouter/cross_validation_policy.go
+    #     Validate).
+    #   - a two-against-two split, where the router must refuse rather than
+    #     pick a side, needs four providers answering at once.
+    #   - a minimum of three distinct groups, and the "too few groups"
+    #     refusal, need three groups to exist in the first place.
+    # Dedicated listeners for the same isolation reason as eth-duo-sim. The
+    # control API keys a fault by "pool:pid", so two pools each having a pid
+    # "1" is fine. They resolve to different providers. What is not fine is
+    # two pools sharing a listener: that is one provider under one key, so a
+    # fault injected for one router's test reaches the other router's traffic,
+    # and the resulting failure would look exactly like a router bug.
+    ("eth-cv-sim", "eth", "1", "EthCvPrimaryProvider1", False, "tier-1", (("jsonrpc", "http", 18596),)),
+    ("eth-cv-sim", "eth", "2", "EthCvPrimaryProvider2", False, "tier-1", (("jsonrpc", "http", 18597),)),
+    ("eth-cv-sim", "eth", "3", "EthCvPrimaryProvider3", False, "tier-2", (("jsonrpc", "http", 18598),)),
+    ("eth-cv-sim", "eth", "4", "EthCvPrimaryProvider4", False, "tier-2", (("jsonrpc", "http", 18599),)),
+    ("eth-cv-sim", "eth", "5", "EthCvPrimaryProvider5", False, "external", (("jsonrpc", "http", 18600),)),
+    ("eth-cv-sim", "eth", "6", "EthCvPrimaryProvider6", False, "external", (("jsonrpc", "http", 18601),)),
     # btc-sim (MAG-2089): dedicated BTC listeners; the success branch routes
     # unconditionally through handlers_btc. Primary tier only — a backup tier,
     # if ever needed, extends contiguously upward.
