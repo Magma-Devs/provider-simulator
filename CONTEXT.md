@@ -84,12 +84,19 @@ each node a `group_label` and the table copies it. No simulator behaviour
 depends on it: the only code here that reads it serves it on `GET /providers`,
 so a caller can ask instead of writing it down.
 
-Only two pools carry a label today: `eth-sim` on its three primary providers,
-and `eth-cv-sim` on all six. The values in use are `tier-1`, `tier-2` and
-`external`. Every other row carries the empty string, which means the deployment
-put that provider in no group at all. It is an empty string and not a missing
-value, so a caller grouping by label gets one bucket of unlabelled providers
-instead of a key that is not there.
+The label is written `voting-group-<n>`. Cross-validation is a vote: providers
+answer, matching answers are counted, and a threshold wins. Providers sharing a
+label are one bloc that would cast the same wrong vote together, because they
+share a source, so the router only counts agreement that spans different blocs.
+The number identifies the bloc and means nothing else. No policy and no test
+names a particular one.
+
+Only two pools carry a label today. `eth-sim` puts its first two primaries in
+one bloc and its third in another. `eth-cv-sim` puts its six providers in three
+blocs of two. Every other row carries the empty string, which means the
+deployment put that provider in no group at all. It is an empty string and not
+a missing value, so a caller grouping by label gets one bucket of unlabelled
+providers instead of a key that is not there.
 _Avoid_: tier, class, provider set
 
 **Endpoint**:
