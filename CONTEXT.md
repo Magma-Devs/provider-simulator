@@ -71,6 +71,27 @@ visible inside the `name` column of the topology table. In `EthBackupProvider4`,
 the role is Backup, but nothing stores that word separately.
 _Avoid_: type, kind, label, category
 
+**Group**:
+The cross-validation group a provider was put in, held in the `group_label`
+column of the topology table. Cross-validation is the router asking several
+providers the same question and only answering when enough of them agree. A
+router policy can also demand that the agreeing answers come from different
+groups, so a test that checks group diversity has to know which provider sits
+in which group.
+
+The deployment chooses it, not the simulator. The router's values file gives
+each node a `group_label` and the table copies it. No simulator behaviour
+depends on it: the only code here that reads it serves it on `GET /providers`,
+so a caller can ask instead of writing it down.
+
+Only two pools carry a label today: `eth-sim` on its three primary providers,
+and `eth-cv-sim` on all six. The values in use are `tier-1`, `tier-2` and
+`external`. Every other row carries the empty string, which means the deployment
+put that provider in no group at all. It is an empty string and not a missing
+value, so a caller grouping by label gets one bucket of unlabelled providers
+instead of a key that is not there.
+_Avoid_: tier, class, provider set
+
 **Endpoint**:
 One door a provider listens on: an interface, the transport that carries it, and
 a TCP port. A JSON-RPC provider has two, one for http and one for ws.
@@ -95,16 +116,31 @@ _Avoid_: network, chain id, chain family
 **Topology**:
 The table in `provider_simulator/topology.py`. It is the one place that says what
 exists — every pool, every provider, every endpoint. Each row also carries the
-provider's `name` and its `is_backup` flag. That makes six fields per row.
-Four of them, pool, chain, pid and endpoints, decide what the simulator runs.
-The other two, `name` and `is_backup`, are only recorded. A caller reads them
-instead of guessing.
+provider's `name`, its `is_backup` flag and its `group_label`. That makes seven
+fields per row. Four of them, pool, chain, pid and endpoints, decide what the
+simulator runs. The other three, `name`, `is_backup` and `group_label`, are only
+recorded. A caller reads them instead of guessing.
 _Avoid_: config, port map, provider list
 
 **Registry**:
 The live objects built from the topology when the server starts. It refuses a
 table that would break at run time, such as one port used twice.
 _Avoid_: container, factory, world
+
+**Provider record**:
+Everything the simulator knows about one provider, served by `GET /providers`
+and keyed by the provider key: pool, pool slot, chain, name, backup flag, group,
+and every endpoint it listens on. Four filters narrow the set, `pool`, `pid`,
+`name` and `is_backup`. The `name` filter ignores case, because the chart
+lowercases every name before the router sees it. An unknown pool is a 400 and
+never an empty set.
+
+It exists so a test can ask instead of writing the answer down. A name written
+into test code can be wrong, and a wrong name raises nothing: the router reports
+the name the deployment gave the provider, the test looks for the name it wrote
+down, and the two never meet. The test then compares two empty sets and passes
+green while checking nothing.
+_Avoid_: provider info, provider details, the /topology reply
 
 ## Faults
 
@@ -131,8 +167,16 @@ content or the timing rather than the shape: `latency_ms`, `responses`,
 _Avoid_: modifier, option, extra
 
 **Chain family**:
-The gate that decides whether a content fault fires on an endpoint. `down` is
-the one fault that ignores it and reaches every endpoint of a provider.
+A retired word. It used to be a field on a scenario, and it decided whether a
+content fault fired on an endpoint. The control API no longer takes it: a
+scenario block carrying `chain_family` gets a 400 that points at the pool and
+the `transports` filter instead.
+
+Two things replaced it. Which chain's handler serves a call is decided by the
+port the call arrived on, so the pool a provider sits in already says which
+chain it speaks. Which of a provider's endpoints a fault reaches is decided by
+the scenario's `transports` list, and `down` obeys that list like every other
+mode. With no list set, `down` still reaches every endpoint the provider has.
 _Avoid_: chain, chain type
 
 ## Telemetry
