@@ -60,7 +60,7 @@ class Pool:
             group_label=group_label,
             scenario=ScenarioConfig(),
             quirks=quirks_for(self.chain)(),
-            log=CallLog(pool=self.name, pid=pid),
+            log=CallLog(pool=self.name, pid=pid, name=name),
             endpoints=list(endpoints),
         )
         self.providers[pid] = provider

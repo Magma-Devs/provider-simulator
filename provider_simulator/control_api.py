@@ -231,11 +231,14 @@ class ControlApi:
             # Quirks read back flat, exactly as they are written — one dict per
             # provider on the wire, no nesting.
             snap.update(provider.quirks.snapshot())
+            # Beside the fault settings, so a reader of this reply sees the
+            # name the router reports rather than only a pool and a slot.
+            snap["name"] = provider.name
             providers[provider.key] = snap
         return 200, {"providers": providers}
 
     def get_stats(self) -> tuple[int, dict]:
-        return 200, {"providers": {p.key: p.log.stats() for p in self.registry.all_providers()}}
+        return 200, {"providers": {p.key: {**p.log.stats(), "name": p.name} for p in self.registry.all_providers()}}
 
     def get_providers(self, query: dict) -> tuple[int, dict]:
         """Every fact about every provider, keyed pool then colon then slot.
@@ -305,7 +308,16 @@ class ControlApi:
                 ]
                 for pid, provider in pool.providers.items()
             }
-            topology[pool_name] = {"chain": pool.chain, "providers": providers}
+            # `names` sits BESIDE `providers`, never inside it. Two readers in
+            # the automation project read a per-slot value as a list of
+            # endpoints, and one raises on purpose when it is not a list.
+            # Nesting the name would break both.
+            names = {pid: provider.name for pid, provider in pool.providers.items()}
+            topology[pool_name] = {
+                "chain": pool.chain,
+                "providers": providers,
+                "names": names,
+            }
         return 200, {"topology": topology}
 
     # ── GET /history ──────────────────────────────────────────────────────────

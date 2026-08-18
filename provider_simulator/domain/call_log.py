@@ -41,9 +41,13 @@ def _now_fields() -> tuple[float, str]:
 
 
 class CallLog:
-    def __init__(self, pool: str, pid: str, history_max: int = HISTORY_MAX) -> None:
+    def __init__(self, pool: str, pid: str, history_max: int = HISTORY_MAX, name: str = "") -> None:
         self._pool = pool
         self._pid = pid
+        # What the router calls this provider. Carried onto every entry so a
+        # history record saved into a test report can be read months later
+        # without a live simulator to ask what eth-sim:4 was called.
+        self._name = name
         self._lock = threading.Lock()
         self._history: deque = deque(maxlen=history_max)
         self._total_calls = 0
@@ -72,6 +76,7 @@ class CallLog:
             "lava_headers": dict(lava_headers) if lava_headers else {},
             "pool": self._pool,
             "pid": self._pid,
+            "name": self._name,
             "interface": interface,
             "transport": transport,
             "port": port,
