@@ -155,6 +155,109 @@ routers:
       maxReplicas: 1
       targetCPUUtilizationPercentage: 75
       targetMemoryUtilizationPercentage: 75
+  - id: "eth-cv-sim"
+    network: "eth1"
+    cross_validation_policies:
+      # Strict: the same shape eth-sim runs, so a test written against one
+      # means the same thing on the other. A caller may tighten the quorum
+      # from 2 to 3; max_participants is pinned; min_groups has no cap.
+      - method: "eth_getBlockByNumber"
+        enabled: true
+        max_participants:
+          floor: 3
+          cap: 3
+        agreement_threshold:
+          floor: 2
+          cap: 3
+        min_groups:
+          floor: 2
+      # Loose: one matching answer from one group is enough. Proves a relaxed
+      # rule is honoured rather than quietly raised to a default.
+      - method: "eth_getCode"
+        enabled: true
+        max_participants:
+          floor: 1
+          cap: 6
+        agreement_threshold:
+          floor: 1
+          cap: 6
+        min_groups:
+          floor: 1
+      # Per-group quorum across two groups: each of two groups must reach two
+      # matching answers on its own, then the two group winners must match.
+      # Needs 2 * 2 = 4 participants — impossible on a three-provider router.
+      - method: "eth_getStorageAt"
+        enabled: true
+        per_group_quorum: true
+        max_participants:
+          floor: 4
+          cap: 6
+        agreement_threshold:
+          floor: 2
+          cap: 3
+        min_groups:
+          floor: 2
+      # Per-group quorum across all three groups: 3 * 2 = 6 participants, the
+      # whole pool. The strictest shape this router can be asked for.
+      - method: "eth_getTransactionCount"
+        enabled: true
+        per_group_quorum: true
+        max_participants:
+          floor: 6
+          cap: 6
+        agreement_threshold:
+          floor: 2
+          cap: 2
+        min_groups:
+          floor: 3
+      # Forbidden: a caller's cross-validation headers are ignored outright on
+      # this method. Not the same as enabled: false, which only declines to
+      # require cross-validation and still honours caller headers.
+      - method: "eth_chainId"
+        forbid_caller_cv: true
+    nodes:
+      - name: "EthCvPrimaryProvider1"
+        group_label: "tier-1"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18596"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
+      - name: "EthCvPrimaryProvider2"
+        group_label: "tier-1"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18597"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
+      - name: "EthCvPrimaryProvider3"
+        group_label: "tier-2"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18598"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
+      - name: "EthCvPrimaryProvider4"
+        group_label: "tier-2"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18599"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
+      - name: "EthCvPrimaryProvider5"
+        group_label: "external"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18600"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
+      - name: "EthCvPrimaryProvider6"
+        group_label: "external"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18601"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 1
+      targetCPUUtilizationPercentage: 75
+      targetMemoryUtilizationPercentage: 75
   # LAVA over REST
   - id: "lava-rest"
     network: "lava"
