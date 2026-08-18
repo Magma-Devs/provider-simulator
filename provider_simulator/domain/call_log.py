@@ -41,9 +41,26 @@ def _now_fields() -> tuple[float, str]:
 
 
 class CallLog:
-    def __init__(self, pool: str, pid: str, history_max: int = HISTORY_MAX) -> None:
+    def __init__(self, pool: str, pid: str, history_max: int = HISTORY_MAX, name: str = "") -> None:
         self._pool = pool
         self._pid = pid
+        # What the router calls this provider — EthBackupProvider4. Carried onto
+        # every entry so a history record saved into a test report can be read
+        # months later without a live simulator to ask what eth-sim:4 was called.
+        #
+        # Empty when the caller supplied no name, which in practice means a test
+        # built this log directly; every provider describing a real deployment
+        # comes through build_registry, which always passes it.
+        #
+        # Empty on purpose rather than a stand-in like "eth-sim:4". The row
+        # already carries pool and pid in their own fields, so a stand-in would
+        # only repeat them — and it would repeat them in the exact shape of
+        # Provider.key, the address the control API accepts, so it would read
+        # like a name the router reported. Tests learn which provider served a
+        # request by matching the Lava-Provider-Address header against these
+        # names, and no real name is ever empty. An empty name therefore cannot
+        # be mistaken for a real one; "eth-sim:4" could.
+        self._name = name
         self._lock = threading.Lock()
         self._history: deque = deque(maxlen=history_max)
         self._total_calls = 0
@@ -72,6 +89,7 @@ class CallLog:
             "lava_headers": dict(lava_headers) if lava_headers else {},
             "pool": self._pool,
             "pid": self._pid,
+            "name": self._name,
             "interface": interface,
             "transport": transport,
             "port": port,
