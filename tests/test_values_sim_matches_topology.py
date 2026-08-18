@@ -21,11 +21,21 @@ For every router entry in the values file whose ``id`` equals a pool name:
 3. The entry lists exactly as many providers as the topology gives the pool —
    an equality, so an extra hand-typed provider fails as loudly as a missing
    one.
+4. All of one provider's urls resolve to the SAME pool slot — a provider whose
+   http and ws urls point at two different slots passes 1 to 3 unnoticed.
 
 Router entries that dial real chain nodes (base, eth, solana, btc, …) have no
 pool and are skipped. The skip is decided by "no pool of this name in
 TOPOLOGY", never by a name list, so a new sim router is covered the moment its
 pool row lands.
+
+That rule cannot check itself. An entry whose id is misspelt is not a pool, so
+it is skipped as a real-node router and never looked at again — which is how a
+typo would get past every check here. So a second, independent classification
+is used for the two checks that ask which entries are sim routers at all: an
+entry that dials the provider simulator's own host IS one, whatever its id
+says. The two classifications are compared against each other, and they are
+typed in different files by different hands.
 
 Two pools have no router entry here at all: ``eth-duo-sim`` lives in
 smart_router_automation's k3d-only routers.yml, and ``ln-sim`` has no router
@@ -153,6 +163,39 @@ PROVIDERS_PER_POOL = {
 SIM_ROUTERS = tuple(r for r in VALUES_ROUTERS if r.router_id in POOLS)
 REAL_NODE_ROUTERS = tuple(r for r in VALUES_ROUTERS if r.router_id not in POOLS)
 
+# The host every simulated provider is dialled on. One Kubernetes service
+# fronts all of them, so a url pointing here is a url into the simulator, and a
+# url pointing anywhere else is a real chain node.
+SIM_PROVIDER_HOST = "provider-simulator.lava-infra.svc.cluster.local"
+
+
+def _dials_the_simulator(router: ValuesRouter) -> bool:
+    """Whether a router entry is a sim router, decided WITHOUT asking whether
+    its id is a pool.
+
+    A second way of telling the two kinds apart is needed, and it has to be
+    independent of the first. "Is its id in POOLS?" cannot answer a question
+    about ids that are not pools: filtering on pool membership and then
+    asserting pool membership restates the filter. A misspelt ``eth-sym``, or a
+    new ``ghost-sim``, would simply be classified as a real-node router and
+    skipped.
+
+    The host is that independent signal. Every simulated provider in this file
+    is dialled at one Kubernetes service name and no real-node entry uses it,
+    so "dials that host" identifies a sim router from the urls alone, without
+    consulting the topology.
+
+    Its one blind spot is an entry that gets the host wrong as well as the id.
+    That entry resolves to nothing the moment it deploys and fails on its own —
+    unlike a wrong id, which deploys cleanly and quietly dials nothing.
+    """
+    return any(urlparse(url).hostname == SIM_PROVIDER_HOST for provider in router.providers for url in provider.urls)
+
+
+# Chosen by the host each entry dials, so an id that is not a pool still lands
+# in this set and can be compared against POOLS.
+SIM_LIKE_ROUTERS = tuple(r for r in VALUES_ROUTERS if _dials_the_simulator(r))
+
 
 # ── the reader is honest before anything is asserted on what it read ─────────
 
@@ -236,13 +279,29 @@ def test_every_sim_router_lists_exactly_its_pools_providers(router):
 def test_a_router_entry_is_skipped_only_when_no_pool_carries_its_name():
     """The skip must stay a lookup. A hardcoded list of real-node router ids
     would silently stop covering any sim router added after the list was
-    written — which is how the drift this file guards against started."""
-    for router in REAL_NODE_ROUTERS:
-        assert router.router_id not in POOLS, (
-            f"router {router.router_id!r} was skipped, but pool {router.router_id!r} " f"exists in the topology"
-        )
-    for router in SIM_ROUTERS:
-        assert router.router_id in POOLS
+    written — which is how the drift this file guards against started.
+
+    Checked against the host each entry dials, because checking it against
+    SIM_ROUTERS and REAL_NODE_ROUTERS proves nothing: those two are BUILT by
+    the pool lookup, so asserting the lookup on them only restates how they
+    were split. The host classification is typed in the values file and the
+    pool classification in the topology, by different hands, so comparing them
+    is a real comparison.
+
+    The direction where an entry dials the simulator under an id that is not a
+    pool has its own test below. This is the other one: an entry named after a
+    pool that does not dial the simulator at all — an ``eth-sim`` entry
+    repointed at real chain nodes, which would keep every check in this file
+    happy while the sim suite ran against production.
+    """
+    named_after_a_pool = {r.router_id for r in SIM_ROUTERS}
+    dials_the_simulator = {r.router_id for r in SIM_LIKE_ROUTERS}
+    stragglers = sorted(named_after_a_pool - dials_the_simulator)
+    assert not stragglers, (
+        f"these entries are named after a pool but dial no provider-simulator url: "
+        f"{stragglers}. Either the urls were repointed away from the simulator, or the "
+        f"id borrows a pool name it should not."
+    )
 
 
 # ── the deployed NAMES against the table ─────────────────────────────────────
@@ -271,18 +330,43 @@ POOLS_WITH_NO_ROUTER_HERE = {
 }
 
 
+def _slots_of_provider(provider: ValuesProvider) -> set[str]:
+    """EVERY pool slot this values provider dials, read from its ports.
+
+    A provider's urls are meant to be one node reached on several transports —
+    the six eth-sim providers each carry an http url and a ws url — so this set
+    should never hold more than one slot.
+    """
+    slots = set()
+    for url in provider.urls:
+        port = _port_of_url(url)
+        if port in POOL_SLOT_OF_PORT:
+            slots.add(POOL_SLOT_OF_PORT[port])
+    return slots
+
+
 def _slot_of_provider(provider: ValuesProvider) -> str | None:
-    """The pool slot a values provider is, read from the port it dials.
+    """The one pool slot a values provider is, or None when it dials no port
+    the topology declares.
 
     Matched by port rather than by position in the list. Position would agree
     with the topology right up until someone reorders one file, and then it
     would compare the wrong two names and still pass most of the time.
+
+    Every url is resolved, not just the first one that lands. Taking the first
+    would leave a provider whose second url was retyped onto another slot's
+    port completely unchecked: both ports still belong to the pool, so the
+    pool-level checks pass, the provider count is still right, and the name
+    would be compared against whichever slot happened to be read first. This
+    refuses instead, naming the provider and the slots it straddles.
     """
-    for url in provider.urls:
-        port = _port_of_url(url)
-        if port in POOL_SLOT_OF_PORT:
-            return POOL_SLOT_OF_PORT[port]
-    return None
+    slots = _slots_of_provider(provider)
+    assert len(slots) <= 1, (
+        f"provider {provider.name!r} dials more than one pool slot — {sorted(slots)}. "
+        f"Its urls are meant to be one node on several transports, so its name cannot "
+        f"be checked against any single slot."
+    )
+    return next(iter(slots)) if slots else None
 
 
 @pytest.mark.parametrize("router", SIM_ROUTERS, ids=lambda r: r.router_id)
@@ -325,15 +409,52 @@ def test_every_provider_in_this_file_was_actually_name_checked():
     ), f"{len(total) - len(resolved)} of {len(total)} providers did not resolve to a slot"
 
 
+@pytest.mark.parametrize("router", SIM_ROUTERS, ids=lambda r: r.router_id)
+def test_every_provider_dials_exactly_one_pool_slot(router):
+    """One values provider is one node.
+
+    Its urls are that node reached on different transports — an http url and a
+    ws url for each of the six eth-sim providers — so every url must resolve to
+    the same pool slot.
+
+    A provider straddling two slots of the SAME pool satisfies every other
+    check in this file. Both ports exist, both belong to the pool, and the
+    provider count is unchanged, so the port checks and the count check all
+    pass. Only this comparison sees it, and what it costs is real: the two
+    transports of one provider answer as two different simulated nodes, so a
+    fault set on that provider lands on one of them and the test watching the
+    other sees nothing wrong.
+    """
+    for provider in router.providers:
+        slots = _slots_of_provider(provider)
+        assert len(slots) <= 1, (
+            f"router {router.router_id!r} provider {provider.name!r} dials {len(slots)} "
+            f"different pool slots — {sorted(slots)} — across its urls {list(provider.urls)}. "
+            f"All of a provider's urls must be the same node."
+        )
+
+
 # ── every pool accounted for, in both directions ─────────────────────────────
 
 
 def test_every_pool_the_values_file_deploys_exists_in_the_topology():
     """A values entry naming a pool the simulator does not have would deploy a
-    router pointing at nothing."""
-    deployed = {r.router_id for r in SIM_ROUTERS}
+    router pointing at nothing.
+
+    Read off SIM_LIKE_ROUTERS, not SIM_ROUTERS. SIM_ROUTERS is built by keeping
+    the entries whose id is a pool, so subtracting POOLS from it is empty every
+    time and this could never fail — a new ``ghost-sim`` entry would be sorted
+    into the real-node routers and skipped, and the file would stay green.
+    SIM_LIKE_ROUTERS is chosen by the host the entry dials, so ``ghost-sim``
+    still lands in the set and its id is actually compared.
+    """
+    deployed = {r.router_id for r in SIM_LIKE_ROUTERS}
     missing = sorted(deployed - POOLS)
-    assert not missing, f"values file deploys pools the topology does not have: {missing}"
+    assert not missing, (
+        f"these router entries dial the provider simulator but their ids are not pools "
+        f"in the topology: {missing}. Either the id is a typo, or the pool row was never "
+        f"added to provider_simulator/topology.py."
+    )
 
 
 def test_every_pool_in_the_topology_is_deployed_or_named_as_an_exception():
