@@ -103,3 +103,33 @@ def test_rollover_caps_history_but_not_the_all_time_counters():
     assert stats["history_entries"] == 3  # ring buffer capped
     assert stats["total_calls"] == 5  # all-time counter keeps counting
     assert [e["request_id"] for e in log.get_history()] == [2, 3, 4]  # oldest evicted
+
+
+def test_a_log_built_without_a_name_leaves_the_name_empty():
+    """Empty is the deliberate choice, not an oversight.
+
+    The row already carries pool and pid in their own fields, so a stand-in like
+    "eth-sim:1" would only repeat them — in the exact shape of Provider.key, the
+    address the control API accepts, so it would read like a name the router
+    reported. Tests learn which provider served a request by matching the
+    Lava-Provider-Address header against these names, and no real name is ever
+    empty. An empty name cannot be mistaken for a real one; "eth-sim:1" could.
+    """
+    log = _log()  # no name= — the shape every direct construction in the tests uses
+    log.push("eth_blockNumber", "success", 0, interface="jsonrpc", transport="http", port=18545)
+    entry = log.get_history()[0]
+    assert entry["name"] == ""
+    # The two fields a stand-in would have duplicated are already here.
+    assert (entry["pool"], entry["pid"]) == ("eth-sim", "1")
+    assert entry["name"] != f"{entry['pool']}:{entry['pid']}"
+
+
+def test_a_named_log_carries_the_name_onto_entries_from_both_paths():
+    """push and record_arrival/finalize are separate entry-creation paths, so
+    both are checked: a name that only survived one of them would leave half the
+    saved rows unreadable months later."""
+    log = CallLog(pool="eth-sim", pid="4", name="EthBackupProvider4")
+    log.push("eth_blockNumber", "success", 0, interface="jsonrpc", transport="http", port=18560)
+    stub = log.record_arrival("jsonrpc", "http", 18560)
+    log.finalize(stub, method="eth_getBalance", status="success", latency_ms=1)
+    assert [e["name"] for e in log.get_history()] == ["EthBackupProvider4", "EthBackupProvider4"]

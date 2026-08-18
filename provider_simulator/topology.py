@@ -1,17 +1,19 @@
 """The one place that says what exists: every pool, its providers, the name
 each provider answers to, and the endpoints it listens on.
 
-Four of the six fields are used by this package and two are not, and the
-difference is worth knowing before you edit a row.
+Seven fields per row. Four of them decide what this process does and three
+describe the deployment it stands in for, and the difference is worth knowing
+before you edit a row.
 
 ``build_registry`` reads the pool, the chain, the pid and the endpoints. It
 binds one listener per port, so those four decide what the simulator actually
 runs. Get one wrong and the process either refuses to start or serves the
 wrong door.
 
-``name`` and ``is_backup`` are recorded here and used by nobody in this
-package. They are facts about the DEPLOYMENT, and the simulator holds them so
-a caller can ask instead of guessing:
+``name``, ``is_backup`` and ``group_label`` change nothing about what the
+simulator does. They are facts about the DEPLOYMENT, and the only code here
+that reads them is ``ControlApi.get_providers``, which serves them on GET
+/providers so a caller can ask instead of writing them down:
 
   * ``name`` is what the router calls this provider. The router reports it in
     the ``Lava-Provider-Address`` response header, and a test reads that header
@@ -28,6 +30,16 @@ a caller can ask instead of guessing:
     in this package behaves differently for a backup provider. It is recorded
     because it cannot be worked out from anything else here, and the slot
     number is only a coincidence, not a rule.
+
+  * ``group_label`` is the cross-validation group the router puts this
+    provider in. A cross-validation policy can demand that the answers agree
+    across a minimum number of distinct groups (``min_groups`` in the
+    router-side values_sim.yml), so a test checking group diversity has to
+    know which provider sits in which group. Only eth-sim labels its providers
+    today — pids 1 and 2 are ``tier-1`` and pid 3 is ``external``. Every other
+    row carries the empty string rather than nothing at all, so a caller
+    grouping by label gets one bucket of unlabelled providers instead of a
+    missing key.
 
 A pool is one router's provider set (one router = one chain + one application
 protocol). Pool names equal the router ids in the router-side values_sim.yml
@@ -46,7 +58,8 @@ parallel set of port dicts keyed by a second, older numbering; those keys
 disagreed with the pids here for six pools and nothing read them as identity, so
 they were removed. Callers that need a port ask ``port_of(...)`` below.
 
-Row shape: (pool, chain, pid, name, is_backup, ((interface, transport, port), ...)).
+Row shape: (pool, chain, pid, name, is_backup, group_label, endpoints), where
+endpoints is ((interface, transport, port), ...).
 Rows and endpoint groups are tuples — structurally immutable, so no caller can
 corrupt the process-global table in place. Provider ids restart at "1" inside
 each pool, so a pid is only unique together with its pool; ``Provider.key``
