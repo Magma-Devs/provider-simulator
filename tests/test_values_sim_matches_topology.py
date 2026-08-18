@@ -32,8 +32,8 @@ smart_router_automation's k3d-only routers.yml, and ``ln-sim`` has no router
 wired yet. This file reads the values entries, so those pools are simply never
 visited — it does not claim to cover them.
 
-Nothing in this file asserts anything about the FORMAT of a provider name.
-The naming scheme is still an open decision.
+It also checks the NAMES. That scheme is decided: pool, then role, then the
+word Provider, then the pool slot.
 """
 
 import re
@@ -243,3 +243,141 @@ def test_a_router_entry_is_skipped_only_when_no_pool_carries_its_name():
         )
     for router in SIM_ROUTERS:
         assert router.router_id in POOLS
+
+
+# ── the deployed NAMES against the table ─────────────────────────────────────
+#
+# The naming scheme was undecided when this file was written, so it checked
+# ports and said nothing about names. It is decided now: pool, then role, then
+# the word Provider, then the pool slot. The same 37 names are typed in three
+# values files across three repositories, and nothing compared any of them to
+# the topology.
+#
+# A wrong name does not raise. The router reports whatever is typed here, and
+# every test that correlates on that name then matches nothing — it compares
+# two empty sets and passes.
+
+# pool:pid -> the name the topology holds for it.
+NAME_OF_POOL_SLOT = {f"{pool}:{pid}": name for pool, _chain, pid, name, _backup, _group, _eps in TOPOLOGY}
+
+# Pools with no entry in THIS values file, each with the reason. Written down
+# rather than derived, so the coverage check below stays an equality with two
+# named holes instead of quietly becoming "whatever both happen to contain".
+POOLS_WITH_NO_ROUTER_HERE = {
+    # Declared in smart_router_automation's k3d-only tools/local-cluster/routers.yml.
+    "eth-duo-sim",
+    # No router dials it yet; the ports are allocated so the pattern stays symmetric.
+    "ln-sim",
+}
+
+
+def _slot_of_provider(provider: ValuesProvider) -> str | None:
+    """The pool slot a values provider is, read from the port it dials.
+
+    Matched by port rather than by position in the list. Position would agree
+    with the topology right up until someone reorders one file, and then it
+    would compare the wrong two names and still pass most of the time.
+    """
+    for url in provider.urls:
+        port = _port_of_url(url)
+        if port in POOL_SLOT_OF_PORT:
+            return POOL_SLOT_OF_PORT[port]
+    return None
+
+
+@pytest.mark.parametrize("router", SIM_ROUTERS, ids=lambda r: r.router_id)
+def test_every_provider_name_matches_the_one_the_topology_holds(router):
+    """The check that stops a typo deploying.
+
+    The values file is typed by a person and the router reports exactly what it
+    says. A name that is wrong by one letter still deploys, still serves
+    traffic, and every test correlating on that name silently matches nothing.
+    """
+    checked = 0
+    for provider in router.providers:
+        slot = _slot_of_provider(provider)
+        assert slot is not None, (
+            f"router {router.router_id!r} provider {provider.name!r} dials no port "
+            f"the topology declares, so its name cannot be checked against anything"
+        )
+        expected = NAME_OF_POOL_SLOT[slot]
+        assert provider.name == expected, (
+            f"{slot} is named {provider.name!r} in the values file and "
+            f"{expected!r} in the topology. The router reports the values-file "
+            f"name, so every test correlating on {expected!r} would match nothing."
+        )
+        checked += 1
+    assert checked == len(router.providers), "a provider was skipped without failing"
+
+
+def test_every_provider_in_this_file_was_actually_name_checked():
+    """A guard on the check above, not a second check.
+
+    Its assertions live inside a loop over one router's providers. If the port
+    join stopped resolving, every loop body would be skipped and the whole
+    parametrised set would pass having compared nothing.
+    """
+    resolved = [p for r in SIM_ROUTERS for p in r.providers if _slot_of_provider(p) is not None]
+    total = [p for r in SIM_ROUTERS for p in r.providers]
+    assert resolved, "no provider resolved to a pool slot; the name check compared nothing"
+    assert len(resolved) == len(
+        total
+    ), f"{len(total) - len(resolved)} of {len(total)} providers did not resolve to a slot"
+
+
+# ── every pool accounted for, in both directions ─────────────────────────────
+
+
+def test_every_pool_the_values_file_deploys_exists_in_the_topology():
+    """A values entry naming a pool the simulator does not have would deploy a
+    router pointing at nothing."""
+    deployed = {r.router_id for r in SIM_ROUTERS}
+    missing = sorted(deployed - POOLS)
+    assert not missing, f"values file deploys pools the topology does not have: {missing}"
+
+
+def test_every_pool_in_the_topology_is_deployed_or_named_as_an_exception():
+    """The other direction, which is the one that rots.
+
+    A pool added to the topology and forgotten in the values file is a pool no
+    router dials — it listens and nothing arrives. Two pools legitimately have
+    no entry here and are listed with their reasons; anything else is an
+    oversight, and this fails naming it.
+    """
+    deployed = {r.router_id for r in SIM_ROUTERS}
+    unaccounted = sorted(POOLS - deployed - POOLS_WITH_NO_ROUTER_HERE)
+    assert not unaccounted, (
+        f"these pools exist in the topology but no router here dials them: {unaccounted}. "
+        f"Either add the router entry, or add the pool to POOLS_WITH_NO_ROUTER_HERE "
+        f"with the reason no router needs it."
+    )
+
+
+def test_the_named_exceptions_are_real_pools_and_really_absent():
+    """An exception list that names a pool which does not exist, or one that IS
+    deployed, is a hole someone can widen without noticing."""
+    deployed = {r.router_id for r in SIM_ROUTERS}
+    for pool in POOLS_WITH_NO_ROUTER_HERE:
+        assert pool in POOLS, f"{pool!r} is excused but is not a pool at all"
+        assert pool not in deployed, f"{pool!r} is excused but this values file does deploy it"
+
+
+# ── one name, one provider, across the whole deployment ──────────────────────
+
+
+def test_no_two_providers_share_a_name_once_lowercased():
+    """Across every pool, not only inside one.
+
+    The chart lowercases a name before the router sees it, so two names
+    differing only in case arrive identical. The router refuses to start when
+    the clash is inside one chain and one api-interface; a clash across two
+    pools starts cleanly and confuses every person who reads a response header
+    afterwards, and every test that looks a name up.
+    """
+    seen: dict[str, str] = {}
+    for slot, name in NAME_OF_POOL_SLOT.items():
+        low = name.lower()
+        clash = seen.get(low)
+        assert clash is None, f"{slot} and {clash} are both named {low!r} once lowercased"
+        seen[low] = slot
+    assert len(seen) == len(NAME_OF_POOL_SLOT)
