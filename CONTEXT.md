@@ -88,8 +88,11 @@ The label is written `voting-group-<n>`. Cross-validation is a vote: providers
 answer, matching answers are counted, and a threshold wins. Providers sharing a
 label are one bloc that would cast the same wrong vote together, because they
 share a source, so the router only counts agreement that spans different blocs.
-The number identifies the bloc and means nothing else. No policy and no test
-names a particular one.
+The number identifies the bloc and means nothing else. A cross-validation policy
+never names a label. It only counts groups, through `min_groups` and
+`per_group_quorum` in the router's values file. One test does write the labels
+out, `tests/test_control_api_providers.py`, and it does that to check that
+`GET /providers` serves the table as written.
 
 Only two pools carry a label today. `eth-sim` puts its first two primaries in
 one bloc and its third in another. `eth-cv-sim` puts its six providers in three
