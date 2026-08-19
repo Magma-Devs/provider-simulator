@@ -73,14 +73,15 @@ def test_no_two_providers_share_a_name_once_lowercased():
 
 # ── The cross-validation group label ──────────────────────────────────────────
 def test_the_three_labelled_providers_carry_their_group():
-    """Cross-validation groups providers by this label and needs agreement
-    across a minimum number of groups, so a test checking group diversity has
-    to know them. Read out of the deployed values file: two of eth-sim's
-    providers are tier-1 and the third is external."""
+    """Cross-validation is a vote, and this label says which bloc a provider
+    votes in. Agreement inside one bloc is not evidence, so the router only
+    counts agreement that spans different blocs. A test checking that has to
+    know which provider sits where. Read out of the deployed values file: two
+    of eth-sim's providers share a bloc and the third is on its own."""
     providers = _providers()
-    assert providers["eth-sim:1"]["group_label"] == "tier-1"
-    assert providers["eth-sim:2"]["group_label"] == "tier-1"
-    assert providers["eth-sim:3"]["group_label"] == "external"
+    assert providers["eth-sim:1"]["group_label"] == "voting-group-1"
+    assert providers["eth-sim:2"]["group_label"] == "voting-group-1"
+    assert providers["eth-sim:3"]["group_label"] == "voting-group-2"
 
 
 def test_a_provider_with_no_label_reports_an_empty_string():
