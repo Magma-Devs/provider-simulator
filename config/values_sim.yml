@@ -60,7 +60,7 @@ routers:
         forbid_caller_cv: true
     nodes:
       - name: "EthPrimaryProvider1"
-        group_label: "tier-1"
+        group_label: "voting-group-1"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18545"
             interface: "jsonrpc"
@@ -68,7 +68,7 @@ routers:
           - url: "ws://provider-simulator.lava-infra.svc.cluster.local:18557/ws"
             interface: "jsonrpc"
       - name: "EthPrimaryProvider2"
-        group_label: "tier-1"
+        group_label: "voting-group-1"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18546"
             interface: "jsonrpc"
@@ -76,7 +76,7 @@ routers:
           - url: "ws://provider-simulator.lava-infra.svc.cluster.local:18558/ws"
             interface: "jsonrpc"
       - name: "EthPrimaryProvider3"
-        group_label: "external"
+        group_label: "voting-group-2"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18547"
             interface: "jsonrpc"
@@ -217,37 +217,37 @@ routers:
         forbid_caller_cv: true
     nodes:
       - name: "EthCvPrimaryProvider1"
-        group_label: "tier-1"
+        group_label: "voting-group-1"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18596"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
       - name: "EthCvPrimaryProvider2"
-        group_label: "tier-1"
+        group_label: "voting-group-1"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18597"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
       - name: "EthCvPrimaryProvider3"
-        group_label: "tier-2"
+        group_label: "voting-group-2"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18598"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
       - name: "EthCvPrimaryProvider4"
-        group_label: "tier-2"
+        group_label: "voting-group-2"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18599"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
       - name: "EthCvPrimaryProvider5"
-        group_label: "external"
+        group_label: "voting-group-3"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18600"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
       - name: "EthCvPrimaryProvider6"
-        group_label: "external"
+        group_label: "voting-group-3"
         endpoints:
           - url: "http://provider-simulator.lava-infra.svc.cluster.local:18601"
             interface: "jsonrpc"
