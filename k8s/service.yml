@@ -252,3 +252,243 @@ spec:
       port: 18587
       targetPort: 18587
       protocol: TCP
+    # Ports 18588-18601 are the four pools added after this list was last
+    # extended: eth-best-sim, eth-priority-sim, eth-precedence-sim and
+    # eth-cv-sim. They were bound by the simulator and published by nothing,
+    # so from inside the cluster they did not exist and every router dialling
+    # them answered "No pairings available".
+    #
+    # 18602-18644 are spare on purpose. A port the Service publishes with
+    # nothing behind it simply refuses the connection, which is a loud and
+    # correct answer. A port the simulator binds and the Service omits is
+    # silent, which is what went wrong. The spares mean the next pool needs
+    # no change here at all. tests/test_service_publishes_every_port.py
+    # fails if a topology port is ever missing again.
+    - name: provider-best-1
+      port: 18588
+      targetPort: 18588
+      protocol: TCP
+    - name: provider-best-2
+      port: 18589
+      targetPort: 18589
+      protocol: TCP
+    - name: provider-best-3
+      port: 18590
+      targetPort: 18590
+      protocol: TCP
+    - name: provider-prio-1
+      port: 18591
+      targetPort: 18591
+      protocol: TCP
+    - name: provider-prio-2
+      port: 18592
+      targetPort: 18592
+      protocol: TCP
+    - name: provider-prio-3
+      port: 18593
+      targetPort: 18593
+      protocol: TCP
+    - name: provider-prec-1
+      port: 18594
+      targetPort: 18594
+      protocol: TCP
+    - name: provider-prec-2
+      port: 18595
+      targetPort: 18595
+      protocol: TCP
+    - name: provider-cv-1
+      port: 18596
+      targetPort: 18596
+      protocol: TCP
+    - name: provider-cv-2
+      port: 18597
+      targetPort: 18597
+      protocol: TCP
+    - name: provider-cv-3
+      port: 18598
+      targetPort: 18598
+      protocol: TCP
+    - name: provider-cv-4
+      port: 18599
+      targetPort: 18599
+      protocol: TCP
+    - name: provider-cv-5
+      port: 18600
+      targetPort: 18600
+      protocol: TCP
+    - name: provider-cv-6
+      port: 18601
+      targetPort: 18601
+      protocol: TCP
+    - name: spare-18602
+      port: 18602
+      targetPort: 18602
+      protocol: TCP
+    - name: spare-18603
+      port: 18603
+      targetPort: 18603
+      protocol: TCP
+    - name: spare-18604
+      port: 18604
+      targetPort: 18604
+      protocol: TCP
+    - name: spare-18605
+      port: 18605
+      targetPort: 18605
+      protocol: TCP
+    - name: spare-18606
+      port: 18606
+      targetPort: 18606
+      protocol: TCP
+    - name: spare-18607
+      port: 18607
+      targetPort: 18607
+      protocol: TCP
+    - name: spare-18608
+      port: 18608
+      targetPort: 18608
+      protocol: TCP
+    - name: spare-18609
+      port: 18609
+      targetPort: 18609
+      protocol: TCP
+    - name: spare-18610
+      port: 18610
+      targetPort: 18610
+      protocol: TCP
+    - name: spare-18611
+      port: 18611
+      targetPort: 18611
+      protocol: TCP
+    - name: spare-18612
+      port: 18612
+      targetPort: 18612
+      protocol: TCP
+    - name: spare-18613
+      port: 18613
+      targetPort: 18613
+      protocol: TCP
+    - name: spare-18614
+      port: 18614
+      targetPort: 18614
+      protocol: TCP
+    - name: spare-18615
+      port: 18615
+      targetPort: 18615
+      protocol: TCP
+    - name: spare-18616
+      port: 18616
+      targetPort: 18616
+      protocol: TCP
+    - name: spare-18617
+      port: 18617
+      targetPort: 18617
+      protocol: TCP
+    - name: spare-18618
+      port: 18618
+      targetPort: 18618
+      protocol: TCP
+    - name: spare-18619
+      port: 18619
+      targetPort: 18619
+      protocol: TCP
+    - name: spare-18620
+      port: 18620
+      targetPort: 18620
+      protocol: TCP
+    - name: spare-18621
+      port: 18621
+      targetPort: 18621
+      protocol: TCP
+    - name: spare-18622
+      port: 18622
+      targetPort: 18622
+      protocol: TCP
+    - name: spare-18623
+      port: 18623
+      targetPort: 18623
+      protocol: TCP
+    - name: spare-18624
+      port: 18624
+      targetPort: 18624
+      protocol: TCP
+    - name: spare-18625
+      port: 18625
+      targetPort: 18625
+      protocol: TCP
+    - name: spare-18626
+      port: 18626
+      targetPort: 18626
+      protocol: TCP
+    - name: spare-18627
+      port: 18627
+      targetPort: 18627
+      protocol: TCP
+    - name: spare-18628
+      port: 18628
+      targetPort: 18628
+      protocol: TCP
+    - name: spare-18629
+      port: 18629
+      targetPort: 18629
+      protocol: TCP
+    - name: spare-18630
+      port: 18630
+      targetPort: 18630
+      protocol: TCP
+    - name: spare-18631
+      port: 18631
+      targetPort: 18631
+      protocol: TCP
+    - name: spare-18632
+      port: 18632
+      targetPort: 18632
+      protocol: TCP
+    - name: spare-18633
+      port: 18633
+      targetPort: 18633
+      protocol: TCP
+    - name: spare-18634
+      port: 18634
+      targetPort: 18634
+      protocol: TCP
+    - name: spare-18635
+      port: 18635
+      targetPort: 18635
+      protocol: TCP
+    - name: spare-18636
+      port: 18636
+      targetPort: 18636
+      protocol: TCP
+    - name: spare-18637
+      port: 18637
+      targetPort: 18637
+      protocol: TCP
+    - name: spare-18638
+      port: 18638
+      targetPort: 18638
+      protocol: TCP
+    - name: spare-18639
+      port: 18639
+      targetPort: 18639
+      protocol: TCP
+    - name: spare-18640
+      port: 18640
+      targetPort: 18640
+      protocol: TCP
+    - name: spare-18641
+      port: 18641
+      targetPort: 18641
+      protocol: TCP
+    - name: spare-18642
+      port: 18642
+      targetPort: 18642
+      protocol: TCP
+    - name: spare-18643
+      port: 18643
+      targetPort: 18643
+      protocol: TCP
+    - name: spare-18644
+      port: 18644
+      targetPort: 18644
+      protocol: TCP

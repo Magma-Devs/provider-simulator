@@ -240,6 +240,177 @@ spec:
             - name: provider-duo-2
               containerPort: 18587
               protocol: TCP
+            - name: provider-best-1
+              containerPort: 18588
+              protocol: TCP
+            - name: provider-best-2
+              containerPort: 18589
+              protocol: TCP
+            - name: provider-best-3
+              containerPort: 18590
+              protocol: TCP
+            - name: provider-prio-1
+              containerPort: 18591
+              protocol: TCP
+            - name: provider-prio-2
+              containerPort: 18592
+              protocol: TCP
+            - name: provider-prio-3
+              containerPort: 18593
+              protocol: TCP
+            - name: provider-prec-1
+              containerPort: 18594
+              protocol: TCP
+            - name: provider-prec-2
+              containerPort: 18595
+              protocol: TCP
+            - name: provider-cv-1
+              containerPort: 18596
+              protocol: TCP
+            - name: provider-cv-2
+              containerPort: 18597
+              protocol: TCP
+            - name: provider-cv-3
+              containerPort: 18598
+              protocol: TCP
+            - name: provider-cv-4
+              containerPort: 18599
+              protocol: TCP
+            - name: provider-cv-5
+              containerPort: 18600
+              protocol: TCP
+            - name: provider-cv-6
+              containerPort: 18601
+              protocol: TCP
+            - name: spare-18602
+              containerPort: 18602
+              protocol: TCP
+            - name: spare-18603
+              containerPort: 18603
+              protocol: TCP
+            - name: spare-18604
+              containerPort: 18604
+              protocol: TCP
+            - name: spare-18605
+              containerPort: 18605
+              protocol: TCP
+            - name: spare-18606
+              containerPort: 18606
+              protocol: TCP
+            - name: spare-18607
+              containerPort: 18607
+              protocol: TCP
+            - name: spare-18608
+              containerPort: 18608
+              protocol: TCP
+            - name: spare-18609
+              containerPort: 18609
+              protocol: TCP
+            - name: spare-18610
+              containerPort: 18610
+              protocol: TCP
+            - name: spare-18611
+              containerPort: 18611
+              protocol: TCP
+            - name: spare-18612
+              containerPort: 18612
+              protocol: TCP
+            - name: spare-18613
+              containerPort: 18613
+              protocol: TCP
+            - name: spare-18614
+              containerPort: 18614
+              protocol: TCP
+            - name: spare-18615
+              containerPort: 18615
+              protocol: TCP
+            - name: spare-18616
+              containerPort: 18616
+              protocol: TCP
+            - name: spare-18617
+              containerPort: 18617
+              protocol: TCP
+            - name: spare-18618
+              containerPort: 18618
+              protocol: TCP
+            - name: spare-18619
+              containerPort: 18619
+              protocol: TCP
+            - name: spare-18620
+              containerPort: 18620
+              protocol: TCP
+            - name: spare-18621
+              containerPort: 18621
+              protocol: TCP
+            - name: spare-18622
+              containerPort: 18622
+              protocol: TCP
+            - name: spare-18623
+              containerPort: 18623
+              protocol: TCP
+            - name: spare-18624
+              containerPort: 18624
+              protocol: TCP
+            - name: spare-18625
+              containerPort: 18625
+              protocol: TCP
+            - name: spare-18626
+              containerPort: 18626
+              protocol: TCP
+            - name: spare-18627
+              containerPort: 18627
+              protocol: TCP
+            - name: spare-18628
+              containerPort: 18628
+              protocol: TCP
+            - name: spare-18629
+              containerPort: 18629
+              protocol: TCP
+            - name: spare-18630
+              containerPort: 18630
+              protocol: TCP
+            - name: spare-18631
+              containerPort: 18631
+              protocol: TCP
+            - name: spare-18632
+              containerPort: 18632
+              protocol: TCP
+            - name: spare-18633
+              containerPort: 18633
+              protocol: TCP
+            - name: spare-18634
+              containerPort: 18634
+              protocol: TCP
+            - name: spare-18635
+              containerPort: 18635
+              protocol: TCP
+            - name: spare-18636
+              containerPort: 18636
+              protocol: TCP
+            - name: spare-18637
+              containerPort: 18637
+              protocol: TCP
+            - name: spare-18638
+              containerPort: 18638
+              protocol: TCP
+            - name: spare-18639
+              containerPort: 18639
+              protocol: TCP
+            - name: spare-18640
+              containerPort: 18640
+              protocol: TCP
+            - name: spare-18641
+              containerPort: 18641
+              protocol: TCP
+            - name: spare-18642
+              containerPort: 18642
+              protocol: TCP
+            - name: spare-18643
+              containerPort: 18643
+              protocol: TCP
+            - name: spare-18644
+              containerPort: 18644
+              protocol: TCP
           resources:
             requests:
               cpu: "100m"
