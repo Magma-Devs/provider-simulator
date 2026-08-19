@@ -55,6 +55,11 @@ stake-weight experiment router — canonical has no router wired to this pool).
 One pool exists as a bound listener only, with no router wired yet: ln-sim
 (upstream LN router pending). eth-cv-sim is the cross-validation topology —
 six providers in three groups, wired in values_sim.yml like the rest.
+eth-best-sim, eth-priority-sim and eth-precedence-sim have no router wired
+either. They are reserved for three local-cluster-only routers, each meant to
+boot with a different upstream-selection setting once wired.
+The listener ports mirror constants.py, the port set the running server binds,
+and a unit test cross-checks the two so they cannot drift.
 
 This table is the only source of port numbers. ``constants.py`` used to carry a
 parallel set of port dicts keyed by a second, older numbering; those keys
@@ -236,6 +241,18 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
     ("lava-sim-tm", "lava", "4", "LavaTmBackupProvider4", True, "", (("tendermintrpc", "http", 18569),)),
     ("lava-sim-tm", "lava", "5", "LavaTmBackupProvider5", True, "", (("tendermintrpc", "http", 18570),)),
     ("lava-sim-tm", "lava", "6", "LavaTmBackupProvider6", True, "", (("tendermintrpc", "http", 18571),)),
+    # eth-best-sim / eth-priority-sim / eth-precedence-sim: three primaries each,
+    # no backup tier and no cross-validation group. Each is reserved for a router
+    # that boots with a different upstream-selection setting. Dedicated listeners,
+    # so a fault set on one never reaches another pool.
+    ("eth-best-sim", "eth", "1", "EthBestProvider1", False, "", (("jsonrpc", "http", 18588),)),
+    ("eth-best-sim", "eth", "2", "EthBestProvider2", False, "", (("jsonrpc", "http", 18589),)),
+    ("eth-best-sim", "eth", "3", "EthBestProvider3", False, "", (("jsonrpc", "http", 18590),)),
+    ("eth-priority-sim", "eth", "1", "EthPriorityProvider1", False, "", (("jsonrpc", "http", 18591),)),
+    ("eth-priority-sim", "eth", "2", "EthPriorityProvider2", False, "", (("jsonrpc", "http", 18592),)),
+    ("eth-priority-sim", "eth", "3", "EthPriorityProvider3", False, "", (("jsonrpc", "http", 18593),)),
+    ("eth-precedence-sim", "eth", "1", "EthPrecedenceProvider1", False, "", (("jsonrpc", "http", 18594),)),
+    ("eth-precedence-sim", "eth", "2", "EthPrecedenceProvider2", False, "", (("jsonrpc", "http", 18595),)),
 )
 
 

@@ -55,6 +55,50 @@ def test_eth_duo_sim_providers_resolve_and_are_distinct_from_eth_sim():
     assert low is not reg.provider("eth-sim", "2")
 
 
+def test_best_priority_precedence_sim_providers_are_distinct_from_each_other_and_eth_sim():
+    """eth-best-sim, eth-priority-sim, and eth-precedence-sim each get their
+    own Provider objects — none of them share state with eth-sim, eth-duo-sim,
+    or each other.
+
+    Mirrors ``test_eth_duo_sim_providers_resolve_and_are_distinct_from_eth_sim``
+    above: a /scenario flip meant for one router's test must not leak into
+    another router's traffic. Each pool owns its own listeners, so the
+    ``pool:pid`` key the control API uses resolves to a different Provider for
+    each — the bare pid ``1`` repeating across pools is expected and harmless.
+    """
+    reg = build_registry()
+    best = [reg.provider("eth-best-sim", pid) for pid in ("1", "2", "3")]
+    priority = [reg.provider("eth-priority-sim", pid) for pid in ("1", "2", "3")]
+    precedence = [reg.provider("eth-precedence-sim", pid) for pid in ("1", "2")]
+
+    assert [p.key for p in best] == ["eth-best-sim:1", "eth-best-sim:2", "eth-best-sim:3"]
+    assert [p.key for p in priority] == [
+        "eth-priority-sim:1",
+        "eth-priority-sim:2",
+        "eth-priority-sim:3",
+    ]
+    assert [p.key for p in precedence] == ["eth-precedence-sim:1", "eth-precedence-sim:2"]
+
+    others = [
+        reg.provider("eth-sim", "1"),
+        reg.provider("eth-sim", "2"),
+        reg.provider("eth-duo-sim", "1"),
+        reg.provider("eth-duo-sim", "2"),
+    ]
+    all_new = best + priority + precedence
+    for provider in all_new:
+        for other in others:
+            assert provider is not other, (
+                f"{provider.key} must be a distinct object from {other.key} — "
+                f"sharing one would let a fault meant for one router's test "
+                f"reach the other router's traffic"
+            )
+    # And distinct from each other, pool to pool.
+    for i, provider in enumerate(all_new):
+        for other in all_new[i + 1 :]:
+            assert provider is not other, f"{provider.key} and {other.key} must be distinct objects"
+
+
 def test_build_registry_reads_patched_topology(monkeypatch):
     small = (("eth-sim", "eth", "1", "EthProvider1", False, "", (("jsonrpc", "http", 18545),)),)
     monkeypatch.setattr(topology_module, "TOPOLOGY", small)

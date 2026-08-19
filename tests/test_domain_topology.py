@@ -12,6 +12,9 @@ EXPECTED_POOLS = {
     "eth-solo-sim",
     "eth-duo-sim",
     "eth-cv-sim",
+    "eth-best-sim",
+    "eth-priority-sim",
+    "eth-precedence-sim",
     "btc-sim",
     "ln-sim",
     "solana-sim",
@@ -218,6 +221,17 @@ def test_port_of_raises_when_a_provider_has_no_websocket_door():
 # the only honest check is the chosen name against the one in the table.
 # Deriving the expected value would compare the table against itself.
 AGREED_NAMES = {
+    # Three selection-policy pools. Nothing tells the providers inside one
+    # apart, so each takes the role its pool is named for: Best, Priority,
+    # Precedence. Those three roles were reserved for exactly these pools.
+    ("eth-best-sim", "1"): "EthBestProvider1",
+    ("eth-best-sim", "2"): "EthBestProvider2",
+    ("eth-best-sim", "3"): "EthBestProvider3",
+    ("eth-priority-sim", "1"): "EthPriorityProvider1",
+    ("eth-priority-sim", "2"): "EthPriorityProvider2",
+    ("eth-priority-sim", "3"): "EthPriorityProvider3",
+    ("eth-precedence-sim", "1"): "EthPrecedenceProvider1",
+    ("eth-precedence-sim", "2"): "EthPrecedenceProvider2",
     # Cross-validation pool: six providers, nothing to tell them apart, so
     # Primary — the same choice btc-sim, ln-sim and solana-sim make.
     ("eth-cv-sim", "1"): "EthCvPrimaryProvider1",
