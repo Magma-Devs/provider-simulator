@@ -41,15 +41,30 @@ The form is `<Pool><Role>Provider<slot>`, for example `EthPrimaryProvider1` and
   the address to send a fault to.
 - **No word is said twice.** Some pool names already contain their own role
   word. `eth-solo-sim` plus the role `Solo` would read `EthSoloSolo`, so the
-  pool word is dropped and the name is `EthSoloProvider1`.
+  pool word is dropped and the name is `EthSoloProvider1`, not
+  `EthSoloSoloProvider1`.
 - **A name must be unique per chain and api-interface.** Two providers on one
   chain and interface cannot share a name or the router exits at startup. The
   chart lowercases every name first, so two names that differ only in case
   arrive identical and collide.
 
 The chart lowercases the name and turns spaces into hyphens before the router
-reads it, so `EthPrimaryProvider1` reaches a test as `ethprimaryprovider1`.
-Compare lowercased, always.
+reads it, so `EthPrimaryProvider1` reaches a test as `ethprimaryprovider1`. The
+template is `charts/smart-router/templates/routers_configmap.yaml` in the
+smart-router-helm-chart repository, and it renders
+`{{ $node.name | lower | replace " " "-" }}`. Compare lowercased, always.
+
+The form also works backwards. A test that has read a name out of a header can
+ask `GET /providers?name=<name>` which slot that was, and the filter lowercases
+both sides for exactly the reason above.
+
+**Ask with the pool, never with the name alone.** A name is unique across every
+pool today, and that is a fact about today rather than a rule. Under the scheme
+this table replaced, `SimProvider1` was the name of slot 1 in three pools at
+once: `eth-sim`, `lava-sim-rest` and `lava-sim-tm`. All three were correct. The
+names became unique only when they moved into the table on 2026-08-18. A test
+that named a provider without saying which pool was right by luck, and would
+have gone wrong at the next rename. Pass `pool` and `name` together.
 _Avoid_: using a name to address a provider through the control API
 
 **Role**:
@@ -68,7 +83,10 @@ quietly building a name with a hole in it.
 
 The role is the middle part of the name. It is not a column of its own. It is
 visible inside the `name` column of the topology table. In `EthBackupProvider4`,
-the role is Backup, but nothing stores that word separately.
+the role is Backup, but nothing stores that word separately, which also means
+nothing can check it. The whole name is checked twice, against a hand-written
+list in `tests/test_domain_topology.py` and against the router's values file in
+`tests/test_values_sim_matches_topology.py`. Neither reads the role out of it.
 _Avoid_: type, kind, label, category
 
 **Group**:
@@ -83,6 +101,12 @@ The deployment chooses it, not the simulator. The router's values file gives
 each node a `group_label` and the table copies it. No simulator behaviour
 depends on it: the only code here that reads it serves it on `GET /providers`,
 so a caller can ask instead of writing it down.
+
+That values file, `config/values_sim.yml`, exists in both repositories. The copy
+here blanks every real-node URL that carries a key, leaving a placeholder such
+as `YOUR_LAVA_GATEWAY_KEY`, and it carries fewer real-node routers. Every
+simulated-router section is identical in both, group labels included. Only the
+comments differ.
 
 The label is written `voting-group-<n>`. Cross-validation is a vote: providers
 answer, matching answers are counted, and a threshold wins. Providers sharing a
@@ -127,9 +151,19 @@ _Avoid_: network, chain id, chain family
 The table in `provider_simulator/topology.py`. It is the one place that says what
 exists — every pool, every provider, every endpoint. Each row also carries the
 provider's `name`, its `is_backup` flag and its `group_label`. That makes seven
-fields per row. Four of them, pool, chain, pid and endpoints, decide what the
-simulator runs. The other three, `name`, `is_backup` and `group_label`, are only
-recorded. A caller reads them instead of guessing.
+fields per row:
+
+    (pool, chain, pid, name, is_backup, group_label, endpoints)
+
+Four of them, pool, chain, pid and endpoints, decide what the simulator runs.
+The other three, `name`, `is_backup` and `group_label`, are only recorded. A
+caller reads them instead of guessing.
+
+Widening this row is never a one-line change. Every place that unpacks it has to
+be rewritten, including test bodies that build their own rows and never mention
+`TOPOLOGY`. The places that read a row by position do not break, which is worse:
+they quietly read the wrong field. The endpoints tuple has already moved from
+index 3 to 5 to 6 as the row grew.
 _Avoid_: config, port map, provider list
 
 **Registry**:
