@@ -9,6 +9,22 @@ is the glossary for that work: one word, one meaning.
 **Pool**:
 One router's own set of providers. Its name equals the router id, such as
 `eth-sim` or `lava-sim-rest`.
+
+A new pool is named `<chain>-<what makes it different>-sim`. The middle part is
+left out when nothing distinguishes the pool, which is why `eth-sim`, `btc-sim`,
+`ln-sim` and `solana-sim` are two words. It is filled in when something does:
+`eth-solo-sim`, `eth-duo-sim`, `eth-cv-sim`, `solana-solo-sim`.
+
+Three pools predate the rule and put the distinguishing word last instead:
+`lava-sim-grpc`, `lava-sim-rest` and `lava-sim-tm`. They are staying as they
+are. Renaming them would touch about eighty files across three repositories and
+change four public hostnames, and nothing is wrong with them beyond the word
+order. Follow the rule for anything new; leave those three alone.
+
+The pool name is not only a label. The same string is the simulator's pool key,
+the router id in the values file, the base of the deployment name once `-router`
+is added, and part of the public hostname. One word decides all four, so it is
+worth a moment.
 _Avoid_: provider group, chain, router, cluster
 
 **Provider**:
