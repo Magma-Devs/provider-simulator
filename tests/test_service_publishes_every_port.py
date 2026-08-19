@@ -14,8 +14,7 @@ silent. That asymmetry is why this test only checks one direction.
 """
 
 import pathlib
-
-import yaml
+import re
 
 from provider_simulator.topology import TOPOLOGY
 
@@ -23,22 +22,46 @@ _K8S = pathlib.Path(__file__).resolve().parents[1] / "k8s"
 
 
 def _topology_ports() -> set:
-    return {
-        endpoint[2]
-        for row in TOPOLOGY
-        for endpoint in row[-1]
-    }
+    return {endpoint[2] for row in TOPOLOGY for endpoint in row[-1]}
+
+
+_PORT_LINE = re.compile(r"^\s*(?:port|containerPort):\s*(\d+)\s*$", re.M)
+_NAME_LINE = re.compile(r"^\s*-\s*name:\s*(\S+)\s*$", re.M)
+
+
+def _ports_in(filename: str) -> set:
+    """Every port number the manifest declares.
+
+    Parsed with a regex rather than a YAML library on purpose. This repo's
+    requirements.txt is stdlib-only apart from gRPC, by design, and CI installs
+    nothing else — a test that needed PyYAML would fail to import there while
+    passing on a developer's machine. The manifests are ours and their shape is
+    fixed, so matching the port lines directly is enough.
+
+    Raises if it finds implausibly few. A parser that quietly returns an empty
+    set would make every assertion below pass while checking nothing, which is
+    the exact failure this whole file exists to catch.
+    """
+    text = (_K8S / filename).read_text()
+    ports = {int(m) for m in _PORT_LINE.findall(text)}
+    assert len(ports) > 40, (
+        f"read only {len(ports)} ports out of k8s/{filename}; the file declares "
+        f"far more than that, so this parser has stopped matching and every "
+        f"check in this file would pass without reading anything"
+    )
+    return ports
 
 
 def _service_ports() -> set:
-    spec = yaml.safe_load((_K8S / "service.yml").read_text())
-    return {p["port"] for p in spec["spec"]["ports"]}
+    return _ports_in("service.yml")
 
 
 def _container_ports() -> set:
-    spec = yaml.safe_load((_K8S / "deployment.yml").read_text())
-    container = spec["spec"]["template"]["spec"]["containers"][0]
-    return {p["containerPort"] for p in container["ports"]}
+    return _ports_in("deployment.yml")
+
+
+def _service_port_names() -> list:
+    return _NAME_LINE.findall((_K8S / "service.yml").read_text())
 
 
 def test_the_service_publishes_every_port_the_topology_binds():
@@ -72,7 +95,6 @@ def test_service_port_names_are_unique():
     Asserting a limit the running cluster does not enforce would fail this test
     on configuration that demonstrably works.
     """
-    spec = yaml.safe_load((_K8S / "service.yml").read_text())
-    names = [p["name"] for p in spec["spec"]["ports"]]
+    names = _service_port_names()
     duplicates = sorted({n for n in names if names.count(n) > 1})
     assert not duplicates, f"duplicate Service port names: {duplicates}"
