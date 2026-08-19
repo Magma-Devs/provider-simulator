@@ -33,7 +33,7 @@ def test_every_provider_in_the_topology_is_served():
     """One entry per provider, keyed the way stats and scenario already key
     theirs: the pool name, a colon, then the pool slot."""
     providers = _providers()
-    assert len(providers) == 43, sorted(providers)
+    assert len(providers) == 51, sorted(providers)
     assert "eth-sim:1" in providers
     assert "lava-sim-tm:6" in providers
 
@@ -89,7 +89,7 @@ def test_a_provider_with_no_label_reports_an_empty_string():
     every unlabelled provider in one bucket without a special case."""
     providers = _providers()
     unlabelled = [k for k, v in providers.items() if v["group_label"] == ""]
-    assert len(unlabelled) == 34, f"expected 34 unlabelled, got {len(unlabelled)}"
+    assert len(unlabelled) == 42, f"expected 42 unlabelled, got {len(unlabelled)}"
 
 
 # ── Filters ───────────────────────────────────────────────────────────────────

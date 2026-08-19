@@ -327,6 +327,15 @@ POOLS_WITH_NO_ROUTER_HERE = {
     "eth-duo-sim",
     # No router dials it yet; the ports are allocated so the pattern stays symmetric.
     "ln-sim",
+    # Three selection-policy pools, each meant for a router that boots with a
+    # different upstream-selection setting. The listeners are declared here so
+    # the ports are reserved and cannot be handed to something else. No router
+    # entry exists in this values file for them, and none was found checked in
+    # anywhere else at the time of writing, although three matching routers do
+    # run on the local k3d cluster. Wire them properly, or drop these rows.
+    "eth-best-sim",
+    "eth-priority-sim",
+    "eth-precedence-sim",
 }
 
 
