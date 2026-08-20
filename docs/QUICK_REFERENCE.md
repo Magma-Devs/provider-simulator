@@ -81,6 +81,10 @@ Router ─→ Provider 1/2/3 (ports 18545-47) ─→ JSONRPCHandler ─→ Read 
 - `POST /reset` → Reset scenario config to healthy
 - `POST /history/clear` → Clear history/counters only
 - `POST /reset/all` → Reset scenario + clear history
+- All three take an optional `{"pool": "<pool>"}` body. Without it they clear
+  every pool and rewind every chain's height. With it they touch that pool's
+  providers and only the chain that pool serves. An unknown pool is a 400
+  naming the pools that exist.
 - `GET /scenario` → Read current state
 - `GET /health` → Health check
 - `GET /stats` → Per-provider counters

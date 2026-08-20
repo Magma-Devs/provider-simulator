@@ -46,6 +46,21 @@ curl -si -X POST "$SIM_CONTROL_URL/history/clear"
 
 # ── reset everything — scenario config AND history ───────────────────────────
 curl -si -X POST "$SIM_CONTROL_URL/reset/all"
+
+# ── the same three, confined to ONE pool (one router's provider set) ─────────
+# Without a pool the reset clears every pool and rewinds every chain's height,
+# which is how one test's clean-up reaches into another router's providers.
+# With a pool it touches that pool's providers and only the chain that pool
+# serves. The reply names the scope it actually cleared, so a caller can check
+# rather than assume.
+curl -si -X POST "$SIM_CONTROL_URL/reset/all" -H 'Content-Type: application/json' -d '{"pool":"btc-sim"}'
+# → {"status":"scenario reset and history cleared","pool":"btc-sim",
+#    "providers":["btc-sim:1","btc-sim:2","btc-sim:3"],"chains":["btc"]}
+
+# A pool that does not exist is a 400 listing the pools that do — never a
+# quiet success that clears nothing.
+curl -si -X POST "$SIM_CONTROL_URL/reset" -H 'Content-Type: application/json' -d '{"pool":"eth-simm"}'
+# → 400 {"error":"no pool 'eth-simm'; pools are ['btc-sim', 'eth-best-sim', ...]"}
 ```
 
 ---

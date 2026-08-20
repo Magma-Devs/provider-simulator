@@ -647,11 +647,11 @@ class _ControlHandler(BaseHTTPRequestHandler):
         if self.path == "/scenario":
             status, payload = control.apply_scenario(body)
         elif self.path == "/reset":
-            status, payload = control.reset()
+            status, payload = control.reset(body.get("pool"))
         elif self.path == "/history/clear":
-            status, payload = control.clear_history()
+            status, payload = control.clear_history(body.get("pool"))
         elif self.path == "/reset/all":
-            status, payload = control.reset_all()
+            status, payload = control.reset_all(body.get("pool"))
         elif self.path == "/advance":
             status, payload = control.advance(body)
         elif self.path == "/ws/emit":
