@@ -179,33 +179,85 @@ class ControlApi:
         return 200, {"status": "ok", "applied": applied}
 
     # ── resets ──────────────────────────────────────────────────────────────
-    def reset(self) -> tuple[int, dict]:
-        self._reset_heads()
-        for provider in self.registry.all_providers():
-            provider.scenario.reset()
-            provider.quirks.reset()
-            provider.reset_fail()
-        return 200, {"status": "scenario reset"}
+    # Every reset takes an optional ``pool``. Without one it clears everything,
+    # exactly as it always has. With one it touches that pool's providers only,
+    # so one router's clean-up can no longer reach into another router's
+    # providers.
+    #
+    # Block heads are a weaker guarantee, and the difference matters. A head is
+    # one value per CHAIN, shared by every pool on that chain. Scoping moves the
+    # heads of the chains that pool serves instead of every chain, but seven
+    # pools serve eth, so an eth-sim reset still rewinds the head an
+    # eth-solo-sim test is watching. Providers are isolated; heads are narrowed.
+    #
+    # Only the scenario reset moves a head at all — clearing history leaves
+    # every head alone.
+    #
+    # An unknown pool name is a 400 that lists the pools that exist. Resetting
+    # nothing and reporting success is the failure this scoping exists to
+    # prevent: the test still runs, still passes, and measures the previous
+    # test's leftovers.
+    def reset(self, pool: str | None = None) -> tuple[int, dict]:
+        return self._perform_reset(pool, scenario=True, history=False, status="scenario reset")
 
-    def clear_history(self) -> tuple[int, dict]:
-        for provider in self.registry.all_providers():
-            provider.log.clear()
-        return 200, {"status": "history cleared"}
+    def clear_history(self, pool: str | None = None) -> tuple[int, dict]:
+        return self._perform_reset(pool, scenario=False, history=True, status="history cleared")
 
-    def reset_all(self) -> tuple[int, dict]:
-        self._reset_heads()
-        for provider in self.registry.all_providers():
-            provider.scenario.reset()
-            provider.quirks.reset()
-            provider.reset_fail()
-            provider.log.clear()
-        return 200, {"status": "scenario reset and history cleared"}
+    def reset_all(self, pool: str | None = None) -> tuple[int, dict]:
+        return self._perform_reset(pool, scenario=True, history=True, status="scenario reset and history cleared")
 
-    def _reset_heads(self) -> None:
-        for chain in CHAINS.values():
-            head = getattr(chain, "head", None)
-            if head is not None:
-                head.reset()
+    def _perform_reset(self, pool: str | None, *, scenario: bool, history: bool, status: str) -> tuple[int, dict]:
+        """Clear the requested state over the requested scope.
+
+        The reply names the scope it actually cleared — the pool (``null`` for
+        a whole-simulator reset), every provider key it touched and every chain
+        whose head it moved. A caller can therefore check what happened rather
+        than trust that the call meant what it asked for.
+        """
+        providers, chains, error = self._scope(pool)
+        if error:
+            return 400, {"error": error}
+        if scenario:
+            for _, chain in chains:
+                head = getattr(chain, "head", None)
+                if head is not None:
+                    head.reset()
+        for provider in providers:
+            if scenario:
+                provider.scenario.reset()
+                provider.quirks.reset()
+                provider.reset_fail()
+            if history:
+                provider.log.clear()
+        return 200, {
+            "status": status,
+            "pool": pool,
+            "providers": sorted(p.key for p in providers),
+            "chains": sorted({name for name, _ in chains}) if scenario else [],
+        }
+
+    def _scope(self, pool: str | None) -> tuple[list, list, str]:
+        """Resolve a pool name into the providers and chains a reset may touch.
+
+        ``None`` means the whole simulator: every provider, every chain. A pool
+        name means that pool's providers and the single chain it serves (a pool
+        serves exactly one chain — ``build_registry`` refuses a pool that
+        declares two). Chains come back as ``(name, chain)`` pairs so the reply
+        can name them.
+
+        Returns ``(providers, chains, error)``; a non-empty error means the
+        pool does not exist and nothing was touched.
+        """
+        if pool is None:
+            return self.registry.all_providers(), list(CHAINS.items()), ""
+        if not isinstance(pool, str):
+            return [], [], f"pool must be a string, got {type(pool).__name__}"
+        if pool not in self.registry.pools:
+            return [], [], f"no pool {pool!r}; pools are {sorted(self.registry.pools)!r}"
+        resolved = self.registry.pools[pool]
+        chain = CHAINS.get(resolved.chain)
+        chains = [(resolved.chain, chain)] if chain is not None else []
+        return list(resolved.providers.values()), chains, ""
 
     # ── POST /advance ─────────────────────────────────────────────────────────
     def advance(self, body: object) -> tuple[int, dict]:

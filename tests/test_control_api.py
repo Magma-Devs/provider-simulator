@@ -2,6 +2,7 @@
 scenario apply (staged, old-format 400, quirk routing, responses normalization),
 resets, stats/history filters, advance, and ws/emit."""
 
+from provider_simulator.chains import CHAINS
 from provider_simulator.control_api import ControlApi
 from provider_simulator.domain.registry import build_registry
 from provider_simulator.listeners.ws import WsSubscriptions
@@ -93,6 +94,131 @@ def test_reset_clears_scenario():
     api.reset()
     _, scen = api.get_scenario()
     assert scen["providers"]["eth-sim:1"]["mode"] == "success"
+
+
+def _arm_two_pools(api):
+    """Put one fault in eth-sim and one in btc-sim, and prove both landed."""
+    st, _ = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down"}, "btc-sim:1": {"mode": "down"}}})
+    assert st == 200
+    _, scen = api.get_scenario()
+    assert scen["providers"]["eth-sim:1"]["mode"] == "down"
+    assert scen["providers"]["btc-sim:1"]["mode"] == "down"
+
+
+def test_reset_one_pool_leaves_another_pools_fault_armed():
+    api = _api()
+    _arm_two_pools(api)
+    st, resp = api.reset("btc-sim")
+    assert st == 200
+    assert resp["pool"] == "btc-sim"
+    _, scen = api.get_scenario()
+    assert scen["providers"]["btc-sim:1"]["mode"] == "success"
+    assert scen["providers"]["eth-sim:1"]["mode"] == "down"
+
+
+def test_reset_without_a_pool_still_clears_every_pool():
+    api = _api()
+    _arm_two_pools(api)
+    st, resp = api.reset()
+    assert st == 200
+    assert resp["pool"] is None
+    _, scen = api.get_scenario()
+    assert scen["providers"]["btc-sim:1"]["mode"] == "success"
+    assert scen["providers"]["eth-sim:1"]["mode"] == "success"
+
+
+def test_reset_unknown_pool_is_400_naming_the_real_pools():
+    api = _api()
+    _arm_two_pools(api)
+    st, resp = api.reset("eth-simm")
+    assert st == 400
+    assert "eth-simm" in resp["error"]
+    for pool in ("eth-sim", "btc-sim", "solana-sim"):
+        assert pool in resp["error"]
+    # A rejected reset must not half-clear anything.
+    _, scen = api.get_scenario()
+    assert scen["providers"]["eth-sim:1"]["mode"] == "down"
+    assert scen["providers"]["btc-sim:1"]["mode"] == "down"
+
+
+def test_reset_all_unknown_pool_is_400_and_clear_history_too():
+    api = _api()
+    for route in (api.reset_all, api.clear_history):
+        st, resp = route("no-such-pool")
+        assert st == 400
+        assert "no-such-pool" in resp["error"]
+        assert "eth-sim" in resp["error"]
+
+
+def test_reset_pool_must_be_a_string():
+    api = _api()
+    st, resp = api.reset(7)
+    assert st == 400
+    assert "string" in resp["error"]
+
+
+def _push(provider, method):
+    provider.log.push(method, "success", 0, interface="jsonrpc", transport="http", port=18545, request_id=1)
+
+
+def test_reset_all_one_pool_leaves_another_pools_history():
+    api = _api()
+    _push(api.registry.provider("eth-sim", "1"), "eth_blockNumber")
+    _push(api.registry.provider("btc-sim", "1"), "getblockcount")
+    st, resp = api.reset_all("btc-sim")
+    assert st == 200
+    assert resp["providers"] == sorted(p.key for p in api.registry.pools["btc-sim"].providers.values())
+    _, hist = api.get_history({})
+    assert [e["method"] for e in hist["history"]] == ["eth_blockNumber"]
+
+
+def test_reset_all_without_a_pool_still_clears_every_history():
+    api = _api()
+    _push(api.registry.provider("eth-sim", "1"), "eth_blockNumber")
+    _push(api.registry.provider("btc-sim", "1"), "getblockcount")
+    st, _ = api.reset_all()
+    assert st == 200
+    _, hist = api.get_history({})
+    assert hist["count"] == 0
+
+
+def test_clear_history_one_pool_leaves_another_pools_history():
+    api = _api()
+    _push(api.registry.provider("eth-sim", "1"), "eth_blockNumber")
+    _push(api.registry.provider("btc-sim", "1"), "getblockcount")
+    st, _ = api.clear_history("eth-sim")
+    assert st == 200
+    _, hist = api.get_history({})
+    assert [e["method"] for e in hist["history"]] == ["getblockcount"]
+
+
+def test_reset_of_another_pool_leaves_this_chains_head_where_it_was():
+    """The nightly failure this scoping fixes: one test's clean-up rewound a
+    chain height a different router was being measured against. eth is the only
+    chain with a movable head today, so btc-sim is the unrelated pool here."""
+    api = _api()
+    try:
+        base = CHAINS["eth"].head.current()
+        api.advance({"chain": "eth", "blocks": 5})
+        assert CHAINS["eth"].head.current() == base + 5
+        st, resp = api.reset("btc-sim")
+        assert st == 200
+        assert resp["chains"] == ["btc"]
+        assert CHAINS["eth"].head.current() == base + 5
+        st, resp = api.reset("eth-sim")
+        assert st == 200
+        assert resp["chains"] == ["eth"]
+        assert CHAINS["eth"].head.current() == base
+    finally:
+        api.reset()  # heads are a shared singleton — don't leak into other tests
+
+
+def test_pool_scoped_reset_names_only_its_own_providers():
+    api = _api()
+    st, resp = api.reset_all("eth-solo-sim")
+    assert st == 200
+    assert resp["providers"] == ["eth-solo-sim:1"]
+    assert resp["chains"] == ["eth"]
 
 
 # ── stats / history ───────────────────────────────────────────────────────────
