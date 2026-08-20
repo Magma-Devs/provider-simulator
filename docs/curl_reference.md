@@ -48,11 +48,17 @@ curl -si -X POST "$SIM_CONTROL_URL/history/clear"
 curl -si -X POST "$SIM_CONTROL_URL/reset/all"
 
 # ── the same three, confined to ONE pool (one router's provider set) ─────────
-# Without a pool the reset clears every pool and rewinds every chain's height,
-# which is how one test's clean-up reaches into another router's providers.
-# With a pool it touches that pool's providers and only the chain that pool
-# serves. The reply names the scope it actually cleared, so a caller can check
-# rather than assume.
+# Without a pool the reset clears every pool, which is how one test's clean-up
+# reaches into another router's providers. With a pool it touches that pool's
+# providers only.
+#
+# Chain heights are different, and only /reset and /reset/all move them —
+# /history/clear never does. A height is one value per chain shared by every
+# pool on it, so a pool scope narrows which chains get rewound but a sibling
+# pool on the same chain still sees it.
+#
+# The reply names the scope it actually cleared, so a caller can check rather
+# than assume.
 curl -si -X POST "$SIM_CONTROL_URL/reset/all" -H 'Content-Type: application/json' -d '{"pool":"btc-sim"}'
 # → {"status":"scenario reset and history cleared","pool":"btc-sim",
 #    "providers":["btc-sim:1","btc-sim:2","btc-sim:3"],"chains":["btc"]}

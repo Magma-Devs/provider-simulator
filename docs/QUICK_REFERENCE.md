@@ -82,9 +82,12 @@ Router ─→ Provider 1/2/3 (ports 18545-47) ─→ JSONRPCHandler ─→ Read 
 - `POST /history/clear` → Clear history/counters only
 - `POST /reset/all` → Reset scenario + clear history
 - All three take an optional `{"pool": "<pool>"}` body. Without it they clear
-  every pool and rewind every chain's height. With it they touch that pool's
-  providers and only the chain that pool serves. An unknown pool is a 400
-  naming the pools that exist.
+  every pool. With it they touch that pool's providers only. An unknown pool
+  is a 400 naming the pools that exist.
+- Chain heights follow a weaker rule, and only `/reset` and `/reset/all` move
+  them at all — clearing history never does. A height is one value per chain,
+  shared by every pool on it, so scoping narrows which chains are rewound but
+  cannot stop a sibling pool on the same chain from seeing it.
 - `GET /scenario` → Read current state
 - `GET /health` → Health check
 - `GET /stats` → Per-provider counters

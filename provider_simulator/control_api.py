@@ -181,9 +181,17 @@ class ControlApi:
     # ── resets ──────────────────────────────────────────────────────────────
     # Every reset takes an optional ``pool``. Without one it clears everything,
     # exactly as it always has. With one it touches that pool's providers only,
-    # and moves only the block heads of the chain that pool serves — so one
-    # router's clean-up can no longer reach into another router's providers or
-    # rewind a chain height a different test is measuring.
+    # so one router's clean-up can no longer reach into another router's
+    # providers.
+    #
+    # Block heads are a weaker guarantee, and the difference matters. A head is
+    # one value per CHAIN, shared by every pool on that chain. Scoping moves the
+    # heads of the chains that pool serves instead of every chain, but seven
+    # pools serve eth, so an eth-sim reset still rewinds the head an
+    # eth-solo-sim test is watching. Providers are isolated; heads are narrowed.
+    #
+    # Only the scenario reset moves a head at all — clearing history leaves
+    # every head alone.
     #
     # An unknown pool name is a 400 that lists the pools that exist. Resetting
     # nothing and reporting success is the failure this scoping exists to
