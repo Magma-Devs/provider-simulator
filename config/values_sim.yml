@@ -258,6 +258,151 @@ routers:
       maxReplicas: 1
       targetCPUUtilizationPercentage: 75
       targetMemoryUtilizationPercentage: 75
+  # eth-duo-sim — the stake-weight experiment router. Exactly TWO primary
+  # providers, no backup tier, equal quality: the simulator serves both with
+  # its default stubs and no injected faults, so the only thing separating them
+  # is the stake written below.
+  #
+  # BOTH stakes must stay explicit. The router treats a static provider with no
+  # stake as legacy and boosts it above the highest explicit stake in the
+  # pairing list. One omitted stake would flip which provider is the favourite
+  # and invalidate the experiment.
+  #
+  # Dedicated listeners 18586-18587, not eth-sim's, so a fault set for one of
+  # eth-sim's providers cannot reach this router.
+  - id: "eth-duo-sim"
+    network: "eth1"
+    nodes:
+      - name: "EthDuoHighProvider1"
+        stake: 45000000000
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18586"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
+      - name: "EthDuoLowProvider2"
+        stake: 5000000000
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18587"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 1
+      targetCPUUtilizationPercentage: 75
+      targetMemoryUtilizationPercentage: 75
+  # eth-best-sim — always pick the highest scoring provider instead of the
+  # weighted lottery the other routers use.
+  #
+  # Its defining router flag is --qos-selection-mode=best, and chart
+  # smart-router-5.15.0 has no key that produces it, so a helm deploy from this
+  # entry would be a plain copy of eth-sim. It runs on the local k3d cluster,
+  # where router arguments are passed directly. The entry is here so this file
+  # matches the pools the simulator actually serves.
+  #
+  # Three primaries: the interesting case is an exact tie between equal nodes,
+  # where best mode must spread across all of them rather than pin every
+  # request on whichever address sorts first. Listeners 18588-18590.
+  - id: "eth-best-sim"
+    network: "eth1"
+    nodes:
+      - name: "EthBestProvider1"
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18588"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
+      - name: "EthBestProvider2"
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18589"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
+      - name: "EthBestProvider3"
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18590"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 1
+      targetCPUUtilizationPercentage: 75
+      targetMemoryUtilizationPercentage: 75
+  # eth-priority-sim — the same providers scored with speed weighted far above
+  # everything else, so its routing can be compared against eth-sim's defaults.
+  #
+  # The router's own form is --qos-selection-priority=fastest, a preset over the
+  # four weights below. The chart has no per-router key for that flag, so the
+  # preset's numbers are written out instead: availability 0.20, latency 0.70,
+  # sync 0.10, stake 0.00. Routing behaviour is identical; what this cannot do
+  # is prove the flag itself works. Listeners 18591-18593.
+  - id: "eth-priority-sim"
+    network: "eth1"
+    providerOptimizerAvailabilityWeight: 0.20
+    providerOptimizerLatencyWeight: 0.70
+    providerOptimizerSyncWeight: 0.10
+    providerOptimizerStakeWeight: 0.00
+    nodes:
+      - name: "EthPriorityProvider1"
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18591"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
+      - name: "EthPriorityProvider2"
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18592"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
+      - name: "EthPriorityProvider3"
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18593"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 1
+      targetCPUUtilizationPercentage: 75
+      targetMemoryUtilizationPercentage: 75
+  # eth-precedence-sim — speed-first like the router above, but with latency
+  # pulled back to 0.10 so no single factor dominates. The pair exists so two
+  # weightings can be compared against each other, not only against the default.
+  #
+  # The router's own form is --qos-selection-priority=fastest plus
+  # --qos-latency-weight=0.10, where the explicit weight overrides the preset's.
+  # That resolves to the four weights below. Listeners 18594-18595.
+  - id: "eth-precedence-sim"
+    network: "eth1"
+    providerOptimizerAvailabilityWeight: 0.20
+    providerOptimizerLatencyWeight: 0.10
+    providerOptimizerSyncWeight: 0.10
+    providerOptimizerStakeWeight: 0.00
+    nodes:
+      - name: "EthPrecedenceProvider1"
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18594"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
+      - name: "EthPrecedenceProvider2"
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18595"
+            interface: "jsonrpc"
+            addons: ["archive", "trace", "debug"]
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 1
+      targetCPUUtilizationPercentage: 75
+      targetMemoryUtilizationPercentage: 75
   # LAVA over REST
   - id: "lava-rest"
     network: "lava"

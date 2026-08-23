@@ -47,17 +47,17 @@ that reads them is ``ControlApi.get_providers``, which serves them on GET
     gets one bucket of unlabelled providers instead of a missing key.
 
 A pool is one router's provider set (one router = one chain + one application
-protocol). Pool names equal the router ids in the router-side values_sim.yml
-wherever a router is wired (eth-sim, eth-solo-sim, btc-sim, solana-sim,
-lava-sim-grpc, lava-sim-rest, lava-sim-tm, eth-cv-sim), or in the k3d-only
-tools/local-cluster/routers.yml in smart_router_automation for eth-duo-sim (the
-stake-weight experiment router — canonical has no router wired to this pool).
-One pool exists as a bound listener only, with no router wired yet: ln-sim
-(upstream LN router pending). eth-cv-sim is the cross-validation topology —
-six providers in three groups, wired in values_sim.yml like the rest.
-eth-best-sim, eth-priority-sim and eth-precedence-sim have no router wired
-either. They are reserved for three local-cluster-only routers, each meant to
-boot with a different upstream-selection setting once wired.
+protocol). Pool names equal the router ids in the router-side values_sim.yml.
+Every pool here has an entry in that file except ln-sim, which exists as a
+bound listener only with no router wired yet (upstream LN router pending).
+eth-cv-sim is the cross-validation topology — six providers in three groups.
+eth-duo-sim is the stake-weight experiment router. eth-best-sim,
+eth-priority-sim and eth-precedence-sim each boot with a different
+upstream-selection setting; priority and precedence run on canonical, while
+eth-best-sim can only ever run on the local k3d cluster, because its defining
+flag --qos-selection-mode=best has no key in chart smart-router-5.15.0 and only
+k3d passes router arguments straight through. Its k3d row ships enabled: false,
+so nothing runs it today; the listeners stand ready for when it is switched on.
 The listener ports mirror constants.py, the port set the running server binds,
 and a unit test cross-checks the two so they cannot drift.
 
