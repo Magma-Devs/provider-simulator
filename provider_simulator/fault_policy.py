@@ -43,6 +43,10 @@ class Verdict:
     error_code: int = 0
     error_message: str = ""
     drop_at: str = "before_headers"
+    # rate_limit kind only: the plain-text body the JSON-RPC listener sends.
+    # REST/Tendermint/gRPC keep building their rate_limit shape from
+    # error_code/error_message above — only jsonrpc.py reads this field.
+    rate_limit_body: str = ""
 
 
 NONE_VERDICT = Verdict(kind="none")
@@ -86,7 +90,16 @@ def ladder(mode: str, scenario: dict) -> Verdict:
     if mode == "drop_connection":
         return Verdict(kind="drop", drop_at=scenario.get("drop_at", "before_headers"))
     if mode == "rate_limit":
-        return Verdict(kind="rate_limit", status=429, error_code=429, error_message="Too many requests")
+        return Verdict(
+            kind="rate_limit",
+            status=429,
+            error_code=429,
+            error_message="Too many requests",
+            rate_limit_body=scenario.get(
+                "rate_limit_body",
+                "Rate limit exceeded. Reduce your request rate, or use an API key for a higher limit.",
+            ),
+        )
     if mode == "error" or random.random() < scenario.get("error_probability", 0.0):
         return Verdict(
             kind="error",

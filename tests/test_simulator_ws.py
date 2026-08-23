@@ -368,7 +368,10 @@ class TestPostHandshakeFaults:
         assert reply["error"]["message"] == "Method not found"
 
     def test_rate_limit_returns_429_error_frame_post_handshake(self, sim):
-        """mode=rate_limit set after handshake returns a 429-shaped error frame."""
+        """mode=rate_limit set after handshake returns a prose frame, not a
+        JSON-RPC error envelope — matching the HTTP shape (see
+        tests/test_simulator.py::test_rate_limit_returns_429). A WS frame
+        carries no HTTP status, so the prose text is the only signal."""
         with WsClient(_WS_HOST, _WS_PORTS["1"], "/ws") as c:
             _control(
                 sim,
@@ -384,8 +387,9 @@ class TestPostHandshakeFaults:
                 },
             )
             c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 8})
-            reply = c.recv_json(timeout=2.0)
-        assert reply["error"]["code"] == 429
+            frame = c.recv_raw(timeout=2.0)
+        body = frame.payload.decode("utf-8")
+        assert not body.lstrip().startswith("{"), f"rate_limit frame must be prose, not JSON; got {body!r}"
 
     def test_hang_yields_no_reply_within_1s(self, sim):
         """mode=hang set after handshake: the reader records history but does not enqueue a reply."""
@@ -1020,7 +1024,8 @@ class TestWsPerMethodFaultOverrides:
         assert "error" not in reply
 
     def test_per_method_mode_rate_limit_emits_429_error_frame(self, sim):
-        """Per-method ``mode: rate_limit`` emits a JSON-RPC error frame with code 429."""
+        """Per-method ``mode: rate_limit`` emits a prose frame, not a
+        JSON-RPC error envelope (see test_rate_limit_returns_429_error_frame_post_handshake)."""
         _control(
             sim,
             "POST",
@@ -1039,10 +1044,9 @@ class TestWsPerMethodFaultOverrides:
         )
         with WsClient(_WS_HOST, _WS_PORTS["1"], "/ws") as c:
             c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1})
-            reply = c.recv_json(timeout=2.0)
-        assert "error" in reply
-        assert reply["error"]["code"] == 429
-        assert reply["id"] == 1
+            frame = c.recv_raw(timeout=2.0)
+        body = frame.payload.decode("utf-8")
+        assert not body.lstrip().startswith("{"), f"rate_limit frame must be prose, not JSON; got {body!r}"
 
     def test_per_method_latency_ms_isolates_to_named_method(self, sim):
         """Per-method ``latency_ms`` only delays the named method."""
@@ -1106,10 +1110,10 @@ class TestWsPerMethodFaultOverrides:
         with WsClient(_WS_HOST, _WS_PORTS["1"], "/ws") as c:
             t0 = time.monotonic()
             c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1})
-            reply = c.recv_json(timeout=2.0)
+            frame = c.recv_raw(timeout=2.0)
             elapsed_ms = (time.monotonic() - t0) * 1000
-        assert "error" in reply
-        assert reply["error"]["code"] == 429
+        body = frame.payload.decode("utf-8")
+        assert not body.lstrip().startswith("{"), f"rate_limit frame must be prose, not JSON; got {body!r}"
         assert elapsed_ms >= 80, f"provider-wide latency_ms=100 should still apply, elapsed={elapsed_ms:.0f}ms"
 
     def test_composition_order_latency_first_then_fault(self, sim):
@@ -1133,10 +1137,10 @@ class TestWsPerMethodFaultOverrides:
         with WsClient(_WS_HOST, _WS_PORTS["1"], "/ws") as c:
             t0 = time.monotonic()
             c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1})
-            reply = c.recv_json(timeout=2.0)
+            frame = c.recv_raw(timeout=2.0)
             elapsed_ms = (time.monotonic() - t0) * 1000
-        assert "error" in reply
-        assert reply["error"]["code"] == 429
+        body = frame.payload.decode("utf-8")
+        assert not body.lstrip().startswith("{"), f"rate_limit frame must be prose, not JSON; got {body!r}"
         assert elapsed_ms >= 180, f"per-method latency should fire before fault, elapsed={elapsed_ms:.0f}ms"
 
     def test_per_method_mode_error_rejected_with_400(self, sim):
@@ -1199,9 +1203,9 @@ class TestWsPerMethodFaultOverrides:
         # The ws endpoint SHOULD see it.
         with WsClient(_WS_HOST, _WS_PORTS["1"], "/ws") as c:
             c.send_json({"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1})
-            reply = c.recv_json(timeout=2.0)
-        assert "error" in reply
-        assert reply["error"]["code"] == 429
+            frame = c.recv_raw(timeout=2.0)
+        ws_body = frame.payload.decode("utf-8")
+        assert not ws_body.lstrip().startswith("{"), f"rate_limit frame must be prose, not JSON; got {ws_body!r}"
 
         # Block B — http-scoped fault. http should 429; ws should succeed.
         _control(

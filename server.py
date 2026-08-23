@@ -153,7 +153,13 @@ class _HttpListenerHandler(BaseHTTPRequestHandler):
         if not emit_body:
             raw = b""
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        # A str body (the JSON-RPC rate_limit fault's prose text) is written
+        # to the wire as-is by wire.serialize, not JSON-encoded — the
+        # Content-Type must say so, or a client would try to JSON-decode
+        # plain text. Every other body shape (dict, or corruption's raw
+        # bytes) is still JSON.
+        content_type = "text/plain; charset=utf-8" if isinstance(result.body, str) else "application/json"
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()

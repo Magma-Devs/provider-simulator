@@ -49,33 +49,42 @@ _ETH1 = f"http://127.0.0.1:{port_of('eth-sim', '1')}"
 #     intentional so each file stays self-contained). ─────────────────────────
 
 
-def _post(url: str, body: dict) -> tuple[int, dict]:
+def _parse_body(raw: bytes) -> dict | str:
+    """JSON-decode ``raw``, falling back to the decoded text when it isn't
+    JSON — the rate_limit fault's prose body is not, by design (see
+    provider_simulator/listeners/jsonrpc.py)."""
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw.decode()
+
+
+def _post(url: str, body: dict) -> tuple[int, dict | str]:
     """POST JSON body, return (status_code, parsed_response_body)."""
     data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
-            raw = resp.read()
-            return resp.status, json.loads(raw) if raw else {}
+            return resp.status, _parse_body(resp.read())
     except urllib.error.HTTPError as e:
         try:
-            raw = e.read()
-            return e.code, json.loads(raw) if raw else {}
+            return e.code, _parse_body(e.read())
         except (ConnectionResetError, OSError):
             return e.code, {}
 
 
-def _get(url: str) -> tuple[int, dict]:
+def _get(url: str) -> tuple[int, dict | str]:
     """GET url, return (status_code, parsed_response_body)."""
     try:
         with urllib.request.urlopen(url, timeout=5) as resp:
-            return resp.status, json.loads(resp.read())
+            return resp.status, _parse_body(resp.read())
     except urllib.error.HTTPError as e:
-        raw = e.read()
-        return e.code, json.loads(raw) if raw else {}
+        return e.code, _parse_body(e.read())
 
 
-def _rpc(url: str, method: str, params: list | None = None) -> tuple[int, dict]:
+def _rpc(url: str, method: str, params: list | None = None) -> tuple[int, dict | str]:
     """Send a JSON-RPC request, return (http_status, response_body)."""
     return _post(url, {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []})
 
@@ -498,13 +507,14 @@ class TestSolanaFaultInjection:
         assert body["error"]["code"] == -32000, f"default error_code is -32000; got {body['error']['code']}"
 
     def test_rate_limit_mode_returns_429(self, sim):
-        """mode=rate_limit on solana-sim:1 returns HTTP 429 with a JSON-RPC
-        error envelope whose code is 429."""
+        """mode=rate_limit on solana-sim:1 returns HTTP 429 with prose, not a
+        JSON-RPC error envelope — solana-sim is served by the same
+        JsonRpcListener as eth-sim (see tests/test_simulator.py::test_rate_limit_returns_429)."""
         _set_solana(sim, "1", mode="rate_limit")
         status, body = _rpc(_SOL_URLS["1"], "getSlot")
         assert status == 429, f"mode=rate_limit must return HTTP 429; got {status}"
-        assert "error" in body, f"expected a JSON-RPC error envelope in the 429 response; got {body}"
-        assert body["error"]["code"] == 429, f"rate_limit error_code is 429; got {body['error'].get('code')}"
+        assert isinstance(body, str), f"expected a prose body in the 429 response; got {body!r}"
+        assert not body.lstrip().startswith("{"), f"rate_limit body must not look like JSON; got {body!r}"
 
     def test_hang_mode_times_out_client(self, sim):
         """mode=hang on solana-sim:1 holds the TCP connection open without
