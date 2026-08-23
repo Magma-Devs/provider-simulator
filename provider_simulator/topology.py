@@ -221,23 +221,23 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
     # lava-sim-grpc (MAG-1780): pids 1-3 primary, 4-6 backup. Shares the same
     # ProviderState the JSON-RPC listeners use — a /scenario call with
     # chain_family="grpc" reconfigures the matching servicer.
-    ("lava-sim-grpc", "lava", "1", "LavaGrpcPrimaryProvider1", False, "", (("grpc", "http2", 18548),)),
-    ("lava-sim-grpc", "lava", "2", "LavaGrpcPrimaryProvider2", False, "", (("grpc", "http2", 18549),)),
-    ("lava-sim-grpc", "lava", "3", "LavaGrpcPrimaryProvider3", False, "", (("grpc", "http2", 18550),)),
+    ("lava-sim-grpc", "lava", "1", "LavaGrpcPrimaryProvider1", False, "voting-group-1", (("grpc", "http2", 18548),)),
+    ("lava-sim-grpc", "lava", "2", "LavaGrpcPrimaryProvider2", False, "voting-group-1", (("grpc", "http2", 18549),)),
+    ("lava-sim-grpc", "lava", "3", "LavaGrpcPrimaryProvider3", False, "voting-group-2", (("grpc", "http2", 18550),)),
     ("lava-sim-grpc", "lava", "4", "LavaGrpcBackupProvider4", True, "", (("grpc", "http2", 18563),)),
     ("lava-sim-grpc", "lava", "5", "LavaGrpcBackupProvider5", True, "", (("grpc", "http2", 18564),)),
     ("lava-sim-grpc", "lava", "6", "LavaGrpcBackupProvider6", True, "", (("grpc", "http2", 18565),)),
     # lava-sim-rest (MAG-1777): pids 1-3 primary, 4-6 backup.
-    ("lava-sim-rest", "lava", "1", "LavaRestPrimaryProvider1", False, "", (("rest", "http", 18551),)),
-    ("lava-sim-rest", "lava", "2", "LavaRestPrimaryProvider2", False, "", (("rest", "http", 18552),)),
-    ("lava-sim-rest", "lava", "3", "LavaRestPrimaryProvider3", False, "", (("rest", "http", 18553),)),
+    ("lava-sim-rest", "lava", "1", "LavaRestPrimaryProvider1", False, "voting-group-1", (("rest", "http", 18551),)),
+    ("lava-sim-rest", "lava", "2", "LavaRestPrimaryProvider2", False, "voting-group-1", (("rest", "http", 18552),)),
+    ("lava-sim-rest", "lava", "3", "LavaRestPrimaryProvider3", False, "voting-group-2", (("rest", "http", 18553),)),
     ("lava-sim-rest", "lava", "4", "LavaRestBackupProvider4", True, "", (("rest", "http", 18566),)),
     ("lava-sim-rest", "lava", "5", "LavaRestBackupProvider5", True, "", (("rest", "http", 18567),)),
     ("lava-sim-rest", "lava", "6", "LavaRestBackupProvider6", True, "", (("rest", "http", 18568),)),
     # lava-sim-tm (MAG-1841): pids 1-3 primary, 4-6 backup.
-    ("lava-sim-tm", "lava", "1", "LavaTmPrimaryProvider1", False, "", (("tendermintrpc", "http", 18554),)),
-    ("lava-sim-tm", "lava", "2", "LavaTmPrimaryProvider2", False, "", (("tendermintrpc", "http", 18555),)),
-    ("lava-sim-tm", "lava", "3", "LavaTmPrimaryProvider3", False, "", (("tendermintrpc", "http", 18556),)),
+    ("lava-sim-tm", "lava", "1", "LavaTmPrimaryProvider1", False, "voting-group-1", (("tendermintrpc", "http", 18554),)),
+    ("lava-sim-tm", "lava", "2", "LavaTmPrimaryProvider2", False, "voting-group-1", (("tendermintrpc", "http", 18555),)),
+    ("lava-sim-tm", "lava", "3", "LavaTmPrimaryProvider3", False, "voting-group-2", (("tendermintrpc", "http", 18556),)),
     ("lava-sim-tm", "lava", "4", "LavaTmBackupProvider4", True, "", (("tendermintrpc", "http", 18569),)),
     ("lava-sim-tm", "lava", "5", "LavaTmBackupProvider5", True, "", (("tendermintrpc", "http", 18570),)),
     ("lava-sim-tm", "lava", "6", "LavaTmBackupProvider6", True, "", (("tendermintrpc", "http", 18571),)),
