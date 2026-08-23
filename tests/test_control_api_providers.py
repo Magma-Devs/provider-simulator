@@ -88,8 +88,18 @@ def test_a_provider_with_no_label_reports_an_empty_string():
     """Not null and not a missing key — a caller grouping by label can put
     every unlabelled provider in one bucket without a special case."""
     providers = _providers()
+    # The property the docstring promises: the key is always present, and an
+    # absent label is the empty string rather than None or a missing key.
+    assert all("group_label" in v for v in providers.values())
+    assert all(v["group_label"] is not None for v in providers.values())
     unlabelled = [k for k, v in providers.items() if v["group_label"] == ""]
-    assert len(unlabelled) == 42, f"expected 42 unlabelled, got {len(unlabelled)}"
+    labelled = [k for k, v in providers.items() if v["group_label"] != ""]
+    assert len(unlabelled) + len(labelled) == len(providers)
+    # 18 labelled today: eth-sim 3, eth-cv-sim 6, and the three lava-sim
+    # routers 3 each (MAG-2791). Update both numbers together when a router
+    # gains or loses a label.
+    assert len(labelled) == 18, f"expected 18 labelled, got {len(labelled)}"
+    assert len(unlabelled) == 33, f"expected 33 unlabelled, got {len(unlabelled)}"
 
 
 # ── Filters ───────────────────────────────────────────────────────────────────
