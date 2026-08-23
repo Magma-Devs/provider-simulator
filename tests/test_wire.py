@@ -60,3 +60,39 @@ def test_clean_does_not_mutate_the_caller_body():
     body = {"result": "0x1"}
     serialize(200, body, "wrong_type")
     assert body == {"result": "0x1"}  # wrong_type copied before swapping
+
+
+# ── str bodies (the JSON-RPC rate_limit fault's prose text) ───────────────────
+# json.dumps on a string would quote/escape it into a JSON string literal —
+# these pin that a str body is written to the wire as-is instead.
+
+
+def test_str_body_roundtrips_as_plain_text_not_json_quoted():
+    status, raw, emit = serialize(429, "Rate limit exceeded.")
+    assert status == 429 and emit is True
+    assert raw == b"Rate limit exceeded."
+    assert not raw.startswith(b'"')  # json.dumps would have quoted it
+
+
+def test_str_body_empty_response_has_no_body():
+    status, raw, emit = serialize(429, "Rate limit exceeded.", "empty_response")
+    assert emit is False
+    assert raw == b""
+
+
+def test_str_body_truncated_cuts_ten_bytes():
+    body = "x" * 50
+    _, raw, _ = serialize(429, body, "truncated")
+    assert len(raw) == len(body.encode()) - 10
+
+
+def test_str_body_invalid_json_is_garbage():
+    _, raw, _ = serialize(429, "Rate limit exceeded.", "invalid_json")
+    assert raw == b"}{ {{ not valid json"
+
+
+def test_str_body_missing_field_is_a_no_op():
+    """missing_field targets a dict key; a string has none — the corruption
+    silently doesn't apply, same as any other non-dict body today."""
+    _, raw, _ = serialize(429, "Rate limit exceeded.", "missing_field", "result")
+    assert raw == b"Rate limit exceeded."

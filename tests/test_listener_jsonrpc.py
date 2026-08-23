@@ -59,13 +59,28 @@ def test_error_becomes_jsonrpc_error_envelope():
     assert provider.log.get_history()[0]["status"] == "error"
 
 
-def test_rate_limit_envelope_429():
+def test_rate_limit_sends_prose_body_not_envelope():
+    """Real providers answer a 429 with prose or HTML, never a JSON-RPC
+    error envelope — see the module docstring in jsonrpc.py. ``error`` mode
+    (test_error_becomes_jsonrpc_error_envelope above) is unchanged."""
     listener, provider = _listener()
     provider.scenario.update({"mode": "rate_limit"})
     res = _serve(listener, "eth_call")
     assert res.status == 429
-    assert res.body["error"]["code"] == 429
+    assert isinstance(res.body, str), f"rate_limit body must be a plain string, got {res.body!r}"
+    assert not res.body.lstrip().startswith("{"), f"rate_limit body must not look like JSON: {res.body!r}"
+    assert res.body == ("Rate limit exceeded. Reduce your request rate, or use an API key for a higher limit.")
     assert provider.log.get_history()[0]["status"] == "rate_limit"
+
+
+def test_rate_limit_body_overridable_per_provider():
+    """ScenarioConfig.rate_limit_body lets a test ask for a specific prose
+    shape — the same per-provider mechanism error_message/http_status use."""
+    listener, provider = _listener()
+    provider.scenario.update({"mode": "rate_limit", "rate_limit_body": "Slow down."})
+    res = _serve(listener, "eth_call")
+    assert res.status == 429
+    assert res.body == "Slow down."
 
 
 def test_hang_and_drop_actions():

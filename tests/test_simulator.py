@@ -83,7 +83,21 @@ MAX_FOR_OVERFLOW_TEST = 200
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
 
 
-def _post(url: str, body: dict, headers: dict | None = None) -> tuple[int, dict]:
+def _parse_body(raw: bytes) -> dict | str:
+    """JSON-decode ``raw``, falling back to the decoded text when it isn't
+    JSON — the rate_limit fault's prose body is not, by design (see
+    provider_simulator/listeners/jsonrpc.py). Callers that don't care about
+    the faulted body's content (most of them) never notice the difference;
+    callers that assert the prose shape read the string directly."""
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw.decode()
+
+
+def _post(url: str, body: dict, headers: dict | None = None) -> tuple[int, dict | str]:
     """POST JSON body, return (status_code, parsed_response_body)."""
     data = json.dumps(body).encode()
     hdrs = {"Content-Type": "application/json"}
@@ -92,28 +106,25 @@ def _post(url: str, body: dict, headers: dict | None = None) -> tuple[int, dict]
     req = urllib.request.Request(url, data=data, headers=hdrs)
     try:
         with urllib.request.urlopen(req, timeout=5) as resp:
-            raw = resp.read()
-            return resp.status, json.loads(raw) if raw else {}
+            return resp.status, _parse_body(resp.read())
     except urllib.error.HTTPError as e:
         try:
-            raw = e.read()
-            return e.code, json.loads(raw) if raw else {}
+            return e.code, _parse_body(e.read())
         except (ConnectionResetError, OSError):
             # server closed connection with no body (e.g. mode=down returns 503 + no body)
             return e.code, {}
 
 
-def _get(url: str) -> tuple[int, dict]:
+def _get(url: str) -> tuple[int, dict | str]:
     """GET url, return (status_code, parsed_response_body)."""
     try:
         with urllib.request.urlopen(url, timeout=5) as resp:
-            return resp.status, json.loads(resp.read())
+            return resp.status, _parse_body(resp.read())
     except urllib.error.HTTPError as e:
-        raw = e.read()
-        return e.code, json.loads(raw) if raw else {}
+        return e.code, _parse_body(e.read())
 
 
-def _rpc(url: str, method: str, params: list | None = None) -> tuple[int, dict]:
+def _rpc(url: str, method: str, params: list | None = None) -> tuple[int, dict | str]:
     """Send a JSON-RPC request, return (http_status, response_body)."""
     return _post(url, {"jsonrpc": "2.0", "id": 1, "method": method, "params": params or []})
 
@@ -272,10 +283,55 @@ class TestProviderModes:
         assert body["error"]["code"] == -32000
 
     def test_rate_limit_returns_429(self, sim):
+        """rate_limit sends prose, not a JSON-RPC error envelope — real
+        providers never answer a 429 with one (see jsonrpc.py)."""
         _set_eth(sim, "1", mode="rate_limit")
         status, body = _rpc(_P1, "eth_blockNumber")
         assert status == 429
-        assert body["error"]["code"] == 429
+        assert isinstance(body, str), f"rate_limit body must be prose text, not JSON; got {body!r}"
+        assert not body.lstrip().startswith("{"), f"rate_limit body must not look like JSON; got {body!r}"
+        assert body == (
+            "Rate limit exceeded. Reduce your request rate, or use an API key for a higher limit."
+        ), f"unexpected default rate_limit body: {body!r}"
+
+    def test_rate_limit_content_type_is_not_json(self, sim):
+        """The 429's Content-Type must say text, not application/json — a
+        client that trusts the header (instead of sniffing the body) must
+        also be able to tell this isn't JSON."""
+        _set_eth(sim, "1", mode="rate_limit")
+        req = urllib.request.Request(
+            _P1,
+            data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            raise AssertionError("expected HTTP 429")
+        except urllib.error.HTTPError as e:
+            assert e.code == 429
+            content_type = e.headers.get("Content-Type", "")
+            assert content_type.startswith(
+                "text/plain"
+            ), f"expected a text/plain Content-Type on the rate_limit body, got {content_type!r}"
+
+    def test_rate_limit_body_overridable_per_provider(self, sim):
+        """A provider-level ``rate_limit_body`` override replaces the default
+        prose — the per-provider mechanism ``error_message``/``http_status``
+        already use for other fault fields."""
+        custom_body = "421 Slow down cowboy — try again in a minute."
+        _set_eth(sim, "1", mode="rate_limit", rate_limit_body=custom_body)
+        status, body = _rpc(_P1, "eth_blockNumber")
+        assert status == 429
+        assert body == custom_body, f"expected the overridden body, got {body!r}"
+
+        # A sibling provider left at the default must be unaffected — the
+        # override is per-provider, not global.
+        _set_eth(sim, "2", mode="rate_limit")
+        status2, body2 = _rpc(_P2, "eth_blockNumber")
+        assert status2 == 429
+        assert body2 == (
+            "Rate limit exceeded. Reduce your request rate, or use an API key for a higher limit."
+        ), f"sibling provider's default body must be untouched by provider 1's override, got {body2!r}"
 
     def test_down_returns_503_with_no_body(self, sim):
         _set_eth(sim, "1", mode="down")

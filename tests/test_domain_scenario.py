@@ -12,6 +12,9 @@ def test_defaults_are_a_healthy_provider():
     assert snap["http_status"] == 200
     assert snap["responses"] == {}
     assert snap["transports"] is None
+    assert snap["rate_limit_body"] == (
+        "Rate limit exceeded. Reduce your request rate, or use an API key for a higher limit."
+    )
 
 
 def test_update_sets_a_fault():

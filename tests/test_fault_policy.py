@@ -53,6 +53,27 @@ def test_rate_limit_verdict():
     assert (v.kind, v.status, v.error_code) == ("rate_limit", 429, 429)
 
 
+def test_rate_limit_verdict_default_body_is_prose():
+    """error_message stays "Too many requests" (REST/Tendermint/gRPC still
+    read it unchanged); rate_limit_body is the separate JSON-RPC-only prose
+    field jsonrpc.py's build_fault reads."""
+    v = fault_policy.decide(_sc(mode="rate_limit"), HTTP, _provider())
+    assert v.error_message == "Too many requests"
+    assert v.rate_limit_body == ("Rate limit exceeded. Reduce your request rate, or use an API key for a higher limit.")
+
+
+def test_rate_limit_verdict_body_overridable():
+    v = fault_policy.decide(
+        _sc(mode="rate_limit", rate_limit_body="Slow down."),
+        HTTP,
+        _provider(),
+    )
+    assert v.rate_limit_body == "Slow down."
+    # The override is scoped to rate_limit_body only — error_message (read
+    # by REST/Tendermint/gRPC) is untouched.
+    assert v.error_message == "Too many requests"
+
+
 def test_hang_verdict():
     assert fault_policy.decide(_sc(mode="hang"), HTTP, _provider()).kind == "hang"
 

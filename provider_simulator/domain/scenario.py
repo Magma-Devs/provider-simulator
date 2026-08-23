@@ -27,6 +27,12 @@ class ScenarioConfig(IntrospectiveConfig):
     error_code: int = -32000
     error_message: str = "Internal error"
     http_status: int = 200
+    # JSON-RPC-listener-only: the plain-text body a ``rate_limit`` fault sends.
+    # Real providers answer a 429 with prose (or HTML), never a JSON-RPC error
+    # envelope, so this is a separate field from error_message rather than a
+    # reuse of it — REST/Tendermint/gRPC still build their rate_limit envelope
+    # from error_code/error_message and are unaffected by this field.
+    rate_limit_body: str = "Rate limit exceeded. Reduce your request rate, or use an API key for a higher limit."
     responses: dict = field(default_factory=dict)  # per-method overrides
     corruption_mode: str | None = None
     missing_field: str | None = None

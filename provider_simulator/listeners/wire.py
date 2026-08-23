@@ -1,4 +1,4 @@
-"""Serialize a response body to JSON bytes, applying corruption if configured.
+"""Serialize a response body to wire bytes, applying corruption if configured.
 
 The fault ladder decides down / hang / drop / rate_limit / error. A *successful*
 response can still be corrupted (corruption composes with mode=success), and this
@@ -10,6 +10,14 @@ serialization; byte-level corruption (truncated / invalid_json) runs after.
 ``dotted`` selects REST semantics: a dotted missing_field path
 (``block.header.height``) and a first-key default for wrong_type, versus
 JSON-RPC's flat top-level field and its ``result`` default.
+
+A ``str`` body (the JSON-RPC ``rate_limit`` fault's prose text) is written as
+UTF-8 bytes as-is, never through ``json.dumps`` — dumping a string would quote
+and escape it into a JSON string literal, which is not a text/plain wire body.
+``missing_field`` / ``wrong_type`` have no meaning on a string (no fields to
+target) and are no-ops there, matching how they already no-op on any other
+non-dict body; ``empty_response`` / ``truncated`` / ``invalid_json`` still
+apply — corruption composes with whatever body was actually written.
 """
 
 import json
@@ -40,8 +48,13 @@ def serialize(
             if target and target in data:
                 data = dict(data)
                 data[target] = _swap_type(data[target])
-
-    raw = json.dumps(data).encode()
+        raw = json.dumps(data).encode()
+    elif isinstance(data, str):
+        if corruption_mode == "empty_response":
+            return status, b"", False
+        raw = data.encode()
+    else:
+        raw = json.dumps(data).encode()
 
     if corruption_mode == "truncated" and len(raw) > 10:
         raw = raw[:-10]

@@ -3,8 +3,13 @@
 The request flow lives in the base Listener; this class supplies only the
 JSON-RPC specifics: parse the JSON body, and shape faults / successes as
 JSON-RPC envelopes. ``down`` / ``hang`` / ``drop`` are transport actions the
-base handles or that carry no body; ``rate_limit`` and ``error`` become a
-JSON-RPC error envelope.
+base handles or that carry no body; ``error`` becomes a JSON-RPC error
+envelope. ``rate_limit`` sends a plain-text body instead — real providers
+answer a 429 with prose or HTML, never a JSON-RPC error object, and the
+router's node-error classification reads the body shape, so a simulated
+rate limit that looked like a JSON-RPC error would exercise a path a real
+429 never reaches. See ``ScenarioConfig.rate_limit_body`` for the
+per-provider override.
 
 Two JSON-RPC-only wire rules:
 - A batch body (top-level JSON array) is not supported: it answers a single
@@ -53,7 +58,10 @@ class JsonRpcListener(Listener):
             return ServeResult(action="hang")
         if verdict.kind == "drop":
             return ServeResult(action="drop", drop_at=verdict.drop_at)
-        # rate_limit / error → JSON-RPC error envelope
+        if verdict.kind == "rate_limit":
+            # Plain text, not a JSON-RPC envelope — see the module docstring.
+            return ServeResult(action="respond", status=verdict.status, body=verdict.rate_limit_body)
+        # error → JSON-RPC error envelope
         rid = self.request_id(request)
         rid = 1 if rid is None else rid
         body = {
