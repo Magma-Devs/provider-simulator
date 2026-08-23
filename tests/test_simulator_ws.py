@@ -367,7 +367,7 @@ class TestPostHandshakeFaults:
         assert reply["error"]["code"] == -32601
         assert reply["error"]["message"] == "Method not found"
 
-    def test_rate_limit_returns_429_error_frame_post_handshake(self, sim):
+    def test_rate_limit_returns_429_prose_frame_post_handshake(self, sim):
         """mode=rate_limit set after handshake returns a prose frame, not a
         JSON-RPC error envelope — matching the HTTP shape (see
         tests/test_simulator.py::test_rate_limit_returns_429). A WS frame
@@ -1023,9 +1023,9 @@ class TestWsPerMethodFaultOverrides:
         assert "result" in reply
         assert "error" not in reply
 
-    def test_per_method_mode_rate_limit_emits_429_error_frame(self, sim):
+    def test_per_method_mode_rate_limit_emits_429_prose_frame(self, sim):
         """Per-method ``mode: rate_limit`` emits a prose frame, not a
-        JSON-RPC error envelope (see test_rate_limit_returns_429_error_frame_post_handshake)."""
+        JSON-RPC error envelope (see test_rate_limit_returns_429_prose_frame_post_handshake)."""
         _control(
             sim,
             "POST",

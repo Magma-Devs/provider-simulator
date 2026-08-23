@@ -156,8 +156,11 @@ class _HttpListenerHandler(BaseHTTPRequestHandler):
         # A str body (the JSON-RPC rate_limit fault's prose text) is written
         # to the wire as-is by wire.serialize, not JSON-encoded — the
         # Content-Type must say so, or a client would try to JSON-decode
-        # plain text. Every other body shape (dict, or corruption's raw
-        # bytes) is still JSON.
+        # plain text. Every other body shape is sent AS application/json,
+        # which is not the same as being valid JSON: corruption_mode
+        # "invalid_json" and "truncated" deliberately emit bytes that do not
+        # parse, and they keep the JSON content type on purpose, because that
+        # is what a real endpoint returning a broken body looks like.
         content_type = "text/plain; charset=utf-8" if isinstance(result.body, str) else "application/json"
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(raw)))
