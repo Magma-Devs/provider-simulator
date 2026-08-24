@@ -37,10 +37,9 @@ entry that dials the provider simulator's own host IS one, whatever its id
 says. The two classifications are compared against each other, and they are
 typed in different files by different hands.
 
-Two pools have no router entry here at all: ``eth-duo-sim`` lives in
-smart_router_automation's k3d-only routers.yml, and ``ln-sim`` has no router
-wired yet. This file reads the values entries, so those pools are simply never
-visited — it does not claim to cover them.
+One pool has no router entry here: ``ln-sim`` has no router wired yet. This
+file reads the values entries, so that pool is simply never visited — it does
+not claim to cover it. Every other pool the simulator serves has an entry.
 
 It also checks the NAMES. That scheme is decided: pool, then role, then the
 word Provider, then the pool slot.
@@ -320,22 +319,11 @@ def test_a_router_entry_is_skipped_only_when_no_pool_carries_its_name():
 NAME_OF_POOL_SLOT = {f"{pool}:{pid}": name for pool, _chain, pid, name, _backup, _group, _eps in TOPOLOGY}
 
 # Pools with no entry in THIS values file, each with the reason. Written down
-# rather than derived, so the coverage check below stays an equality with two
-# named holes instead of quietly becoming "whatever both happen to contain".
+# rather than derived, so the coverage check below stays an equality with one
+# named hole instead of quietly becoming "whatever both happen to contain".
 POOLS_WITH_NO_ROUTER_HERE = {
-    # Declared in smart_router_automation's k3d-only tools/local-cluster/routers.yml.
-    "eth-duo-sim",
     # No router dials it yet; the ports are allocated so the pattern stays symmetric.
     "ln-sim",
-    # Three selection-policy pools, each meant for a router that boots with a
-    # different upstream-selection setting. The listeners are declared here so
-    # the ports are reserved and cannot be handed to something else. No router
-    # entry exists in this values file for them, and none was found checked in
-    # anywhere else at the time of writing, although three matching routers do
-    # run on the local k3d cluster. Wire them properly, or drop these rows.
-    "eth-best-sim",
-    "eth-priority-sim",
-    "eth-precedence-sim",
 }
 
 
