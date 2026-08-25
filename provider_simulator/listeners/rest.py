@@ -23,9 +23,21 @@ from stubs_rest import REST_METHOD_DEFAULTS
 
 
 def _compile_route(template: str) -> "re.Pattern[str]":
-    """Compile ``/.../blocks/{height}`` into an anchored regex with named groups."""
+    """Compile ``/.../blocks/{height}`` into an anchored regex with named groups.
+
+    A trailing slash is optional. ``/blocks/latest`` and ``/blocks/latest/`` are
+    the same resource, and the smart-router treats them that way when it matches
+    a request against a spec api -- it resolves either form to the same api and
+    forwards the path as the caller sent it. Anchoring on ``$`` alone made the
+    slashed form miss every route here and answer 404, so a router that had
+    matched correctly still looked broken from the outside.
+
+    ``/?`` and not ``/*``: one optional slash, never two. A parametrised segment
+    is ``[^/]+``, which needs at least one character, so ``/blocks/`` still fails
+    to match ``/blocks/{height}`` rather than matching it with an empty height.
+    """
     pattern = re.sub(r"\{([^}/]+)\}", lambda m: rf"(?P<{m.group(1)}>[^/]+)", template)
-    return re.compile(rf"^{pattern}$")
+    return re.compile(rf"^{pattern}/?$")
 
 
 # Compiled once: (verb_upper, regex, template) for every known REST route.

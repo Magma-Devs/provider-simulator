@@ -286,10 +286,24 @@ class TestRestPathTemplates:
         assert first["pagination"]["inbound_key"] == "cursor-1"
         assert second["pagination"]["inbound_key"] == "cursor-2"
 
-    def test_trailing_slash_doesnt_match(self, sim):
-        """Exact-end regex anchor — ``/...validators/`` is not the same path."""
-        status, _, _ = _get(_REST_URLS["1"] + "/cosmos/staking/v1beta1/validators/")
-        assert status == 404
+    def test_trailing_slash_serves_the_same_path(self, sim):
+        """``/...validators/`` is the same resource as ``/...validators``.
+
+        This asserted 404 until 2026-08-25. The old expectation recorded the
+        regex anchor rather than a decision -- its docstring read "exact-end
+        regex anchor", which describes the mechanism and argues nothing.
+
+        The smart-router settled the question the other way in v1.4.0: it treats
+        a trailing slash as optional when matching a request against a spec api,
+        resolves either form to the same api, and forwards the path as the
+        caller sent it. A real Cosmos REST node accepts both too. So a 404 here
+        made a router that had matched correctly look broken from the outside,
+        and the failure pointed at the router rather than at this route table.
+        """
+        plain, _, _ = _get(_REST_URLS["1"] + "/cosmos/staking/v1beta1/validators")
+        slashed, _, _ = _get(_REST_URLS["1"] + "/cosmos/staking/v1beta1/validators/")
+        assert plain == 200, "control: the unslashed form must already work"
+        assert slashed == 200, f"the slashed form must be served too, got {slashed}"
 
     def test_path_template_keys_are_unique(self):
         """The compiled route table has no duplicate (verb, template) pairs."""
