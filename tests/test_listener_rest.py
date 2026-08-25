@@ -206,3 +206,65 @@ def test_head_on_down_provider_is_503_with_nothing_to_size():
     assert res.action == "no_body"
     assert res.status == 503
     assert res.suppress_body is False
+
+
+# --- Trailing slash ---------------------------------------------------------
+# The smart-router treats a trailing slash as optional when it matches a request
+# against a spec api, and forwards the path as the caller sent it. The route
+# table here anchored on "$", so the slashed form matched nothing and answered
+# 404 -- a router that had resolved the path correctly still looked broken.
+
+
+def test_trailing_slash_serves_the_same_resource():
+    listener, provider = _listener()
+    plain = listener.serve(_get(_BLOCKS_LATEST))
+    slashed = listener.serve(_get(_BLOCKS_LATEST + "/"))
+
+    assert plain.status == 200, "control: the unslashed form must already work"
+    assert slashed.status == 200, (
+        f"{_BLOCKS_LATEST}/ is the same resource as {_BLOCKS_LATEST} and must be "
+        f"served, not 404ed. Got {slashed.status}."
+    )
+    assert slashed.body == plain.body
+
+
+def test_both_forms_are_recorded_under_one_method_key():
+    """History records the matched route, not the caller's raw path.
+
+    So a slashed and an unslashed request to the same resource land under one
+    key, and a test filtering history by method sees both. Recording the raw
+    path would split them and quietly halve such a filter's results.
+    """
+    listener, provider = _listener()
+    listener.serve(_get(_BLOCKS_LATEST))
+    listener.serve(_get(_BLOCKS_LATEST + "/"))
+
+    methods = [row["method"] for row in provider.log.get_history()]
+    assert methods == [
+        f"GET {_BLOCKS_LATEST}",
+        f"GET {_BLOCKS_LATEST}",
+    ], f"Both forms must record under the matched route. Got {methods}."
+
+
+def test_a_double_slash_is_still_not_a_route():
+    """One optional slash, never two. Guards `/?` against being loosened to `/*`."""
+    listener, _ = _listener()
+    assert listener.serve(_get(_BLOCKS_LATEST + "//")).status == 404
+
+
+def test_an_empty_parameter_is_still_not_a_route():
+    """`/blocks/` must not match `/blocks/{height}` with height set to nothing.
+
+    A parametrised segment is ``[^/]+``, which needs at least one character, so
+    making the slash optional cannot turn a missing parameter into an empty one.
+    """
+    listener, _ = _listener()
+    assert listener.serve(_get("/cosmos/base/tendermint/v1beta1/blocks/")).status == 404
+
+
+def test_allowed_verbs_answers_for_the_slashed_form_too():
+    """OPTIONS builds its Allow header from the same route table."""
+    from provider_simulator.listeners.rest import allowed_verbs
+
+    assert allowed_verbs(_BLOCKS_LATEST + "/") == allowed_verbs(_BLOCKS_LATEST)
+    assert allowed_verbs(_BLOCKS_LATEST) != [], "control: the plain form has verbs"
