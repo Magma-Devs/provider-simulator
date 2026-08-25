@@ -285,17 +285,6 @@ routers:
   # ``lava-sim-rest-rest.<host>``.
   - id: "lava-sim-rest"
     network: "lava"
-    cross_validation_policies:
-      - method: "/cosmos/base/tendermint/v1beta1/blocks/latest"
-        enabled: true
-        agreement_threshold:
-          floor: 2
-          cap: 3
-        max_participants:
-          floor: 3
-          cap: 3
-        min_groups:
-          floor: 2
     nodes:
       - name: "LavaRestPrimaryProvider1"
         group_label: "voting-group-1"
@@ -532,17 +521,6 @@ routers:
   # ProviderState per pid).
   - id: "lava-sim-grpc"
     network: "lava"
-    cross_validation_policies:
-      - method: "cosmos.base.tendermint.v1beta1.Service/GetLatestBlock"
-        enabled: true
-        agreement_threshold:
-          floor: 2
-          cap: 3
-        max_participants:
-          floor: 3
-          cap: 3
-        min_groups:
-          floor: 2
     nodes:
       - name: "LavaGrpcPrimaryProvider1"
         group_label: "voting-group-1"
@@ -636,17 +614,6 @@ routers:
   # ``simulate`` skips mirror the lava-sim-rest precedent on MAG-1834.
   - id: "lava-sim-tm"
     network: "lava"
-    cross_validation_policies:
-      - method: "block"
-        enabled: true
-        agreement_threshold:
-          floor: 2
-          cap: 3
-        max_participants:
-          floor: 3
-          cap: 3
-        min_groups:
-          floor: 2
     nodes:
       - name: "LavaTmPrimaryProvider1"
         group_label: "voting-group-1"
