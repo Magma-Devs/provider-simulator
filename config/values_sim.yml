@@ -285,17 +285,6 @@ routers:
   # ``lava-sim-rest-rest.<host>``.
   - id: "lava-sim-rest"
     network: "lava"
-    cross_validation_policies:
-      - method: "/cosmos/base/tendermint/v1beta1/blocks/latest"
-        enabled: true
-        agreement_threshold:
-          floor: 2
-          cap: 3
-        max_participants:
-          floor: 3
-          cap: 3
-        min_groups:
-          floor: 2
     nodes:
       - name: "LavaRestPrimaryProvider1"
         group_label: "voting-group-1"
@@ -350,6 +339,172 @@ routers:
       maxReplicas: 1
       targetCPUUtilizationPercentage: 75
       targetMemoryUtilizationPercentage: 75
+  # lava-cv-rest-sim — the REST cross-validation router (MAG-3046). Six primary
+  # providers in three groups of two, no backup tier. The REST counterpart of
+  # eth-cv-sim, field for field.
+  #
+  # Why a dedicated router rather than policies on lava-sim-rest: an operator
+  # policy (enabled: true) makes cross-validation MANDATORY for that method for
+  # every caller, and lava-sim-rest is shared by 30 existing tests. A
+  # cross-validated reply carries the lava-cross-validation-* headers INSTEAD of
+  # lava-provider-address, and those tests assert lava-provider-address as proof
+  # the router is in the request path, so eight of them failed the moment a
+  # policy was added there. Group diversity has no request header — min_groups is
+  # operator-only — so the rules below cannot be reached caller-side either.
+  #
+  # Why six providers in three groups: per-group quorum needs
+  # max-participants >= min-groups * agreement-threshold, so three groups each
+  # needing two matching answers needs six. Three providers in two groups covers
+  # plain diversity and nothing else.
+  #
+  # No backup tier: cross-validation never reaches a backup, so a provider
+  # labelled backup would claim a group the router can never count.
+  #
+  # EVERY POLICY NAMES api_interface. The production chart renders
+  # `api-interface: {{ $policy.api_interface | default "jsonrpc" }}`
+  # (charts/smart-router/templates/routers_configmap.yaml), so a policy that
+  # omits it is filed under jsonrpc — an interface no request on this router ever
+  # uses. It would match nothing, the router would start clean, and no test would
+  # notice. The local k3d chart instead renders `api-interface: {{ $router.interface }}`,
+  # so the same values would behave differently on the two clusters.
+  #
+  # Each method is a REST path written exactly as the chain spec names it, braces
+  # included. The router looks a policy up by (chain-id, api-interface, method)
+  # where method is the spec's api name, not the URL the caller sent, so
+  # `/cosmos/base/tendermint/v1beta1/blocks/{height}` matches a request for
+  # `/blocks/12345`. `/blocks/latest` and `/blocks/{height}` are two separate spec
+  # apis and need two separate policies.
+  #
+  # `/cosmos/tx/v1beta1/simulate` is deliberately absent: the spec marks it
+  # stateful, and an enabled policy on a stateful method is refused at startup
+  # (ValidateNoStatefulPolicies), which crash-loops the pod.
+  - id: "lava-cv-rest-sim"
+    network: "lava"
+    cross_validation_policies:
+      # Strict: ask 3, 2 must match, and those 2 must come from different
+      # groups. A caller may tighten the quorum from 2 to 3; max_participants is
+      # pinned because floor equals cap; min_groups has no cap.
+      - method: "/cosmos/base/tendermint/v1beta1/blocks/latest"
+        api_interface: "rest"
+        enabled: true
+        max_participants:
+          floor: 3
+          cap: 3
+        agreement_threshold:
+          floor: 2
+          cap: 3
+        min_groups:
+          floor: 2
+      # Loose: one matching answer from one group is enough. Proves a relaxed
+      # rule is honoured rather than quietly raised to a default.
+      - method: "/cosmos/staking/v1beta1/validators"
+        api_interface: "rest"
+        enabled: true
+        max_participants:
+          floor: 1
+          cap: 6
+        agreement_threshold:
+          floor: 1
+          cap: 6
+        min_groups:
+          floor: 1
+      # Per-group quorum across two groups: each of two groups must reach two
+      # matching answers on its own, then the two group winners must match.
+      # Needs 2 * 2 = 4 participants — impossible on a three-provider router.
+      - method: "/cosmos/bank/v1beta1/balances/{address}"
+        api_interface: "rest"
+        enabled: true
+        per_group_quorum: true
+        max_participants:
+          floor: 4
+          cap: 6
+        agreement_threshold:
+          floor: 2
+          cap: 3
+        min_groups:
+          floor: 2
+      # Per-group quorum across all three groups: 3 * 2 = 6 participants, the
+      # whole pool. The strictest shape this router can be asked for.
+      - method: "/cosmos/base/tendermint/v1beta1/blocks/{height}"
+        api_interface: "rest"
+        enabled: true
+        per_group_quorum: true
+        max_participants:
+          floor: 6
+          cap: 6
+        agreement_threshold:
+          floor: 2
+          cap: 2
+        min_groups:
+          floor: 3
+      # Forbidden: a caller's cross-validation headers are ignored outright on
+      # this method — the router does not even parse them. Not the same as
+      # enabled: false, which only declines to require cross-validation and
+      # still honours caller headers. `enabled` and `forbid_caller_cv` on one
+      # policy is refused at startup, so this policy carries no other key.
+      #
+      # node_info is the right method to forbid on: the spec marks it
+      # non-deterministic, so two honest providers may legitimately differ, and
+      # this is the one method where the router never compares answers at all.
+      - method: "/cosmos/base/tendermint/v1beta1/node_info"
+        api_interface: "rest"
+        forbid_caller_cv: true
+    # skip_verifications mirrors lava-sim-rest: the simulator's REST stubs answer
+    # the routes but do not satisfy the router's startup chain-fetcher checks.
+    #
+    # addons stay empty on every provider, as on lava-sim-rest. The archive
+    # asymmetry on eth-cv-sim exists to make an addon-narrowed candidate set
+    # reachable on JSON-RPC; nothing here asks for an extension, and an
+    # asymmetry no test reads is an assumption waiting to be depended on.
+    nodes:
+      - name: "LavaCvRestPrimaryProvider1"
+        group_label: "voting-group-1"
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18602"
+            interface: "rest"
+            addons: []
+      - name: "LavaCvRestPrimaryProvider2"
+        group_label: "voting-group-1"
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18603"
+            interface: "rest"
+            addons: []
+      - name: "LavaCvRestPrimaryProvider3"
+        group_label: "voting-group-2"
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18604"
+            interface: "rest"
+            addons: []
+      - name: "LavaCvRestPrimaryProvider4"
+        group_label: "voting-group-2"
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18605"
+            interface: "rest"
+            addons: []
+      - name: "LavaCvRestPrimaryProvider5"
+        group_label: "voting-group-3"
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18606"
+            interface: "rest"
+            addons: []
+      - name: "LavaCvRestPrimaryProvider6"
+        group_label: "voting-group-3"
+        skip_verifications: "chain-id,pruning,simulate"
+        endpoints:
+          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18607"
+            interface: "rest"
+            addons: []
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 1
+      targetCPUUtilizationPercentage: 75
+      targetMemoryUtilizationPercentage: 75
   # lava-sim-grpc — simulator router for the Cosmos gRPC chain (MAG-1780
   # primary + MAG-18xx surface-backup PR). Wires the simulator's gRPC
   # listeners (handlers_grpc.CosmosBaseTendermintServicer) into the
@@ -366,17 +521,6 @@ routers:
   # ProviderState per pid).
   - id: "lava-sim-grpc"
     network: "lava"
-    cross_validation_policies:
-      - method: "cosmos.base.tendermint.v1beta1.Service/GetLatestBlock"
-        enabled: true
-        agreement_threshold:
-          floor: 2
-          cap: 3
-        max_participants:
-          floor: 3
-          cap: 3
-        min_groups:
-          floor: 2
     nodes:
       - name: "LavaGrpcPrimaryProvider1"
         group_label: "voting-group-1"
@@ -470,17 +614,6 @@ routers:
   # ``simulate`` skips mirror the lava-sim-rest precedent on MAG-1834.
   - id: "lava-sim-tm"
     network: "lava"
-    cross_validation_policies:
-      - method: "block"
-        enabled: true
-        agreement_threshold:
-          floor: 2
-          cap: 3
-        max_participants:
-          floor: 3
-          cap: 3
-        min_groups:
-          floor: 2
     nodes:
       - name: "LavaTmPrimaryProvider1"
         group_label: "voting-group-1"

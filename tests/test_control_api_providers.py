@@ -33,7 +33,7 @@ def test_every_provider_in_the_topology_is_served():
     """One entry per provider, keyed the way stats and scenario already key
     theirs: the pool name, a colon, then the pool slot."""
     providers = _providers()
-    assert len(providers) == 51, sorted(providers)
+    assert len(providers) == 57, sorted(providers)
     assert "eth-sim:1" in providers
     assert "lava-sim-tm:6" in providers
 
@@ -95,10 +95,10 @@ def test_a_provider_with_no_label_reports_an_empty_string():
     unlabelled = [k for k, v in providers.items() if v["group_label"] == ""]
     labelled = [k for k, v in providers.items() if v["group_label"] != ""]
     assert len(unlabelled) + len(labelled) == len(providers)
-    # 18 labelled today: eth-sim 3, eth-cv-sim 6, and the three lava-sim
-    # routers 3 each (MAG-2791). Update both numbers together when a router
-    # gains or loses a label.
-    assert len(labelled) == 18, f"expected 18 labelled, got {len(labelled)}"
+    # 24 labelled today: eth-sim 3, eth-cv-sim 6, the three lava-sim routers 3
+    # each (MAG-2791), and lava-cv-rest-sim 6 (MAG-3046). Update both numbers
+    # together when a router gains or loses a label.
+    assert len(labelled) == 24, f"expected 24 labelled, got {len(labelled)}"
     assert len(unlabelled) == 33, f"expected 33 unlabelled, got {len(unlabelled)}"
 
 
