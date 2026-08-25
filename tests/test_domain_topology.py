@@ -22,6 +22,7 @@ EXPECTED_POOLS = {
     "lava-sim-grpc",
     "lava-sim-rest",
     "lava-sim-tm",
+    "lava-cv-rest-sim",
 }
 
 
@@ -277,10 +278,26 @@ AGREED_NAMES = {
     ("lava-sim-tm", "4"): "LavaTmBackupProvider4",
     ("lava-sim-tm", "5"): "LavaTmBackupProvider5",
     ("lava-sim-tm", "6"): "LavaTmBackupProvider6",
+    # The REST cross-validation pool. Six primaries and no backup, so every
+    # slot takes the Primary role. The pool contributes "LavaCvRest" — its own
+    # name minus the trailing "-sim" — and the role adds no word the pool
+    # already put there.
+    ("lava-cv-rest-sim", "1"): "LavaCvRestPrimaryProvider1",
+    ("lava-cv-rest-sim", "2"): "LavaCvRestPrimaryProvider2",
+    ("lava-cv-rest-sim", "3"): "LavaCvRestPrimaryProvider3",
+    ("lava-cv-rest-sim", "4"): "LavaCvRestPrimaryProvider4",
+    ("lava-cv-rest-sim", "5"): "LavaCvRestPrimaryProvider5",
+    ("lava-cv-rest-sim", "6"): "LavaCvRestPrimaryProvider6",
 }
 
-# Slots 4 to 6 of the four six-provider pools. The router consults these only
-# after the primary tier is exhausted. The values file marks them is_backup.
+# Slots 4 to 6 of the four six-provider pools that HAVE a backup tier. The
+# router consults these only after the primary tier is exhausted, and the values
+# file marks them is_backup.
+#
+# eth-cv-sim and lava-cv-rest-sim are six-provider pools too and are absent on
+# purpose: both are cross-validation topologies, cross-validation never reaches
+# a backup, and a provider labelled backup there would claim a group the router
+# can never count. Their slots 4 to 6 are ordinary primaries.
 AGREED_BACKUPS = {
     (pool, pid) for pool in ("eth-sim", "lava-sim-grpc", "lava-sim-rest", "lava-sim-tm") for pid in ("4", "5", "6")
 }

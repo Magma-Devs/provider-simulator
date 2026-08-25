@@ -161,3 +161,80 @@ def test_build_registry_rejects_unknown_interface_and_transport():
         build_registry([("btc-sim", "btc", "1", "BtcProvider1", False, "", [("bitcoinrpc", "http", 19996)])])
     with pytest.raises(ValueError, match="unknown transport"):
         build_registry([("btc-sim", "btc", "1", "BtcProvider1", False, "", [("jsonrpc", "grpc", 19997)])])
+
+
+def test_lava_cv_rest_sim_pool_builds_with_six_rest_providers_in_three_groups():
+    """The REST cross-validation pool is built exactly as its rows declare.
+
+    Six primaries, no backup, each on its own REST port, labelled three groups
+    of two. Those three facts are what every cross-validation rule on this
+    router rests on: per-group quorum across three groups needs
+    max-participants >= min-groups * agreement-threshold, which is 3 * 2 = 6 —
+    the whole pool. A row that lost its group label, or a seventh provider, or
+    a backup counted as a candidate, would each change what the router can be
+    asked for while the pool still looked fine.
+    """
+    reg = build_registry()
+
+    providers = [reg.provider("lava-cv-rest-sim", pid) for pid in ("1", "2", "3", "4", "5", "6")]
+
+    assert [p.key for p in providers] == [f"lava-cv-rest-sim:{n}" for n in range(1, 7)]
+    assert [p.name for p in providers] == [f"LavaCvRestPrimaryProvider{n}" for n in range(1, 7)]
+    assert not any(p.is_backup for p in providers), (
+        "cross-validation never reaches a backup, so a provider labelled backup "
+        "here would claim a group the router can never count"
+    )
+    assert [p.group_label for p in providers] == [
+        "voting-group-1",
+        "voting-group-1",
+        "voting-group-2",
+        "voting-group-2",
+        "voting-group-3",
+        "voting-group-3",
+    ]
+    assert len({p.group_label for p in providers}) == 3
+
+    # One REST endpoint each, on its own port, contiguous and in order.
+    ports = []
+    for provider in providers:
+        assert len(provider.endpoints) == 1, f"{provider.key} should serve exactly one endpoint"
+        endpoint = provider.endpoints[0]
+        assert (endpoint.interface, endpoint.transport) == ("rest", "http")
+        ports.append(endpoint.port)
+    assert ports == [18602, 18603, 18604, 18605, 18606, 18607]
+
+    assert reg.pools["lava-cv-rest-sim"].chain == "lava"
+
+
+def test_lava_cv_rest_sim_shares_no_state_with_lava_sim_rest():
+    """The two REST pools are separate Provider objects on separate ports.
+
+    They are the pair most at risk of being conflated: same chain, same
+    interface, and a scenario call addressed by family alone resolves to
+    lava-sim-rest. If the cross-validation router reused those listeners, one
+    provider would sit under two pool keys, and a fault armed for a
+    cross-validation test would land in the traffic of the 30 tests that
+    already run against the shared router — reading as a router bug.
+    """
+    reg = build_registry()
+
+    for pid in ("1", "2", "3"):
+        cv_provider = reg.provider("lava-cv-rest-sim", pid)
+        shared_provider = reg.provider("lava-sim-rest", pid)
+        assert cv_provider is not shared_provider
+        assert cv_provider.endpoints[0].port != shared_provider.endpoints[0].port
+
+    cv_ports = {
+        endpoint.port
+        for pid in ("1", "2", "3", "4", "5", "6")
+        for endpoint in reg.provider("lava-cv-rest-sim", pid).endpoints
+    }
+    shared_ports = {
+        endpoint.port
+        for pid in ("1", "2", "3", "4", "5", "6")
+        for endpoint in reg.provider("lava-sim-rest", pid).endpoints
+    }
+    assert cv_ports.isdisjoint(shared_ports)
+    # Positive control: both sets are non-empty, so the disjointness above is
+    # not two empty sets agreeing with each other.
+    assert len(cv_ports) == 6 and len(shared_ports) == 6
