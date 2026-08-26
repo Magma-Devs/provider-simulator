@@ -238,3 +238,84 @@ def test_lava_cv_rest_sim_shares_no_state_with_lava_sim_rest():
     # Positive control: both sets are non-empty, so the disjointness above is
     # not two empty sets agreeing with each other.
     assert len(cv_ports) == 6 and len(shared_ports) == 6
+
+
+def test_lava_cv_tm_sim_pool_builds_with_six_tendermint_providers_in_three_groups():
+    """The Tendermint cross-validation pool is built exactly as its rows declare.
+
+    Six primaries, no backup, each on its own Tendermint-RPC port, labelled
+    three groups of two. Those three facts are what every cross-validation rule
+    on this router rests on: per-group quorum across three groups needs
+    max-participants >= min-groups * agreement-threshold, which is 3 * 2 = 6 —
+    the whole pool. A row that lost its group label, or a seventh provider, or
+    a backup counted as a candidate, would each change what the router can be
+    asked for while the pool still looked fine.
+
+    The interface is checked as well as the port. ``tendermintrpc`` is the
+    string the router matches a policy on, and a row that said ``rest`` here
+    would bind a listener that answers a shape this router never sends.
+    """
+    reg = build_registry()
+
+    providers = [reg.provider("lava-cv-tm-sim", pid) for pid in ("1", "2", "3", "4", "5", "6")]
+
+    assert [p.key for p in providers] == [f"lava-cv-tm-sim:{n}" for n in range(1, 7)]
+    assert [p.name for p in providers] == [f"LavaCvTmPrimaryProvider{n}" for n in range(1, 7)]
+    assert not any(p.is_backup for p in providers), (
+        "cross-validation never reaches a backup, so a provider labelled backup "
+        "here would claim a group the router can never count"
+    )
+    assert [p.group_label for p in providers] == [
+        "voting-group-1",
+        "voting-group-1",
+        "voting-group-2",
+        "voting-group-2",
+        "voting-group-3",
+        "voting-group-3",
+    ]
+    assert len({p.group_label for p in providers}) == 3
+
+    # One Tendermint-RPC endpoint each, on its own port, contiguous and in order.
+    ports = []
+    for provider in providers:
+        assert len(provider.endpoints) == 1, f"{provider.key} should serve exactly one endpoint"
+        endpoint = provider.endpoints[0]
+        assert (endpoint.interface, endpoint.transport) == ("tendermintrpc", "http")
+        ports.append(endpoint.port)
+    assert ports == [18608, 18609, 18610, 18611, 18612, 18613]
+
+    assert reg.pools["lava-cv-tm-sim"].chain == "lava"
+
+
+def test_lava_cv_tm_sim_shares_no_state_with_lava_sim_tm():
+    """The two Tendermint pools are separate Provider objects on separate ports.
+
+    They are the pair most at risk of being conflated: same chain, same
+    interface, and a scenario call addressed by family alone resolves to
+    lava-sim-tm. If the cross-validation router reused those listeners, one
+    provider would sit under two pool keys, and a fault armed for a
+    cross-validation test would land in the traffic of the tests that already
+    run against the shared router — reading as a router bug.
+    """
+    reg = build_registry()
+
+    for pid in ("1", "2", "3"):
+        cv_provider = reg.provider("lava-cv-tm-sim", pid)
+        shared_provider = reg.provider("lava-sim-tm", pid)
+        assert cv_provider is not shared_provider
+        assert cv_provider.endpoints[0].port != shared_provider.endpoints[0].port
+
+    cv_ports = {
+        endpoint.port
+        for pid in ("1", "2", "3", "4", "5", "6")
+        for endpoint in reg.provider("lava-cv-tm-sim", pid).endpoints
+    }
+    shared_ports = {
+        endpoint.port
+        for pid in ("1", "2", "3", "4", "5", "6")
+        for endpoint in reg.provider("lava-sim-tm", pid).endpoints
+    }
+    assert cv_ports.isdisjoint(shared_ports)
+    # Positive control: both sets are non-empty, so the disjointness above is
+    # not two empty sets agreeing with each other.
+    assert len(cv_ports) == 6 and len(shared_ports) == 6

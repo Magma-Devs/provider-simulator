@@ -40,19 +40,20 @@ that reads them is ``ControlApi.get_providers``, which serves them on GET
     label are one bloc that would cast the same wrong vote together, so the
     router only counts agreement that spans different blocs. The number
     identifies the bloc and means nothing else; no policy and no test names a
-    particular one. Six pools label their providers today. eth-sim,
+    particular one. Seven pools label their providers today. eth-sim,
     lava-sim-rest, lava-sim-grpc and lava-sim-tm each put pids 1 and 2 in
     ``voting-group-1`` and pid 3 in ``voting-group-2``, and label no backup.
-    eth-cv-sim and lava-cv-rest-sim each put six providers in three blocs of
-    two, the smallest set a per-group quorum across three groups can run on.
-    Every other row carries the
+    eth-cv-sim, lava-cv-rest-sim and lava-cv-tm-sim each put six providers in
+    three blocs of two, the smallest set a per-group quorum across three groups
+    can run on. Every other row carries the
     empty string rather than nothing at all, so a caller grouping by label
     gets one bucket of unlabelled providers instead of a missing key.
 
 A pool is one router's provider set (one router = one chain + one application
 protocol). Pool names equal the router ids in the router-side values_sim.yml
 wherever a router is wired (eth-sim, eth-solo-sim, btc-sim, solana-sim,
-lava-sim-grpc, lava-sim-rest, lava-sim-tm, eth-cv-sim), or in the k3d-only
+lava-sim-grpc, lava-sim-rest, lava-sim-tm, eth-cv-sim, lava-cv-rest-sim,
+lava-cv-tm-sim), or in the k3d-only
 tools/local-cluster/routers.yml in smart_router_automation for eth-duo-sim (the
 stake-weight experiment router — canonical has no router wired to this pool).
 One pool exists as a bound listener only, with no router wired yet: ln-sim
@@ -62,6 +63,8 @@ lava-cv-rest-sim is its REST counterpart, the same six-in-three shape on the
 rest interface, added so the group-diversity and per-group-quorum rules can be
 exercised on REST without putting an operator policy on the shared
 lava-sim-rest router, which 30 other tests already use (MAG-3046).
+lava-cv-tm-sim is the third of that shape, on the tendermintrpc interface, for
+the same reason applied to the shared lava-sim-tm router.
 eth-best-sim, eth-priority-sim and eth-precedence-sim have no router wired
 either. They are reserved for three local-cluster-only routers, each meant to
 boot with a different upstream-selection setting once wired.
@@ -115,7 +118,8 @@ the universal exception (MAG-2092) and fires on every listener regardless of
     18594-18595  ETH precedence
     18596-18601  ETH cross-validation
     18602-18607  Lava REST cross-validation
-    (next free: 18608)
+    18608-18613  Lava Tendermint-RPC cross-validation
+    (next free: 18614)
 
 The ETH backup block sits at 18560-18562 rather than next to its primaries
 because 18548-18559 were already claimed by the gRPC / REST / Tendermint /
@@ -275,6 +279,79 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
         False,
         "voting-group-3",
         (("rest", "http", 18607),),
+    ),
+    # lava-cv-tm-sim: 6 primaries, no backup tier — the Tendermint-RPC
+    # cross-validation topology, and the third pool of this shape after
+    # eth-cv-sim and lava-cv-rest-sim. Same six-in-three arithmetic and the
+    # same reason: per-group quorum across three groups needs
+    # max-participants >= min-groups * agreement-threshold, so 3 * 2 = 6.
+    #
+    # It exists because the rules cannot be exercised on lava-sim-tm. That
+    # router is shared, and the only way to ask for group diversity is an
+    # operator policy, which makes cross-validation mandatory for every caller
+    # of that method and changes what the tests already on that router see —
+    # the same eight-test breakage a policy on lava-sim-rest caused (MAG-3046).
+    #
+    # No backup tier: cross-validation never reaches a backup, so a provider
+    # labelled backup would claim a group the router can never count.
+    #
+    # Dedicated listeners for the same isolation reason as lava-cv-rest-sim.
+    # Sharing lava-sim-tm's 18554-18556 would put one provider under two pool
+    # keys, so a fault armed for one router's test would land in the other's
+    # traffic.
+    (
+        "lava-cv-tm-sim",
+        "lava",
+        "1",
+        "LavaCvTmPrimaryProvider1",
+        False,
+        "voting-group-1",
+        (("tendermintrpc", "http", 18608),),
+    ),
+    (
+        "lava-cv-tm-sim",
+        "lava",
+        "2",
+        "LavaCvTmPrimaryProvider2",
+        False,
+        "voting-group-1",
+        (("tendermintrpc", "http", 18609),),
+    ),
+    (
+        "lava-cv-tm-sim",
+        "lava",
+        "3",
+        "LavaCvTmPrimaryProvider3",
+        False,
+        "voting-group-2",
+        (("tendermintrpc", "http", 18610),),
+    ),
+    (
+        "lava-cv-tm-sim",
+        "lava",
+        "4",
+        "LavaCvTmPrimaryProvider4",
+        False,
+        "voting-group-2",
+        (("tendermintrpc", "http", 18611),),
+    ),
+    (
+        "lava-cv-tm-sim",
+        "lava",
+        "5",
+        "LavaCvTmPrimaryProvider5",
+        False,
+        "voting-group-3",
+        (("tendermintrpc", "http", 18612),),
+    ),
+    (
+        "lava-cv-tm-sim",
+        "lava",
+        "6",
+        "LavaCvTmPrimaryProvider6",
+        False,
+        "voting-group-3",
+        (("tendermintrpc", "http", 18613),),
     ),
     # btc-sim (MAG-2089): dedicated BTC listeners; the success branch routes
     # unconditionally through handlers_btc. Primary tier only — a backup tier,
