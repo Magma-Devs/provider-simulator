@@ -13,6 +13,7 @@ new format — a stale client fails loudly, never silently.
 
 from dataclasses import fields
 
+from provider_simulator.build_info import build_info
 from provider_simulator.chains import CHAINS
 from provider_simulator.domain.registry import Registry
 from provider_simulator.listeners.ws import WsSubscriptions
@@ -461,6 +462,14 @@ class ControlApi:
         # Registry built = every provider present. The live TCP-port check the
         # flat /ready did is the socket adapter's job at cut-over.
         return 200, {"status": "ready", "providers": len(self.registry.all_providers())}
+
+    # ── version ───────────────────────────────────────────────────────────────
+    def version(self) -> tuple[int, dict]:
+        """Which build this is: release tag, commit, and which of the three
+        states it is in. Stamped into the image at build time; see
+        provider_simulator/build_info.py. Always 200: "I do not know what I am"
+        is an answer, not a failure, and a probe should not treat it as one."""
+        return 200, build_info()
 
 
 def _bad_enum(field_name: str, value: object) -> str:

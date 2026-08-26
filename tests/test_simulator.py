@@ -189,6 +189,92 @@ class TestHealth:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# /version
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestVersion:
+    """Which build a running simulator is, over the real control port.
+
+    The values are stamped into the image as environment variables at build
+    time, and the route reads the environment on every call, so setting them
+    here exercises the same path a pod takes. Each test clears all three first,
+    so an ambient SIM_GIT_* (running the suite inside the built image, say)
+    cannot make one of these pass for the wrong reason.
+    """
+
+    def _stamp(self, monkeypatch, **values):
+        for name in ("SIM_GIT_COMMIT", "SIM_GIT_VERSION", "SIM_GIT_DESCRIBE"):
+            monkeypatch.delenv(name, raising=False)
+        for name, value in values.items():
+            monkeypatch.setenv(name, value)
+
+    def test_unstamped_build_reports_unknown(self, sim, monkeypatch):
+        """The case that happens first: someone runs `python run.py` from a
+        checkout, or the pod predates this route. Saying so beats guessing."""
+        self._stamp(monkeypatch)
+        status, body = _get(_ctrl(sim, "/version"))
+        assert status == 200
+        assert body == {"version": None, "commit": None, "git_describe": None, "state": "unknown"}
+
+    def test_release_build_reports_version_and_commit(self, sim, monkeypatch):
+        self._stamp(
+            monkeypatch,
+            SIM_GIT_COMMIT="cd0c74c2ad8e9ff36d24ce19e29e6db2aba6ec3e",
+            SIM_GIT_VERSION="v1.4.0",
+            SIM_GIT_DESCRIBE="v1.4.0",
+        )
+        status, body = _get(_ctrl(sim, "/version"))
+        assert status == 200
+        assert body == {
+            "version": "v1.4.0",
+            "commit": "cd0c74c2ad8e9ff36d24ce19e29e6db2aba6ec3e",
+            "git_describe": "v1.4.0",
+            "state": "release",
+        }
+
+    def test_build_past_a_release_reports_no_version(self, sim, monkeypatch):
+        """A build three commits past v1.4.0 is not v1.4.0. The commit still
+        identifies it exactly, and git_describe says which release it follows."""
+        self._stamp(
+            monkeypatch,
+            SIM_GIT_COMMIT="abc1234abc1234abc1234abc1234abc1234abc12",
+            SIM_GIT_DESCRIBE="v1.4.0-3-gabc1234",
+        )
+        status, body = _get(_ctrl(sim, "/version"))
+        assert status == 200
+        assert body == {
+            "version": None,
+            "commit": "abc1234abc1234abc1234abc1234abc1234abc12",
+            "git_describe": "v1.4.0-3-gabc1234",
+            "state": "untagged",
+        }
+
+    def test_dirty_release_build_is_not_reported_as_that_release(self, sim, monkeypatch):
+        """Uncommitted changes at build time mean the tag no longer describes
+        what was built, so the version is withheld and -dirty stays visible."""
+        self._stamp(
+            monkeypatch,
+            SIM_GIT_COMMIT="cd0c74c2ad8e9ff36d24ce19e29e6db2aba6ec3e",
+            SIM_GIT_VERSION="v1.4.0-dirty",
+            SIM_GIT_DESCRIBE="v1.4.0-dirty",
+        )
+        _, body = _get(_ctrl(sim, "/version"))
+        assert body["version"] is None
+        assert body["state"] == "untagged"
+        assert body["git_describe"] == "v1.4.0-dirty"
+
+    def test_response_is_json_with_no_store(self, sim, monkeypatch):
+        """A cached /version would answer for the previous pod. The control
+        API's shared reply path already sets no-store; this pins it for the one
+        route where a stale answer is the whole failure being prevented."""
+        self._stamp(monkeypatch, SIM_GIT_COMMIT="cd0c74c2ad8e9ff36d24ce19e29e6db2aba6ec3e")
+        with urllib.request.urlopen(_ctrl(sim, "/version"), timeout=5) as resp:
+            assert resp.headers["Content-Type"] == "application/json"
+            assert resp.headers["Cache-Control"] == "no-store"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # /scenario  GET + POST
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1827,6 +1913,9 @@ class TestHTTPWrongMethod:
 
     def test_post_health_returns_404(self, sim):
         assert self._post_raw(_ctrl(sim, "/health")) == 404
+
+    def test_post_version_returns_404(self, sim):
+        assert self._post_raw(_ctrl(sim, "/version")) == 404
 
     def test_post_stats_returns_404(self, sim):
         assert self._post_raw(_ctrl(sim, "/stats")) == 404

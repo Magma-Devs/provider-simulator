@@ -677,6 +677,8 @@ class _ControlHandler(BaseHTTPRequestHandler):
         control = self.server.control
         if path == "/health":
             status, payload = control.health()
+        elif path == "/version":
+            status, payload = control.version()
         elif path == "/ready":
             status, payload = self._ready()
         elif path == "/scenario":

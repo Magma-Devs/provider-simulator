@@ -327,3 +327,31 @@ def test_ws_emit_missing_id_is_400():
 
 def test_health():
     assert _api().health() == (200, {"status": "ok"})
+
+
+# ── GET /version ──────────────────────────────────────────────────────────────
+def test_version_reports_the_stamped_build(monkeypatch):
+    monkeypatch.setenv("SIM_GIT_COMMIT", "cd0c74c2ad8e9ff36d24ce19e29e6db2aba6ec3e")
+    monkeypatch.setenv("SIM_GIT_VERSION", "v1.4.0")
+    monkeypatch.setenv("SIM_GIT_DESCRIBE", "v1.4.0")
+    assert _api().version() == (
+        200,
+        {
+            "version": "v1.4.0",
+            "commit": "cd0c74c2ad8e9ff36d24ce19e29e6db2aba6ec3e",
+            "git_describe": "v1.4.0",
+            "state": "release",
+        },
+    )
+
+
+def test_version_is_200_when_nothing_was_stamped(monkeypatch):
+    """An unidentifiable build is still a working simulator, so the route
+    answers 200 with "unknown" rather than failing. A non-2xx here would make
+    every probe that watches this route report a broken pod."""
+    for name in ("SIM_GIT_COMMIT", "SIM_GIT_VERSION", "SIM_GIT_DESCRIBE"):
+        monkeypatch.delenv(name, raising=False)
+    assert _api().version() == (
+        200,
+        {"version": None, "commit": None, "git_describe": None, "state": "unknown"},
+    )

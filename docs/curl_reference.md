@@ -25,6 +25,14 @@ All endpoints live on `$SIM_CONTROL_URL` (port 19000).
 curl -si "$SIM_CONTROL_URL/health"
 # → {"status": "ok"}
 
+# ── which build is this simulator? ───────────────────────────────────────────
+curl -s "$SIM_CONTROL_URL/version"
+# → {"version": "v1.4.0", "commit": "cd0c74c2...", "git_describe": "v1.4.0", "state": "release"}
+#   state=release  : built from a commit carrying a release tag
+#   state=untagged : a commit between releases; version is null, git_describe
+#                    names the release it follows (v1.4.0-3-gabc1234)
+#   state=unknown  : nothing stamped in (a checkout run, or an older image)
+
 # ── current scenario config for all providers ────────────────────────────────
 curl -s "$SIM_CONTROL_URL/scenario" | python3 -m json.tool
 # → {"providers": {"1": {"mode":"success","latency_ms":0,"error_probability":0.0,

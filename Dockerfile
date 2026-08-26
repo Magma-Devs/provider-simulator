@@ -23,5 +23,19 @@ COPY provider_simulator/ ./provider_simulator/
 RUN groupadd --system simulator && useradd --system --gid simulator --home-dir /app simulator \
     && chown -R simulator:simulator /app
 USER simulator
+# Build identity for GET /version. A container has no .git directory, so the
+# only place these values can come from is the build itself: scripts/deploy.sh
+# reads them out of the checkout it is building and passes them with
+# --build-arg. Built without them (a plain `docker build .`), they stay empty
+# and the route answers "unknown" rather than inventing a version.
+#
+# Last in the file on purpose: these change on every commit, so anything above
+# them (the pip install, the source COPYs) keeps its build cache.
+ARG SIM_GIT_COMMIT=""
+ARG SIM_GIT_VERSION=""
+ARG SIM_GIT_DESCRIBE=""
+ENV SIM_GIT_COMMIT=$SIM_GIT_COMMIT \
+    SIM_GIT_VERSION=$SIM_GIT_VERSION \
+    SIM_GIT_DESCRIBE=$SIM_GIT_DESCRIBE
 EXPOSE 18545 18546 18547 19000 18548 18549 18550
 CMD ["python", "-u", "run.py"]

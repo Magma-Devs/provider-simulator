@@ -127,7 +127,29 @@ Pick one `mode`; combine it with the orthogonal fields.
 | `POST /reset/all` | Reset both |
 | `POST /advance` | Move a chain's simulated head (default `eth`; sync-freshness tests) |
 | `POST /ws/emit` | Push a WebSocket event to a live subscription |
+| `GET /version` | Which build this simulator is: see below |
 | `GET /health` · `/ready` · `/scenario` · `/stats` · `/topology` · `/history` · `/ws/subscriptions` | Health / readiness (all listener ports bound) / config / counters / read-only provider/port topology per pool / call log / live subscriptions |
+
+`GET /version` answers "which simulator am I talking to", so a release run can be
+identified afterwards without hashing files inside the pod:
+
+```json
+{"version": "v1.4.0", "commit": "cd0c74c2ad8e9ff36d24ce19e29e6db2aba6ec3e", "git_describe": "v1.4.0", "state": "release"}
+```
+
+`state` is one of three, and it never guesses:
+
+| `state` | Means | `version` |
+|---|---|---|
+| `release` | Built from a commit carrying a release tag | the tag, e.g. `v1.4.0` |
+| `untagged` | Built from a commit between releases | `null`. `git_describe` names the release it follows, e.g. `v1.4.0-3-gabc1234` |
+| `unknown` | Nothing was stamped in: `python run.py` from a checkout, or an image built before this route existed | `null`, and so is `commit` |
+
+The values are stamped into the image at build time: `scripts/deploy.sh` reads
+them from the checkout it is building and passes them as Docker build arguments,
+because a container has no `.git` directory to ask at runtime. A build made from
+a tree with uncommitted changes reports `untagged` with `-dirty` in
+`git_describe`: the tag no longer describes what was built.
 
 `GET /history` merges every provider's ring buffer, sorts by time, and adds
 `correlation_group` (the calls of one router relay) and `call_order`. Each entry
