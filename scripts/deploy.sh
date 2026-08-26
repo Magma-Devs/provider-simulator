@@ -175,8 +175,33 @@ BUILT="false"
 if [ "$SKIP_BUILD" = "true" ]; then
 	echo "=== Skipping Docker build (SKIP_BUILD=true) ==="
 else
+	# Build identity for GET /version (see provider_simulator/build_info.py).
+	# Read out of the checkout being built. The self-update above has already
+	# put it on origin/$DEPLOY_REF. A container has no .git directory, so this
+	# is the only moment these values can be captured.
+	#
+	# --exact-match prints a tag ONLY when this commit is that release, and
+	# prints nothing at all otherwise. That is what keeps a build between
+	# releases from reporting the previous release as its own version. The
+	# fuller --always --dirty form still names the nearest release
+	# (v1.4.0-3-gabc1234), so an untagged build stays locatable.
+	#
+	# Every value is optional: a git failure leaves it empty and the route
+	# answers "unknown", which is the honest reading of "we did not capture it".
+	GIT_COMMIT="$(git rev-parse HEAD 2>/dev/null || true)"
+	GIT_VERSION="$(git describe --tags --exact-match --dirty 2>/dev/null || true)"
+	GIT_DESCRIBE="$(git describe --tags --always --dirty 2>/dev/null || true)"
+	echo "=== Build identity ==="
+	echo "Commit              : ${GIT_COMMIT:-<none>}"
+	echo "Release version     : ${GIT_VERSION:-<none, this commit carries no release tag>}"
+	echo "git describe        : ${GIT_DESCRIBE:-<none>}"
+
 	echo "=== Building Docker image ==="
-	docker build -t provider-simulator:latest .
+	docker build \
+		--build-arg SIM_GIT_COMMIT="$GIT_COMMIT" \
+		--build-arg SIM_GIT_VERSION="$GIT_VERSION" \
+		--build-arg SIM_GIT_DESCRIBE="$GIT_DESCRIBE" \
+		-t provider-simulator:latest .
 
 	echo "=== Importing image into MicroK8s ==="
 	docker save provider-simulator:latest | microk8s ctr image import -
@@ -272,6 +297,7 @@ echo "  WS sim ingress     : wss://$LAVA_SIM_WS_HOSTNAME/ws"
 echo ""
 echo "Verify:"
 echo "  curl https://$CONTROL_HOSTNAME/health"
+echo "  curl https://$CONTROL_HOSTNAME/version    # confirms the deployed pod is the commit you just built"
 echo "  grpcurl -import-path cosmos_pb2 -proto cosmos/base/tendermint/v1beta1/query.proto $LAVA_SIM_GRPC_HOSTNAME:443 cosmos.base.tendermint.v1beta1.Service.GetLatestBlock"
 echo "  curl https://$LAVA_SIM_REST_HOSTNAME/cosmos/base/tendermint/v1beta1/blocks/latest"
 echo "  websocat wss://$LAVA_SIM_WS_HOSTNAME/ws    # then paste {\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"id\":1}"
