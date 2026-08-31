@@ -36,11 +36,11 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: lava-sim-ws-httproute
-  namespace: lava-infra
+  namespace: smart-router
 spec:
   parentRefs:
     - name: sr-gateway
-      namespace: lava-infra
+      namespace: smart-router
   hostnames:
     - "__LAVA_SIM_WS_HOSTNAME__"
   rules:
@@ -50,14 +50,14 @@ spec:
             value: /
       backendRefs:
         - name: provider-simulator
-          namespace: lava-infra
+          namespace: smart-router
           port: 18557
           weight: 1
         - name: provider-simulator
-          namespace: lava-infra
+          namespace: smart-router
           port: 18558
           weight: 1
         - name: provider-simulator
-          namespace: lava-infra
+          namespace: smart-router
           port: 18559
           weight: 1

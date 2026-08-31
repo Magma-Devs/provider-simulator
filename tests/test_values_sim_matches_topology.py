@@ -166,7 +166,7 @@ REAL_NODE_ROUTERS = tuple(r for r in VALUES_ROUTERS if r.router_id not in POOLS)
 # The host every simulated provider is dialled on. One Kubernetes service
 # fronts all of them, so a url pointing here is a url into the simulator, and a
 # url pointing anywhere else is a real chain node.
-SIM_PROVIDER_HOST = "provider-simulator.lava-infra.svc.cluster.local"
+SIM_PROVIDER_HOST = "provider-simulator.smart-router.svc.cluster.local"
 
 
 def _dials_the_simulator(router: ValuesRouter) -> bool:

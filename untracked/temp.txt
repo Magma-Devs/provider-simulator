@@ -15,11 +15,11 @@ lavap rpcconsumer pod       lavap provider pod         Real blockchain node
 The chains[].providers[].endpoints[].url in values.yml is the HTTP URL that the lavap provider pod connects to.
 The consumer and provider pods always talk gRPC to each other.
 
-Option A — HTTP simulator in lava-infra
+Option A — HTTP simulator in smart-router
 
 lavap rpcconsumer pod       lavap provider pod         HTTP simulator pod
                                                         (new Python pod in
-      │                           │                      lava-infra)
+      │                           │                      smart-router)
       │──── gRPC RelayRequest ───▶│                           │
       │                           │──── HTTP JSON-RPC ───────▶│
       │                           │◀─── fake response ────────│
@@ -49,7 +49,7 @@ I want to configure lavap rpcconsumer to skip provider pods and connect directly
 instead of using real blockchain nodes."
 
 
-If yes → Option B, deploy provider_simulator as a pod in lava-infra, no new simulator to write.
+If yes → Option B, deploy provider_simulator as a pod in smart-router, no new simulator to write.
 If no → Option A, build a small HTTP simulator pod and just change the url: in values.yml.
 
 

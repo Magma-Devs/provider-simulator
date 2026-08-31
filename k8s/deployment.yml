@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: provider-simulator
-  namespace: lava-infra
+  namespace: smart-router
   labels:
     app: provider-simulator
     app.kubernetes.io/name: provider-simulator

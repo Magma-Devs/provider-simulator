@@ -330,7 +330,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: provider-simulator
-  namespace: lava-infra
+  namespace: smart-router
 spec:
   replicas: 1
   containers:
@@ -379,7 +379,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: provider-simulator
-  namespace: lava-infra
+  namespace: smart-router
 spec:
   type: ClusterIP
   ports:
@@ -395,7 +395,7 @@ spec:
 
 **What it does:**
 - Creates an internal Kubernetes service (like a load balancer inside the cluster)
-- Other pods can reach it via: `provider-simulator.lava-infra.svc.cluster.local:18545`
+- Other pods can reach it via: `provider-simulator.smart-router.svc.cluster.local:18545`
 - Distributes traffic if multiple pods exist (though we only have 1)
 
 **Simple explanation:**
@@ -412,7 +412,7 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: sim-control-httproute
-  namespace: lava-infra
+  namespace: smart-router
 spec:
   parentRefs:
     - name: sr-gateway
@@ -453,11 +453,11 @@ kubectl apply -f k8s/service.yml
 kubectl apply -f <rendered httproute based on BASE_DOMAIN>
 
 # 4. Wait for pod to be ready
-kubectl rollout status deployment/provider-simulator -n lava-infra --timeout=60s
+kubectl rollout status deployment/provider-simulator -n smart-router --timeout=60s
 
 # 5. Restart deployment so the new latest image is actually used
-kubectl rollout restart deployment/provider-simulator -n lava-infra
-kubectl rollout status deployment/provider-simulator -n lava-infra --timeout=60s
+kubectl rollout restart deployment/provider-simulator -n smart-router
+kubectl rollout status deployment/provider-simulator -n smart-router --timeout=60s
 ```
 
 **What it does:**
@@ -572,7 +572,7 @@ Scenario: Test sets provider 1 to "rate_limit"
 ┌────────────────────────────────────────────────────────┐
 │  HTTPS Reverse Proxy (Gateway)                         │
 │  Converts: sim-control.${BASE_DOMAIN}/scenario │
-│  To: provider-simulator.lava-infra:19000/scenario      │
+│  To: provider-simulator.smart-router:19000/scenario      │
 └────────────────┬───────────────────────────────────────┘
                  │
         ┌────────┴───────┐
@@ -694,7 +694,7 @@ Apply Manifests:
 ├─ service.yml
 │  ├─ Create Service resource
 │  ├─ Tells Kubernetes: "Route internal requests to this pod"
-│  └─ Accessible via: provider-simulator.lava-infra.svc.cluster.local
+│  └─ Accessible via: provider-simulator.smart-router.svc.cluster.local
 │
 └─ httproute-control.yml
    ├─ Create HTTPRoute resource
@@ -747,7 +747,7 @@ Result: Deployment complete!
          │                                │
          ↓                                ↓
 ┌──────────────────────────────────────────────────────────────┐
-│                  K8s Service (lava-infra)                    │
+│                  K8s Service (smart-router)                    │
 │           provider-simulator (ClusterIP)                     │
 │  - Port 18545 → JSONRPCHandler (provider 1)                  │
 │  - Port 18546 → JSONRPCHandler (provider 2)                  │

@@ -13,7 +13,7 @@ No prior context is required.
 The smart router runs on `victoria.magmadevs.com` as a Kubernetes (MicroK8s) deployment.
 It uses Lava Protocol (`lavap`) deployed via a private Helm chart.
 
-Kubernetes namespace: `lava-infra`
+Kubernetes namespace: `smart-router`
 Helm chart: `oci://ghcr.io/magma-devs/smart-router-helm-chart/smart-router`
 Helm chart version: `3.1.0`
 Gateway name: `sr-gateway` (Envoy Gateway API)
@@ -31,7 +31,7 @@ chain id "eth-sim" → eth-sim-jsonrpc.victoria.magmadevs.com:443
 
 ```
 Test (HTTPS POST)
-  → Cloudflare → Gateway (sr-gateway, lava-infra)
+  → Cloudflare → Gateway (sr-gateway, smart-router)
     → lavap rpcconsumer pod     ← WRS, retry, failover, QoS scoring
       → lavap provider pod      ← gRPC ↔ HTTP bridge
         → Real blockchain node  ← Google / QuickNode (HTTP JSON-RPC)
@@ -302,7 +302,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: provider-simulator
-  namespace: lava-infra
+  namespace: smart-router
   labels:
     app: provider-simulator
     app.kubernetes.io/name: provider-simulator
@@ -367,7 +367,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: provider-simulator
-  namespace: lava-infra
+  namespace: smart-router
   labels:
     app: provider-simulator
 spec:
@@ -396,7 +396,7 @@ spec:
 ### File: `k8s/httproute-control.yml`
 
 This exposes the control API externally at `sim-control.victoria.magmadevs.com`.
-The gateway name `sr-gateway` and namespace `lava-infra` match the existing gateway
+The gateway name `sr-gateway` and namespace `smart-router` match the existing gateway
 in the smart-router-standalone deployment.
 
 ```yaml
@@ -404,11 +404,11 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: sim-control-httproute
-  namespace: lava-infra
+  namespace: smart-router
 spec:
   parentRefs:
     - name: sr-gateway
-      namespace: lava-infra
+      namespace: smart-router
   hostnames:
     - "sim-control.victoria.magmadevs.com"
   rules:
@@ -418,7 +418,7 @@ spec:
             value: /
       backendRefs:
         - name: provider-simulator
-          namespace: lava-infra
+          namespace: smart-router
           port: 19000
 ```
 
@@ -430,7 +430,7 @@ Run this from the `victoria.magmadevs.com` server inside the `provider-simulator
 #!/bin/bash
 set -e
 
-NAMESPACE="lava-infra"
+NAMESPACE="smart-router"
 
 echo "=== Building Docker image ==="
 docker build -t provider-simulator:latest .
@@ -453,7 +453,7 @@ echo "=== Updating TLS certificate to include new hostname ==="
 
 echo ""
 echo "Provider simulator deployed."
-echo "  JSON-RPC providers : ClusterDNS provider-simulator.lava-infra.svc.cluster.local:18545/18546/18547"
+echo "  JSON-RPC providers : ClusterDNS provider-simulator.smart-router.svc.cluster.local:18545/18546/18547"
 echo "  Control API        : https://sim-control.victoria.magmadevs.com"
 echo ""
 echo "Verify:"
@@ -477,7 +477,7 @@ The router team adds it and runs `helm upgrade`.
 #   eth-sim-jsonrpc.victoria.magmadevs.com:443  → simulator providers
 #
 # The three providers point to different ports on the provider-simulator pod.
-# ClusterDNS: provider-simulator.lava-infra.svc.cluster.local
+# ClusterDNS: provider-simulator.smart-router.svc.cluster.local
 
 chains:
   - id: "eth-sim"
@@ -485,17 +485,17 @@ chains:
     providers:
       - name: "SimProvider1"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18545"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18545"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
       - name: "SimProvider2"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18546"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18546"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
       - name: "SimProvider3"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18547"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18547"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
 ```
@@ -852,7 +852,7 @@ bash scripts/deploy.sh
 Verify:
 
 ```bash
-kubectl get pods -n lava-infra | grep provider-simulator
+kubectl get pods -n smart-router | grep provider-simulator
 # Expected: provider-simulator-xxxxx   1/1   Running
 
 curl https://sim-control.victoria.magmadevs.com/health
@@ -882,10 +882,10 @@ bash scripts/install_gateway_api_tls_certificate.sh
 Verify:
 
 ```bash
-kubectl get pods -n lava-infra | grep eth-sim
+kubectl get pods -n smart-router | grep eth-sim
 # Expected: eth-sim-consumer-xxxxx and eth-sim-provider-xxxxx pods Running
 
-kubectl get httproute -n lava-infra | grep eth-sim
+kubectl get httproute -n smart-router | grep eth-sim
 # Expected: an HTTPRoute for eth-sim-jsonrpc.victoria.magmadevs.com
 
 curl -X POST https://eth-sim-jsonrpc.victoria.magmadevs.com \

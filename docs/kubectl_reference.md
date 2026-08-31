@@ -1,6 +1,6 @@
 # kubectl Reference — Provider Simulator
 
-**Namespace:** `lava-infra`  
+**Namespace:** `smart-router`  
 **Deployment:** `provider-simulator`  
 **Ports:** providers `:18545 / :18546 / :18547` · control `:19000`
 
@@ -31,16 +31,16 @@ Host 64.176.170.39
 
 ```bash
 # is the pod running?
-kubectl get pods -n lava-infra -l app=provider-simulator
+kubectl get pods -n smart-router -l app=provider-simulator
 
 # full deployment status
-kubectl get deployment provider-simulator -n lava-infra
+kubectl get deployment provider-simulator -n smart-router
 
 # watch rollout in real time
-kubectl get pods -n lava-infra -l app=provider-simulator -w
+kubectl get pods -n smart-router -l app=provider-simulator -w
 
 # show all resources for this app at once
-kubectl get deployment,service,pod -n lava-infra -l app=provider-simulator
+kubectl get deployment,service,pod -n smart-router -l app=provider-simulator
 ```
 
 ---
@@ -49,17 +49,17 @@ kubectl get deployment,service,pod -n lava-infra -l app=provider-simulator
 
 ```bash
 # last 30 lines
-kubectl logs -n lava-infra -l app=provider-simulator --tail=30
+kubectl logs -n smart-router -l app=provider-simulator --tail=30
 
 # follow live
-kubectl logs -n lava-infra -l app=provider-simulator -f
+kubectl logs -n smart-router -l app=provider-simulator -f
 
 # previous crashed pod (if pod is in CrashLoopBackOff)
-kubectl logs -n lava-infra -l app=provider-simulator --previous
+kubectl logs -n smart-router -l app=provider-simulator --previous
 
 # logs by pod name (use this if --previous doesn't work with a label selector)
-POD=$(kubectl get pod -n lava-infra -l app=provider-simulator -o jsonpath='{.items[0].metadata.name}')
-kubectl logs -n lava-infra "$POD" --previous
+POD=$(kubectl get pod -n smart-router -l app=provider-simulator -o jsonpath='{.items[0].metadata.name}')
+kubectl logs -n smart-router "$POD" --previous
 ```
 
 ---
@@ -74,10 +74,10 @@ cd ~/provider-simulator && git pull origin develop && bash scripts/deploy.sh
 cd ~/provider-simulator && git fetch origin && git checkout <branch> && bash scripts/deploy.sh
 
 # optional: force restart without rebuilding (only if image is already present)
-kubectl rollout restart deployment/provider-simulator -n lava-infra
+kubectl rollout restart deployment/provider-simulator -n smart-router
 
 # wait for rollout to finish
-kubectl rollout status deployment/provider-simulator -n lava-infra --timeout=60s
+kubectl rollout status deployment/provider-simulator -n smart-router --timeout=60s
 ```
 
 `scripts/deploy.sh` already does the rollout restart for the normal deploy flow.
@@ -88,7 +88,7 @@ kubectl rollout status deployment/provider-simulator -n lava-infra --timeout=60s
 
 ```bash
 # shows image SHA — compare with what docker build produced
-kubectl describe pod -n lava-infra -l app=provider-simulator | grep Image
+kubectl describe pod -n smart-router -l app=provider-simulator | grep Image
 
 # hit health endpoint — quickest sanity check
 curl -s https://sim-control.victoria.magmadevs.com/health
@@ -105,13 +105,13 @@ curl -s http://localhost:18545 \
 
 ```bash
 # open an interactive shell inside the running container
-kubectl exec -it -n lava-infra \
-  "$(kubectl get pod -n lava-infra -l app=provider-simulator -o jsonpath='{.items[0].metadata.name}')" \
+kubectl exec -it -n smart-router \
+  "$(kubectl get pod -n smart-router -l app=provider-simulator -o jsonpath='{.items[0].metadata.name}')" \
   -- /bin/sh
 
 # run a one-off command without an interactive shell
-kubectl exec -n lava-infra \
-  "$(kubectl get pod -n lava-infra -l app=provider-simulator -o jsonpath='{.items[0].metadata.name}')" \
+kubectl exec -n smart-router \
+  "$(kubectl get pod -n smart-router -l app=provider-simulator -o jsonpath='{.items[0].metadata.name}')" \
   -- curl -s localhost:19000/health
 ```
 
@@ -123,13 +123,13 @@ Bypass the Gateway and hit the pod directly from your laptop.
 
 ```bash
 # control API on localhost:19000
-kubectl port-forward -n lava-infra svc/provider-simulator 19000:19000
+kubectl port-forward -n smart-router svc/provider-simulator 19000:19000
 
 # provider 1 on localhost:18545
-kubectl port-forward -n lava-infra svc/provider-simulator 18545:18545
+kubectl port-forward -n smart-router svc/provider-simulator 18545:18545
 
 # all four ports at once
-kubectl port-forward -n lava-infra svc/provider-simulator \
+kubectl port-forward -n smart-router svc/provider-simulator \
   18545:18545 18546:18546 18547:18547 19000:19000
 
 # then in another terminal:
@@ -143,16 +143,16 @@ curl http://localhost:19000/stats
 
 ```bash
 # view rollout history (shows revision numbers)
-kubectl rollout history deployment/provider-simulator -n lava-infra
+kubectl rollout history deployment/provider-simulator -n smart-router
 
 # see what changed in a specific revision
-kubectl rollout history deployment/provider-simulator -n lava-infra --revision=2
+kubectl rollout history deployment/provider-simulator -n smart-router --revision=2
 
 # roll back to the previous version
-kubectl rollout undo deployment/provider-simulator -n lava-infra
+kubectl rollout undo deployment/provider-simulator -n smart-router
 
 # roll back to a specific revision
-kubectl rollout undo deployment/provider-simulator -n lava-infra --to-revision=1
+kubectl rollout undo deployment/provider-simulator -n smart-router --to-revision=1
 ```
 
 ---
@@ -161,19 +161,19 @@ kubectl rollout undo deployment/provider-simulator -n lava-infra --to-revision=1
 
 ```bash
 # check the HTTPRoute for the control endpoint
-kubectl get httproute -n lava-infra sim-control-httproute
+kubectl get httproute -n smart-router sim-control-httproute
 
 # see full HTTPRoute config + status conditions
-kubectl describe httproute -n lava-infra sim-control-httproute
+kubectl describe httproute -n smart-router sim-control-httproute
 
 # check the gateway
-kubectl get gateway -n lava-infra sr-gateway
+kubectl get gateway -n smart-router sr-gateway
 
 # verify service endpoints are populated (empty = pod not ready or label mismatch)
-kubectl get endpoints provider-simulator -n lava-infra
+kubectl get endpoints provider-simulator -n smart-router
 
 # check the service ports
-kubectl get svc provider-simulator -n lava-infra
+kubectl get svc provider-simulator -n smart-router
 ```
 
 ---
@@ -182,11 +182,11 @@ kubectl get svc provider-simulator -n lava-infra
 
 ```bash
 # all events in the namespace, newest last
-kubectl get events -n lava-infra --sort-by='.lastTimestamp'
+kubectl get events -n smart-router --sort-by='.lastTimestamp'
 
 # only events for the provider-simulator pod
-kubectl get events -n lava-infra \
-  --field-selector involvedObject.name="$(kubectl get pod -n lava-infra \
+kubectl get events -n smart-router \
+  --field-selector involvedObject.name="$(kubectl get pod -n smart-router \
     -l app=provider-simulator -o jsonpath='{.items[0].metadata.name}')"
 ```
 
@@ -212,20 +212,20 @@ microk8s ctr images rm docker.io/library/provider-simulator:latest
 
 ```bash
 # pod not starting — see events and probe failures
-kubectl describe pod -n lava-infra -l app=provider-simulator
+kubectl describe pod -n smart-router -l app=provider-simulator
 
 # check readiness probe (hits GET /health on port 19000)
-kubectl get pod -n lava-infra -l app=provider-simulator -o wide
+kubectl get pod -n smart-router -l app=provider-simulator -o wide
 
 # resource usage
-kubectl top pod -n lava-infra -l app=provider-simulator
+kubectl top pod -n smart-router -l app=provider-simulator
 
 # check configured resource requests/limits
-kubectl get deployment provider-simulator -n lava-infra \
+kubectl get deployment provider-simulator -n smart-router \
   -o jsonpath='{.spec.template.spec.containers[0].resources}' | python3 -m json.tool
 
 # dump full pod spec — verify env vars, volume mounts, probe config
-kubectl get pod -n lava-infra -l app=provider-simulator -o yaml
+kubectl get pod -n smart-router -l app=provider-simulator -o yaml
 ```
 
 ---
@@ -234,17 +234,17 @@ kubectl get pod -n lava-infra -l app=provider-simulator -o yaml
 
 | Situation | Command |
 |---|---|
-| Is it running? | `kubectl get pods -n lava-infra -l app=provider-simulator` |
-| See logs | `kubectl logs -n lava-infra -l app=provider-simulator --tail=30` |
-| Watch rollout | `kubectl get pods -n lava-infra -l app=provider-simulator -w` |
+| Is it running? | `kubectl get pods -n smart-router -l app=provider-simulator` |
+| See logs | `kubectl logs -n smart-router -l app=provider-simulator --tail=30` |
+| Watch rollout | `kubectl get pods -n smart-router -l app=provider-simulator -w` |
 | Deploy new version | `git pull origin develop && bash scripts/deploy.sh` |
-| Force restart | `kubectl rollout restart deployment/provider-simulator -n lava-infra` |
+| Force restart | `kubectl rollout restart deployment/provider-simulator -n smart-router` |
 | Pod crashing | `kubectl logs ... --previous` + `kubectl describe pod ...` |
 | Verify new code is live | `curl -s https://sim-control.victoria.magmadevs.com/health` |
-| Open shell in pod | `kubectl exec -it -n lava-infra <pod-name> -- /bin/sh` |
-| Local port-forward | `kubectl port-forward -n lava-infra svc/provider-simulator 19000:19000` |
-| Check network route | `kubectl describe httproute -n lava-infra sim-control-httproute` |
-| Check service endpoints | `kubectl get endpoints provider-simulator -n lava-infra` |
-| Rollback | `kubectl rollout undo deployment/provider-simulator -n lava-infra` |
-| Debug scheduling | `kubectl get events -n lava-infra --sort-by='.lastTimestamp'` |
+| Open shell in pod | `kubectl exec -it -n smart-router <pod-name> -- /bin/sh` |
+| Local port-forward | `kubectl port-forward -n smart-router svc/provider-simulator 19000:19000` |
+| Check network route | `kubectl describe httproute -n smart-router sim-control-httproute` |
+| Check service endpoints | `kubectl get endpoints provider-simulator -n smart-router` |
+| Rollback | `kubectl rollout undo deployment/provider-simulator -n smart-router` |
+| Debug scheduling | `kubectl get events -n smart-router --sort-by='.lastTimestamp'` |
 | Check MicroK8s images | `microk8s ctr images list \| grep provider-simulator` |

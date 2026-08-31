@@ -558,7 +558,7 @@ Requires an active `kubectl port-forward` session (see `kubectl_reference.md`).
 
 ```bash
 # start port-forward in one terminal (forwards all provider ports + control)
-kubectl port-forward -n lava-infra svc/provider-simulator \
+kubectl port-forward -n smart-router svc/provider-simulator \
   18545:18545 18546:18546 18547:18547 19000:19000
 
 # in another terminal — set local env vars

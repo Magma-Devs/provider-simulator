@@ -72,7 +72,7 @@ SSH into `victoria.magmadevs.com` and run `scripts/deploy.sh`.
 ---
 
 ## Key facts
-- Kubernetes namespace: `lava-infra`
+- Kubernetes namespace: `smart-router`
 - Simulator ports: 18545 (P1), 18546 (P2), 18547 (P3), 19000 (control API)
 - Control API public URL: `https://sim-control.victoria.magmadevs.com`
 - Router test URL: `https://eth-sim-jsonrpc.victoria.magmadevs.com`

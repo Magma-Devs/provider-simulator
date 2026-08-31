@@ -13,14 +13,14 @@ Three independent gRPC servers run inside the simulator pod on ports `18548` / `
 Forward one or all three ports, then call over `localhost` without TLS:
 
 ```bash
-kubectl port-forward -n lava-infra deployment/provider-simulator 18548:18548 &
+kubectl port-forward -n smart-router deployment/provider-simulator 18548:18548 &
 grpcurl -plaintext localhost:18548 list
 ```
 
 To forward all three providers + control + JSON-RPC at once:
 
 ```bash
-kubectl port-forward -n lava-infra svc/provider-simulator 18545:18545 18546:18546 18547:18547 18548:18548 18549:18549 18550:18550 19000:19000
+kubectl port-forward -n smart-router svc/provider-simulator 18545:18545 18546:18546 18547:18547 18548:18548 18549:18549 18550:18550 19000:19000
 ```
 
 ### Public (through the GRPCRoute ingress)
@@ -114,8 +114,8 @@ grpcurl -plaintext -import-path cosmos_pb2 -proto cosmos/base/tendermint/v1beta1
 DNS or TLS cert. Check the GRPCRoute exists and the cert covers the hostname:
 
 ```bash
-kubectl get grpcroute -n lava-infra
-kubectl describe grpcroute lava-sim-grpc-grpcroute -n lava-infra
+kubectl get grpcroute -n smart-router
+kubectl describe grpcroute lava-sim-grpc-grpcroute -n smart-router
 ```
 
 If the route exists but the cert doesn't cover `lava-sim-grpc.<BASE_DOMAIN>` (typical on a fresh server), refresh it:
@@ -129,7 +129,7 @@ cd ~/smart-router-standalone && bash scripts/install_gateway_api_tls_certificate
 Your `kubectl port-forward` isn't running. Start it and retry:
 
 ```bash
-kubectl port-forward -n lava-infra deployment/provider-simulator 18548:18548 &
+kubectl port-forward -n smart-router deployment/provider-simulator 18548:18548 &
 ```
 
 ### `failed to dial target host` (public hostname)

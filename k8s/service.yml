@@ -2,7 +2,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: provider-simulator
-  namespace: lava-infra
+  namespace: smart-router
   labels:
     app: provider-simulator
 spec:
