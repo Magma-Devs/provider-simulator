@@ -23,7 +23,7 @@
 # (which builds) restarts every run by design — that is what makes new code
 # take effect. For an idempotent manifests-only run, pass SKIP_BUILD=true:
 # then two runs back-to-back produce at most one restart, and only when the
-# manifests actually changed (observable in `kubectl get events -n lava-infra`).
+# manifests actually changed (observable in `kubectl get events -n smart-router`).
 #
 # Env overrides
 # -------------
@@ -47,16 +47,16 @@
 #
 # Verify (paste-ready)
 # --------------------
-#   kubectl describe svc provider-simulator -n lava-infra | grep -E 'Port:|TargetPort' | wc -l
-#   kubectl exec -n lava-infra deployment/provider-simulator -- python3 -c "import socket; [print(p, 'LISTENING' if (s:=socket.socket()).connect_ex(('127.0.0.1',p))==0 else 'closed') or s.close() for p in (18545,18546,18547)]"
-#   bash scripts/deploy.sh && bash scripts/deploy.sh && kubectl get events -n lava-infra --sort-by=lastTimestamp | tail -5
+#   kubectl describe svc provider-simulator -n smart-router | grep -E 'Port:|TargetPort' | wc -l
+#   kubectl exec -n smart-router deployment/provider-simulator -- python3 -c "import socket; [print(p, 'LISTENING' if (s:=socket.socket()).connect_ex(('127.0.0.1',p))==0 else 'closed') or s.close() for p in (18545,18546,18547)]"
+#   bash scripts/deploy.sh && bash scripts/deploy.sh && kubectl get events -n smart-router --sort-by=lastTimestamp | tail -5
 #
 # Refs: MAG-1808 (this script), MAG-1805 (manifest + constants additions
 # this script rolls out once they land).
 
 set -euo pipefail
 
-NAMESPACE="lava-infra"
+NAMESPACE="smart-router"
 DEPLOYMENT="provider-simulator"
 CONFIG_FILE="${CONFIG_FILE:-config/base-domain.env}"
 HTTPROUTE_TEMPLATE="k8s/httproute-control.yml"
@@ -285,10 +285,10 @@ echo "=== Updating TLS certificate to include new hostname ==="
 
 echo ""
 echo "Provider simulator deployed."
-echo "  JSON-RPC providers : ClusterDNS provider-simulator.lava-infra.svc.cluster.local:18545/18546/18547"
-echo "  gRPC providers     : ClusterDNS provider-simulator.lava-infra.svc.cluster.local:18548/18549/18550"
-echo "  REST sim providers : ClusterDNS provider-simulator.lava-infra.svc.cluster.local:18551/18552/18553"
-echo "  WS sim providers   : ClusterDNS provider-simulator.lava-infra.svc.cluster.local:18557/18558/18559"
+echo "  JSON-RPC providers : ClusterDNS provider-simulator.smart-router.svc.cluster.local:18545/18546/18547"
+echo "  gRPC providers     : ClusterDNS provider-simulator.smart-router.svc.cluster.local:18548/18549/18550"
+echo "  REST sim providers : ClusterDNS provider-simulator.smart-router.svc.cluster.local:18551/18552/18553"
+echo "  WS sim providers   : ClusterDNS provider-simulator.smart-router.svc.cluster.local:18557/18558/18559"
 echo "  Control API        : https://$CONTROL_HOSTNAME"
 echo "  Simulator router   : https://$SIM_ROUTER_HOSTNAME"
 echo "  gRPC sim ingress   : $LAVA_SIM_GRPC_HOSTNAME:443"

@@ -30,15 +30,15 @@ The key things Kubernetes manages:
 | **Deployment** | A rule: "always keep N copies of this pod running". If a pod crashes, Kubernetes starts a new one. |
 | **Service** | A stable network address (DNS name + port) that points to a set of pods. Pods come and go; the Service address never changes. |
 | **HTTPRoute** | A rule for the Gateway: "requests to hostname X should go to Service Y". |
-| **Namespace** | A folder/group inside the cluster. All our stuff lives in the `lava-infra` namespace. |
+| **Namespace** | A folder/group inside the cluster. All our stuff lives in the `smart-router` namespace. |
 
 ### What is kubectl?
 
 `kubectl` is the command-line tool for talking to Kubernetes. It is like a remote
 control for the cluster. Examples:
-- `kubectl get pods -n lava-infra` → list all running pods in the `lava-infra` namespace
-- `kubectl logs <pod-name> -n lava-infra` → read what a pod printed to its console
-- `kubectl describe pod <pod-name> -n lava-infra` → detailed status and events for a pod
+- `kubectl get pods -n smart-router` → list all running pods in the `smart-router` namespace
+- `kubectl logs <pod-name> -n smart-router` → read what a pod printed to its console
+- `kubectl describe pod <pod-name> -n smart-router` → detailed status and events for a pod
 
 ### What is Helm?
 
@@ -147,7 +147,7 @@ statements — shell variable definitions that subsequent commands will need.
 
 If you opened the file, you would see something like:
 ```bash
-export NAMESPACE="lava-infra"
+export NAMESPACE="smart-router"
 export HELM_CHART_VERSION="4.1.0"
 export HELM_REGISTRY_USERNAME="some-github-user"
 export HELM_REGISTRY_TOKEN="ghp_xxxxxxxxxxxxxxxxxxxx"
@@ -155,7 +155,7 @@ export HELM_REGISTRY_TOKEN="ghp_xxxxxxxxxxxxxxxxxxxx"
 
 After running `source scripts/utils/common.sh`, those variables are available in
 your terminal session. When you later type `$NAMESPACE` in a command, the shell
-replaces it with `"lava-infra"`.
+replaces it with `"smart-router"`.
 
 ### What is `HELM_CHART_VERSION`?
 
@@ -314,17 +314,17 @@ routers:
     nodes:
       - name: "SimProvider1"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18545"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18545"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
       - name: "SimProvider2"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18546"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18546"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
       - name: "SimProvider3"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18547"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18547"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
 ```
@@ -340,14 +340,14 @@ These are the YAML key names that chart 4.0.0 expects. The original guide used
 `chains:` + `providers:` (chart 3.1.0 schema) — those keys are accepted silently
 but ignored, so no pods get created. Always verify by reading `values/core/values.yml`.
 
-### What is `provider-simulator.lava-infra.svc.cluster.local`?
+### What is `provider-simulator.smart-router.svc.cluster.local`?
 
 This is a Kubernetes internal DNS name. It follows the pattern:
 ```
 <service-name>.<namespace>.svc.cluster.local
 ```
 Kubernetes automatically creates this DNS entry when a Service named
-`provider-simulator` exists in the `lava-infra` namespace. It only resolves inside
+`provider-simulator` exists in the `smart-router` namespace. It only resolves inside
 the cluster — you cannot curl it from your laptop or browser.
 
 ### Why three ports (18545 / 18546 / 18547)?
@@ -366,7 +366,7 @@ latency scoring, and rate-limit avoidance.
 ```bash
 helm upgrade smart-router \
   "oci://ghcr.io/magma-devs/smart-router-helm-chart/smart-router" \
-  --namespace lava-infra \
+  --namespace smart-router \
   --version "$HELM_CHART_VERSION" \
   --values values/core/values.yml \
   --values values/simulator/values_sim.yml \
@@ -382,7 +382,7 @@ helm upgrade smart-router \
 `oci://ghcr.io/magma-devs/smart-router-helm-chart/smart-router`
 → Where to download the chart from. `oci://` = stored in a container registry.
 
-`--namespace lava-infra`
+`--namespace smart-router`
 → The Kubernetes namespace where the release lives. All smart router pods, services,
   and routes are in this namespace.
 
@@ -443,7 +443,7 @@ yet in the certificate — HTTPS requests would fail with a certificate error.
 
 ### What does this script do?
 
-It reads all existing HTTPRoutes in `lava-infra`, collects every hostname, and
+It reads all existing HTTPRoutes in `smart-router`, collects every hostname, and
 regenerates the `router-tls` secret to cover all of them. It then restarts
 `envoy-gateway` so it picks up the updated certificate.
 
@@ -460,8 +460,8 @@ deployment.apps/envoy-gateway restarted
 ## Step 7 — Verify HTTPRoute and pods
 
 ```bash
-kubectl get httproute -n lava-infra | grep eth-sim
-kubectl get pods -n lava-infra | grep eth-sim
+kubectl get httproute -n smart-router | grep eth-sim
+kubectl get pods -n smart-router | grep eth-sim
 ```
 
 ### What is `kubectl get`?
@@ -491,7 +491,7 @@ eth-sim-router-xxxxxxxxxx-xxxxx          0/1   CrashLoopBackOff   4 (40s ago)   
 
 This is **expected at this point** and is NOT a config error. The router process
 starts correctly, reads the config, and logs all 3 simulator provider URLs — but
-then crashes because `provider-simulator.lava-infra.svc.cluster.local` does not
+then crashes because `provider-simulator.smart-router.svc.cluster.local` does not
 resolve yet (the simulator pod and its Service do not exist).
 
 ✅ HTTPRoute present = the values file schema was correct, Helm worked.
@@ -499,7 +499,7 @@ resolve yet (the simulator pod and its Service do not exist).
 
 To confirm the crash is only about the missing backend (not a config mistake):
 ```bash
-kubectl logs -n lava-infra <eth-sim-router-pod-name> -c router | head -50 | grep -i "Direct RPC Endpoint:"
+kubectl logs -n smart-router <eth-sim-router-pod-name> -c router | head -50 | grep -i "Direct RPC Endpoint:"
 ```
 
 You should see `"Direct RPC Endpoint:"` lines for all 3 simulator URLs and
@@ -518,8 +518,8 @@ DNS address but does not deploy it. You deploy it manually.
 ### Why do the eth-sim-router pods crash without the simulator?
 
 When the router pod starts, it tries to resolve
-`provider-simulator.lava-infra.svc.cluster.local`. Kubernetes DNS only creates that
-entry when a **Service** named `provider-simulator` exists in `lava-infra`. Without
+`provider-simulator.smart-router.svc.cluster.local`. Kubernetes DNS only creates that
+entry when a **Service** named `provider-simulator` exists in `smart-router`. Without
 the simulator pod deployed (and its Service), the DNS lookup fails and the router
 process eventually crashes.
 
@@ -652,7 +652,7 @@ kubectl apply -f <rendered httproute using BASE_DOMAIN>
 
 **4. Restarts the deployment and waits for readiness:**
 
-`deploy.sh` runs `kubectl rollout restart deployment/provider-simulator -n lava-infra`
+`deploy.sh` runs `kubectl rollout restart deployment/provider-simulator -n smart-router`
 and waits until the new pod is ready.
 
 ---
@@ -660,7 +660,7 @@ and waits until the new pod is ready.
 ## Step 9 — Verify simulator is running
 
 ```bash
-kubectl get pods -n lava-infra | grep provider-simulator
+kubectl get pods -n smart-router | grep provider-simulator
 curl https://sim-control.<YOUR_DOMAIN>/health
 ```
 
@@ -674,7 +674,7 @@ request to port 19000 — it passes once the Python HTTP servers are listening.
 
 Kubernetes never gives up on a `CrashLoopBackOff` pod — it keeps restarting it with
 increasing delays (10s, 20s, 40s...). When you deploy the simulator, the DNS name
-`provider-simulator.lava-infra.svc.cluster.local` starts resolving. The next time
+`provider-simulator.smart-router.svc.cluster.local` starts resolving. The next time
 Kubernetes restarts the eth-sim-router pod, the router process starts successfully and
 stays running. No manual action needed.
 
@@ -722,8 +722,8 @@ the entire stack is working end-to-end.
 
 If you get a `503` or connection error:
 - Check Step 9 — the simulator pod must be `Running`
-- Check `kubectl get pods -n lava-infra | grep eth-sim` — router pods must be `Running`
-- Check `kubectl get httproute -n lava-infra | grep eth-sim` — route must exist
+- Check `kubectl get pods -n smart-router | grep eth-sim` — router pods must be `Running`
+- Check `kubectl get httproute -n smart-router | grep eth-sim` — route must exist
 
 ---
 
@@ -731,14 +731,14 @@ If you get a `503` or connection error:
 
 ### Symptom
 
-`kubectl get pods -n lava-infra | grep eth-sim` shows `CrashLoopBackOff` even though
-`kubectl get pods -n lava-infra | grep provider-simulator` shows `1/1 Running`.
+`kubectl get pods -n smart-router | grep eth-sim` shows `CrashLoopBackOff` even though
+`kubectl get pods -n smart-router | grep provider-simulator` shows `1/1 Running`.
 
 ### How to read the crash logs
 
 ```bash
-kubectl logs -n lava-infra \
-  $(kubectl get pods -n lava-infra | grep eth-sim-router | head -1 | awk '{print $1}') \
+kubectl logs -n smart-router \
+  $(kubectl get pods -n smart-router | grep eth-sim-router | head -1 | awk '{print $1}') \
   --previous 2>/dev/null | grep -iE "error|fatal|panic|fail|refused|invalid"
 ```
 

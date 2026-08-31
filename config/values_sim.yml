@@ -62,26 +62,26 @@ routers:
       - name: "EthPrimaryProvider1"
         group_label: "voting-group-1"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18545"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18545"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
-          - url: "ws://provider-simulator.lava-infra.svc.cluster.local:18557/ws"
+          - url: "ws://provider-simulator.smart-router.svc.cluster.local:18557/ws"
             interface: "jsonrpc"
       - name: "EthPrimaryProvider2"
         group_label: "voting-group-1"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18546"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18546"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
-          - url: "ws://provider-simulator.lava-infra.svc.cluster.local:18558/ws"
+          - url: "ws://provider-simulator.smart-router.svc.cluster.local:18558/ws"
             interface: "jsonrpc"
       - name: "EthPrimaryProvider3"
         group_label: "voting-group-2"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18547"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18547"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
-          - url: "ws://provider-simulator.lava-infra.svc.cluster.local:18559/ws"
+          - url: "ws://provider-simulator.smart-router.svc.cluster.local:18559/ws"
             interface: "jsonrpc"
       # Backup tier — consulted only when the primary pool
       # is exhausted on a request (PairingListEmptyError → backup fallback
@@ -104,26 +104,26 @@ routers:
       - name: "EthBackupProvider4"
         is_backup: true
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18560"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18560"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
-          - url: "ws://provider-simulator.lava-infra.svc.cluster.local:18572/ws"
+          - url: "ws://provider-simulator.smart-router.svc.cluster.local:18572/ws"
             interface: "jsonrpc"
       - name: "EthBackupProvider5"
         is_backup: true
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18561"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18561"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
-          - url: "ws://provider-simulator.lava-infra.svc.cluster.local:18573/ws"
+          - url: "ws://provider-simulator.smart-router.svc.cluster.local:18573/ws"
             interface: "jsonrpc"
       - name: "EthBackupProvider6"
         is_backup: true
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18562"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18562"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
-          - url: "ws://provider-simulator.lava-infra.svc.cluster.local:18574/ws"
+          - url: "ws://provider-simulator.smart-router.svc.cluster.local:18574/ws"
             interface: "jsonrpc"
     autoscaling:
       enabled: true
@@ -146,7 +146,7 @@ routers:
     nodes:
       - name: "EthSoloProvider1"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18581"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18581"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
     autoscaling:
@@ -219,37 +219,37 @@ routers:
       - name: "EthCvPrimaryProvider1"
         group_label: "voting-group-1"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18596"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18596"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
       - name: "EthCvPrimaryProvider2"
         group_label: "voting-group-1"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18597"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18597"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
       - name: "EthCvPrimaryProvider3"
         group_label: "voting-group-2"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18598"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18598"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
       - name: "EthCvPrimaryProvider4"
         group_label: "voting-group-2"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18599"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18599"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
       - name: "EthCvPrimaryProvider5"
         group_label: "voting-group-3"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18600"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18600"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
       - name: "EthCvPrimaryProvider6"
         group_label: "voting-group-3"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18601"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18601"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
     autoscaling:
@@ -290,21 +290,21 @@ routers:
         group_label: "voting-group-1"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18551"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18551"
             interface: "rest"
             addons: []
       - name: "LavaRestPrimaryProvider2"
         group_label: "voting-group-1"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18552"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18552"
             interface: "rest"
             addons: []
       - name: "LavaRestPrimaryProvider3"
         group_label: "voting-group-2"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18553"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18553"
             interface: "rest"
             addons: []
       # Backup tier (provider-simulator MAG-18xx surface-backup PR).
@@ -316,21 +316,21 @@ routers:
         is_backup: true
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18566"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18566"
             interface: "rest"
             addons: []
       - name: "LavaRestBackupProvider5"
         is_backup: true
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18567"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18567"
             interface: "rest"
             addons: []
       - name: "LavaRestBackupProvider6"
         is_backup: true
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18568"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18568"
             interface: "rest"
             addons: []
     autoscaling:
@@ -461,42 +461,42 @@ routers:
         group_label: "voting-group-1"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18602"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18602"
             interface: "rest"
             addons: []
       - name: "LavaCvRestPrimaryProvider2"
         group_label: "voting-group-1"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18603"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18603"
             interface: "rest"
             addons: []
       - name: "LavaCvRestPrimaryProvider3"
         group_label: "voting-group-2"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18604"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18604"
             interface: "rest"
             addons: []
       - name: "LavaCvRestPrimaryProvider4"
         group_label: "voting-group-2"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18605"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18605"
             interface: "rest"
             addons: []
       - name: "LavaCvRestPrimaryProvider5"
         group_label: "voting-group-3"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18606"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18606"
             interface: "rest"
             addons: []
       - name: "LavaCvRestPrimaryProvider6"
         group_label: "voting-group-3"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18607"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18607"
             interface: "rest"
             addons: []
     autoscaling:
@@ -526,42 +526,42 @@ routers:
         group_label: "voting-group-1"
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
-          - url: "grpc://provider-simulator.lava-infra.svc.cluster.local:18548"
+          - url: "grpc://provider-simulator.smart-router.svc.cluster.local:18548"
             interface: "grpc"
             addons: []
       - name: "LavaGrpcPrimaryProvider2"
         group_label: "voting-group-1"
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
-          - url: "grpc://provider-simulator.lava-infra.svc.cluster.local:18549"
+          - url: "grpc://provider-simulator.smart-router.svc.cluster.local:18549"
             interface: "grpc"
             addons: []
       - name: "LavaGrpcPrimaryProvider3"
         group_label: "voting-group-2"
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
-          - url: "grpc://provider-simulator.lava-infra.svc.cluster.local:18550"
+          - url: "grpc://provider-simulator.smart-router.svc.cluster.local:18550"
             interface: "grpc"
             addons: []
       - name: "LavaGrpcBackupProvider4"
         is_backup: true
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
-          - url: "grpc://provider-simulator.lava-infra.svc.cluster.local:18563"
+          - url: "grpc://provider-simulator.smart-router.svc.cluster.local:18563"
             interface: "grpc"
             addons: []
       - name: "LavaGrpcBackupProvider5"
         is_backup: true
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
-          - url: "grpc://provider-simulator.lava-infra.svc.cluster.local:18564"
+          - url: "grpc://provider-simulator.smart-router.svc.cluster.local:18564"
             interface: "grpc"
             addons: []
       - name: "LavaGrpcBackupProvider6"
         is_backup: true
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
-          - url: "grpc://provider-simulator.lava-infra.svc.cluster.local:18565"
+          - url: "grpc://provider-simulator.smart-router.svc.cluster.local:18565"
             interface: "grpc"
             addons: []
     autoscaling:
@@ -619,21 +619,21 @@ routers:
         group_label: "voting-group-1"
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18554"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18554"
             interface: "tendermintrpc"
             addons: []
       - name: "LavaTmPrimaryProvider2"
         group_label: "voting-group-1"
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18555"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18555"
             interface: "tendermintrpc"
             addons: []
       - name: "LavaTmPrimaryProvider3"
         group_label: "voting-group-2"
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18556"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18556"
             interface: "tendermintrpc"
             addons: []
       # Backup tier (provider-simulator MAG-18xx surface-backup PR).
@@ -644,21 +644,21 @@ routers:
         is_backup: true
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18569"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18569"
             interface: "tendermintrpc"
             addons: []
       - name: "LavaTmBackupProvider5"
         is_backup: true
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18570"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18570"
             interface: "tendermintrpc"
             addons: []
       - name: "LavaTmBackupProvider6"
         is_backup: true
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18571"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18571"
             interface: "tendermintrpc"
             addons: []
     autoscaling:
@@ -799,42 +799,42 @@ routers:
         group_label: "voting-group-1"
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18608"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18608"
             interface: "tendermintrpc"
             addons: []
       - name: "LavaCvTmPrimaryProvider2"
         group_label: "voting-group-1"
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18609"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18609"
             interface: "tendermintrpc"
             addons: []
       - name: "LavaCvTmPrimaryProvider3"
         group_label: "voting-group-2"
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18610"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18610"
             interface: "tendermintrpc"
             addons: []
       - name: "LavaCvTmPrimaryProvider4"
         group_label: "voting-group-2"
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18611"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18611"
             interface: "tendermintrpc"
             addons: []
       - name: "LavaCvTmPrimaryProvider5"
         group_label: "voting-group-3"
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18612"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18612"
             interface: "tendermintrpc"
             addons: []
       - name: "LavaCvTmPrimaryProvider6"
         group_label: "voting-group-3"
         skip_verifications: "chain-id,pruning,simulate,tx-indexing"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18613"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18613"
             interface: "tendermintrpc"
             addons: []
     autoscaling:
@@ -933,19 +933,19 @@ routers:
       - name: "BtcPrimaryProvider1"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18575"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18575"
             interface: "jsonrpc"
             addons: []
       - name: "BtcPrimaryProvider2"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18576"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18576"
             interface: "jsonrpc"
             addons: []
       - name: "BtcPrimaryProvider3"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18577"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18577"
             interface: "jsonrpc"
             addons: []
     autoscaling:
@@ -969,19 +969,19 @@ routers:
       - name: "SolanaPrimaryProvider1"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18582"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18582"
             interface: "jsonrpc"
             addons: []
       - name: "SolanaPrimaryProvider2"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18583"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18583"
             interface: "jsonrpc"
             addons: []
       - name: "SolanaPrimaryProvider3"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18584"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18584"
             interface: "jsonrpc"
             addons: []
     autoscaling:
@@ -1001,7 +1001,7 @@ routers:
       - name: "SolanaSoloProvider1"
         skip_verifications: "chain-id,pruning,simulate"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18585"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18585"
             interface: "jsonrpc"
             addons: []
     autoscaling:

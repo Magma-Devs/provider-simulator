@@ -295,7 +295,7 @@ Content-Type: application/json
 
 **Request:**
 ```http
-POST http://provider-simulator.lava-infra.svc.cluster.local:18545/
+POST http://provider-simulator.smart-router.svc.cluster.local:18545/
 Content-Type: application/json
 
 {"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}
@@ -406,16 +406,16 @@ docker build -t provider-simulator:latest .
 bash scripts/deploy.sh
 
 # Check logs
-kubectl logs -f deployment/provider-simulator -n lava-infra
+kubectl logs -f deployment/provider-simulator -n smart-router
 
 # Check pod status
-kubectl get pods -n lava-infra | grep provider-simulator
+kubectl get pods -n smart-router | grep provider-simulator
 
 # Check services
-kubectl get svc -n lava-infra | grep provider-simulator
+kubectl get svc -n smart-router | grep provider-simulator
 
 # Check HTTP routes
-kubectl get httproute -n lava-infra | grep sim-control
+kubectl get httproute -n smart-router | grep sim-control
 
 # Test health
 curl https://sim-control.${BASE_DOMAIN}/health

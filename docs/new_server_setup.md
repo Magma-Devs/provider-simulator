@@ -129,7 +129,7 @@ bash scripts/deploy.sh
 ## 4. Verify pod is running
 
 ```bash
-kubectl get pods -n lava-infra -l app=provider-simulator
+kubectl get pods -n smart-router -l app=provider-simulator
 ```
 
 Expected: `1/1 Running`
@@ -147,7 +147,7 @@ The simulator runs **7 listeners** in a single pod. Pod `Running` only tells you
 ### 7 Service ports are exposed
 
 ```bash
-kubectl describe svc provider-simulator -n lava-infra | grep -E 'Port:|TargetPort'
+kubectl describe svc provider-simulator -n smart-router | grep -E 'Port:|TargetPort'
 ```
 
 Expected output — 7 entries:
@@ -167,7 +167,7 @@ Missing entries → manifest wasn't applied; re-run the deploy step.
 From the pod:
 
 ```bash
-for port in 18545 18546 18547; do kubectl exec -n lava-infra deployment/provider-simulator -- sh -c "wget -qO- --post-data='{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}' --header=Content-Type:application/json http://localhost:$port" | grep -q '"result":' && echo "port $port: OK" || echo "port $port: FAIL"; done
+for port in 18545 18546 18547; do kubectl exec -n smart-router deployment/provider-simulator -- sh -c "wget -qO- --post-data='{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}' --header=Content-Type:application/json http://localhost:$port" | grep -q '"result":' && echo "port $port: OK" || echo "port $port: FAIL"; done
 ```
 
 Expected: three `OK` lines.
@@ -175,7 +175,7 @@ Expected: three `OK` lines.
 ### Control API responds (port 19000)
 
 ```bash
-kubectl exec -n lava-infra deployment/provider-simulator -- wget -qO- http://localhost:19000/health
+kubectl exec -n smart-router deployment/provider-simulator -- wget -qO- http://localhost:19000/health
 ```
 
 Expected: `{"status": "ok"}`.
@@ -185,7 +185,7 @@ Expected: `{"status": "ok"}`.
 Requires `grpcurl` from the Prerequisites section. From the deploy server:
 
 ```bash
-for port in 18548 18549 18550; do kubectl port-forward -n lava-infra deployment/provider-simulator $port:$port >/dev/null 2>&1 & PF=$!; sleep 1; grpcurl -plaintext localhost:$port list 2>/dev/null | grep -q "cosmos.base.tendermint" && echo "port $port: OK" || echo "port $port: FAIL"; kill $PF 2>/dev/null; wait $PF 2>/dev/null; done
+for port in 18548 18549 18550; do kubectl port-forward -n smart-router deployment/provider-simulator $port:$port >/dev/null 2>&1 & PF=$!; sleep 1; grpcurl -plaintext localhost:$port list 2>/dev/null | grep -q "cosmos.base.tendermint" && echo "port $port: OK" || echo "port $port: FAIL"; kill $PF 2>/dev/null; wait $PF 2>/dev/null; done
 ```
 
 Expected: three `OK` lines.
@@ -193,7 +193,7 @@ Expected: three `OK` lines.
 Then sanity-test one real gRPC call:
 
 ```bash
-kubectl port-forward -n lava-infra deployment/provider-simulator 18548:18548 >/dev/null 2>&1 & PF=$!; sleep 1; grpcurl -plaintext -d '{}' localhost:18548 cosmos.base.tendermint.v1beta1.Service/GetLatestBlock; kill $PF 2>/dev/null
+kubectl port-forward -n smart-router deployment/provider-simulator 18548:18548 >/dev/null 2>&1 & PF=$!; sleep 1; grpcurl -plaintext -d '{}' localhost:18548 cosmos.base.tendermint.v1beta1.Service/GetLatestBlock; kill $PF 2>/dev/null
 ```
 
 Expected: a JSON `block` object with `header.height` matching the simulator's current block.
@@ -203,7 +203,7 @@ Expected: a JSON `block` object with `header.height` matching the simulator's cu
 Check pod logs for startup errors:
 
 ```bash
-kubectl logs -n lava-infra deployment/provider-simulator | tail -100
+kubectl logs -n smart-router deployment/provider-simulator | tail -100
 ```
 
 Look for tracebacks at boot, port-bind errors, or missing-module errors. If logs are clean but a port isn't responding, the corresponding listener didn't start — re-run the deploy step.
@@ -241,7 +241,7 @@ routers:
     nodes:
       - name: "SimProvider1"
         endpoints:
-          - url: "http://provider-simulator.lava-infra.svc.cluster.local:18545"
+          - url: "http://provider-simulator.smart-router.svc.cluster.local:18545"
             interface: "jsonrpc"
             addons: ["archive", "trace", "debug"]
       ...
@@ -344,7 +344,7 @@ source scripts/utils/common.sh
 
 helm upgrade smart-router \
   "oci://ghcr.io/magma-devs/smart-router-helm-chart/smart-router" \
-  --namespace lava-infra \
+  --namespace smart-router \
   --version "$HELM_CHART_VERSION" \
   --values values/core/values.yml \
   --values values/simulator/values_sim.yml \
@@ -364,8 +364,8 @@ echo "$BASE_DOMAIN"
 If both objects already exist, skip the create blocks below:
 
 ```bash
-kubectl get service eth-router-debug -n lava-infra
-kubectl get httproute eth-router-debug-httproute -n lava-infra
+kubectl get service eth-router-debug -n smart-router
+kubectl get httproute eth-router-debug-httproute -n smart-router
 ```
 
 Create Service:
@@ -376,7 +376,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: eth-router-debug
-  namespace: lava-infra
+  namespace: smart-router
 spec:
   selector:
     app.lavanet.io/router: eth
@@ -394,11 +394,11 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: eth-router-debug-httproute
-  namespace: lava-infra
+  namespace: smart-router
 spec:
   parentRefs:
     - name: sr-gateway
-      namespace: lava-infra
+      namespace: smart-router
   hostnames:
     - "debug.${BASE_DOMAIN}"
   rules:
@@ -422,11 +422,11 @@ bash scripts/install_gateway_api_tls_certificate.sh
 ### A.4 Verify debug server is reachable
 
 ```bash
-kubectl get service eth-router-debug -n lava-infra
-kubectl get httproute eth-router-debug-httproute -n lava-infra
+kubectl get service eth-router-debug -n smart-router
+kubectl get httproute eth-router-debug-httproute -n smart-router
 
-ETH_POD=$(kubectl get pods -n lava-infra -l app.lavanet.io/router=eth -o jsonpath='{.items[0].metadata.name}')
-kubectl logs -n lava-infra "$ETH_POD" | grep "Debug HTTP server started"
+ETH_POD=$(kubectl get pods -n smart-router -l app.lavanet.io/router=eth -o jsonpath='{.items[0].metadata.name}')
+kubectl logs -n smart-router "$ETH_POD" | grep "Debug HTTP server started"
 
 curl -s "https://debug.${BASE_DOMAIN}/debug/time" | python3 -m json.tool
 ```
@@ -487,15 +487,15 @@ cd ~/smart-router-standalone && bash scripts/install_gateway_api_tls_certificate
 Check that debug route objects exist:
 
 ```bash
-kubectl get service eth-router-debug -n lava-infra
-kubectl get httproute eth-router-debug-httproute -n lava-infra
+kubectl get service eth-router-debug -n smart-router
+kubectl get httproute eth-router-debug-httproute -n smart-router
 ```
 
 Check debug server started in router pod:
 
 ```bash
-ETH_POD=$(kubectl get pods -n lava-infra -l app.lavanet.io/router=eth -o jsonpath='{.items[0].metadata.name}')
-kubectl logs -n lava-infra "$ETH_POD" | grep "Debug HTTP server started"
+ETH_POD=$(kubectl get pods -n smart-router -l app.lavanet.io/router=eth -o jsonpath='{.items[0].metadata.name}')
+kubectl logs -n smart-router "$ETH_POD" | grep "Debug HTTP server started"
 ```
 
 If route exists but TLS fails, re-run certificate install:

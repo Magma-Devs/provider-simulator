@@ -36,7 +36,7 @@ Successfully populated all 7 empty files in the `provider-simulator` repository 
 
 ### 4. **k8s/deployment.yml** (62 lines)
 ✅ **Status:** Complete
-- Namespace: `lava-infra`
+- Namespace: `smart-router`
 - 1 replica of `provider-simulator` pod
 - All 4 ports configured with descriptive names
 - Resource requests: 100m CPU, 128Mi memory
@@ -50,7 +50,7 @@ Successfully populated all 7 empty files in the `provider-simulator` repository 
 - Type: `ClusterIP` (internal-only service)
 - All 4 ports mapped (18545, 18546, 18547, 19000)
 - Selects pods with label `app: provider-simulator`
-- Accessible via DNS: `provider-simulator.lava-infra.svc.cluster.local`
+- Accessible via DNS: `provider-simulator.smart-router.svc.cluster.local`
 
 ### 6. **k8s/httproute-control.yml** (22 lines)
 ✅ **Status:** Complete

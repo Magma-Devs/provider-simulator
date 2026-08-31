@@ -8,7 +8,7 @@ When the unified router ships, nothing needs to change: the unified router will 
 
 ## What I am suggesting
 
-**Option A — HTTP simulator pod in `lava-infra`, with a runtime control API.**
+**Option A — HTTP simulator pod in `smart-router`, with a runtime control API.**
 
 This is not Option B (gRPC static-providers). The full Lava Protocol stack stays intact — consumer pod, provider pod, everything. The only change is the last hop: instead of calling Google or QuickNode, the `lavap provider` pod calls a fake Python HTTP server that returns whatever the test has configured.
 
@@ -134,7 +134,7 @@ provider-simulator/
   Dockerfile               ← python:3.12-slim, exposes ports 18545-18547 + 19000
   requirements.txt         ← no external dependencies (stdlib only)
   k8s/
-    deployment.yml         ← single-replica Deployment in lava-infra namespace
+    deployment.yml         ← single-replica Deployment in smart-router namespace
     service.yml            ← ClusterIP Service, all four ports
     httproute-control.yml  ← exposes control API at sim-control.victoria.magmadevs.com
   scripts/
@@ -152,7 +152,7 @@ values/simulator/values_sim.yml   ← adds eth-sim chain pointing to simulator U
 ```
 
 This file is applied via `helm upgrade --values values/simulator/values_sim.yml` and tells the router about the three simulated providers:
-`http://provider-simulator.lava-infra.svc.cluster.local:18545/18546/18547`
+`http://provider-simulator.smart-router.svc.cluster.local:18545/18546/18547`
 
 That is the only change in the router repo. The router team does not own or maintain the simulator.
 
@@ -253,7 +253,7 @@ Option B (gRPC static-providers) would require a complete rewrite at that point 
 
 This proposal does **not** require asking DevOps about `static-providers` support in the Helm chart. It only requires:
 
-1. Permission to deploy a new pod (`provider-simulator`) in the `lava-infra` namespace
+1. Permission to deploy a new pod (`provider-simulator`) in the `smart-router` namespace
 2. Adding an HTTPRoute for `sim-control.victoria.magmadevs.com`
 3. Running `helm upgrade` with an additional `--values` file to add the `eth-sim` chain
 

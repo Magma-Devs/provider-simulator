@@ -72,7 +72,7 @@ GET /health
 ### Type 2: Router Requests (Router → Simulator)
 
 **Who sends:** Smart router  
-**Where to:** `provider-simulator.lava-infra.svc.cluster.local:18545/18546/18547`  
+**Where to:** `provider-simulator.smart-router.svc.cluster.local:18545/18546/18547`  
 **What:** Get blockchain data (JSON-RPC calls)  
 **Handler:** JSONRPCHandler (3 instances)
 
