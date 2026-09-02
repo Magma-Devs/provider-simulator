@@ -28,6 +28,13 @@ name: Publish image
 #     every merge.
 
 on:
+  # pull_request builds and does NOT push: the Plan tags step below sets
+  # push=false for any ref that is not main. That is the point -- it proves the
+  # Dockerfile still builds, that the arm64 layer finishes under emulation, and
+  # that the workflow itself parses and runs, all BEFORE merge. Without it the
+  # first execution of this file is on main, where a mistake publishes nothing
+  # and blocks the next push behind cancel-in-progress: false.
+  pull_request:
   push:
     branches: [main]
   release:
@@ -45,8 +52,36 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The gate. :main is what every test cluster pulls by default, so publishing a
+  # commit whose own suite is red would hand that build to the whole nightly with
+  # nothing going red at merge to connect the two.
+  #
+  # Lint and test runs on this same trigger, but it is a SEPARATE workflow file:
+  # separate workflows run independently and concurrently, so it cannot gate
+  # anything here. The router's publish job gates with `needs: [version, build]`
+  # because those jobs live beside it. This re-runs the suite in-workflow to get
+  # the same guarantee. workflow_run was the alternative and was rejected: it
+  # runs the DEFAULT branch's copy of the workflow and reports the default
+  # branch's SHA, so it would happily publish an image built from the wrong
+  # commit -- worse than the problem it solves.
+  test:
+    name: Suite must pass before anything is published
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-timeout
+      - name: pytest
+        run: pytest tests/ -v
+
   publish:
     name: Build and publish image
+    needs: [test]
     runs-on: ubuntu-latest
     permissions:
       contents: read
