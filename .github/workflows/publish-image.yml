@@ -1,0 +1,180 @@
+name: Publish image
+
+# Builds the repo-root Dockerfile and publishes it to GitHub Container
+# Registry on every push to main.
+#
+# WHY: every k3d test cluster used to build this image itself (`docker build`
+# in the automation repo's tools/local-cluster/scripts/k3d-up.sh), and the
+# result was published nowhere. When the "copy the local image into the
+# cluster" step failed, the simulator pod had nothing to fall back on: it sat
+# in ImagePullBackOff and the whole bring-up hung for ~6 minutes. The
+# smart-router image never had that failure mode, because it is published —
+# a failed copy just means Kubernetes downloads it again in a few seconds.
+# Publishing this image removes the same failure mode here.
+#
+# Shape, action versions and the "Plan tags" step are deliberately copied from
+# the smart-router repo's build_docker job so the two repos stay consistent.
+# Two things there are NOT copied, on purpose:
+#   * its per-branch image pushes — this repo publishes from main only;
+#   * its "Ensure version is not already published" gate, which forces a new
+#     git tag on every main merge. That is the router's release discipline,
+#     not this repo's (one tag exists here, v1.4.0), so the gate would fail
+#     every merge.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize, don't cancel. Two pushes landing close together both want the
+# floating :main tag; cancelling the in-flight one can leave :main pointing at
+# the OLDER commit. Queuing them means the newest push writes :main last.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and publish image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_NAME: magma-devs/provider-simulator
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          # git describe needs the tag history for the build-identity args below.
+          fetch-depth: 0
+
+      - name: Resolve build identity
+        id: identity
+        run: |
+          set -euo pipefail
+          # Same three values scripts/deploy.sh passes; the Dockerfile bakes
+          # them into env vars that GET /version reads. Built without them, a
+          # published image would answer "unknown" and nobody could tell which
+          # commit a running simulator came from. No --dirty here: a CI
+          # checkout is clean by construction, unlike a deploy-server tree.
+          commit="$(git rev-parse HEAD)"
+          version="$(git describe --tags --exact-match 2>/dev/null || true)"
+          describe="$(git describe --tags --always)"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "describe=$describe" >> "$GITHUB_OUTPUT"
+          echo "Commit          : $commit"
+          echo "Release version : ${version:-<none, this commit carries no release tag>}"
+          echo "git describe    : $describe"
+
+      - name: Plan tags
+        id: plan
+        run: |
+          set -euo pipefail
+          push=false
+          tag=""
+          ref="${GITHUB_REF#refs/heads/}"
+          if [ "$ref" = "main" ]; then
+            push=true
+            tag="main"
+          fi
+          echo "push=$push" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ "$push" = "true" ]; then
+            base="${REGISTRY}/${IMAGE_NAME}"
+            # Two tags, both required by the nightly:
+            #   :main            floating — "newest main", the default pull
+            #   :main-<sha>      commit-pinned — one exact build, for a run
+            #                    that must not move under it
+            tags=("${base}:${tag}" "${base}:${tag}-${GITHUB_SHA}")
+            {
+              echo "tags<<EOF"
+              printf '%s\n' "${tags[@]}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "::notice title=Image tags::$(IFS=' '; echo "${tags[*]}")"
+            echo "Planned image tags:"
+            printf '  - %s\n' "${tags[@]}"
+            {
+              echo "### Planned image tags"
+              printf -- '- `%s`\n' "${tags[@]}"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Skipping push: ref=${GITHUB_REF} is not main (build-only run)."
+            {
+              echo "### No tags planned"
+              echo ""
+              echo "Ref \`${GITHUB_REF}\` is not \`main\` — the image was built but not pushed."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # The router's image is assembled from binaries cross-compiled on the
+      # runner, so it needs no emulation. This one runs `pip install` inside
+      # the image, so the linux/arm64 layer has to execute arm64 binaries on
+      # an amd64 runner — that is what QEMU provides. arm64 is not optional:
+      # k3d on an Apple Silicon Mac cannot run an amd64-only image natively.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log into registry ${{ env.REGISTRY }}
+        if: steps.plan.outputs.push == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract OCI labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          # Repo root: the Dockerfile COPYs *.py, cosmos_pb2/ and
+          # provider_simulator/ from the top of the checkout, and both
+          # scripts/deploy.sh and the automation repo's k3d-up.sh build it
+          # exactly this way.
+          context: .
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            SIM_GIT_COMMIT=${{ steps.identity.outputs.commit }}
+            SIM_GIT_VERSION=${{ steps.identity.outputs.version }}
+            SIM_GIT_DESCRIBE=${{ steps.identity.outputs.describe }}
+          tags: ${{ steps.plan.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          push: ${{ steps.plan.outputs.push == 'true' }}
+
+      - name: Report pushed image
+        if: steps.plan.outputs.push == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.plan.outputs.tags }}
+          DESCRIBE: ${{ steps.identity.outputs.describe }}
+        run: |
+          echo "::notice title=Image published::digest=${DIGEST}"
+          echo "Pushed image digest: ${DIGEST}"
+          echo "Build identity: ${DESCRIBE}"
+          echo "Tags:"
+          printf '  - %s\n' ${TAGS}
+          {
+            echo "### Pushed image"
+            echo ""
+            echo "**Digest:** \`${DIGEST}\`"
+            echo ""
+            echo "**Build identity:** \`${DESCRIBE}\`"
+            echo ""
+            echo "**Tags:**"
+            for t in ${TAGS}; do echo "- \`${t}\`"; done
+          } >> "$GITHUB_STEP_SUMMARY"
