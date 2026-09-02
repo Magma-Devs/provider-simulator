@@ -1,7 +1,13 @@
 name: Publish image
 
 # Builds the repo-root Dockerfile and publishes it to GitHub Container
-# Registry on every push to main.
+# Registry on every push to main, and on every published release.
+#
+# A merge to main makes a BUILD (:main and :main-<sha>). A release makes a
+# RELEASE IMAGE (:v<X.Y.Z>) and publishes ONLY that tag — it never moves
+# :main. :main means "newest main", and a release is cut from a commit that
+# may sit behind it, so letting a release write :main would drag the
+# nightly's default backwards.
 #
 # WHY: every k3d test cluster used to build this image itself (`docker build`
 # in the automation repo's tools/local-cluster/scripts/k3d-up.sh), and the
@@ -24,6 +30,8 @@ name: Publish image
 on:
   push:
     branches: [main]
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -78,20 +86,30 @@ jobs:
           set -euo pipefail
           push=false
           tag=""
-          ref="${GITHUB_REF#refs/heads/}"
-          if [ "$ref" = "main" ]; then
+          base="${REGISTRY}/${IMAGE_NAME}"
+          if [ "${GITHUB_EVENT_NAME}" = "release" ]; then
+            # A release publishes ONE version tag and never touches :main.
+            # :main means "newest main", and a release is cut from a commit
+            # that may sit behind it — writing :main here would drag the
+            # nightly's default backwards.
             push=true
-            tag="main"
+            tag="${GITHUB_REF#refs/tags/}"
+            tags=("${base}:${tag}")
+          else
+            ref="${GITHUB_REF#refs/heads/}"
+            if [ "$ref" = "main" ]; then
+              push=true
+              tag="main"
+              # Two tags, both required by the nightly:
+              #   :main            floating — "newest main", the default pull
+              #   :main-<sha>      commit-pinned — one exact build, for a run
+              #                    that must not move under it
+              tags=("${base}:${tag}" "${base}:${tag}-${GITHUB_SHA}")
+            fi
           fi
           echo "push=$push" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           if [ "$push" = "true" ]; then
-            base="${REGISTRY}/${IMAGE_NAME}"
-            # Two tags, both required by the nightly:
-            #   :main            floating — "newest main", the default pull
-            #   :main-<sha>      commit-pinned — one exact build, for a run
-            #                    that must not move under it
-            tags=("${base}:${tag}" "${base}:${tag}-${GITHUB_SHA}")
             {
               echo "tags<<EOF"
               printf '%s\n' "${tags[@]}"
@@ -105,11 +123,11 @@ jobs:
               printf -- '- `%s`\n' "${tags[@]}"
             } >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "Skipping push: ref=${GITHUB_REF} is not main (build-only run)."
+            echo "Skipping push: ref=${GITHUB_REF} is neither main nor a release tag (build-only run)."
             {
               echo "### No tags planned"
               echo ""
-              echo "Ref \`${GITHUB_REF}\` is not \`main\` — the image was built but not pushed."
+              echo "Ref \`${GITHUB_REF}\` is neither \`main\` nor a release tag — the image was built but not pushed."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
