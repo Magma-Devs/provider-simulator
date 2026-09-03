@@ -25,6 +25,7 @@ _CORRUPTION_MODES = {
     "invalid_json",
     "empty_response",
     "wrong_type",
+    "null_body",  # the whole wire body becomes the literal ``null``
     "invalid_proto",  # gRPC-only wire corruption; other listeners never emit it
 }
 _DROP_AT = {"before_headers", "after_headers", "mid_body"}

@@ -6,7 +6,9 @@ is the one place that corruption becomes wire bytes — ported verbatim from the
 flat handlers' ``_reply`` so the output is byte-identical.
 
 Dict-level corruption (missing_field / wrong_type / empty_response) runs before
-serialization; byte-level corruption (truncated / invalid_json) runs after.
+serialization; byte-level corruption (truncated / invalid_json) runs after;
+``null_body`` replaces the whole wire body with the literal ``null`` before
+either, whatever the body type.
 ``dotted`` selects REST semantics: a dotted missing_field path
 (``block.header.height``) and a first-key default for wrong_type, versus
 JSON-RPC's flat top-level field and its ``result`` default.
@@ -35,6 +37,13 @@ def serialize(
     ``emit_body`` is False only for ``empty_response`` — the caller sends the
     status and a zero-length body.
     """
+    # null_body is a WHOLE-BODY override: the wire carries the five bytes
+    # ``null`` — valid JSON, no envelope at all. It reproduces the reply shape
+    # smart-router v1.4.1 hardened against (a node answering literal null used
+    # to end the router process), so it applies whatever the body type was.
+    if corruption_mode == "null_body":
+        return status, b"null", True
+
     data = body
     if isinstance(data, dict):
         if corruption_mode == "missing_field" and missing_field:
