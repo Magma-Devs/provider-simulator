@@ -114,10 +114,7 @@ def test_pool_scoped_reset_keeps_the_other_pools_subscriptions():
     api.subscriptions.register("0xbtc", "btc-sim", "1", "eth_subscribe")
     api.reset(pool="btc-sim")
     live = {sub["subscription_id"] for sub in api.subscriptions.list()}
-    assert live == {"0xeth"}, (
-        f"a btc-sim-scoped reset must drop only btc-sim's subscriptions; "
-        f"still live: {live}"
-    )
+    assert live == {"0xeth"}, f"a btc-sim-scoped reset must drop only btc-sim's subscriptions; " f"still live: {live}"
 
 
 def _arm_two_pools(api):

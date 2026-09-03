@@ -76,16 +76,16 @@ def test_str_body_roundtrips_as_plain_text_not_json_quoted():
 
 def test_null_body_replaces_a_dict_body_with_literal_null():
     status, raw, emit = serialize(200, {"jsonrpc": "2.0", "id": 1, "result": "0x1"}, "null_body")
-    assert (status, raw, emit) == (200, b"null", True), (
-        f"the whole wire body must become the literal null, got {raw!r}"
-    )
+    assert (status, raw, emit) == (200, b"null", True), f"the whole wire body must become the literal null, got {raw!r}"
 
 
 def test_null_body_replaces_a_str_body_too():
     status, raw, emit = serialize(429, "Rate limit exceeded.", "null_body")
-    assert (status, raw, emit) == (429, b"null", True), (
-        f"null_body is a whole-body override for any body type, got {(status, raw, emit)!r}"
-    )
+    assert (status, raw, emit) == (
+        429,
+        b"null",
+        True,
+    ), f"null_body is a whole-body override for any body type, got {(status, raw, emit)!r}"
 
 
 def test_str_body_empty_response_has_no_body():
