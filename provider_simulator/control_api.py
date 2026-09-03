@@ -231,6 +231,12 @@ class ControlApi:
                 provider.reset_fail()
             if history:
                 provider.log.clear()
+        if scenario:
+            # A router that leaks an upstream ws subscription (the pre-v1.4.1
+            # client-disconnect bug) leaves a zombie entry nothing else ever
+            # removes -- reset is the isolation point, so it clears the ws
+            # registry with the rest of the fault state.
+            self.subscriptions.clear()
         return 200, {
             "status": status,
             "pool": pool,

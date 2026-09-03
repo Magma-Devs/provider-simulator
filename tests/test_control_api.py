@@ -96,6 +96,18 @@ def test_reset_clears_scenario():
     assert scen["providers"]["eth-sim:1"]["mode"] == "success"
 
 
+def test_reset_clears_the_ws_subscription_registry():
+    api = _api()
+    api.subscriptions.register("0xzombie", "eth-sim", "1", "eth_subscribe")
+    assert api.subscriptions.list(), "the planted subscription must be there before reset"
+    api.reset()
+    assert api.subscriptions.list() == [], (
+        "a router that leaks an upstream ws subscription leaves a zombie "
+        "entry nothing else removes; reset is the isolation point and must "
+        "clear the registry"
+    )
+
+
 def _arm_two_pools(api):
     """Put one fault in eth-sim and one in btc-sim, and prove both landed."""
     st, _ = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down"}, "btc-sim:1": {"mode": "down"}}})
