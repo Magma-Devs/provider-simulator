@@ -89,6 +89,7 @@ grpcurl -plaintext -d '{}' localhost:18548 cosmos.base.tendermint.v1beta1.Servic
 | `corruption_mode="wrong_type"` | partial | proto runtime won't accept the type swap, so the request aborts `INTERNAL` instead of returning a malformed message |
 | `corruption_mode="truncated"` / `empty_response"` / `invalid_proto"` | yes | all abort `UNKNOWN` (the gRPC client sees a parse-failure surface) |
 | `corruption_mode="invalid_json"` | no | JSON-only — not meaningful on gRPC |
+| `corruption_mode="null_body"` | yes | aborts `UNKNOWN` — a whole-body JSON null has no gRPC shape, so it joins the parse-failure family instead of silently no-opping |
 | `blocks_behind` | yes | decrements `block.header.height` in `GetLatestBlockResponse` |
 
 For the cross-family fault primitive table (with the JSON-RPC side alongside), see [`using_the_simulator.md`](using_the_simulator.md#fault-primitives-across-chain-families).

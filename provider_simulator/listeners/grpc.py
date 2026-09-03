@@ -19,7 +19,8 @@ gRPC-specific rules preserved from the flat handler:
   other outcome records the configured latency.
 - A per-method error_stub / error override is a status abort, not a body.
 - Corruption is proto-level: missing_field clears a field (still a respond);
-  wrong_type aborts INTERNAL; invalid_proto / empty_response / truncated abort
+  wrong_type aborts INTERNAL; invalid_proto / empty_response / truncated /
+  null_body abort
   UNKNOWN.
 """
 
@@ -154,7 +155,7 @@ class GrpcListener:
                 message=f"wrong_type corruption on {scenario.get('missing_field') or 'response'}",
                 latency_ms=latency,
             )
-        if corruption in ("invalid_proto", "empty_response", "truncated"):
+        if corruption in ("invalid_proto", "empty_response", "truncated", "null_body"):
             _finalize("error", latency)
             return GrpcPlan(
                 action="abort",

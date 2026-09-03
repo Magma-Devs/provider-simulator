@@ -92,16 +92,8 @@ class WsSubscriptions:
                 for s in self._subs.values()
             ]
 
-    def clear(self, pools: "set[str] | None" = None) -> None:
-        """Close and drop subscriptions; ``pools`` scopes to those pools only.
-
-        ``None`` clears everything -- a full reset. A pool-scoped reset must
-        not touch another pool's live subscriptions."""
+    def clear(self) -> None:
         with self._lock:
-            if pools is None:
-                doomed = list(self._subs.keys())
-            else:
-                doomed = [sid for sid, sub in self._subs.items() if sub.pool in pools]
-            for sid in doomed:
-                self._subs[sid].closed = True
-                del self._subs[sid]
+            for s in self._subs.values():
+                s.closed = True
+            self._subs.clear()

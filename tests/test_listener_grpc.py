@@ -100,6 +100,14 @@ def test_invalid_proto_corruption_unknown_abort():
     assert listener.plan("GetLatestBlock").status_code == "UNKNOWN"
 
 
+def test_null_body_corruption_unknown_abort():
+    # A whole-body JSON null has no gRPC shape; falling through to a clean
+    # success would be a fault that arms with a 200 and does nothing.
+    listener, _ = _listener()
+    _upd(listener, {"corruption_mode": "null_body"})
+    assert listener.plan("GetLatestBlock").status_code == "UNKNOWN"
+
+
 def test_missing_field_corruption_stays_respond():
     listener, _ = _listener()
     _upd(listener, {"corruption_mode": "missing_field", "missing_field": "block"})
