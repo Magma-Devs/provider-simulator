@@ -162,6 +162,10 @@ class _HttpListenerHandler(BaseHTTPRequestHandler):
         # parse, and they keep the JSON content type on purpose, because that
         # is what a real endpoint returning a broken body looks like.
         content_type = "text/plain; charset=utf-8" if isinstance(result.body, str) else "application/json"
+        if getattr(result, "corruption_mode", None) == "null_body":
+            # The whole body was replaced by the JSON literal ``null``; the
+            # original body's type no longer describes what is on the wire.
+            content_type = "application/json"
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")

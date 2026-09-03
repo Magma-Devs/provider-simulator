@@ -159,7 +159,7 @@ The 6 primitives below apply to every provider regardless of `chain_family`. The
 | `mode=drop_connection` | close socket at `drop_at` point | empty initial metadata then abort `UNAVAILABLE` (unary collapses `mid_body` to `after_headers`) |
 | `mode=rate_limit` | HTTP 429 + JSON-RPC error body | abort `RESOURCE_EXHAUSTED` |
 | `mode=error` | `http_status` + JSON-RPC error body using `error_code` / `error_message` | abort with `grpc.StatusCode` matched from `error_message` (symbolic name) or `error_code` (int) — falls back to `UNKNOWN` |
-| `corruption_mode` | byte-/structural-level corruption of the JSON body (truncated / invalid_json / empty_response / missing_field / wrong_type) | `missing_field` clears the proto field; `truncated` / `empty_response` / `invalid_proto` abort `UNKNOWN`; `wrong_type` aborts `INTERNAL` |
+| `corruption_mode` | byte-/structural-level corruption of the JSON body (truncated / invalid_json / empty_response / missing_field / wrong_type / null_body — the whole body becomes the JSON literal `null`) | `missing_field` clears the proto field; `truncated` / `empty_response` / `invalid_proto` / `null_body` abort `UNKNOWN`; `wrong_type` aborts `INTERNAL` |
 | `blocks_behind` | shifts `eth_blockNumber` head and named-tag block numbers | decrements `block.header.height` in `GetLatestBlockResponse` |
 | `latency_ms` | `time.sleep` before responding | `await asyncio.sleep` before responding |
 | `error_probability` | random `mode=error` per request | random gRPC abort per request |
