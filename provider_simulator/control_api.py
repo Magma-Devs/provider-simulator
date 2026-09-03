@@ -235,8 +235,9 @@ class ControlApi:
             # A router that leaks an upstream ws subscription (the pre-v1.4.1
             # client-disconnect bug) leaves a zombie entry nothing else ever
             # removes -- reset is the isolation point, so it clears the ws
-            # registry with the rest of the fault state.
-            self.subscriptions.clear()
+            # registry with the rest of the fault state. Scoped: a pool
+            # reset must not drop another pool's live subscriptions.
+            self.subscriptions.clear(pools={p.pool.name for p in providers})
         return 200, {
             "status": status,
             "pool": pool,

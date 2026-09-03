@@ -108,6 +108,18 @@ def test_reset_clears_the_ws_subscription_registry():
     )
 
 
+def test_pool_scoped_reset_keeps_the_other_pools_subscriptions():
+    api = _api()
+    api.subscriptions.register("0xeth", "eth-sim", "1", "eth_subscribe")
+    api.subscriptions.register("0xbtc", "btc-sim", "1", "eth_subscribe")
+    api.reset(pool="btc-sim")
+    live = {sub["subscription_id"] for sub in api.subscriptions.list()}
+    assert live == {"0xeth"}, (
+        f"a btc-sim-scoped reset must drop only btc-sim's subscriptions; "
+        f"still live: {live}"
+    )
+
+
 def _arm_two_pools(api):
     """Put one fault in eth-sim and one in btc-sim, and prove both landed."""
     st, _ = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down"}, "btc-sim:1": {"mode": "down"}}})

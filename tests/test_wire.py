@@ -83,7 +83,9 @@ def test_null_body_replaces_a_dict_body_with_literal_null():
 
 def test_null_body_replaces_a_str_body_too():
     status, raw, emit = serialize(429, "Rate limit exceeded.", "null_body")
-    assert raw == b"null", f"null_body is a whole-body override for any body type, got {raw!r}"
+    assert (status, raw, emit) == (429, b"null", True), (
+        f"null_body is a whole-body override for any body type, got {(status, raw, emit)!r}"
+    )
 
 
 def test_str_body_empty_response_has_no_body():

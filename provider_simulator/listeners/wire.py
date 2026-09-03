@@ -37,7 +37,7 @@ def serialize(
     ``emit_body`` is False only for ``empty_response`` — the caller sends the
     status and a zero-length body.
     """
-    # null_body is a WHOLE-BODY override: the wire carries the five bytes
+    # null_body is a WHOLE-BODY override: the wire carries the four bytes
     # ``null`` — valid JSON, no envelope at all. It reproduces the reply shape
     # smart-router v1.4.1 hardened against (a node answering literal null used
     # to end the router process), so it applies whatever the body type was.
