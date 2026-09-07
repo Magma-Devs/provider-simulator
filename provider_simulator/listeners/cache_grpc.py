@@ -78,15 +78,36 @@ def build_generic_handler(sim: CacheSim) -> grpc.GenericRpcHandler:
     return grpc.method_handlers_generic_handler(SERVICE_NAME, {"GetRelay": handler})
 
 
-async def serve(sim: CacheSim, port: int, host: str = "0.0.0.0") -> None:
-    """Run one cache-sim's gRPC listener until the process ends."""
+async def serve(
+    sim: CacheSim,
+    port: int,
+    host: str = "0.0.0.0",
+    *,
+    stop: "asyncio.Event | None" = None,
+) -> None:
+    """Run one cache-sim's gRPC listener.
+
+    Without ``stop`` it runs until the process ends, which is what the
+    simulator's daemon thread wants. With one, it shuts the server down when the
+    event is set.
+
+    ``stop`` exists because stopping the event loop is not enough. The gRPC
+    server owns its listening socket, and abandoning this coroutine mid-await
+    leaves that socket open for the life of the process — a caller that stopped
+    the loop and joined the thread would still find the port accepting
+    connections. Only ``server.stop()`` closes it.
+    """
     server = grpc.aio.server()
     server.add_generic_rpc_handlers((build_generic_handler(sim),))
     bind = f"[::]:{port}" if host == "0.0.0.0" else f"{host}:{port}"
     server.add_insecure_port(bind)
     _log.info("cache-sim %r bound on %s serving %s", sim.name, bind, GET_RELAY_METHOD)
     await server.start()
-    await server.wait_for_termination()
+    if stop is None:
+        await server.wait_for_termination()
+        return
+    await stop.wait()
+    await server.stop(grace=None)
 
 
 def run_in_thread(sim: CacheSim, port: int, host: str = "0.0.0.0") -> None:

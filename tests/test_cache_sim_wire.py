@@ -44,11 +44,14 @@ class _Listener:
         self.port = _free_port()
         self._loop = asyncio.new_event_loop()
         self._ready = threading.Event()
+        self._stop: asyncio.Event | None = None
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def _run(self) -> None:
         asyncio.set_event_loop(self._loop)
-        self._loop.create_task(serve(self.sim, self.port, host="127.0.0.1"))
+        # The Event must be created on the loop that awaits it.
+        self._stop = asyncio.Event()
+        self._loop.create_task(serve(self.sim, self.port, host="127.0.0.1", stop=self._stop))
         self._loop.call_soon(self._ready.set)
         self._loop.run_forever()
 
@@ -59,6 +62,16 @@ class _Listener:
         return self
 
     def __exit__(self, *_: object) -> None:
+        """Stop the server, THEN the loop.
+
+        Stopping the loop alone leaves the port open: the gRPC server holds its
+        own listening socket, and abandoning the serve() coroutine never closes
+        it. Every test would then leak a listening socket for the life of the
+        pytest process. test_the_port_is_closed_after_teardown pins this.
+        """
+        if self._stop is not None:
+            self._loop.call_soon_threadsafe(self._stop.set)
+        _wait_until_closed(self.port)
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=5)
 
@@ -76,6 +89,17 @@ def _wait_until_listening(port: int, timeout_s: float = 5.0) -> None:
             if s.connect_ex(("127.0.0.1", port)) == 0:
                 return
     raise AssertionError(f"cache-sim listener never accepted on port {port}")
+
+
+def _wait_until_closed(port: int, timeout_s: float = 5.0) -> None:
+    """Poll until the port stops accepting, so teardown is observed not assumed."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        with socket.socket() as s:
+            s.settimeout(0.2)
+            if s.connect_ex(("127.0.0.1", port)) != 0:
+                return
+    raise AssertionError(f"cache-sim listener still accepting on port {port} after teardown")
 
 
 def call_get_relay(target: str, body: dict, timeout_s: float = 5.0) -> bytes:
@@ -193,3 +217,42 @@ class TestOnlyGetRelayIsServed:
                 with pytest.raises(grpc.RpcError):
                     rpc(b"{}", timeout=5)
             assert sim.call_count() == 0
+
+
+class TestTeardownActuallyStops:
+    """A leaked listener is invisible until the suite runs out of sockets.
+
+    Stopping the event loop is not enough — the gRPC server owns the listening
+    socket, and abandoning the serve() coroutine leaves it open for the life of
+    the process. This ran green against the leaking version because nothing
+    looked; it fails against it now.
+    """
+
+    def test_the_port_is_closed_after_teardown(self) -> None:
+        sim = CacheSim("internal")
+        with _Listener(sim) as listener:
+            port = listener.port
+            call_get_relay(listener.target, a_lookup())
+
+        with socket.socket() as s:
+            s.settimeout(0.5)
+            assert s.connect_ex(("127.0.0.1", port)) != 0, (
+                f"port {port} still accepts after teardown — the gRPC server was "
+                f"never stopped, so every wire test leaks a listening socket"
+            )
+
+    def test_repeated_listeners_leave_nothing_behind(self) -> None:
+        ports = []
+        for _ in range(3):
+            sim = CacheSim("internal")
+            with _Listener(sim) as listener:
+                ports.append(listener.port)
+                call_get_relay(listener.target, a_lookup())
+
+        still_open = []
+        for port in ports:
+            with socket.socket() as s:
+                s.settimeout(0.5)
+                if s.connect_ex(("127.0.0.1", port)) == 0:
+                    still_open.append(port)
+        assert not still_open, f"leaked listeners on {still_open}"
