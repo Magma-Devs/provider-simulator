@@ -670,7 +670,7 @@ def _dispatch_cache_get(control: ControlApi, path: str) -> tuple[int, dict]:
         return control.get_cache_calls(name)
     if not action:
         return control.get_cache(name)
-    return 404, {"error": f"unknown cache-sim action {action!r}", "actions": ["calls", ""]}
+    return 404, {"error": f"unknown cache-sim action {action!r}", "actions": ["calls", "(none, for the cache itself)"]}
 
 
 class _ControlHandler(BaseHTTPRequestHandler):
@@ -694,20 +694,23 @@ class _ControlHandler(BaseHTTPRequestHandler):
             return
 
         control = self.server.control
-        if self.path == "/scenario":
+        # Parsed, not raw: do_GET has always used urlparse, and a POST carrying
+        # a query string would otherwise become an action named "entry?x=1".
+        path = urlparse(self.path).path
+        if path == "/scenario":
             status, payload = control.apply_scenario(body)
-        elif self.path == "/reset":
+        elif path == "/reset":
             status, payload = control.reset(body.get("pool"))
-        elif self.path == "/history/clear":
+        elif path == "/history/clear":
             status, payload = control.clear_history(body.get("pool"))
-        elif self.path == "/reset/all":
+        elif path == "/reset/all":
             status, payload = control.reset_all(body.get("pool"))
-        elif self.path == "/advance":
+        elif path == "/advance":
             status, payload = control.advance(body)
-        elif self.path == "/ws/emit":
+        elif path == "/ws/emit":
             status, payload = control.ws_emit(body)
-        elif self.path.startswith("/cache/"):
-            status, payload = _dispatch_cache_post(control, self.path, body)
+        elif path.startswith("/cache/"):
+            status, payload = _dispatch_cache_post(control, path, body)
         else:
             status, payload = 404, {"error": "unknown path"}
         self._reply(status, payload)

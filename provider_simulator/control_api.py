@@ -14,6 +14,7 @@ new format — a stale client fails loudly, never silently.
 from dataclasses import fields
 
 from provider_simulator.build_info import build_info
+from provider_simulator.cache_sim import DEFAULT_MODE as DEFAULT_CACHE_MODE
 from provider_simulator.cache_sim import CacheEntry, CacheSimRegistry, UnknownMode
 from provider_simulator.chains import CHAINS
 from provider_simulator.domain.registry import Registry
@@ -241,11 +242,31 @@ class ControlApi:
                 provider.reset_fail()
             if history:
                 provider.log.clear()
+        # Cache-sims reset with everything else. A staged entry that survived
+        # into the next test would be served to a test expecting a cold cache,
+        # which passes for the wrong reason and reports coverage it does not
+        # have. They are not pool-scoped -- a cache has no pool -- so a
+        # pool-scoped reset leaves them alone rather than clearing state the
+        # caller did not ask about.
+        cache_names: list = []
+        if pool is None:
+            for name in self.caches.names():
+                sim = self.caches.get(name)
+                if sim is None:
+                    continue
+                if scenario and history:
+                    sim.reset()
+                elif scenario:
+                    sim.stage(mode=DEFAULT_CACHE_MODE)
+                elif history:
+                    sim.clear_calls()
+                cache_names.append(name)
         return 200, {
             "status": status,
             "pool": pool,
             "providers": sorted(p.key for p in providers),
             "chains": sorted({name for name, _ in chains}) if scenario else [],
+            "caches": sorted(cache_names),
         }
 
     def _scope(self, pool: str | None) -> tuple[list, list, str]:

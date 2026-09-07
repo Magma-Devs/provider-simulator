@@ -113,7 +113,14 @@ def test_the_deployment_declares_every_cache_sim_port():
 
 
 def test_no_cache_sim_port_collides_with_a_provider_or_the_control_port():
-    """Two listeners on one port is a start-up crash, not a silent gap."""
+    """A collision is loud where a missing Service port is silent.
+
+    grpc.aio raises RuntimeError on a failed bind, so the cache-sim's daemon
+    thread dies with a traceback. The process survives, though, and nothing else
+    reports the loss: /ready probes only topology ports, and GET /caches answers
+    the same either way. So keep the port sets disjoint rather than relying on
+    anyone noticing.
+    """
     cache_ports = set(CACHE_SIM_PORTS.values())
     assert not (cache_ports & _topology_ports()), (
         f"a cache-sim port collides with a provider port: " f"{sorted(cache_ports & _topology_ports())}"

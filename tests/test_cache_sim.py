@@ -31,6 +31,7 @@ from provider_simulator.cache_sim import (
     CacheSim,
     CacheSimRegistry,
     UnknownMode,
+    UnknownStatus,
     relay_key,
 )
 
@@ -141,10 +142,19 @@ class TestTheReplyTheRouterDecodes:
         sim.stage(mode="hit", entry=CacheEntry(data=b"x", status_code=0))
         assert sim.plan(lookup()).body["status_code"] == 0  # type: ignore[index]
 
-    def test_the_rendered_reply_is_json_serialisable(self) -> None:
+    def test_the_rendered_reply_survives_a_json_round_trip(self) -> None:
+        """It used to call json.dumps and discard the result, which also passes
+        when the body is None -- the exact vacuous shape this file warns about
+        elsewhere. Now it round-trips and checks the payload came back."""
         sim = CacheSim()
-        sim.stage(mode="hit", entry=CacheEntry(data="plain text"))
-        json.dumps(sim.plan(lookup()).body)
+        sim.stage(mode="hit", entry=CacheEntry(data="plain text", status_code=204))
+
+        body = sim.plan(lookup()).body
+        assert body is not None
+        restored = json.loads(json.dumps(body))
+        assert restored == body
+        assert base64.b64decode(restored["reply"]["data"]) == b"plain text"
+        assert restored["status_code"] == 204
 
 
 class TestBehavingBadlyOnPurpose:
@@ -214,10 +224,17 @@ class TestStagingRefusesWhatWouldPassQuietly:
         body = sim.plan(lookup()).body
         assert body["status_code"] == 200  # type: ignore[index]
 
-    def test_unknown_keys_in_a_staged_dict_are_ignored(self) -> None:
+    def test_unknown_keys_in_a_staged_dict_are_ignored_and_known_ones_kept(self) -> None:
+        """Asserting only that it responded said nothing -- four of five modes
+        respond. The point is that the unknown key was dropped without taking
+        the known ones with it."""
         sim = CacheSim()
-        sim.stage(mode="hit", entry={"data": b"x", "not_a_field": 1})
-        assert sim.plan(lookup()).action == "respond"
+        sim.stage(mode="hit", entry={"data": b"x", "status_code": 418, "not_a_field": 1})
+
+        body = sim.plan(lookup()).body
+        assert body is not None
+        assert base64.b64decode(body["reply"]["data"]) == b"x"
+        assert body["status_code"] == 418
 
 
 class TestTheCallLog:
@@ -347,3 +364,94 @@ class TestAddressingByName:
             sim = registry.get_or_create(name)
             assert sim.call_count() == 0
             assert sim.plan(lookup()).body == {"reply": None}
+
+
+class TestStagingRefusesInputTheRouterCannotAct0n:
+    """Each of these used to be accepted, and each produced a cold-looking cache
+    rather than the behaviour the test asked for."""
+
+    def test_an_error_status_of_ok_is_refused_because_it_hangs_the_call(self) -> None:
+        """Aborting with OK neither answers nor fails the call, so the router
+        waits out its whole budget. That is a hang wearing the name of an
+        error, and a test asking for an error would never see one."""
+        sim = CacheSim()
+        with pytest.raises(UnknownStatus) as excinfo:
+            sim.stage(mode="error", error_status="OK")
+        assert "OK" in str(excinfo.value)
+
+    def test_a_misspelt_error_status_is_refused_rather_than_becoming_unknown(self) -> None:
+        """The router treats every gRPC error as a miss, so a typo would pass a
+        test that meant to exercise UNAVAILABLE while exercising UNKNOWN."""
+        sim = CacheSim()
+        with pytest.raises(UnknownStatus):
+            sim.stage(mode="error", error_status="UNAVAILABEL")
+
+    def test_a_real_status_is_still_accepted(self) -> None:
+        sim = CacheSim()
+        sim.stage(mode="error", error_status="RESOURCE_EXHAUSTED")
+        assert sim.plan(lookup()).status_code == "RESOURCE_EXHAUSTED"
+
+    def test_a_number_where_the_body_belongs_is_refused(self) -> None:
+        """Go decodes the whole reply in one step, so one wrongly-typed field
+        fails the entire unmarshal and the router logs a miss."""
+        sim = CacheSim()
+        with pytest.raises(TypeError) as excinfo:
+            sim.stage(mode="hit", entry={"data": 12345})
+        assert "data" in str(excinfo.value)
+
+    def test_a_string_where_a_block_height_belongs_is_refused(self) -> None:
+        sim = CacheSim()
+        with pytest.raises(TypeError) as excinfo:
+            sim.stage(mode="hit", entry={"data": b"x", "latest_block": "99000000"})
+        assert "latest_block" in str(excinfo.value)
+
+    def test_a_bool_is_not_accepted_as_a_block_height(self) -> None:
+        sim = CacheSim()
+        with pytest.raises(TypeError):
+            sim.stage(mode="hit", entry={"data": b"x", "seen_block": True})
+
+    def test_a_refused_entry_leaves_the_previous_one_serving(self) -> None:
+        sim = CacheSim()
+        sim.stage(mode="hit", entry=CacheEntry(data=b"good"))
+        with pytest.raises(TypeError):
+            sim.stage(mode="hit", entry={"data": 999})
+        body = sim.plan(lookup()).body
+        assert body is not None
+        assert base64.b64decode(body["reply"]["data"]) == b"good"
+
+
+class TestTheCallLogIsBounded:
+    def test_the_log_stops_growing_at_the_cap(self) -> None:
+        """The router queries the secondary on every primary miss, so an
+        unbounded list grows until the pod restarts. Every provider's log is
+        capped the same way."""
+        from constants import HISTORY_MAX
+
+        sim = CacheSim()
+        for _ in range(HISTORY_MAX + 25):
+            sim.plan(lookup())
+        assert sim.call_count() == HISTORY_MAX
+
+    def test_the_newest_calls_are_the_ones_kept(self) -> None:
+        from constants import HISTORY_MAX
+
+        sim = CacheSim()
+        for i in range(HISTORY_MAX + 5):
+            sim.plan(lookup(requested_block=i))
+        blocks = [c["requested_block"] for c in sim.calls()]
+        assert blocks[-1] == HISTORY_MAX + 4
+        assert blocks[0] == 5
+
+
+class TestHangHonoursAStagedLatency:
+    def test_a_longer_staged_latency_wins_over_the_default(self) -> None:
+        """It used to compute the latency and then discard it, so a test asking
+        for a five-second overrun quietly got two."""
+        sim = CacheSim()
+        sim.stage(mode="hang", latency_ms=5000)
+        assert sim.plan(lookup()).sleep_s == 5.0
+
+    def test_a_shorter_one_does_not_shorten_the_hang(self) -> None:
+        sim = CacheSim()
+        sim.stage(mode="hang", latency_ms=10)
+        assert sim.plan(lookup()).sleep_s == HANG_SECONDS

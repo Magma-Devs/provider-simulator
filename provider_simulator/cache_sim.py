@@ -51,8 +51,11 @@ import binascii
 import json
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
+
+from constants import HISTORY_MAX
 
 # The full method path the router calls. Anything else is unimplemented.
 GET_RELAY_METHOD = "/smartrouter.pairing.RelayerCache/GetRelay"
@@ -74,6 +77,30 @@ DEFAULT_MODE = "miss"
 HANG_SECONDS = 2.0
 
 
+class UnknownStatus(ValueError):
+    """Raised for an error status that is not a gRPC code, or is ``OK``.
+
+    Two failures this closes, both of which produce a green test that measured
+    nothing:
+
+    ``OK`` is a valid gRPC code and aborting with it neither answers the call
+    nor fails it -- the router waits out its whole budget on every lookup. That
+    is a hang wearing the name of an error.
+
+    A misspelt code (``UNAVAILABEL``) would otherwise fall through to
+    ``UNKNOWN``. The router treats every gRPC error as a miss, so a test meaning
+    to prove "an unavailable cache degrades to a miss" would pass while actually
+    exercising a different code. This module already refuses a misspelt mode for
+    exactly that reason; a status deserves the same.
+    """
+
+    def __init__(self, status: object, allowed: list) -> None:
+        super().__init__(
+            f"unknown error_status {status!r}; expected a gRPC status code such as "
+            f"{', '.join(allowed[:4])} (OK is rejected: aborting with it hangs the call)"
+        )
+
+
 class UnknownMode(ValueError):
     """Raised for a mode outside MODES, naming the ones that exist.
 
@@ -84,6 +111,30 @@ class UnknownMode(ValueError):
 
     def __init__(self, mode: object) -> None:
         super().__init__(f"unknown cache-sim mode {mode!r}; expected one of {', '.join(MODES)}")
+
+
+def grpc_status_names() -> list:
+    """Every gRPC status name, or an empty list when grpcio is absent.
+
+    Imported lazily so the offline module keeps working without grpcio, which is
+    an optional dependency here. With no grpcio there is nothing to validate
+    against, so a status is accepted and the listener -- which needs grpcio to
+    run at all -- is never reached.
+    """
+    try:
+        import grpc
+    except ImportError:  # pragma: no cover - grpcio is installed in CI
+        return []
+    return [sc.name for sc in grpc.StatusCode]
+
+
+def _check_status(status: object) -> None:
+    """Refuse a status the router could never act on. See UnknownStatus."""
+    names = grpc_status_names()
+    if not names:
+        return
+    if status == "OK" or status not in names:
+        raise UnknownStatus(status, [n for n in names if n != "OK"])
 
 
 def _b64(raw: bytes | str | None) -> str | None:
@@ -153,6 +204,29 @@ class CacheEntry:
     blocks_hashes_to_heights: list[dict[str, Any]] = field(default_factory=list)
     is_node_error: bool = False
     status_code: int = 0
+
+    def validate(self) -> None:
+        """Refuse a field whose type the router cannot read.
+
+        Go decodes the whole reply in one step, so one wrongly-typed field does
+        not degrade -- it fails the entire unmarshal, the router logs a miss,
+        and the test reads a cold cache instead of the entry it staged. A number
+        where a string belongs is caught here rather than three layers later.
+        """
+        for name in ("data", "sig", "sig_blocks", "finalized_blocks_hashes"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, (bytes, str)):
+                raise TypeError(f"entry.{name} must be bytes or str, got {type(value).__name__}")
+        for name in ("latest_block", "seen_block", "status_code"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"entry.{name} must be an int, got {type(value).__name__}")
+        if not isinstance(self.is_node_error, bool):
+            raise TypeError(f"entry.is_node_error must be a bool, got {type(self.is_node_error).__name__}")
+        for name in ("metadata", "optional_metadata", "blocks_hashes_to_heights"):
+            value = getattr(self, name)
+            if not isinstance(value, list):
+                raise TypeError(f"entry.{name} must be a list, got {type(value).__name__}")
 
     @classmethod
     def from_dict(cls, body: dict[str, Any]) -> CacheEntry:
@@ -281,7 +355,10 @@ class CacheSim:
         self._error_status: str = "UNAVAILABLE"
         self._error_message: str = "cache-sim: injected error"
         self._malformed_body: bytes = b"{not json"
-        self._calls: list[RecordedCall] = []
+        # Bounded for the same reason every provider's log is: the router
+        # queries the secondary on every primary miss, and an unbounded list
+        # grows until the pod restarts. Same cap, same env override.
+        self._calls: deque = deque(maxlen=HISTORY_MAX)
 
     # ── staging ───────────────────────────────────────────────────────────
 
@@ -305,8 +382,12 @@ class CacheSim:
             raise UnknownMode(mode)
         if mode == "hit" and entry is None:
             raise ValueError("mode='hit' needs an entry; pass entry=... or use mode='miss'")
+        if error_status is not None:
+            _check_status(error_status)
         if isinstance(entry, dict):
             entry = CacheEntry.from_dict(entry)
+        if entry is not None:
+            entry.validate()
         if isinstance(malformed_body, str):
             malformed_body = malformed_body.encode()
         with self._lock:
@@ -327,12 +408,12 @@ class CacheSim:
             self._mode = DEFAULT_MODE
             self._entry = None
             self._latency_ms = 0
-            self._calls = []
+            self._calls.clear()
 
     def clear_calls(self) -> None:
         """Drop the call log, keeping whatever is staged."""
         with self._lock:
-            self._calls = []
+            self._calls.clear()
 
     # ── reading ───────────────────────────────────────────────────────────
 
@@ -417,7 +498,10 @@ class CacheSim:
             # Answer later than the router's budget allows. The router counts
             # the overrun as a miss and goes to its providers, so the answer
             # itself is never read -- a miss body keeps that honest.
-            return CachePlan(action="respond", body=miss_reply(), sleep_s=HANG_SECONDS)
+            #
+            # A staged latency longer than the default wins, so a test that asks
+            # for a specific overrun gets it rather than silently getting 2s.
+            return CachePlan(action="respond", body=miss_reply(), sleep_s=max(HANG_SECONDS, sleep_s))
         if mode == "error":
             return CachePlan(
                 action="abort",

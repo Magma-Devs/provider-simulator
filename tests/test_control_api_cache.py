@@ -293,3 +293,59 @@ class TestTheServerWiring:
         cache_ports = set(CACHE_SIM_PORTS.values())
         assert not (provider_ports & cache_ports)
         assert CONTROL_PORT not in cache_ports
+
+
+class TestTheSharedResetClearsCacheSims:
+    """A staged entry that survived into the next test would be served to a
+    test expecting a cold cache: green, for the wrong reason.
+
+    Nothing used to clear them. POST /reset/all runs ControlApi.reset_all, which
+    iterates providers and chain heads and never touched the cache-sims, so the
+    only thing that cleared one was a route no shared fixture calls.
+    """
+
+    def _staged(self) -> ControlApi:
+        control = api("secondary")
+        control.cache_stage("secondary", {"mode": "hit", "entry": {"data": "x"}})
+        sim = control.caches.get("secondary")
+        assert sim is not None
+        sim.plan(b"{}")
+        return control
+
+    def test_reset_all_clears_the_staged_entry_and_the_call_log(self) -> None:
+        control = self._staged()
+        status, payload = control.reset_all()
+        assert status == 200
+        assert payload["caches"] == ["secondary"]
+
+        sim = control.caches.get("secondary")
+        assert sim is not None
+        assert sim.call_count() == 0
+        assert sim.plan(b"{}").body == {"reply": None}, "a staged hit survived reset_all"
+
+    def test_reset_clears_the_answer_but_keeps_the_call_log(self) -> None:
+        control = self._staged()
+        control.reset()
+        sim = control.caches.get("secondary")
+        assert sim is not None
+        assert sim.plan(b"{}").body == {"reply": None}
+
+    def test_clear_history_clears_the_call_log_but_keeps_the_answer(self) -> None:
+        control = self._staged()
+        control.clear_history()
+        sim = control.caches.get("secondary")
+        assert sim is not None
+        assert sim.call_count() == 0
+        assert sim.plan(b"{}").body != {"reply": None}, "clear_history dropped the staged entry"
+
+    def test_a_pool_scoped_reset_leaves_cache_sims_alone(self) -> None:
+        """A cache has no pool, so a caller narrowing to one is not asking
+        about it. Clearing it anyway would wipe state the caller meant to keep."""
+        control = self._staged()
+        status, payload = control.reset_all(pool="eth-sim")
+        assert status == 200
+        assert payload["caches"] == []
+
+        sim = control.caches.get("secondary")
+        assert sim is not None
+        assert sim.plan(b"{}").body != {"reply": None}
