@@ -1,0 +1,466 @@
+"""Cache-sim — a simulated read-only secondary cache for the smart router.
+
+The router can consult a second cache when its own produces no answer, before it
+falls through to upstream nodes. It treats that second cache as untrusted: it
+strips the writer's signature, keeps only two of the entry's headers, and refuses
+the entry's view of the chain head.
+
+None of those rules can be exercised against a real cache, because a real cache
+holds only what a real router wrote into it. This one holds whatever a test
+chooses, which is the entire reason it exists. Faithful storage is not a goal and
+is not attempted -- the router repository already ships a two-zone lab that runs
+a real cache for that.
+
+What the router sees
+--------------------
+One gRPC call, on the same service path a real cache serves::
+
+    /smartrouter.pairing.RelayerCache/GetRelay
+
+The message bodies are JSON rather than protobuf. That is the router's own
+choice, recorded in ``smart-router/types/relay/proto_compat.go``: every cache
+message's ``Marshal`` is ``json.Marshal``, and gRPC's default codec delegates to
+it. So this module needs no ``.proto`` file and no generated stubs -- it reads
+and writes JSON, and the field names below are the Go structs' JSON tags.
+
+Only ``GetRelay`` is served. The service declares six methods, but the router
+holds a secondary behind a read-only interface offering "is it up?" and "get an
+entry", and "is it up?" is answered by the connection having been established
+(``protocol/performance/cache.go``, ``CacheActive``) rather than by a call. The
+other five are unreachable on this path.
+
+How a test drives it
+--------------------
+A test never names the key an entry is filed under. A real key carries a hash the
+router mints from the request data, which Python cannot recompute, so a test that
+had to name it would get a clean miss whenever it named it wrongly -- and a clean
+miss is indistinguishable from a passing test. Instead a test stages a *rule*
+("the next lookup gets this entry") and reads back the key the router actually
+asked under, which is also how a key-mismatch fault becomes visible.
+
+Every incoming call is recorded. That record matters more than it looks: both
+cache tiers answer with the same headers, so nothing in the response says which
+one served. A test proving the secondary was reached needs this log, or the
+router's own per-tier counter, or both.
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import json
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+# The full method path the router calls. Anything else is unimplemented.
+GET_RELAY_METHOD = "/smartrouter.pairing.RelayerCache/GetRelay"
+SERVICE_NAME = "smartrouter.pairing.RelayerCache"
+
+# Key prefixes the real cache files entries under, so a recorded key can be
+# compared with one. Source: smart-router/ecosystem/cache/core/keys.go.
+RELAY_FINALIZED_PREFIX = "rel:f:"
+RELAY_TEMP_PREFIX = "rel:t:"
+
+# What the cache-sim does with the next lookup. Mutually exclusive, the same way
+# a simulated provider's mode is.
+MODES = ("hit", "miss", "error", "hang", "malformed")
+
+DEFAULT_MODE = "miss"
+
+# A hang must outlast the router's secondary-cache-timeout, whose default is
+# 50ms. Long enough to exceed a raised one, short enough not to stall a suite.
+HANG_SECONDS = 2.0
+
+
+class UnknownMode(ValueError):
+    """Raised for a mode outside MODES, naming the ones that exist.
+
+    A typo must fail loudly here. Left to fall through to a default it would
+    silently become a miss, and the test built on it would pass having proved
+    nothing.
+    """
+
+    def __init__(self, mode: object) -> None:
+        super().__init__(f"unknown cache-sim mode {mode!r}; expected one of {', '.join(MODES)}")
+
+
+def _b64(raw: bytes | str | None) -> str | None:
+    """Encode bytes the way Go's encoding/json does: base64, or null when unset.
+
+    Go marshals a nil []byte as null and a present one as a base64 string, so a
+    reader on the other side must see exactly that.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = raw.encode()
+    return base64.b64encode(raw).decode()
+
+
+def _unb64(value: object) -> bytes:
+    """Decode a base64 field back to bytes, tolerating null and malformed input.
+
+    A request the router sent is always well formed; this stays forgiving so a
+    hand-made probe cannot crash the listener.
+    """
+    if not isinstance(value, str) or not value:
+        return b""
+    try:
+        return base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        return b""
+
+
+@dataclass
+class CacheEntry:
+    """One entry the cache-sim can hand back, including entries no real writer
+    would produce.
+
+    Every field a test needs in order to prove one of the router's trust rules
+    is settable here:
+
+    ``sig`` / ``sig_blocks``
+        The writer's signatures. The router drops both. A test sets them to
+        prove the drop happened.
+    ``metadata``
+        The upstream's response headers, as ``[{"name": ..., "value": ...}]``.
+        The router keeps only ``Content-Type`` and ``Content-Encoding`` and
+        discards the rest, so a test sets a header outside that pair.
+    ``latest_block``
+        The other zone's view of the chain head. The router drops it and stamps
+        its own tip in its place, so a test sets it far above the local one.
+    ``blocks_hashes_to_heights``
+        Block-hash-to-height mappings. The router never asks for these, so a
+        test sets them to prove the answer is ignored.
+    ``is_node_error``
+        Marks the payload as a stored node error. The router serves it, labels
+        it, and refuses to re-file it as a success.
+    ``status_code``
+        The status the entry's writer recorded. Zero means the writer recorded
+        none, which is a distinct case from 200 and is preserved as such.
+    """
+
+    data: bytes | str = b""
+    sig: bytes | str | None = None
+    sig_blocks: bytes | str | None = None
+    finalized_blocks_hashes: bytes | str | None = None
+    latest_block: int = 0
+    metadata: list[dict[str, str]] = field(default_factory=list)
+    optional_metadata: list[dict[str, str]] = field(default_factory=list)
+    seen_block: int = 0
+    blocks_hashes_to_heights: list[dict[str, Any]] = field(default_factory=list)
+    is_node_error: bool = False
+    status_code: int = 0
+
+    @classmethod
+    def from_dict(cls, body: dict[str, Any]) -> CacheEntry:
+        """Build an entry from a control-API body, ignoring unknown keys.
+
+        A test writes the field names this class uses, not the wire names, so
+        the wire shape stays one module's business.
+        """
+        known = {f for f in cls.__dataclass_fields__}
+        return cls(**{k: v for k, v in body.items() if k in known})
+
+    def to_cache_relay_reply(self) -> dict[str, Any]:
+        """Render this entry as the ``CacheRelayReply`` JSON the router decodes.
+
+        Field names and nesting follow the Go structs' JSON tags in
+        ``smart-router/types/relay/cache.go`` and ``relay.go``. Byte fields are
+        base64 because that is how Go's encoding/json writes them.
+        """
+        return {
+            "reply": {
+                "data": _b64(self.data),
+                "sig": _b64(self.sig),
+                "latest_block": self.latest_block,
+                "finalized_blocks_hashes": _b64(self.finalized_blocks_hashes),
+                "sig_blocks": _b64(self.sig_blocks),
+                "metadata": list(self.metadata),
+            },
+            "optional_metadata": list(self.optional_metadata),
+            "seen_block": self.seen_block,
+            "blocks_hashes_to_heights": list(self.blocks_hashes_to_heights),
+            "is_node_error": self.is_node_error,
+            "status_code": self.status_code,
+        }
+
+
+def miss_reply() -> dict[str, Any]:
+    """The answer a real cache gives when it holds nothing for the key.
+
+    The real server does not fail the call on a not-found: its GetRelay handler
+    swallows the lookup error and returns a reply whose ``reply`` is absent
+    (``ecosystem/cache/handlers.go``). The router reads a hit as "no transport
+    error AND a non-nil reply", so this is a miss and not a failure.
+    """
+    return {"reply": None}
+
+
+def relay_key(*, finalized: bool, chain_id: str, request_hash: bytes, block: int) -> str:
+    """The key a real cache would file this lookup under.
+
+    Mirrors ``RelayKey`` in ``smart-router/ecosystem/cache/core/keys.go`` so a
+    key recorded here can be compared with a real one. The cache-sim does not
+    look entries up by it -- it records it, so a test can assert on what the
+    router actually asked for.
+    """
+    prefix = RELAY_FINALIZED_PREFIX if finalized else RELAY_TEMP_PREFIX
+    return f"{prefix}{chain_id}:{request_hash.hex()}:{block}"
+
+
+@dataclass
+class CachePlan:
+    """What the listener glue should do for one lookup.
+
+    ``action`` is one of ``respond`` (send ``body``), ``abort`` (fail the call
+    with ``status_code``), or ``raw`` (send ``raw_body`` unchanged, which is how
+    a malformed answer is produced).
+    """
+
+    action: str
+    body: dict[str, Any] | None = None
+    raw_body: bytes | None = None
+    status_code: str = "OK"
+    message: str = ""
+    sleep_s: float = 0.0
+
+
+@dataclass
+class RecordedCall:
+    """One lookup the router made, as the cache-sim saw it."""
+
+    method: str
+    chain_id: str
+    request_hash_hex: str
+    requested_block: int
+    finalized: bool
+    seen_block: int
+    shared_state_id: str
+    blocks_hashes_to_heights: list[dict[str, Any]]
+    key: str
+    mode: str
+    ts: float
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "method": self.method,
+            "chain_id": self.chain_id,
+            "request_hash": self.request_hash_hex,
+            "requested_block": self.requested_block,
+            "finalized": self.finalized,
+            "seen_block": self.seen_block,
+            "shared_state_id": self.shared_state_id,
+            "blocks_hashes_to_heights": self.blocks_hashes_to_heights,
+            "key": self.key,
+            "mode": self.mode,
+            "ts": self.ts,
+        }
+
+
+class CacheSim:
+    """One simulated secondary cache: a staged answer and a log of every call.
+
+    Holds a lock for the same reason a provider's state does -- the gRPC
+    listener and the control API run on different threads and a test may stage
+    an entry while a lookup is in flight.
+
+    A cache is not a provider. It has no pool and takes no provider slot, so it
+    is addressed by its own name and a fault set on a chain's providers can
+    never reach it.
+    """
+
+    def __init__(self, name: str = "secondary") -> None:
+        self.name = name
+        self._lock = threading.Lock()
+        self._mode: str = DEFAULT_MODE
+        self._entry: CacheEntry | None = None
+        self._latency_ms: int = 0
+        self._error_status: str = "UNAVAILABLE"
+        self._error_message: str = "cache-sim: injected error"
+        self._malformed_body: bytes = b"{not json"
+        self._calls: list[RecordedCall] = []
+
+    # ── staging ───────────────────────────────────────────────────────────
+
+    def stage(
+        self,
+        *,
+        mode: str = "hit",
+        entry: CacheEntry | dict[str, Any] | None = None,
+        latency_ms: int = 0,
+        error_status: str | None = None,
+        error_message: str | None = None,
+        malformed_body: bytes | str | None = None,
+    ) -> None:
+        """Decide what the next lookups get. Raises on an unknown mode.
+
+        ``mode="hit"`` with no entry is a caller error rather than an empty
+        answer: an entry-less hit would serve a reply with no data and read as a
+        cache that answered, which is never what a test means.
+        """
+        if mode not in MODES:
+            raise UnknownMode(mode)
+        if mode == "hit" and entry is None:
+            raise ValueError("mode='hit' needs an entry; pass entry=... or use mode='miss'")
+        if isinstance(entry, dict):
+            entry = CacheEntry.from_dict(entry)
+        if isinstance(malformed_body, str):
+            malformed_body = malformed_body.encode()
+        with self._lock:
+            self._mode = mode
+            if entry is not None:
+                self._entry = entry
+            self._latency_ms = int(latency_ms)
+            if error_status is not None:
+                self._error_status = error_status
+            if error_message is not None:
+                self._error_message = error_message
+            if malformed_body is not None:
+                self._malformed_body = malformed_body
+
+    def reset(self) -> None:
+        """Return to answering misses, drop the staged entry and the call log."""
+        with self._lock:
+            self._mode = DEFAULT_MODE
+            self._entry = None
+            self._latency_ms = 0
+            self._calls = []
+
+    def clear_calls(self) -> None:
+        """Drop the call log, keeping whatever is staged."""
+        with self._lock:
+            self._calls = []
+
+    # ── reading ───────────────────────────────────────────────────────────
+
+    def calls(self) -> list[dict[str, Any]]:
+        """Every lookup so far, oldest first."""
+        with self._lock:
+            return [c.as_dict() for c in self._calls]
+
+    def call_count(self) -> int:
+        """How many lookups the router has made.
+
+        The number a test asserts on to prove the secondary was asked exactly
+        once, or never -- the router must reach it only after its own cache
+        misses.
+        """
+        with self._lock:
+            return len(self._calls)
+
+    def state(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "name": self.name,
+                "mode": self._mode,
+                "latency_ms": self._latency_ms,
+                "has_entry": self._entry is not None,
+                "calls": len(self._calls),
+            }
+
+    # ── the decision ──────────────────────────────────────────────────────
+
+    def plan(self, request_body: bytes) -> CachePlan:
+        """Record one lookup and decide the answer. Pure apart from the log.
+
+        ``request_body`` is the JSON the router sent. A body that will not parse
+        is still recorded -- a lookup that reached us is a lookup, however it
+        was shaped -- and answered with a miss, because inventing a hit from a
+        request we could not read would be a fiction a test might believe.
+        """
+        try:
+            decoded = json.loads(request_body or b"{}")
+            if not isinstance(decoded, dict):
+                decoded = {}
+        except (ValueError, TypeError):
+            decoded = {}
+
+        request_hash = _unb64(decoded.get("request_hash"))
+        chain_id = str(decoded.get("chain_id") or "")
+        requested_block = int(decoded.get("requested_block") or 0)
+        finalized = bool(decoded.get("finalized"))
+
+        with self._lock:
+            mode = self._mode
+            entry = self._entry
+            latency_ms = self._latency_ms
+            error_status = self._error_status
+            error_message = self._error_message
+            malformed_body = self._malformed_body
+            self._calls.append(
+                RecordedCall(
+                    method=GET_RELAY_METHOD,
+                    chain_id=chain_id,
+                    request_hash_hex=request_hash.hex(),
+                    requested_block=requested_block,
+                    finalized=finalized,
+                    seen_block=int(decoded.get("seen_block") or 0),
+                    shared_state_id=str(decoded.get("shared_state_id") or ""),
+                    blocks_hashes_to_heights=list(decoded.get("blocks_hashes_to_heights") or []),
+                    key=relay_key(
+                        finalized=finalized,
+                        chain_id=chain_id,
+                        request_hash=request_hash,
+                        block=requested_block,
+                    ),
+                    mode=mode,
+                    ts=time.time(),
+                )
+            )
+
+        sleep_s = latency_ms / 1000.0
+
+        if mode == "hang":
+            # Answer later than the router's budget allows. The router counts
+            # the overrun as a miss and goes to its providers, so the answer
+            # itself is never read -- a miss body keeps that honest.
+            return CachePlan(action="respond", body=miss_reply(), sleep_s=HANG_SECONDS)
+        if mode == "error":
+            return CachePlan(
+                action="abort",
+                status_code=error_status,
+                message=error_message,
+                sleep_s=sleep_s,
+            )
+        if mode == "malformed":
+            return CachePlan(action="raw", raw_body=malformed_body, sleep_s=sleep_s)
+        if mode == "hit" and entry is not None:
+            return CachePlan(action="respond", body=entry.to_cache_relay_reply(), sleep_s=sleep_s)
+        return CachePlan(action="respond", body=miss_reply(), sleep_s=sleep_s)
+
+
+class CacheSimRegistry:
+    """The cache-sims this simulator is running, addressed by name.
+
+    Named rather than numbered because a zone-segregated topology has one cache
+    per zone, and because a cache has no pool slot to be numbered within.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._sims: dict[str, CacheSim] = {}
+
+    def get_or_create(self, name: str) -> CacheSim:
+        with self._lock:
+            sim = self._sims.get(name)
+            if sim is None:
+                sim = CacheSim(name)
+                self._sims[name] = sim
+            return sim
+
+    def get(self, name: str) -> CacheSim | None:
+        with self._lock:
+            return self._sims.get(name)
+
+    def names(self) -> list[str]:
+        with self._lock:
+            return sorted(self._sims)
+
+    def reset_all(self) -> None:
+        with self._lock:
+            sims = list(self._sims.values())
+        for sim in sims:
+            sim.reset()
