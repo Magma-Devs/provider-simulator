@@ -37,8 +37,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import stubs_ws
-from constants import CONTROL_PORT
+from constants import CACHE_SIM_PORTS, CONTROL_PORT
 from provider_simulator import fault_policy
+from provider_simulator.cache_sim import CacheSimRegistry
 from provider_simulator.control_api import ControlApi
 from provider_simulator.domain.registry import Registry, build_registry
 from provider_simulator.listeners import (
@@ -636,6 +637,42 @@ class _WsHandler(BaseHTTPRequestHandler):
 # ── Control API adapter (port 19000) ──────────────────────────────────────────
 
 
+def _cache_route(path: str) -> tuple[str, str]:
+    """Split ``/cache/<name>/<action>`` into its name and action.
+
+    The name is a path segment rather than a body field so a cache reads the
+    same way in a URL as it does in a log line. An action-less path is the
+    cache itself.
+    """
+    rest = path[len("/cache/") :].strip("/")
+    name, _, action = rest.partition("/")
+    return name, action
+
+
+def _dispatch_cache_post(control: ControlApi, path: str, body: dict) -> tuple[int, dict]:
+    name, action = _cache_route(path)
+    if not name:
+        return 404, {"error": "no cache-sim named in the path"}
+    if action == "entry":
+        return control.cache_stage(name, body)
+    if action == "reset":
+        return control.cache_reset(name)
+    if action == "calls/clear":
+        return control.cache_clear_calls(name)
+    return 404, {"error": f"unknown cache-sim action {action!r}", "actions": ["entry", "reset", "calls/clear"]}
+
+
+def _dispatch_cache_get(control: ControlApi, path: str) -> tuple[int, dict]:
+    name, action = _cache_route(path)
+    if not name:
+        return 404, {"error": "no cache-sim named in the path"}
+    if action == "calls":
+        return control.get_cache_calls(name)
+    if not action:
+        return control.get_cache(name)
+    return 404, {"error": f"unknown cache-sim action {action!r}", "actions": ["calls", ""]}
+
+
 class _ControlHandler(BaseHTTPRequestHandler):
     """HTTP surface for the ControlApi routes. Parsing and route dispatch only —
     every decision lives in ControlApi; /ready is the exception because probing
@@ -669,6 +706,8 @@ class _ControlHandler(BaseHTTPRequestHandler):
             status, payload = control.advance(body)
         elif self.path == "/ws/emit":
             status, payload = control.ws_emit(body)
+        elif self.path.startswith("/cache/"):
+            status, payload = _dispatch_cache_post(control, self.path, body)
         else:
             status, payload = 404, {"error": "unknown path"}
         self._reply(status, payload)
@@ -697,6 +736,10 @@ class _ControlHandler(BaseHTTPRequestHandler):
             status, payload = control.get_history(query)
         elif path == "/ws/subscriptions":
             status, payload = control.ws_subscriptions()
+        elif path == "/caches":
+            status, payload = control.get_caches()
+        elif path.startswith("/cache/"):
+            status, payload = _dispatch_cache_get(control, path)
         else:
             status, payload = 404, {"error": "unknown path"}
         self._reply(status, payload)
@@ -901,16 +944,28 @@ class SimulatorServer:
         host: str = "0.0.0.0",
         control_port: int = CONTROL_PORT,
         scenario_ttl_s: "int | None" = None,
+        cache_ports: "dict[str, int] | None" = None,
     ) -> None:
         self.host = host
         self.control_port = control_port
         self.registry = build_registry()
         self.subscriptions = _WireSubscriptions(self.registry)
-        self.control = ControlApi(self.registry, self.subscriptions)
+        # One cache-sim per configured port. Built here rather than on first
+        # use so an unknown name on the control port is a 404 that lists what
+        # exists, instead of quietly creating a cache nothing serves.
+        self.caches = CacheSimRegistry()
+        # Overridable for the same reason control_port is: a second server in
+        # one process needs its own ports, and {} runs the simulator with no
+        # cache-sim at all.
+        self.cache_ports = dict(CACHE_SIM_PORTS if cache_ports is None else cache_ports)
+        for cache_name in self.cache_ports:
+            self.caches.get_or_create(cache_name)
+        self.control = ControlApi(self.registry, self.subscriptions, self.caches)
         if scenario_ttl_s is None:
             scenario_ttl_s = int(os.environ.get("SIM_SCENARIO_TTL_SECONDS", "900"))
         self.scenario_ttl_s = scenario_ttl_s
         self.grpc_enabled = False
+        self.cache_sims_enabled = False
         self._servers: list[_SimThreadingHTTPServer] = []
         self._threads: list[threading.Thread] = []
 
@@ -952,6 +1007,26 @@ class SimulatorServer:
                 self.grpc_enabled = True
             except ImportError as exc:
                 _log.warning(f"  gRPC listeners DISABLED — grpcio import failed: {exc}")
+
+        # Cache-sims speak gRPC too, and share grpcio's optional-dependency
+        # treatment: without it the HTTP simulator still runs and only the
+        # secondary-cache tier is unavailable.
+        if self.cache_ports:
+            try:
+                from provider_simulator.listeners.cache_grpc import run_in_thread
+
+                for cache_name, cache_port in self.cache_ports.items():
+                    self._threads.append(
+                        threading.Thread(
+                            target=run_in_thread,
+                            args=(self.caches.get_or_create(cache_name), cache_port, self.host),
+                            daemon=True,
+                            name=f"cache-sim-{cache_name}",
+                        )
+                    )
+                self.cache_sims_enabled = True
+            except ImportError as exc:
+                _log.warning(f"  cache-sims DISABLED — grpcio import failed: {exc}")
 
         if self.scenario_ttl_s > 0:
             self._threads.append(

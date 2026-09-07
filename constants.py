@@ -17,6 +17,20 @@ import os
 CONTROL_PORT = 19000
 
 
+# ── Cache-sims — simulated read-only secondary caches ─────────────────────────
+# Service ports for the same reason CONTROL_PORT is one: a cache is not a
+# provider. It has no pool and no pid, so it cannot be addressed as "pool:pid"
+# and does not belong in the topology table. Named instead, because a
+# zone-segregated deployment has one cache per zone.
+#
+# A router reaches one of these by port, through its --secondary-cache-be
+# setting. Tests reach the same one by name, on the control port.
+#
+# Chosen above the provider block (18545-18614) and the control port so a new
+# provider pool can be added without walking into a cache's port.
+CACHE_SIM_PORTS = {"secondary": 19100}
+
+
 # ── Provider history — call-log ring-buffer ───────────────────────────────────
 # Each provider keeps the last N calls in memory.
 # When full, the oldest entry is dropped to make room for the newest.
