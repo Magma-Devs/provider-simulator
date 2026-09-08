@@ -122,13 +122,35 @@ Pick one `mode`; combine it with the orthogonal fields.
 | Route | Purpose |
 |---|---|
 | `POST /scenario` | Set per-provider behaviour, keyed `pool:pid`: `{"providers": {"eth-sim:1": {"mode": "down"}}}`. An old bare-pid key or a `chain_family` field gets a 400 naming the new format. |
-| `POST /reset` | Reset scenario config, keep history |
-| `POST /history/clear` | Clear history, keep config |
-| `POST /reset/all` | Reset both |
+| `POST /reset` | Reset scenario config, keep history. Also returns a cache-sim to answering misses |
+| `POST /history/clear` | Clear history, keep config. Also clears each cache-sim's call log |
+| `POST /reset/all` | Reset both, cache-sims included |
 | `POST /advance` | Move a chain's simulated head (default `eth`; sync-freshness tests) |
 | `POST /ws/emit` | Push a WebSocket event to a live subscription |
 | `GET /version` | Which build this simulator is: see below |
 | `GET /health` · `/ready` · `/scenario` · `/stats` · `/topology` · `/history` · `/ws/subscriptions` | Health / readiness (all listener ports bound) / config / counters / read-only provider/port topology per pool / call log / live subscriptions |
+
+### Cache-sims (a simulated read-only secondary cache)
+
+A router reaches one of these on its own port through `--secondary-cache-be`; a
+test reaches the same one by name, here. A cache is not a provider — it has no
+pool and no pid — so it is addressed by name, and a scenario set on a chain's
+providers can never reach it. An unknown name is a 404 listing the names that
+exist.
+
+| Route | Purpose |
+|---|---|
+| `POST /cache/<name>/entry` | What the next lookups get: `{"mode": "hit", "entry": {"data": "{\"result\":\"0x1\"}"}}`. Modes are `hit`, `miss`, `error`, `hang`, `malformed`. `entry.data` is **plain text** — it is base64-encoded once on the way out, so encoding it yourself sends it twice-encoded |
+| `POST /cache/<name>/reset` | Back to answering misses; entry and call log dropped |
+| `POST /cache/<name>/calls/clear` | Drop the call log, keep the staged entry |
+| `GET /cache/<name>/calls` | Every lookup the router made, oldest first, each with the key it arrived under |
+| `GET /cache/<name>` | Its current state |
+| `GET /caches` | Every cache-sim this simulator runs |
+
+Read the call log to prove the secondary was reached. Neither cache tier names
+itself in the response, so that log and the router's own
+`smartrouter_cache_success_total{cache_tier="secondary"}` counter are the only
+two witnesses a test has.
 
 `GET /version` answers "which simulator am I talking to", so a release run can be
 identified afterwards without hashing files inside the pod:

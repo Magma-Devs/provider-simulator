@@ -16,6 +16,7 @@ silent. That asymmetry is why this test only checks one direction.
 import pathlib
 import re
 
+from constants import CACHE_SIM_PORTS, CONTROL_PORT
 from provider_simulator.topology import TOPOLOGY
 
 _K8S = pathlib.Path(__file__).resolve().parents[1] / "k8s"
@@ -83,6 +84,48 @@ def test_the_deployment_declares_every_port_the_topology_binds():
         f"alone does not break traffic, but the manifest then lies about what "
         f"the container serves. Add them to k8s/deployment.yml."
     )
+
+
+def test_the_service_publishes_every_cache_sim_port():
+    """The cache-sims bind ports too, and the topology cannot see them.
+
+    A cache is not a provider: it has no pool and no pid, so it is deliberately
+    absent from TOPOLOGY and the two checks above look straight past it. That
+    makes it the exact shape this file was written for — a port the simulator
+    binds and the Service omits, which refuses nothing and says nothing. A
+    router pointed at it with --secondary-cache-be would simply never connect.
+    """
+    missing = sorted(set(CACHE_SIM_PORTS.values()) - _service_ports())
+    assert not missing, (
+        f"a cache-sim binds {missing} and k8s/service.yml does not publish "
+        f"them, so no router in the cluster can reach the secondary cache "
+        f"tier. Add them to k8s/service.yml."
+    )
+
+
+def test_the_deployment_declares_every_cache_sim_port():
+    missing = sorted(set(CACHE_SIM_PORTS.values()) - _container_ports())
+    assert not missing, (
+        f"a cache-sim binds {missing} and k8s/deployment.yml does not declare "
+        f"them as container ports, so the manifest lies about what the "
+        f"container serves. Add them to k8s/deployment.yml."
+    )
+
+
+def test_no_cache_sim_port_collides_with_a_provider_or_the_control_port():
+    """A collision is loud where a missing Service port is silent.
+
+    grpc.aio raises RuntimeError on a failed bind, so the cache-sim's daemon
+    thread dies with a traceback. The process survives, though, and nothing else
+    reports the loss: /ready probes only topology ports, and GET /caches answers
+    the same either way. So keep the port sets disjoint rather than relying on
+    anyone noticing.
+    """
+    cache_ports = set(CACHE_SIM_PORTS.values())
+    assert not (cache_ports & _topology_ports()), (
+        f"a cache-sim port collides with a provider port: " f"{sorted(cache_ports & _topology_ports())}"
+    )
+    assert CONTROL_PORT not in cache_ports, "a cache-sim port collides with the control port"
 
 
 def test_service_port_names_are_unique():

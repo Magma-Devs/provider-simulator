@@ -82,6 +82,15 @@ spec:
       port: 19000
       targetPort: 19000
       protocol: TCP
+    # Cache-sim: a simulated read-only secondary cache a router reaches with
+    # --secondary-cache-be. gRPC, so HTTP/2, and reached in-cluster by Service
+    # DNS rather than through a route. Not a provider and not in the topology,
+    # so the topology-driven port test above cannot see it — its own check is
+    # in tests/test_service_publishes_every_port.py.
+    - name: cache-sim
+      port: 19100
+      targetPort: 19100
+      protocol: TCP
     # gRPC provider ports (MAG-1780). HTTP/2 by virtue of gRPC; the named
     # ports here are used by GRPCRoute backendRefs as well as direct
     # in-cluster Service access. REST sim (MAG-1777) reserves 18551-18553.

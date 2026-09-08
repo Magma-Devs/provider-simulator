@@ -14,6 +14,8 @@ new format — a stale client fails loudly, never silently.
 from dataclasses import fields
 
 from provider_simulator.build_info import build_info
+from provider_simulator.cache_sim import DEFAULT_MODE as DEFAULT_CACHE_MODE
+from provider_simulator.cache_sim import CacheEntry, CacheSimRegistry, UnknownMode
 from provider_simulator.chains import CHAINS
 from provider_simulator.domain.registry import Registry
 from provider_simulator.listeners.ws import WsSubscriptions
@@ -104,9 +106,18 @@ def _normalise_responses(responses: object) -> object:
 
 
 class ControlApi:
-    def __init__(self, registry: Registry, subscriptions: WsSubscriptions) -> None:
+    def __init__(
+        self,
+        registry: Registry,
+        subscriptions: WsSubscriptions,
+        caches: CacheSimRegistry | None = None,
+    ) -> None:
         self.registry = registry
         self.subscriptions = subscriptions
+        # A simulator built without cache-sims answers the cache routes with a
+        # 404 rather than pretending it has one. An empty registry is the same
+        # thing as none for every read below.
+        self.caches = caches if caches is not None else CacheSimRegistry()
 
     # ── POST /scenario ──────────────────────────────────────────────────────
     def apply_scenario(self, body: object) -> tuple[int, dict]:
@@ -231,11 +242,31 @@ class ControlApi:
                 provider.reset_fail()
             if history:
                 provider.log.clear()
+        # Cache-sims reset with everything else. A staged entry that survived
+        # into the next test would be served to a test expecting a cold cache,
+        # which passes for the wrong reason and reports coverage it does not
+        # have. They are not pool-scoped -- a cache has no pool -- so a
+        # pool-scoped reset leaves them alone rather than clearing state the
+        # caller did not ask about.
+        cache_names: list = []
+        if pool is None:
+            for name in self.caches.names():
+                sim = self.caches.get(name)
+                if sim is None:
+                    continue
+                if scenario and history:
+                    sim.reset()
+                elif scenario:
+                    sim.stage(mode=DEFAULT_CACHE_MODE)
+                elif history:
+                    sim.clear_calls()
+                cache_names.append(name)
         return 200, {
             "status": status,
             "pool": pool,
             "providers": sorted(p.key for p in providers),
             "chains": sorted({name for name, _ in chains}) if scenario else [],
+            "caches": sorted(cache_names),
         }
 
     def _scope(self, pool: str | None) -> tuple[list, list, str]:
@@ -471,6 +502,95 @@ class ControlApi:
         provider_simulator/build_info.py. Always 200: "I do not know what I am"
         is an answer, not a failure, and a probe should not treat it as one."""
         return 200, build_info()
+
+    # ── cache-sims ────────────────────────────────────────────────────────────
+    #
+    # A cache is not a provider: it has no pool and no pid, so it is addressed
+    # by name and a scenario set on a chain's providers can never reach it.
+    #
+    # An unknown name is a 404 that lists the names that exist, never a silent
+    # success. Staging into a cache nothing serves would leave the test running
+    # against an unstaged one, passing while measuring nothing — the same
+    # failure the pool-scoped reset above exists to prevent.
+    def _unknown(self, name: str) -> dict:
+        return {"error": f"unknown cache-sim {name!r}", "caches": self.caches.names()}
+
+    def cache_stage(self, name: str, body: object) -> tuple[int, dict]:
+        """Decide what the named cache-sim answers the router's next lookups.
+
+        ``mode`` picks one behaviour and ``entry`` supplies what a hit returns.
+        Both a bad mode and a hit with no entry are refused here rather than
+        answered — an entry-less hit would serve a reply with no data and read
+        as a cache that answered.
+        """
+        if not isinstance(body, dict):
+            return 400, {"error": "request body must be a JSON object"}
+        sim = self.caches.get(name)
+        if sim is None:
+            return 404, self._unknown(name)
+
+        entry = body.get("entry")
+        if entry is not None and not isinstance(entry, dict):
+            return 400, {"error": f"entry must be an object, got {type(entry).__name__}"}
+        try:
+            sim.stage(
+                mode=str(body.get("mode", "hit")),
+                entry=CacheEntry.from_dict(entry) if entry else None,
+                latency_ms=_as_int(body.get("latency_ms"), 0),
+                error_status=body.get("error_status"),
+                error_message=body.get("error_message"),
+                malformed_body=body.get("malformed_body"),
+            )
+        except (UnknownMode, ValueError) as exc:
+            return 400, {"error": str(exc)}
+        return 200, {"status": "staged", "cache": sim.state()}
+
+    def cache_reset(self, name: str) -> tuple[int, dict]:
+        """Back to answering misses, with the staged entry and call log dropped."""
+        sim = self.caches.get(name)
+        if sim is None:
+            return 404, self._unknown(name)
+        sim.reset()
+        return 200, {"status": "reset", "cache": sim.state()}
+
+    def cache_clear_calls(self, name: str) -> tuple[int, dict]:
+        """Drop the call log, keeping whatever is staged.
+
+        The same split the provider reset/history-clear pair keeps: a test that
+        warms an entry and then wants a clean count needs one without the other.
+        """
+        sim = self.caches.get(name)
+        if sim is None:
+            return 404, self._unknown(name)
+        sim.clear_calls()
+        return 200, {"status": "calls cleared", "cache": sim.state()}
+
+    def get_cache_calls(self, name: str) -> tuple[int, dict]:
+        """Every lookup the router made against this cache-sim, oldest first.
+
+        Neither cache tier names itself in the response, so this log and the
+        router's own per-tier counter are the only two witnesses that the
+        secondary was reached at all — and the only way to prove it was reached
+        exactly once, or not at all.
+        """
+        sim = self.caches.get(name)
+        if sim is None:
+            return 404, self._unknown(name)
+        calls = sim.calls()
+        return 200, {"cache": name, "count": len(calls), "calls": calls}
+
+    def get_cache(self, name: str) -> tuple[int, dict]:
+        sim = self.caches.get(name)
+        if sim is None:
+            return 404, self._unknown(name)
+        return 200, sim.state()
+
+    def get_caches(self) -> tuple[int, dict]:
+        sims = [self.caches.get(n) for n in self.caches.names()]
+        return 200, {
+            "caches": [s.state() for s in sims if s is not None],
+            "count": len(sims),
+        }
 
 
 def _bad_enum(field_name: str, value: object) -> str:

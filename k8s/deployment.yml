@@ -125,6 +125,10 @@ spec:
             - name: control
               containerPort: 19000
               protocol: TCP
+            # Cache-sim (a simulated read-only secondary cache)
+            - name: cache-sim
+              containerPort: 19100
+              protocol: TCP
             # gRPC provider ports (MAG-1780)
             - name: grpc-sim-1
               containerPort: 18548
