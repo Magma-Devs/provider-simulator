@@ -37,10 +37,13 @@ entry that dials the provider simulator's own host IS one, whatever its id
 says. The two classifications are compared against each other, and they are
 typed in different files by different hands.
 
-Two pools have no router entry here at all: ``eth-duo-sim`` lives in
-smart_router_automation's k3d-only routers.yml, and ``ln-sim`` has no router
-wired yet. This file reads the values entries, so those pools are simply never
-visited — it does not claim to cover them.
+Several pools have no router entry here at all — the exact set is
+``POOLS_WITH_NO_ROUTER_HERE`` below, where each one carries its own reason.
+``ln-sim`` has no router wired anywhere yet; the rest are k3d-only and live in
+smart_router_automation's routers.yml. This file reads the values entries, so
+those pools are simply never visited — it does not claim to cover them. Read
+the set rather than a count in this sentence: it has grown four times, and a
+number written here goes stale silently.
 
 It also checks the NAMES. That scheme is decided: pool, then role, then the
 word Provider, then the pool slot.
@@ -336,6 +339,14 @@ POOLS_WITH_NO_ROUTER_HERE = {
     "eth-best-sim",
     "eth-priority-sim",
     "eth-precedence-sim",
+    # The two-tier cache pair. Their routers are k3d-only and land in
+    # smart_router_automation's tools/local-cluster/routers.yml in the
+    # companion change; until that merges these two pools listen and nothing
+    # dials them, which is why they are excused here rather than added to this
+    # file. Adding them here would claim a deployment that does not exist: the
+    # same topology on the shared cluster is MAG-3537 and is not built.
+    "eth-cache-writer-sim",
+    "eth-cache-reader-sim",
 }
 
 
@@ -470,9 +481,9 @@ def test_every_pool_in_the_topology_is_deployed_or_named_as_an_exception():
     """The other direction, which is the one that rots.
 
     A pool added to the topology and forgotten in the values file is a pool no
-    router dials — it listens and nothing arrives. Two pools legitimately have
-    no entry here and are listed with their reasons; anything else is an
-    oversight, and this fails naming it.
+    router dials — it listens and nothing arrives. The pools that legitimately
+    have no entry here are listed in ``POOLS_WITH_NO_ROUTER_HERE``, each with
+    its reason; anything else is an oversight, and this fails naming it.
     """
     deployed = {r.router_id for r in SIM_ROUTERS}
     unaccounted = sorted(POOLS - deployed - POOLS_WITH_NO_ROUTER_HERE)
