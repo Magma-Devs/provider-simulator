@@ -319,3 +319,95 @@ def test_lava_cv_tm_sim_shares_no_state_with_lava_sim_tm():
     # Positive control: both sets are non-empty, so the disjointness above is
     # not two empty sets agreeing with each other.
     assert len(cv_ports) == 6 and len(shared_ports) == 6
+
+
+def test_eth_cache_writer_and_reader_pools_build_with_three_primaries_and_three_backups():
+    """The two-tier cache pools are built exactly as their rows declare.
+
+    Three primaries and three backups each, one JSON-RPC endpoint per provider,
+    on contiguous ports of their own. Each of those facts carries weight.
+
+    The backup tier is the one worth stating. The router answers from either
+    cache tier BEFORE it picks any provider, primary tier and backup tier
+    alike. A test proving the router skipped the backup needs a backup to
+    exist, or it cannot tell "never reached it" from "there was none to
+    reach" — and a row that lost its backup flag would take that apart while
+    the pool still looked complete.
+
+    No group label on any of the twelve. Neither router carries a
+    cross-validation policy, so a label here would name a voting bloc nothing
+    ever counts.
+    """
+    reg = build_registry()
+
+    for pool, first_port in (("eth-cache-writer-sim", 18614), ("eth-cache-reader-sim", 18620)):
+        role = "Writer" if "writer" in pool else "Reader"
+        providers = [reg.provider(pool, pid) for pid in ("1", "2", "3", "4", "5", "6")]
+
+        assert [p.key for p in providers] == [f"{pool}:{n}" for n in range(1, 7)]
+        assert [p.name for p in providers] == [
+            f"EthCache{role}PrimaryProvider1",
+            f"EthCache{role}PrimaryProvider2",
+            f"EthCache{role}PrimaryProvider3",
+            f"EthCache{role}BackupProvider4",
+            f"EthCache{role}BackupProvider5",
+            f"EthCache{role}BackupProvider6",
+        ]
+        assert [p.is_backup for p in providers] == [False, False, False, True, True, True], (
+            f"{pool} must keep three primaries and three backups: without a backup "
+            f"tier a test cannot tell 'the router never reached the backup' from "
+            f"'there was no backup to reach'"
+        )
+        assert [p.group_label for p in providers] == [""] * 6, (
+            f"{pool} carries no cross-validation policy, so a group label here " f"would name a bloc nothing counts"
+        )
+
+        ports = []
+        for provider in providers:
+            assert len(provider.endpoints) == 1, f"{provider.key} should serve exactly one endpoint"
+            endpoint = provider.endpoints[0]
+            assert (endpoint.interface, endpoint.transport) == ("jsonrpc", "http")
+            ports.append(endpoint.port)
+        assert ports == list(range(first_port, first_port + 6))
+
+        assert reg.pools[pool].chain == "eth"
+
+
+def test_the_two_cache_pools_share_no_state_with_each_other_or_with_eth_sim():
+    """Three eth JSON-RPC pools, three separate sets of Provider objects.
+
+    These are the pools most at risk of being conflated. All three serve the
+    same chain on the same interface, the two cache pools sit on adjacent port
+    blocks, and their names differ by one word. A scenario call addressed by
+    family alone resolves to eth-sim.
+
+    If any two shared a listener, one provider would sit under two pool keys.
+    A fault armed for the writer's test would then land in the reader's
+    traffic, or in the traffic of every test already running against eth-sim —
+    and the failure would read exactly like a router bug.
+    """
+    reg = build_registry()
+    slots = ("1", "2", "3", "4", "5", "6")
+
+    writer = [reg.provider("eth-cache-writer-sim", pid) for pid in slots]
+    reader = [reg.provider("eth-cache-reader-sim", pid) for pid in slots]
+    shared = [reg.provider("eth-sim", pid) for pid in slots]
+
+    for a, b in ((writer, reader), (writer, shared), (reader, shared)):
+        for left, right in zip(a, b):
+            assert left is not right
+
+    def ports_of(providers):
+        return {endpoint.port for p in providers for endpoint in p.endpoints}
+
+    writer_ports, reader_ports, shared_ports = map(ports_of, (writer, reader, shared))
+
+    assert writer_ports.isdisjoint(reader_ports)
+    assert writer_ports.isdisjoint(shared_ports)
+    assert reader_ports.isdisjoint(shared_ports)
+    # Positive control: no set is empty, so the three disjointness checks above
+    # are not empty sets agreeing with each other. eth-sim carries twelve ports
+    # rather than six because each of its providers has an http and a ws door.
+    assert len(writer_ports) == 6
+    assert len(reader_ports) == 6
+    assert len(shared_ports) == 12

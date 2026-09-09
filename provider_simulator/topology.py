@@ -55,9 +55,13 @@ wherever a router is wired (eth-sim, eth-solo-sim, btc-sim, solana-sim,
 lava-sim-grpc, lava-sim-rest, lava-sim-tm, eth-cv-sim, lava-cv-rest-sim,
 lava-cv-tm-sim), or in the k3d-only
 tools/local-cluster/routers.yml in smart_router_automation for eth-duo-sim (the
-stake-weight experiment router — canonical has no router wired to this pool)
-and for eth-cache-writer-sim and eth-cache-reader-sim (the two-tier cache pair,
-k3d first; the shared cluster is MAG-3537).
+stake-weight experiment router — canonical has no router wired to this pool).
+eth-cache-writer-sim and eth-cache-reader-sim are the same k3d-only shape, and
+their routers land in that same file in the companion change; until it merges
+these two pools listen and nothing dials them. The shared cluster is MAG-3537.
+Note the split: routers.yml carries the two router ids, while the twelve
+provider nodes come from config/values_sim.yml in that repository, because an
+upstreams list in routers.yml can only produce primaries.
 One pool exists as a bound listener only, with no router wired yet: ln-sim
 (upstream LN router pending). eth-cv-sim is the cross-validation topology —
 six providers in three groups, wired in values_sim.yml like the rest.
@@ -78,8 +82,9 @@ second. Both pools carry a backup tier because the router answers from either
 cache tier before it picks any provider, primary tier and backup tier alike,
 and without a backup tier a test cannot tell "never reached the backup" from
 "there was no backup to reach".
-The listener ports mirror constants.py, the port set the running server binds,
-and a unit test cross-checks the two so they cannot drift.
+The listener ports live here and nowhere else. constants.py holds no ports, so
+there is nothing to cross-check them against; the sentence that used to claim
+such a test described a check removed with those duplicate port tables.
 
 This table is the only source of port numbers. ``constants.py`` used to carry a
 parallel set of port dicts keyed by a second, older numbering; those keys
@@ -473,8 +478,14 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
     # router, which nobody has asked yet.
     #
     # No cross-validation group on any of the twelve: neither router carries a
-    # cross-validation policy, and an unlabelled provider raises rather than
-    # letting a group-diversity check compare two empty sets and pass.
+    # cross-validation policy, so a label here would name a bloc nothing ever
+    # counts.
+    #
+    # These rows carry the empty string, and GET /providers serves it verbatim
+    # — nothing in THIS package raises for an unlabelled provider. The raise is
+    # on the reading side: _provider_names.group_of in smart_router_automation
+    # answers UnlabeledProvider rather than an empty answer, so a
+    # group-diversity check cannot compare two empty sets and pass.
     ("eth-cache-writer-sim", "eth", "1", "EthCacheWriterPrimaryProvider1", False, "", (("jsonrpc", "http", 18614),)),
     ("eth-cache-writer-sim", "eth", "2", "EthCacheWriterPrimaryProvider2", False, "", (("jsonrpc", "http", 18615),)),
     ("eth-cache-writer-sim", "eth", "3", "EthCacheWriterPrimaryProvider3", False, "", (("jsonrpc", "http", 18616),)),
