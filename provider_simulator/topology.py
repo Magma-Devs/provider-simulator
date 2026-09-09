@@ -55,7 +55,9 @@ wherever a router is wired (eth-sim, eth-solo-sim, btc-sim, solana-sim,
 lava-sim-grpc, lava-sim-rest, lava-sim-tm, eth-cv-sim, lava-cv-rest-sim,
 lava-cv-tm-sim), or in the k3d-only
 tools/local-cluster/routers.yml in smart_router_automation for eth-duo-sim (the
-stake-weight experiment router — canonical has no router wired to this pool).
+stake-weight experiment router — canonical has no router wired to this pool)
+and for eth-cache-writer-sim and eth-cache-reader-sim (the two-tier cache pair,
+k3d first; the shared cluster is MAG-3537).
 One pool exists as a bound listener only, with no router wired yet: ln-sim
 (upstream LN router pending). eth-cv-sim is the cross-validation topology —
 six providers in three groups, wired in values_sim.yml like the rest.
@@ -68,6 +70,14 @@ the same reason applied to the shared lava-sim-tm router.
 eth-best-sim, eth-priority-sim and eth-precedence-sim have no router wired
 either. They are reserved for three local-cluster-only routers, each meant to
 boot with a different upstream-selection setting once wired.
+eth-cache-writer-sim and eth-cache-reader-sim are the two-tier cache pair. The
+router can read a second cache after its own cache misses, and it never writes
+that second cache, so a test cannot put an entry there directly. The writer
+router does it instead: its own cache is the one the reader treats as its
+second. Both pools carry a backup tier because the router answers from either
+cache tier before it picks any provider, primary tier and backup tier alike,
+and without a backup tier a test cannot tell "never reached the backup" from
+"there was no backup to reach".
 The listener ports mirror constants.py, the port set the running server binds,
 and a unit test cross-checks the two so they cannot drift.
 
@@ -119,7 +129,9 @@ the universal exception (MAG-2092) and fires on every listener regardless of
     18596-18601  ETH cross-validation
     18602-18607  Lava REST cross-validation
     18608-18613  Lava Tendermint-RPC cross-validation
-    (next free: 18614)
+    18614-18619  ETH cache writer (3 primary, 3 backup)
+    18620-18625  ETH cache reader (3 primary, 3 backup)
+    (next free: 18626)
 
 The ETH backup block sits at 18560-18562 rather than next to its primaries
 because 18548-18559 were already claimed by the gRPC / REST / Tendermint /
@@ -438,6 +450,43 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
     ("eth-priority-sim", "eth", "3", "EthPriorityProvider3", False, "", (("jsonrpc", "http", 18593),)),
     ("eth-precedence-sim", "eth", "1", "EthPrecedenceProvider1", False, "", (("jsonrpc", "http", 18594),)),
     ("eth-precedence-sim", "eth", "2", "EthPrecedenceProvider2", False, "", (("jsonrpc", "http", 18595),)),
+    # eth-cache-writer-sim / eth-cache-reader-sim: 3 primary + 3 backup each,
+    # the two-tier cache topology (MAG-3541). The router can read a SECOND
+    # cache after its own cache misses and before it asks any provider, and it
+    # never writes that second cache. So a test cannot put an entry there
+    # directly: something else has to write it. The writer router does, because
+    # its own cache IS the cache the reader router treats as its second one.
+    # The writer's providers are these listeners, so a test chooses exactly
+    # what gets stored.
+    #
+    # Two pools rather than one, for the reason every dedicated pool here
+    # exists: the control API keys a fault by "pool:pid", and one listener
+    # under two pool keys means a fault armed for one router's test lands in
+    # the other router's traffic.
+    #
+    # The backup tier is not decoration. The router answers from either cache
+    # tier BEFORE it picks any provider, primary tier and backup tier alike,
+    # and that ordering is a guarantee a regression can break quietly. Without
+    # a backup tier in the pool a test cannot tell "the router never reached
+    # the backup" from "there was no backup to reach". It also lets a test ask
+    # whether a backup-served answer is cached and then crosses to the other
+    # router, which nobody has asked yet.
+    #
+    # No cross-validation group on any of the twelve: neither router carries a
+    # cross-validation policy, and an unlabelled provider raises rather than
+    # letting a group-diversity check compare two empty sets and pass.
+    ("eth-cache-writer-sim", "eth", "1", "EthCacheWriterPrimaryProvider1", False, "", (("jsonrpc", "http", 18614),)),
+    ("eth-cache-writer-sim", "eth", "2", "EthCacheWriterPrimaryProvider2", False, "", (("jsonrpc", "http", 18615),)),
+    ("eth-cache-writer-sim", "eth", "3", "EthCacheWriterPrimaryProvider3", False, "", (("jsonrpc", "http", 18616),)),
+    ("eth-cache-writer-sim", "eth", "4", "EthCacheWriterBackupProvider4", True, "", (("jsonrpc", "http", 18617),)),
+    ("eth-cache-writer-sim", "eth", "5", "EthCacheWriterBackupProvider5", True, "", (("jsonrpc", "http", 18618),)),
+    ("eth-cache-writer-sim", "eth", "6", "EthCacheWriterBackupProvider6", True, "", (("jsonrpc", "http", 18619),)),
+    ("eth-cache-reader-sim", "eth", "1", "EthCacheReaderPrimaryProvider1", False, "", (("jsonrpc", "http", 18620),)),
+    ("eth-cache-reader-sim", "eth", "2", "EthCacheReaderPrimaryProvider2", False, "", (("jsonrpc", "http", 18621),)),
+    ("eth-cache-reader-sim", "eth", "3", "EthCacheReaderPrimaryProvider3", False, "", (("jsonrpc", "http", 18622),)),
+    ("eth-cache-reader-sim", "eth", "4", "EthCacheReaderBackupProvider4", True, "", (("jsonrpc", "http", 18623),)),
+    ("eth-cache-reader-sim", "eth", "5", "EthCacheReaderBackupProvider5", True, "", (("jsonrpc", "http", 18624),)),
+    ("eth-cache-reader-sim", "eth", "6", "EthCacheReaderBackupProvider6", True, "", (("jsonrpc", "http", 18625),)),
 )
 
 

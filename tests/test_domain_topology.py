@@ -24,6 +24,8 @@ EXPECTED_POOLS = {
     "lava-sim-tm",
     "lava-cv-rest-sim",
     "lava-cv-tm-sim",
+    "eth-cache-writer-sim",
+    "eth-cache-reader-sim",
 }
 
 
@@ -295,11 +297,32 @@ AGREED_NAMES = {
     ("lava-cv-tm-sim", "4"): "LavaCvTmPrimaryProvider4",
     ("lava-cv-tm-sim", "5"): "LavaCvTmPrimaryProvider5",
     ("lava-cv-tm-sim", "6"): "LavaCvTmPrimaryProvider6",
+    # The two-tier cache pair. Nothing tells the three primaries in one pool
+    # apart, so they take Primary, the same choice btc-sim and eth-cv-sim make.
+    # Slots 4 to 6 are the backup tier, so they take Backup. The pool word
+    # "cache" is not repeated by either role, so neither is dropped.
+    ("eth-cache-writer-sim", "1"): "EthCacheWriterPrimaryProvider1",
+    ("eth-cache-writer-sim", "2"): "EthCacheWriterPrimaryProvider2",
+    ("eth-cache-writer-sim", "3"): "EthCacheWriterPrimaryProvider3",
+    ("eth-cache-writer-sim", "4"): "EthCacheWriterBackupProvider4",
+    ("eth-cache-writer-sim", "5"): "EthCacheWriterBackupProvider5",
+    ("eth-cache-writer-sim", "6"): "EthCacheWriterBackupProvider6",
+    ("eth-cache-reader-sim", "1"): "EthCacheReaderPrimaryProvider1",
+    ("eth-cache-reader-sim", "2"): "EthCacheReaderPrimaryProvider2",
+    ("eth-cache-reader-sim", "3"): "EthCacheReaderPrimaryProvider3",
+    ("eth-cache-reader-sim", "4"): "EthCacheReaderBackupProvider4",
+    ("eth-cache-reader-sim", "5"): "EthCacheReaderBackupProvider5",
+    ("eth-cache-reader-sim", "6"): "EthCacheReaderBackupProvider6",
 }
 
-# Slots 4 to 6 of the four six-provider pools that HAVE a backup tier. The
+# Slots 4 to 6 of the six six-provider pools that HAVE a backup tier. The
 # router consults these only after the primary tier is exhausted, and the values
 # file marks them is_backup.
+#
+# eth-cache-writer-sim and eth-cache-reader-sim carry one because the router
+# answers from either cache tier BEFORE it picks any provider, primary tier and
+# backup tier alike. Without a backup tier a test cannot tell "the router never
+# reached the backup" from "there was no backup to reach".
 #
 # eth-cv-sim, lava-cv-rest-sim and lava-cv-tm-sim are six-provider pools too and
 # are absent on purpose: all three are cross-validation topologies,
@@ -307,7 +330,16 @@ AGREED_NAMES = {
 # would claim a group the router can never count. Their slots 4 to 6 are
 # ordinary primaries.
 AGREED_BACKUPS = {
-    (pool, pid) for pool in ("eth-sim", "lava-sim-grpc", "lava-sim-rest", "lava-sim-tm") for pid in ("4", "5", "6")
+    (pool, pid)
+    for pool in (
+        "eth-sim",
+        "lava-sim-grpc",
+        "lava-sim-rest",
+        "lava-sim-tm",
+        "eth-cache-writer-sim",
+        "eth-cache-reader-sim",
+    )
+    for pid in ("4", "5", "6")
 }
 
 

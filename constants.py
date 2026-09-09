@@ -26,7 +26,7 @@ CONTROL_PORT = 19000
 # A router reaches one of these by port, through its --secondary-cache-be
 # setting. Tests reach the same one by name, on the control port.
 #
-# Chosen above the provider block (18545-18614) and the control port so a new
+# Chosen above the provider block (18545-18625) and the control port so a new
 # provider pool can be added without walking into a cache's port.
 CACHE_SIM_PORTS = {"secondary": 19100}
 

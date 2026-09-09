@@ -336,6 +336,11 @@ POOLS_WITH_NO_ROUTER_HERE = {
     "eth-best-sim",
     "eth-priority-sim",
     "eth-precedence-sim",
+    # The two-tier cache pair, also declared in smart_router_automation's
+    # k3d-only tools/local-cluster/routers.yml. k3d first on purpose; the same
+    # topology on the shared cluster is MAG-3537 and is not built yet.
+    "eth-cache-writer-sim",
+    "eth-cache-reader-sim",
 }
 
 
