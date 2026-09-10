@@ -412,6 +412,12 @@ class CacheSim:
         # queries the secondary on every primary miss, and an unbounded list
         # grows until the pod restarts. Same cap, same env override.
         self._calls: deque = deque(maxlen=HISTORY_MAX)
+        # Counts every call ever recorded, and is never evicted. ``_calls`` is
+        # capped, so once it is full an append drops the oldest entry and its
+        # LENGTH stops changing -- which makes "did the record grow" unanswerable
+        # from len() alone on exactly the busy cache-sim where the question
+        # matters. This counter answers it. Cleared by reset(), like the log.
+        self._records_total = 0
 
     # ── staging ───────────────────────────────────────────────────────────
 
@@ -462,6 +468,7 @@ class CacheSim:
             self._entry = None
             self._latency_ms = 0
             self._calls.clear()
+            self._records_total = 0
 
     def record_other_method(self, method: str) -> None:
         """Record a call to a method this cache does not serve.
@@ -480,6 +487,7 @@ class CacheSim:
         describe a cache lookup, and this was not one.
         """
         with self._lock:
+            self._records_total += 1
             self._calls.append(
                 RecordedCall(
                     method=method,
@@ -507,6 +515,21 @@ class CacheSim:
         """Every lookup so far, oldest first."""
         with self._lock:
             return [c.as_dict() for c in self._calls]
+
+    def records_total(self) -> int:
+        """How many calls have EVER been recorded, lost ones included.
+
+        ``calls()`` is capped at ``HISTORY_MAX`` and drops its oldest entry when
+        full, so its length stops growing on a busy cache-sim while calls keep
+        arriving. A caller asking "did my call get recorded" by comparing the
+        length before and after gets "no" on every cache-sim that has been doing
+        real work. This is the number that answers that question.
+
+        Reset by ``reset()`` along with the log, so a test that resets first
+        reads both from zero.
+        """
+        with self._lock:
+            return self._records_total
 
     def call_count(self) -> int:
         """How many LOOKUPS the router has made.
@@ -564,6 +587,7 @@ class CacheSim:
             error_status = self._error_status
             error_message = self._error_message
             malformed_body = self._malformed_body
+            self._records_total += 1
             self._calls.append(
                 RecordedCall(
                     method=GET_RELAY_METHOD,

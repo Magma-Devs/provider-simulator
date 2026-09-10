@@ -318,11 +318,78 @@ class TestTheSelfTestRouteOverTheWire:
 
         assert status == 200, payload
         assert payload["refused_with"] == "UNIMPLEMENTED"
-        assert payload["calls_after"] == payload["calls_before"] + 1
+        assert payload["records_total_after"] == payload["records_total_before"] + 1
         assert [c["method"] for c in payload["recorded"]] == [NON_READ_PROBE_METHOD], (
             f"the route reported {payload['recorded']!r}. It must name the method it "
             f"sent, or a caller cannot tell a working record from an empty one."
         )
+
+    def test_a_full_call_log_does_not_read_as_a_lost_call(self) -> None:
+        """The record is a ring buffer, so its LENGTH stops moving when full.
+
+        A cache-sim at ``HISTORY_MAX`` evicts its oldest entry on every append.
+        Measuring "did my call get recorded" by the length before and after then
+        answers no on every cache-sim that has been doing real work -- the one
+        kind whose record a test most wants to trust. The route counts records
+        ever taken instead, which eviction cannot move.
+        """
+        from constants import HISTORY_MAX
+        from provider_simulator.cache_sim import CacheSimRegistry
+        from provider_simulator.control_api import ControlApi
+        from provider_simulator.domain.registry import build_registry
+        from provider_simulator.listeners.ws import WsSubscriptions
+
+        caches = CacheSimRegistry()
+        sim = caches.get_or_create("secondary")
+        cap = HISTORY_MAX
+        assert cap, "this test needs a bounded record"
+        for filler in range(cap + 1):
+            sim.record_other_method(f"/filler/Method{filler}")
+        assert len(sim.calls()) == cap, "the record should be at its cap now"
+
+        with _Listener(sim) as listener:
+            control = ControlApi(
+                build_registry(),
+                WsSubscriptions(),
+                caches,
+                {"secondary": listener.port},
+            )
+            status, payload = control.cache_selftest_write("secondary")
+
+        assert status == 200, payload
+        assert payload["records_total_after"] == payload["records_total_before"] + 1
+        assert [c["method"] for c in payload["recorded"]] == [NON_READ_PROBE_METHOD]
+
+    def test_a_port_with_nothing_listening_is_never_reported_as_success(self) -> None:
+        """The whole job of this route is to prove a call reached the recorder.
+
+        A call that never arrives fails with UNAVAILABLE, which is an RpcError
+        exactly like a refusal. Reporting that as success would make the route
+        answer "the record works" about a cache-sim that is not running -- the
+        precise false reassurance it exists to remove.
+        """
+        import socket as _socket
+
+        from provider_simulator.cache_sim import CacheSimRegistry
+        from provider_simulator.control_api import ControlApi
+        from provider_simulator.domain.registry import build_registry
+        from provider_simulator.listeners.ws import WsSubscriptions
+
+        with _socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            dead_port = probe.getsockname()[1]
+
+        caches = CacheSimRegistry()
+        caches.get_or_create("secondary")
+        status, payload = ControlApi(
+            build_registry(),
+            WsSubscriptions(),
+            caches,
+            {"secondary": dead_port},
+        ).cache_selftest_write("secondary")
+
+        assert status == 502, payload
+        assert "never reached" in payload["fault"]
 
 
 class TestTeardownActuallyStops:

@@ -143,9 +143,20 @@ exist.
 | `POST /cache/<name>/entry` | What the next lookups get: `{"mode": "hit", "entry": {"data": "{\"result\":\"0x1\"}"}}`. Modes are `hit`, `miss`, `error`, `hang`, `malformed`. `entry.data` is **plain text** — it is base64-encoded once on the way out, so encoding it yourself sends it twice-encoded |
 | `POST /cache/<name>/reset` | Back to answering misses; entry and call log dropped |
 | `POST /cache/<name>/calls/clear` | Drop the call log, keep the staged entry |
-| `GET /cache/<name>/calls` | Every lookup the router made, oldest first, each with the key it arrived under |
+| `POST /cache/<name>/selftest-write` | Send this cache-sim one real non-read call, and report whether its call log kept it. Run this BEFORE trusting an absence of writes — see below |
+| `GET /cache/<name>/calls` | Every call the cache-sim received, oldest first — reads and refused non-reads alike, each with the method it arrived on |
 | `GET /cache/<name>` | Its current state |
 | `GET /caches` | Every cache-sim this simulator runs |
+
+**Before asserting that no write arrived, use `selftest-write`.** An absence is
+evidence only when the thing it rules out would have shown up, and twice it
+would not have: this simulator used to register the read method alone, so gRPC
+answered a write itself and the log never saw it; and after that was fixed, the
+rows it wrote carried an empty method name. The route sends one real non-read
+call over a socket, through gRPC's own dispatch and the generic handler, and
+answers 200 only if the log then holds it under its own name. It answers 502 if
+the call never arrived and 500 if the cache-sim served it. Clear the log with
+`calls/clear` afterwards, not `reset`, which also drops what you staged.
 
 Read the call log to prove the secondary was reached. Neither cache tier names
 itself in the response, so that log and the router's own

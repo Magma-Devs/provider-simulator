@@ -134,6 +134,22 @@ def build_generic_handler(sim: CacheSim) -> grpc.GenericRpcHandler:
     return _EveryMethodOnTheService()
 
 
+class CacheSimUnreachable(RuntimeError):
+    """The probe call never reached the cache-sim's handler.
+
+    Nothing listening, a deadline, a dropped connection. It says nothing about
+    the call record, which is exactly why it must not be reported as a success.
+    """
+
+
+class CacheSimDidNotRefuse(RuntimeError):
+    """The cache-sim ANSWERED a method it must refuse.
+
+    A cache-sim that serves a write is broken, and every test that trusts its
+    record is measuring something else.
+    """
+
+
 NON_READ_PROBE_METHOD = f"/{SERVICE_NAME}/SetRelay"
 """The method a router would use if it ever wrote this tier.
 
@@ -164,20 +180,41 @@ def send_non_read(
     first two, which are exactly where the previous version of this listener
     lost every non-read call.
 
-    Returns the refusal's status name, normally ``UNIMPLEMENTED``.
+    Returns ``"UNIMPLEMENTED"``, and only that. Every other outcome raises,
+    because every other outcome means the control did NOT establish what it
+    claims.
+
+    The distinction that matters is between a call that was REFUSED and a call
+    that never arrived. Both raise ``grpc.RpcError``, and an earlier version of
+    this returned the status name for either -- so dialling a port with nothing
+    listening answered ``"UNAVAILABLE"`` and every caller read it as success.
+    The one job of this function is to prove a call reached the handler, so the
+    one status that proves it is the only one it accepts.
 
     Raises:
-        RuntimeError: if the call was ANSWERED. A cache-sim that serves a write
-            is broken in a way that would make the test it supports meaningless,
-            so this refuses to return quietly.
+        CacheSimDidNotRefuse: if the cache-sim ANSWERED the write. That is a
+            broken simulator, and it would make every test built on this
+            meaningless.
+        CacheSimUnreachable: if the call failed any other way -- nothing
+            listening, a deadline, a broken connection. The call never reached
+            the recorder, so nothing was proven about the recorder.
     """
     with grpc.insecure_channel(f"{host}:{port}") as channel:
         try:
             channel.unary_unary(method)(b"", timeout=timeout_s)
         except grpc.RpcError as exc:
             code = exc.code()
-            return code.name if code is not None else "UNKNOWN"
-    raise RuntimeError(
+            if code is grpc.StatusCode.UNIMPLEMENTED:
+                return code.name
+            raise CacheSimUnreachable(
+                f"the call to {method!r} on port {port} did not reach the "
+                f"cache-sim's handler: it failed with "
+                f"{code.name if code is not None else 'an unknown status'}. "
+                f"Only UNIMPLEMENTED means the listener saw the call and "
+                f"refused it. Anything else means the call never arrived, so "
+                f"nothing has been proven about the call record."
+            ) from exc
+    raise CacheSimDidNotRefuse(
         f"the cache-sim on port {port} ANSWERED {method!r} instead of refusing it. "
         f"This listener must serve {GET_RELAY_METHOD!r} and nothing else."
     )

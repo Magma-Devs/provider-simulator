@@ -15,7 +15,7 @@ from dataclasses import fields
 
 from provider_simulator.build_info import build_info
 from provider_simulator.cache_sim import DEFAULT_MODE as DEFAULT_CACHE_MODE
-from provider_simulator.cache_sim import GET_RELAY_METHOD, CacheEntry, CacheSimRegistry, UnknownMode
+from provider_simulator.cache_sim import CacheEntry, CacheSimRegistry, UnknownMode
 from provider_simulator.chains import CHAINS
 from provider_simulator.domain.registry import Registry
 from provider_simulator.listeners.ws import WsSubscriptions
@@ -600,7 +600,9 @@ class ControlApi:
 
         The call is refused, exactly as a router's write would be. Nothing is
         stored and no staged entry changes -- but the call log does grow by one,
-        so a caller that is about to count calls should reset afterwards.
+        so a caller about to count calls should clear the log afterwards with
+        ``POST /cache/<name>/calls/clear``. Use that rather than ``reset``,
+        which also drops whatever the caller staged.
         """
         sim = self.caches.get(name)
         if sim is None:
@@ -620,30 +622,76 @@ class ControlApi:
         # Imported here, not at module scope: this module must stay importable
         # on a machine without grpcio, the way server.py already guards the
         # listener import.
-        from provider_simulator.listeners.cache_grpc import (
-            NON_READ_PROBE_METHOD,
-            send_non_read,
-        )
-
-        before = len(sim.calls())
         try:
-            refused_with = send_non_read(port)
-        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
-            return 502, {
-                "error": f"the self-test call to {name!r} on port {port} failed: {exc}",
+            from provider_simulator.listeners.cache_grpc import (
+                NON_READ_PROBE_METHOD,
+                CacheSimDidNotRefuse,
+                CacheSimUnreachable,
+                send_non_read,
+            )
+        except ImportError as exc:
+            # grpcio is optional. Without it no cache listener ever started, so
+            # there is nothing to dial -- but cache_ports is filled from the
+            # constants regardless, so the port check above cannot notice.
+            return 409, {
+                "error": (
+                    f"this simulator has no gRPC support ({exc}), so cache-sim "
+                    f"{name!r} has no listener and nothing can dial it."
+                ),
                 "cache": name,
-                "method": NON_READ_PROBE_METHOD,
             }
 
-        calls = sim.calls()
-        recorded = [c for c in calls[before:] if c.get("method") != GET_RELAY_METHOD]
+        # records_total, NOT len(calls()). The call log is a ring buffer capped
+        # at HISTORY_MAX, so on a cache-sim that has served that many lookups an
+        # append evicts the oldest and the LENGTH does not move. Measuring by
+        # length there reports a call that did arrive as missing -- and it does
+        # it only on a busy cache-sim, which is the one whose record a test most
+        # wants to trust.
+        before = sim.records_total()
+        try:
+            refused_with = send_non_read(port)
+        except CacheSimDidNotRefuse as exc:
+            return 500, {
+                "error": str(exc),
+                "cache": name,
+                "method": NON_READ_PROBE_METHOD,
+                "fault": "this cache-sim served a method it must refuse",
+            }
+        except CacheSimUnreachable as exc:
+            return 502, {
+                "error": str(exc),
+                "cache": name,
+                "method": NON_READ_PROBE_METHOD,
+                "fault": "the probe call never reached the cache-sim",
+            }
+
+        after = sim.records_total()
+        recorded = [c for c in sim.calls() if c.get("method") == NON_READ_PROBE_METHOD]
+        if after <= before or not recorded:
+            return 500, {
+                "error": (
+                    f"cache-sim {name!r} refused the probe call, so its listener "
+                    f"saw it, but the call record does not hold it. Recorded "
+                    f"calls went from {before} to {after}, and the record holds "
+                    f"{len(recorded)} row(s) under {NON_READ_PROBE_METHOD!r}. "
+                    f"An absence of writes read off this record would prove "
+                    f"nothing."
+                ),
+                "cache": name,
+                "method": NON_READ_PROBE_METHOD,
+                "refused_with": refused_with,
+                "records_total_before": before,
+                "records_total_after": after,
+                "fault": "the listener refused the call but the record did not keep it",
+            }
+
         return 200, {
             "status": "the call record can see a call that is not a read",
             "cache": name,
             "method": NON_READ_PROBE_METHOD,
             "refused_with": refused_with,
-            "calls_before": before,
-            "calls_after": len(calls),
+            "records_total_before": before,
+            "records_total_after": after,
             "recorded": recorded,
         }
 
