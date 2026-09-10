@@ -528,6 +528,14 @@ class ControlApi:
         Both a bad mode and a hit with no entry are refused here rather than
         answered — an entry-less hit would serve a reply with no data and read
         as a cache that answered.
+
+        ``seen_block`` appears at two levels and they mean different things. At
+        the top it is the CACHE's own view of the chain head, which a miss
+        reports and which persists until it is set again or the cache is reset.
+        Inside ``entry`` it is the value stored with that one entry. A real
+        cache reports its own head on every lookup, so the top-level one is the
+        faithful knob; the entry-level one stays because a test needs to offer
+        a chain head the router is supposed to refuse.
         """
         if not isinstance(body, dict):
             return 400, {"error": "request body must be a JSON object"}
@@ -539,6 +547,10 @@ class ControlApi:
         if entry is not None and not isinstance(entry, dict):
             return 400, {"error": f"entry must be an object, got {type(entry).__name__}"}
         try:
+            seen_block = _cache_head(body)
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
+        try:
             sim.stage(
                 mode=str(body.get("mode", "hit")),
                 entry=CacheEntry.from_dict(entry) if entry else None,
@@ -546,6 +558,7 @@ class ControlApi:
                 error_status=body.get("error_status"),
                 error_message=body.get("error_message"),
                 malformed_body=body.get("malformed_body"),
+                seen_block=seen_block,
             )
         except (UnknownMode, ValueError) as exc:
             return 400, {"error": str(exc)}
@@ -721,6 +734,45 @@ def _as_int(value: object, default: int) -> int:
         return int(str(value))
     except (TypeError, ValueError):
         return default
+
+
+def _cache_head(body: dict) -> int | None:
+    """Read a cache-sim's chain head out of a staging body, or None for "leave it".
+
+    Not ``_as_int``, and the difference is the whole point of the function.
+    ``_as_int`` answers 0 for anything it cannot read — ``None``, ``"banana"``,
+    ``[]``, ``{}`` all become 0 — so a junk value would silently RESET the head
+    an earlier call established, and the next miss would report 0 with nothing
+    naming the cause. That is the shape of MAG-3562, where a staged field
+    vanished in silence and three green suite runs never showed it.
+
+    So the three cases are told apart rather than collapsed:
+
+    ``seen_block`` absent
+        Leave the head alone. A caller who is staging something else is not
+        asking about the head.
+    ``seen_block`` present and null
+        Also leave it alone. JSON null is how a caller says "no value", and
+        reading it as 0 would contradict the line above for the one client
+        that spells its absent fields out.
+    ``seen_block`` present and a whole number
+        Set it. 0 is a real head -- a cache that has not seen one yet -- so it
+        is accepted rather than treated as unset.
+
+    Anything else refuses loudly, naming what arrived.
+    """
+    if body.get("seen_block") is None:
+        return None
+    value = body["seen_block"]
+    # bool is an int in Python, and True would quietly become the head 1.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(
+            f"seen_block must be a whole number or null, got {value!r}. It is the "
+            f"cache's own view of the chain head; omit it to leave the head alone."
+        )
+    if value < 0:
+        raise ValueError(f"seen_block must not be negative, got {value!r}")
+    return value
 
 
 def _as_float(value: object, default: float) -> float:

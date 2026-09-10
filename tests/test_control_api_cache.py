@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import base64
 
+import pytest
+
 from provider_simulator.cache_sim import CacheSimRegistry
 from provider_simulator.control_api import ControlApi
 from provider_simulator.domain.registry import build_registry
@@ -116,6 +118,85 @@ class TestStaging:
         status, payload = control.cache_stage("secondary", {"entry": {"data": "x"}})
         assert status == 200
         assert payload["cache"]["mode"] == "hit"
+
+    def test_the_caches_chain_head_can_be_set_and_a_miss_reports_it(self) -> None:
+        control = api("secondary")
+        status, payload = control.cache_stage("secondary", {"mode": "miss", "seen_block": 25_946_041})
+        assert status == 200
+        assert payload["cache"]["seen_block"] == 25_946_041
+
+        sim = control.caches.get("secondary")
+        assert sim is not None
+        body = sim.plan(b"{}").body
+        assert body is not None
+        assert body["seen_block"] == 25_946_041
+
+    def test_a_later_stage_that_names_no_head_leaves_the_head_alone(self) -> None:
+        """Absent means "leave it", not "set it to zero".
+
+        A stage that reset the head silently would send the next miss out
+        reporting 0, and nothing in the answer would say why.
+        """
+        control = api("secondary")
+        control.cache_stage("secondary", {"mode": "miss", "seen_block": 25_946_041})
+        control.cache_stage("secondary", {"mode": "miss", "latency_ms": 5})
+
+        sim = control.caches.get("secondary")
+        assert sim is not None
+        assert sim.plan(b"{}").body["seen_block"] == 25_946_041  # type: ignore[index]
+
+    def test_an_explicit_null_head_leaves_the_head_alone(self) -> None:
+        """JSON null is how a caller says "no value", so it must mean the same
+        as omitting the key. Reading it as 0 would silently wipe the head for
+        the one client that spells its absent fields out."""
+        control = api("secondary")
+        control.cache_stage("secondary", {"mode": "miss", "seen_block": 25_946_041})
+        status, _ = control.cache_stage("secondary", {"mode": "miss", "seen_block": None})
+        assert status == 200
+
+        sim = control.caches.get("secondary")
+        assert sim is not None
+        assert sim.plan(b"{}").body["seen_block"] == 25_946_041  # type: ignore[index]
+
+    def test_a_head_of_zero_is_accepted_and_does_set_the_head(self) -> None:
+        """0 is a real head -- a cache that has not seen one -- so a caller who
+        asks for it gets it, and it is not confused with the null above."""
+        control = api("secondary")
+        control.cache_stage("secondary", {"mode": "miss", "seen_block": 25_946_041})
+        control.cache_stage("secondary", {"mode": "miss", "seen_block": 0})
+
+        sim = control.caches.get("secondary")
+        assert sim is not None
+        assert sim.plan(b"{}").body["seen_block"] == 0  # type: ignore[index]
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param("banana", id="a-word"),
+            pytest.param("25946041", id="a-number-as-a-string"),
+            pytest.param([], id="a-list"),
+            pytest.param({"a": 1}, id="an-object"),
+            pytest.param(True, id="a-boolean"),
+            pytest.param(1.5, id="a-fraction"),
+            pytest.param(-1, id="a-negative-block"),
+        ],
+    )
+    def test_a_head_that_is_not_a_whole_number_refuses_loudly(self, value) -> None:
+        """Every one of these used to become 0 in silence, which RESET the head
+        rather than failing. A staged value that vanishes without a word is the
+        shape of MAG-3562, and it took three green suite runs to notice."""
+        control = api("secondary")
+        control.cache_stage("secondary", {"mode": "miss", "seen_block": 25_946_041})
+        status, payload = control.cache_stage("secondary", {"mode": "miss", "seen_block": value})
+
+        assert status == 400, f"{value!r} was accepted as a chain head"
+        assert "seen_block" in payload["error"], f"the refusal does not name the field: {payload}"
+
+        sim = control.caches.get("secondary")
+        assert sim is not None
+        assert sim.plan(b"{}").body["seen_block"] == 25_946_041, (  # type: ignore[index]
+            "a refused stage changed the head anyway"
+        )
 
     def test_a_refused_stage_leaves_the_previous_answer_in_place(self) -> None:
         control = api("secondary")
@@ -349,14 +430,14 @@ class TestTheSharedResetClearsCacheSims:
         sim = control.caches.get("secondary")
         assert sim is not None
         assert sim.call_count() == 0
-        assert sim.plan(b"{}").body == {"reply": None}, "a staged hit survived reset_all"
+        assert sim.plan(b"{}").body["reply"] is None, "a staged hit survived reset_all"  # type: ignore[index]
 
     def test_reset_clears_the_answer_but_keeps_the_call_log(self) -> None:
         control = self._staged()
         control.reset()
         sim = control.caches.get("secondary")
         assert sim is not None
-        assert sim.plan(b"{}").body == {"reply": None}
+        assert sim.plan(b"{}").body["reply"] is None  # type: ignore[index]
 
     def test_clear_history_clears_the_call_log_but_keeps_the_answer(self) -> None:
         control = self._staged()
@@ -364,7 +445,7 @@ class TestTheSharedResetClearsCacheSims:
         sim = control.caches.get("secondary")
         assert sim is not None
         assert sim.call_count() == 0
-        assert sim.plan(b"{}").body != {"reply": None}, "clear_history dropped the staged entry"
+        assert sim.plan(b"{}").body["reply"] is not None, "clear_history dropped the staged entry"  # type: ignore[index]
 
     def test_a_pool_scoped_reset_leaves_cache_sims_alone(self) -> None:
         """A cache has no pool, so a caller narrowing to one is not asking
@@ -376,4 +457,4 @@ class TestTheSharedResetClearsCacheSims:
 
         sim = control.caches.get("secondary")
         assert sim is not None
-        assert sim.plan(b"{}").body != {"reply": None}
+        assert sim.plan(b"{}").body["reply"] is not None  # type: ignore[index]

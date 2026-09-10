@@ -153,6 +153,30 @@ def _b64(raw: bytes | str | None) -> str | None:
     return base64.b64encode(raw).decode()
 
 
+def _list_or_null(items: list[Any]) -> list[Any] | None:
+    """Render an empty list as null, the way a real cache's empty fields arrive.
+
+    **This deliberately collapses a distinction Go keeps, and the difference is
+    worth stating.** Go writes a NIL slice as null and an EMPTY one as ``[]`` --
+    two states. Python has one: a list is either populated or not, with no way
+    to say "present but holding nothing" separately from "never set". So this
+    maps our single empty state onto the null a real cache sends, rather than
+    reproducing Go's rule. ``_b64`` faces no such problem because Python's
+    ``None`` and ``b""`` already give it the two states Go has.
+
+    The consequence, so nobody re-derives it: an entry cannot stage ``[]`` on
+    the wire. Every reply a real cache sent in ``recorded-2026-09-10.jsonl``
+    supports that -- ``optional_metadata`` and ``blocks_hashes_to_heights`` are
+    null in all 307 of them, hits and misses alike, and ``[]`` appears nowhere.
+    If a real cache is ever recorded sending ``[]``, this helper is where that
+    changes, and it would need a second state on ``CacheEntry`` to express it.
+
+    We used to send ``[]`` unconditionally, which says "present and empty" -- a
+    different statement, and one no real cache made.
+    """
+    return list(items) if items else None
+
+
 def _unb64(value: object) -> bytes:
     """Decode a base64 field back to bytes, tolerating null and malformed input.
 
@@ -178,6 +202,14 @@ class CacheEntry:
     ``sig`` / ``sig_blocks``
         The writer's signatures. The router drops both. A test sets them to
         prove the drop happened.
+
+        Their defaults differ on purpose, and the difference is measured rather
+        than chosen. A real cache stores an empty signature and no signature
+        blocks, so every hit it sent in ``recorded-2026-09-10.jsonl`` carried
+        ``sig: ""`` and ``sig_blocks: null`` -- 26 replies out of 26. Empty is
+        not the same statement as absent, and one real message makes both, so
+        ``sig`` defaults to empty bytes and ``sig_blocks`` to None. Pass
+        ``sig=None`` when a test needs the absent case.
     ``metadata``
         The upstream's response headers, as ``[{"name": ..., "value": ...}]``.
         The router keeps only ``Content-Type`` and ``Content-Encoding`` and
@@ -197,7 +229,7 @@ class CacheEntry:
     """
 
     data: bytes | str = b""
-    sig: bytes | str | None = None
+    sig: bytes | str | None = b""
     sig_blocks: bytes | str | None = None
     finalized_blocks_hashes: bytes | str | None = None
     latest_block: int = 0
@@ -307,23 +339,43 @@ class CacheEntry:
                 "sig_blocks": _b64(self.sig_blocks),
                 "metadata": list(self.metadata),
             },
-            "optional_metadata": list(self.optional_metadata),
+            "optional_metadata": _list_or_null(self.optional_metadata),
             "seen_block": self.seen_block,
-            "blocks_hashes_to_heights": list(self.blocks_hashes_to_heights),
+            "blocks_hashes_to_heights": _list_or_null(self.blocks_hashes_to_heights),
             "is_node_error": self.is_node_error,
             "status_code": self.status_code,
         }
 
 
-def miss_reply() -> dict[str, Any]:
+def miss_reply(seen_block: int = 0) -> dict[str, Any]:
     """The answer a real cache gives when it holds nothing for the key.
 
     The real server does not fail the call on a not-found: its GetRelay handler
     swallows the lookup error and returns a reply whose ``reply`` is absent
     (``ecosystem/cache/handlers.go``). The router reads a hit as "no transport
     error AND a non-nil reply", so this is a miss and not a failure.
+
+    All six fields are sent, because a real cache sends all six. Every one of
+    the 281 misses in ``recorded-2026-09-10.jsonl`` carried the full set; this
+    used to send ``reply`` alone and nothing else. Go fills a missing field with
+    its zero value, so the router decodes either shape the same way today -- but
+    the cache-sim is what every test reasons about as a cache, and a shape no
+    real cache produces is a fiction a test can come to depend on.
+
+    ``seen_block`` is the CACHE's own view of the chain head, never anything
+    taken from the request. The recording shows it is cache-level state: it
+    rises over time and hits and misses answered in the same moment carry the
+    same value. It stays 0 until the cache has a head, which is what 249 of
+    those 281 misses reported.
     """
-    return {"reply": None}
+    return {
+        "reply": None,
+        "optional_metadata": None,
+        "seen_block": int(seen_block),
+        "blocks_hashes_to_heights": None,
+        "is_node_error": False,
+        "status_code": 0,
+    }
 
 
 def relay_key(*, finalized: bool, chain_id: str, request_hash: bytes, block: int) -> str:
@@ -408,6 +460,11 @@ class CacheSim:
         self._error_status: str = "UNAVAILABLE"
         self._error_message: str = "cache-sim: injected error"
         self._malformed_body: bytes = b"{not json"
+        # This cache's own view of the chain head, reported on a miss. Cache
+        # state, not request state: a real cache answers every lookup with the
+        # head IT knows, and 0 until it knows one. Nothing derives it from the
+        # request, because a real cache does not either.
+        self._seen_block: int = 0
         # Bounded for the same reason every provider's log is: the router
         # queries the secondary on every primary miss, and an unbounded list
         # grows until the pod restarts. Same cap, same env override.
@@ -430,12 +487,17 @@ class CacheSim:
         error_status: str | None = None,
         error_message: str | None = None,
         malformed_body: bytes | str | None = None,
+        seen_block: int | None = None,
     ) -> None:
         """Decide what the next lookups get. Raises on an unknown mode.
 
         ``mode="hit"`` with no entry is a caller error rather than an empty
         answer: an entry-less hit would serve a reply with no data and read as a
         cache that answered, which is never what a test means.
+
+        ``seen_block`` sets this cache's own view of the chain head, which a
+        miss reports. It persists until it is set again or the cache is reset,
+        because it describes the cache rather than the next answer.
         """
         if mode not in MODES:
             raise UnknownMode(mode)
@@ -460,15 +522,23 @@ class CacheSim:
                 self._error_message = error_message
             if malformed_body is not None:
                 self._malformed_body = malformed_body
+            if seen_block is not None:
+                self._seen_block = int(seen_block)
 
     def reset(self) -> None:
-        """Return to answering misses, drop the staged entry and the call log."""
+        """Return to answering misses, drop the staged entry and the call log.
+
+        The chain head goes back to 0 with everything else, because a cache that
+        has just come up has not seen a head yet, and that is the state a reset
+        cache should describe.
+        """
         with self._lock:
             self._mode = DEFAULT_MODE
             self._entry = None
             self._latency_ms = 0
             self._calls.clear()
             self._records_total = 0
+            self._seen_block = 0
 
     def record_other_method(self, method: str) -> None:
         """Record a call to a method this cache does not serve.
@@ -554,6 +624,7 @@ class CacheSim:
                 "mode": self._mode,
                 "latency_ms": self._latency_ms,
                 "has_entry": self._entry is not None,
+                "seen_block": self._seen_block,
                 "calls": sum(1 for c in self._calls if c.method == GET_RELAY_METHOD),
                 "other_method_calls": sum(1 for c in self._calls if c.method != GET_RELAY_METHOD),
             }
@@ -587,6 +658,7 @@ class CacheSim:
             error_status = self._error_status
             error_message = self._error_message
             malformed_body = self._malformed_body
+            seen_block = self._seen_block
             self._records_total += 1
             self._calls.append(
                 RecordedCall(
@@ -618,7 +690,11 @@ class CacheSim:
             #
             # A staged latency longer than the default wins, so a test that asks
             # for a specific overrun gets it rather than silently getting 2s.
-            return CachePlan(action="respond", body=miss_reply(), sleep_s=max(HANG_SECONDS, sleep_s))
+            return CachePlan(
+                action="respond",
+                body=miss_reply(seen_block),
+                sleep_s=max(HANG_SECONDS, sleep_s),
+            )
         if mode == "error":
             return CachePlan(
                 action="abort",
@@ -630,7 +706,7 @@ class CacheSim:
             return CachePlan(action="raw", raw_body=malformed_body, sleep_s=sleep_s)
         if mode == "hit" and entry is not None:
             return CachePlan(action="respond", body=entry.to_cache_relay_reply(), sleep_s=sleep_s)
-        return CachePlan(action="respond", body=miss_reply(), sleep_s=sleep_s)
+        return CachePlan(action="respond", body=miss_reply(seen_block), sleep_s=sleep_s)
 
 
 class CacheSimRegistry:
