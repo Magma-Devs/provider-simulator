@@ -466,35 +466,35 @@ class TestTheResultConvenienceReachesTheWire:
     a staged payload can never silently vanish again.
     """
 
-    def test_result_becomes_a_jsonrpc_envelope_in_data(self):
+    def test_result_becomes_a_jsonrpc_envelope_in_data(self) -> None:
         entry = CacheEntry.from_dict({"result": "0xbead"})
         body = json.loads(entry.data)
         assert body == {"jsonrpc": "2.0", "id": 0, "result": "0xbead"}
 
-    def test_the_envelope_reaches_the_relay_reply_base64d(self):
+    def test_the_envelope_reaches_the_relay_reply_base64d(self) -> None:
         entry = CacheEntry.from_dict({"result": "0xbead"})
         reply = entry.to_cache_relay_reply()
         decoded = json.loads(base64.b64decode(reply["reply"]["data"]))
         assert decoded["result"] == "0xbead"
 
-    def test_error_becomes_an_error_envelope_and_marks_the_node_error(self):
+    def test_error_becomes_an_error_envelope_and_marks_the_node_error(self) -> None:
         entry = CacheEntry.from_dict({"error": {"code": -32000, "message": "boom"}})
         body = json.loads(entry.data)
         assert body["error"]["code"] == -32000
         assert entry.is_node_error is True
 
-    def test_an_explicit_is_node_error_false_survives_the_error_convenience(self):
+    def test_an_explicit_is_node_error_false_survives_the_error_convenience(self) -> None:
         entry = CacheEntry.from_dict({"error": {"code": -32000, "message": "boom"}, "is_node_error": False})
         assert entry.is_node_error is False
 
-    def test_result_beside_data_is_refused(self):
+    def test_result_beside_data_is_refused(self) -> None:
         with pytest.raises(ValueError, match="two payloads"):
             CacheEntry.from_dict({"result": "a", "data": b"b"})
 
-    def test_result_beside_error_is_refused(self):
+    def test_result_beside_error_is_refused(self) -> None:
         with pytest.raises(ValueError, match="one or the other"):
             CacheEntry.from_dict({"result": "a", "error": {"code": 1}})
 
-    def test_an_unknown_field_is_refused_naming_the_known_set(self):
+    def test_an_unknown_field_is_refused_naming_the_known_set(self) -> None:
         with pytest.raises(ValueError, match="unknown entry field.*resutl"):
             CacheEntry.from_dict({"resutl": "typo"})
