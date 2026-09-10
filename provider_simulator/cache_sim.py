@@ -77,6 +77,9 @@ DEFAULT_MODE = "miss"
 HANG_SECONDS = 2.0
 
 
+_UNSET = object()
+
+
 class UnknownStatus(ValueError):
     """Raised for an error status that is not a gRPC code, or is ``OK``.
 
@@ -230,13 +233,63 @@ class CacheEntry:
 
     @classmethod
     def from_dict(cls, body: dict[str, Any]) -> CacheEntry:
-        """Build an entry from a control-API body, ignoring unknown keys.
+        """Build an entry from a control-API body. Unknown keys REFUSE, loudly.
 
         A test writes the field names this class uses, not the wire names, so
         the wire shape stays one module's business.
+
+        Two conveniences, because every test that stages a hit thinks in
+        JSON-RPC and not in payload bytes:
+
+        ``result``
+            Becomes ``data`` carrying the JSON-RPC envelope
+            ``{"jsonrpc": "2.0", "id": 0, "result": <value>}``. The router
+            rewrites the id on serve, so the staged id does not matter.
+        ``error``
+            Becomes ``data`` carrying an error envelope, and marks the entry
+            ``is_node_error`` unless the body says otherwise. This is the
+            stored-node-error shape no real router can write (MAG-2662's
+            P2.2), staged in one key.
+
+        Refusals, each naming what to do instead: ``result`` together with
+        ``data`` (two payloads, one entry), ``result`` together with
+        ``error`` (a reply is one or the other), and any unknown key. The
+        silent unknown-key filter this replaces is how MAG-3562 lived:
+        every caller staged ``result``, the filter dropped it, ``data``
+        stayed empty, and the router served hits with no body while every
+        header said otherwise.
         """
+        body = dict(body)
+        result = body.pop("result", _UNSET)
+        error = body.pop("error", _UNSET)
+        if result is not _UNSET and error is not _UNSET:
+            raise ValueError(
+                "entry carries both 'result' and 'error' - a JSON-RPC reply "
+                "is one or the other. Stage two entries for two shapes."
+            )
+        if (result is not _UNSET or error is not _UNSET) and "data" in body:
+            raise ValueError(
+                "entry carries 'data' beside 'result'/'error' - two payloads "
+                "for one entry. Pass raw bytes in 'data' alone, or the "
+                "JSON-RPC value alone."
+            )
         known = {f for f in cls.__dataclass_fields__}
-        return cls(**{k: v for k, v in body.items() if k in known})
+        unknown = sorted(set(body) - known)
+        if unknown:
+            raise ValueError(
+                f"unknown entry field(s) {unknown!r}; known fields are "
+                f"{sorted(known)!r} plus the 'result'/'error' conveniences. "
+                f"A silently dropped field is how a staged payload vanishes "
+                f"(MAG-3562), so nothing here is ignored."
+            )
+        entry = cls(**body)
+        if result is not _UNSET:
+            entry.data = json.dumps({"jsonrpc": "2.0", "id": 0, "result": result})
+        elif error is not _UNSET:
+            entry.data = json.dumps({"jsonrpc": "2.0", "id": 0, "error": error})
+            if "is_node_error" not in body:
+                entry.is_node_error = True
+        return entry
 
     def to_cache_relay_reply(self) -> dict[str, Any]:
         """Render this entry as the ``CacheRelayReply`` JSON the router decodes.

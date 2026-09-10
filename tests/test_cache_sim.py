@@ -219,22 +219,35 @@ class TestStagingRefusesWhatWouldPassQuietly:
         assert sim.plan(lookup()).body["reply"]["data"] == base64.b64encode(b"first").decode()  # type: ignore[index]
 
     def test_an_entry_can_be_staged_as_a_plain_dict(self) -> None:
+        """The dict-staged payload must REACH the wire, not merely be accepted.
+
+        The data assertion moved here on 2026-09-10 from the unknown-key test
+        that was inverted in the same change. That test was the only one
+        checking a dict-staged 'data' survived to the reply, and inverting it
+        left the path asserted nowhere - which is the exact shape of MAG-3562,
+        where a staged field was accepted and then silently never served.
+        The neighbouring b"good" check stages a CacheEntry object, so it does
+        not cover the dict route.
+        """
         sim = CacheSim()
         sim.stage(mode="hit", entry={"data": b"from a dict", "status_code": 200})
         body = sim.plan(lookup()).body
-        assert body["status_code"] == 200  # type: ignore[index]
-
-    def test_unknown_keys_in_a_staged_dict_are_ignored_and_known_ones_kept(self) -> None:
-        """Asserting only that it responded said nothing -- four of five modes
-        respond. The point is that the unknown key was dropped without taking
-        the known ones with it."""
-        sim = CacheSim()
-        sim.stage(mode="hit", entry={"data": b"x", "status_code": 418, "not_a_field": 1})
-
-        body = sim.plan(lookup()).body
         assert body is not None
-        assert base64.b64decode(body["reply"]["data"]) == b"x"
-        assert body["status_code"] == 418
+        assert base64.b64decode(body["reply"]["data"]) == b"from a dict"
+        assert body["status_code"] == 200
+
+    def test_unknown_keys_in_a_staged_dict_are_refused_naming_them(self) -> None:
+        """INVERTED 2026-09-10, and the old direction was the MAG-3562 enabler.
+
+        This test used to lock the silent drop: an unknown key vanished and
+        the known ones survived. Every caller staged {"result": ...}, result
+        was not a field, the drop swallowed it, and the router served hits
+        with empty bodies while every header said otherwise. Nothing staged
+        may vanish quietly - an unknown key now refuses, naming itself and
+        the known set."""
+        sim = CacheSim()
+        with pytest.raises(ValueError, match="unknown entry field.*not_a_field"):
+            sim.stage(mode="hit", entry={"data": b"x", "status_code": 418, "not_a_field": 1})
 
 
 class TestTheCallLog:
@@ -455,3 +468,45 @@ class TestHangHonoursAStagedLatency:
         sim = CacheSim()
         sim.stage(mode="hang", latency_ms=10)
         assert sim.plan(lookup()).sleep_s == HANG_SECONDS
+
+
+class TestTheResultConvenienceReachesTheWire:
+    """MAG-3562: every caller staged 'result'; the old from_dict dropped it.
+
+    The router served hits whose headers said everything and whose body said
+    nothing. These lock the mapping, the refusals, and the wire encoding, so
+    a staged payload can never silently vanish again.
+    """
+
+    def test_result_becomes_a_jsonrpc_envelope_in_data(self) -> None:
+        entry = CacheEntry.from_dict({"result": "0xbead"})
+        body = json.loads(entry.data)
+        assert body == {"jsonrpc": "2.0", "id": 0, "result": "0xbead"}
+
+    def test_the_envelope_reaches_the_relay_reply_base64d(self) -> None:
+        entry = CacheEntry.from_dict({"result": "0xbead"})
+        reply = entry.to_cache_relay_reply()
+        decoded = json.loads(base64.b64decode(reply["reply"]["data"]))
+        assert decoded["result"] == "0xbead"
+
+    def test_error_becomes_an_error_envelope_and_marks_the_node_error(self) -> None:
+        entry = CacheEntry.from_dict({"error": {"code": -32000, "message": "boom"}})
+        body = json.loads(entry.data)
+        assert body["error"]["code"] == -32000
+        assert entry.is_node_error is True
+
+    def test_an_explicit_is_node_error_false_survives_the_error_convenience(self) -> None:
+        entry = CacheEntry.from_dict({"error": {"code": -32000, "message": "boom"}, "is_node_error": False})
+        assert entry.is_node_error is False
+
+    def test_result_beside_data_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="two payloads"):
+            CacheEntry.from_dict({"result": "a", "data": b"b"})
+
+    def test_result_beside_error_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="one or the other"):
+            CacheEntry.from_dict({"result": "a", "error": {"code": 1}})
+
+    def test_an_unknown_field_is_refused_naming_the_known_set(self) -> None:
+        with pytest.raises(ValueError, match="unknown entry field.*resutl"):
+            CacheEntry.from_dict({"resutl": "typo"})
