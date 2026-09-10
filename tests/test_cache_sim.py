@@ -542,8 +542,7 @@ class TestEveryMethodReachesTheRecord:
         handler = build_generic_handler(CacheSim())
         served = handler.service(self._details(f"/{SERVICE_NAME}/SetRelay"))
         assert served is not None, (
-            "SetRelay was left to gRPC, so it never reaches the call record and "
-            "a count of zero writes cannot fail"
+            "SetRelay was left to gRPC, so it never reaches the call record and " "a count of zero writes cannot fail"
         )
 
     def test_a_different_service_is_not_claimed(self) -> None:
@@ -606,6 +605,5 @@ class TestEveryMethodReachesTheRecord:
         sim.record_other_method(f"/{SERVICE_NAME}/SetRelay")
         writes = [c for c in sim.calls() if c["method"] != GET_RELAY_METHOD]
         assert len(writes) == 1, (
-            "the control failed: a non-read call did not reach the record, so "
-            "the empty list above proved nothing"
+            "the control failed: a non-read call did not reach the record, so " "the empty list above proved nothing"
         )

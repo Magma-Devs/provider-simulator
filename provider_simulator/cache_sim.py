@@ -532,9 +532,7 @@ class CacheSim:
                 "latency_ms": self._latency_ms,
                 "has_entry": self._entry is not None,
                 "calls": sum(1 for c in self._calls if c.method == GET_RELAY_METHOD),
-                "other_method_calls": sum(
-                    1 for c in self._calls if c.method != GET_RELAY_METHOD
-                ),
+                "other_method_calls": sum(1 for c in self._calls if c.method != GET_RELAY_METHOD),
             }
 
     # ── the decision ──────────────────────────────────────────────────────
