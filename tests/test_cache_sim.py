@@ -219,10 +219,22 @@ class TestStagingRefusesWhatWouldPassQuietly:
         assert sim.plan(lookup()).body["reply"]["data"] == base64.b64encode(b"first").decode()  # type: ignore[index]
 
     def test_an_entry_can_be_staged_as_a_plain_dict(self) -> None:
+        """The dict-staged payload must REACH the wire, not merely be accepted.
+
+        The data assertion moved here on 2026-09-10 from the unknown-key test
+        that was inverted in the same change. That test was the only one
+        checking a dict-staged 'data' survived to the reply, and inverting it
+        left the path asserted nowhere - which is the exact shape of MAG-3562,
+        where a staged field was accepted and then silently never served.
+        The neighbouring b"good" check stages a CacheEntry object, so it does
+        not cover the dict route.
+        """
         sim = CacheSim()
         sim.stage(mode="hit", entry={"data": b"from a dict", "status_code": 200})
         body = sim.plan(lookup()).body
-        assert body["status_code"] == 200  # type: ignore[index]
+        assert body is not None
+        assert base64.b64decode(body["reply"]["data"]) == b"from a dict"
+        assert body["status_code"] == 200
 
     def test_unknown_keys_in_a_staged_dict_are_refused_naming_them(self) -> None:
         """INVERTED 2026-09-10, and the old direction was the MAG-3562 enabler.
