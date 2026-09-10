@@ -25,7 +25,11 @@ import pytest
 grpc = pytest.importorskip("grpc", reason="grpcio is an optional dependency")
 
 from provider_simulator.cache_sim import CacheEntry, CacheSim  # noqa: E402
-from provider_simulator.listeners.cache_grpc import serve  # noqa: E402
+from provider_simulator.listeners.cache_grpc import (  # noqa: E402
+    NON_READ_PROBE_METHOD,
+    send_non_read,
+    serve,
+)
 
 GET_RELAY = "/smartrouter.pairing.RelayerCache/GetRelay"
 
@@ -217,6 +221,108 @@ class TestOnlyGetRelayIsServed:
                 with pytest.raises(grpc.RpcError):
                     rpc(b"{}", timeout=5)
             assert sim.call_count() == 0
+
+    def test_the_refused_method_is_recorded_under_its_real_name(self) -> None:
+        """The record must carry the method, not an empty string.
+
+        The two tests above check that a write is refused and is not counted as
+        a lookup. Neither reads the name, and that gap hid a real fault: the
+        handler asked ``context.method()``, which no ServicerContext -- neither
+        the synchronous one nor the asyncio one -- actually has. Every refused
+        call was therefore recorded as ``""``. The refusal worked, the count
+        worked, and the one field the record exists to carry was never real.
+
+        A test that says "the router wrote the second tier" can only name the
+        offending method if this holds.
+        """
+        sim = CacheSim("internal")
+        wrote = "/smartrouter.pairing.RelayerCache/SetRelay"
+        with _Listener(sim) as listener:
+            with grpc.insecure_channel(listener.target) as channel:
+                rpc = channel.unary_unary(
+                    wrote,
+                    request_serializer=lambda b: b,
+                    response_deserializer=lambda b: b,
+                )
+                with pytest.raises(grpc.RpcError):
+                    rpc(b"{}", timeout=5)
+
+        recorded = [c["method"] for c in sim.calls()]
+        assert recorded == [wrote], (
+            f"the refused call was recorded as {recorded!r}. An empty string here "
+            f"means the method name was never captured, so a failure report cannot "
+            f"say which method the router sent."
+        )
+
+    def test_each_refused_method_is_recorded_under_its_own_name(self) -> None:
+        """Two different non-read methods must not collapse into one name.
+
+        One handler object serving every refused path would record whichever
+        name it was built with, for all of them. Two distinct calls is the
+        cheapest way to pin that they are told apart.
+        """
+        sim = CacheSim("internal")
+        sent = [
+            "/smartrouter.pairing.RelayerCache/SetRelay",
+            "/smartrouter.pairing.RelayerCache/Flush",
+        ]
+        with _Listener(sim) as listener:
+            with grpc.insecure_channel(listener.target) as channel:
+                for method in sent:
+                    rpc = channel.unary_unary(
+                        method,
+                        request_serializer=lambda b: b,
+                        response_deserializer=lambda b: b,
+                    )
+                    with pytest.raises(grpc.RpcError):
+                        rpc(b"{}", timeout=5)
+
+        assert [c["method"] for c in sim.calls()] == sent
+
+    def test_the_probe_helper_records_a_write_and_reports_the_refusal(self) -> None:
+        """``send_non_read`` is the positive control a black-box test calls.
+
+        It exists so a test can prove the record WOULD show a write before it
+        trusts an absence of writes. If this ever passes while the record stays
+        empty, every "the router never wrote the tier" assertion downstream is
+        measuring nothing.
+        """
+        sim = CacheSim("internal")
+        with _Listener(sim) as listener:
+            status = send_non_read(listener.port)
+
+        assert status == "UNIMPLEMENTED"
+        assert [c["method"] for c in sim.calls()] == [NON_READ_PROBE_METHOD]
+        assert sim.call_count() == 0, "a refused write is still not a lookup"
+
+
+class TestTheSelfTestRouteOverTheWire:
+    """The control route dials a real listener, so it belongs with the wire tests."""
+
+    def test_the_route_records_a_write_and_reports_what_it_recorded(self) -> None:
+        from provider_simulator.cache_sim import CacheSimRegistry
+        from provider_simulator.control_api import ControlApi
+        from provider_simulator.domain.registry import build_registry
+        from provider_simulator.listeners.ws import WsSubscriptions
+
+        caches = CacheSimRegistry()
+        sim = caches.get_or_create("secondary")
+        with _Listener(sim) as listener:
+            control = ControlApi(
+                build_registry(),
+                WsSubscriptions(),
+                caches,
+                {"secondary": listener.port},
+            )
+            status, payload = control.cache_selftest_write("secondary")
+
+        assert status == 200, payload
+        assert payload["refused_with"] == "UNIMPLEMENTED"
+        assert payload["calls_after"] == payload["calls_before"] + 1
+        assert [c["method"] for c in payload["recorded"]] == [NON_READ_PROBE_METHOD], (
+            f"the route reported {payload['recorded']!r}. It must name the method it "
+            f"sent, or a caller cannot tell a working record from an empty one."
+        )
 
 
 class TestTeardownActuallyStops:

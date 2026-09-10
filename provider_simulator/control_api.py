@@ -15,7 +15,7 @@ from dataclasses import fields
 
 from provider_simulator.build_info import build_info
 from provider_simulator.cache_sim import DEFAULT_MODE as DEFAULT_CACHE_MODE
-from provider_simulator.cache_sim import CacheEntry, CacheSimRegistry, UnknownMode
+from provider_simulator.cache_sim import GET_RELAY_METHOD, CacheEntry, CacheSimRegistry, UnknownMode
 from provider_simulator.chains import CHAINS
 from provider_simulator.domain.registry import Registry
 from provider_simulator.listeners.ws import WsSubscriptions
@@ -111,6 +111,7 @@ class ControlApi:
         registry: Registry,
         subscriptions: WsSubscriptions,
         caches: CacheSimRegistry | None = None,
+        cache_ports: "dict[str, int] | None" = None,
     ) -> None:
         self.registry = registry
         self.subscriptions = subscriptions
@@ -118,6 +119,11 @@ class ControlApi:
         # 404 rather than pretending it has one. An empty registry is the same
         # thing as none for every read below.
         self.caches = caches if caches is not None else CacheSimRegistry()
+        # Only the self-test below needs a port: it dials a cache-sim's own
+        # listener. Every other cache route reads the sim object directly. A
+        # cache with no port here is one whose listener never started, and the
+        # self-test says so rather than dialling nothing.
+        self.cache_ports = dict(cache_ports or {})
 
     # ── POST /scenario ──────────────────────────────────────────────────────
     def apply_scenario(self, body: object) -> tuple[int, dict]:
@@ -578,6 +584,68 @@ class ControlApi:
             return 404, self._unknown(name)
         calls = sim.calls()
         return 200, {"cache": name, "count": len(calls), "calls": calls}
+
+    def cache_selftest_write(self, name: str) -> tuple[int, dict]:
+        """Send one non-read call to this cache-sim, so its record can be trusted.
+
+        A test that asserts "the router never wrote the second tier" is reading
+        an absence. An absence is only evidence when the thing it rules out
+        would have shown up, and for most of this simulator's life it would not
+        have: the listener registered GetRelay alone, so gRPC answered every
+        other method itself and the record stayed empty whatever arrived.
+
+        This route puts a real non-read call through the real listener and
+        reports what the record then holds. A test calls it first, checks the
+        call is there, resets, and only then trusts the absence it measures.
+
+        The call is refused, exactly as a router's write would be. Nothing is
+        stored and no staged entry changes -- but the call log does grow by one,
+        so a caller that is about to count calls should reset afterwards.
+        """
+        sim = self.caches.get(name)
+        if sim is None:
+            return 404, self._unknown(name)
+
+        port = self.cache_ports.get(name)
+        if port is None:
+            return 409, {
+                "error": (
+                    f"cache-sim {name!r} has no listener port, so nothing can dial it. "
+                    "This simulator was built without a gRPC listener for that cache."
+                ),
+                "cache": name,
+                "ports": self.cache_ports,
+            }
+
+        # Imported here, not at module scope: this module must stay importable
+        # on a machine without grpcio, the way server.py already guards the
+        # listener import.
+        from provider_simulator.listeners.cache_grpc import (
+            NON_READ_PROBE_METHOD,
+            send_non_read,
+        )
+
+        before = len(sim.calls())
+        try:
+            refused_with = send_non_read(port)
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            return 502, {
+                "error": f"the self-test call to {name!r} on port {port} failed: {exc}",
+                "cache": name,
+                "method": NON_READ_PROBE_METHOD,
+            }
+
+        calls = sim.calls()
+        recorded = [c for c in calls[before:] if c.get("method") != GET_RELAY_METHOD]
+        return 200, {
+            "status": "the call record can see a call that is not a read",
+            "cache": name,
+            "method": NON_READ_PROBE_METHOD,
+            "refused_with": refused_with,
+            "calls_before": before,
+            "calls_after": len(calls),
+            "recorded": recorded,
+        }
 
     def get_cache(self, name: str) -> tuple[int, dict]:
         sim = self.caches.get(name)

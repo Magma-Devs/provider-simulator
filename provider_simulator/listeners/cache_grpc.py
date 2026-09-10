@@ -83,23 +83,39 @@ def build_generic_handler(sim: CacheSim) -> grpc.GenericRpcHandler:
 
         return json.dumps(plan.body).encode()
 
-    async def refuse_and_record(request: bytes, context: grpc.aio.ServicerContext) -> bytes:
-        """Record the method, then refuse it exactly as gRPC would have."""
-        method = context.method() if callable(getattr(context, "method", None)) else ""
-        sim.record_other_method(str(method))
-        await context.abort(
-            grpc.StatusCode.UNIMPLEMENTED,
-            "this cache serves GetRelay only; the call was recorded",
+    def refuse_handler_for(path: str) -> grpc.RpcMethodHandler:
+        """Build the refusing handler for ONE method path.
+
+        The path is closed over here rather than read from the context inside
+        the handler. Neither ``grpc.aio.ServicerContext`` nor the synchronous
+        ``grpc.ServicerContext`` exposes a ``method()`` -- checked against grpc
+        1.81.1 -- so an earlier version of this that asked the context recorded
+        an empty string for every refused call. The method name is the one
+        field this record exists to carry, and it was the one field that was
+        never real. ``service()`` below already holds the path, so it passes it
+        in and nothing has to be discovered at call time.
+
+        Only refused calls build a handler here. GetRelay keeps the one built
+        once above, so the serving path is untouched.
+        """
+
+        async def refuse_and_record(request: bytes, context: grpc.aio.ServicerContext) -> bytes:
+            """Record the method, then refuse it exactly as gRPC would have."""
+            sim.record_other_method(path)
+            await context.abort(
+                grpc.StatusCode.UNIMPLEMENTED,
+                "this cache serves GetRelay only; the call was recorded",
+            )
+            return b""
+
+        return grpc.unary_unary_rpc_method_handler(
+            refuse_and_record,
+            request_deserializer=_identity,
+            response_serializer=_identity,
         )
-        return b""
 
     get_relay_handler = grpc.unary_unary_rpc_method_handler(
         get_relay,
-        request_deserializer=_identity,
-        response_serializer=_identity,
-    )
-    refuse_handler = grpc.unary_unary_rpc_method_handler(
-        refuse_and_record,
         request_deserializer=_identity,
         response_serializer=_identity,
     )
@@ -113,9 +129,58 @@ def build_generic_handler(sim: CacheSim) -> grpc.GenericRpcHandler:
                 return None
             if path == GET_RELAY_METHOD:
                 return get_relay_handler
-            return refuse_handler
+            return refuse_handler_for(path)
 
     return _EveryMethodOnTheService()
+
+
+NON_READ_PROBE_METHOD = f"/{SERVICE_NAME}/SetRelay"
+"""The method a router would use if it ever wrote this tier.
+
+Named after the real write so the probe below exercises the case the test
+cares about, rather than an invented method no implementation would send.
+"""
+
+
+def send_non_read(
+    port: int,
+    *,
+    method: str = NON_READ_PROBE_METHOD,
+    host: str = "127.0.0.1",
+    timeout_s: float = 5.0,
+) -> str:
+    """Send one non-read call to a cache-sim's own listener, and expect refusal.
+
+    This is the positive control for the call record. A test that asserts "the
+    router never wrote this tier" is reading an absence, and an absence proves
+    nothing unless a write WOULD have shown up. Calling this first puts a real
+    non-read call through the real listener, so the record can be checked for
+    it before the absence is trusted.
+
+    It goes over a socket rather than invoking the handler in-process, on
+    purpose: what it exercises is then the whole path a router's write would
+    take -- gRPC's own dispatch, ``_EveryMethodOnTheService.service`` claiming
+    the path, and the handler recording it. An in-process call would skip the
+    first two, which are exactly where the previous version of this listener
+    lost every non-read call.
+
+    Returns the refusal's status name, normally ``UNIMPLEMENTED``.
+
+    Raises:
+        RuntimeError: if the call was ANSWERED. A cache-sim that serves a write
+            is broken in a way that would make the test it supports meaningless,
+            so this refuses to return quietly.
+    """
+    with grpc.insecure_channel(f"{host}:{port}") as channel:
+        try:
+            channel.unary_unary(method)(b"", timeout=timeout_s)
+        except grpc.RpcError as exc:
+            code = exc.code()
+            return code.name if code is not None else "UNKNOWN"
+    raise RuntimeError(
+        f"the cache-sim on port {port} ANSWERED {method!r} instead of refusing it. "
+        f"This listener must serve {GET_RELAY_METHOD!r} and nothing else."
+    )
 
 
 async def serve(

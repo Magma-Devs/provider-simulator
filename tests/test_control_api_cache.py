@@ -202,6 +202,31 @@ class TestTheDefaultConstructorStillWorks:
         assert control.get_caches() == (200, {"caches": [], "count": 0})
 
 
+class TestTheSelfTestRoute:
+    """``POST /cache/<name>/selftest-write`` proves the call record can see a
+    write, so a test asserting "no writes arrived" is reading a real absence.
+
+    The dialling half needs a listener and lives in the wire tests. These two
+    pin the branches that answer without dialling anything.
+    """
+
+    def test_an_unknown_cache_is_a_404_naming_the_ones_that_exist(self) -> None:
+        status, payload = api("secondary").cache_selftest_write("nosuch")
+        assert status == 404
+        assert payload["caches"] == ["secondary"]
+
+    def test_a_cache_with_no_listener_port_refuses_rather_than_dialling(self) -> None:
+        """A cache-sim built with no gRPC listener has nothing to dial.
+
+        Answering 200 here would report "the record can see a write" without
+        any call having been made, which is the exact false reassurance this
+        route exists to remove.
+        """
+        status, payload = api("secondary").cache_selftest_write("secondary")
+        assert status == 409
+        assert "no listener port" in payload["error"]
+
+
 class TestThePathDispatch:
     """``/cache/<name>/<action>`` parsing, which the ControlApi tests cannot
     see because they are called with the name already split out.
@@ -232,6 +257,9 @@ class TestThePathDispatch:
         assert _dispatch_cache_post(control, "/cache/secondary/entry", {"entry": {"data": "x"}})[0] == 200
         assert _dispatch_cache_post(control, "/cache/secondary/calls/clear", {})[0] == 200
         assert _dispatch_cache_post(control, "/cache/secondary/reset", {})[0] == 200
+        # 409, not 404: the route is wired, and this ControlApi has no ports.
+        # A 404 here would mean the action never reached the ControlApi at all.
+        assert _dispatch_cache_post(control, "/cache/secondary/selftest-write", {})[0] == 409
 
     def test_each_get_action_reaches_its_route(self) -> None:
         from server import _dispatch_cache_get
