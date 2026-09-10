@@ -78,12 +78,74 @@ class TestTheAnswerAMissGives:
         sim = CacheSim()
         plan = sim.plan(lookup())
         assert plan.action == "respond", f"a miss must not fail the call, got {plan.action}"
-        assert plan.body == {"reply": None}, f"unexpected miss body: {plan.body}"
+        assert plan.body == {
+            "reply": None,
+            "optional_metadata": None,
+            "seen_block": 0,
+            "blocks_hashes_to_heights": None,
+            "is_node_error": False,
+            "status_code": 0,
+        }, f"unexpected miss body: {plan.body}"
+
+    def test_a_miss_carries_every_field_a_real_cache_sends(self) -> None:
+        """A real cache never sends a short message. All six fields, every time.
+
+        Written out as names rather than compared against ``miss_reply()``,
+        which would compare the module with itself and pass however wrong the
+        shape became. The values are checked by the test that reads them beside
+        a real cache's recorded bytes.
+        """
+        body = CacheSim().plan(lookup()).body
+        assert body is not None
+        assert sorted(body) == [
+            "blocks_hashes_to_heights",
+            "is_node_error",
+            "optional_metadata",
+            "reply",
+            "seen_block",
+            "status_code",
+        ], f"a miss is six fields; got {sorted(body)}"
+
+    def test_the_chain_head_a_miss_reports_is_the_caches_own(self) -> None:
+        """``seen_block`` describes the cache, never the request.
+
+        The lookup below asks with ``seen_block=777`` and the cache answers with
+        the head it was given. A cache-sim that echoed the request would return
+        777 here and would look right in every test that never set the two apart.
+        """
+        sim = CacheSim()
+        sim.stage(mode="miss", seen_block=25_946_041)
+        body = sim.plan(lookup(seen_block=777)).body
+        assert body is not None
+        assert (
+            body["seen_block"] == 25_946_041
+        ), f"a miss must report the cache's own head, not the request's; got {body['seen_block']}"
+
+    def test_a_cache_with_no_head_yet_reports_zero(self) -> None:
+        """The commonest real answer: 249 of the 281 recorded misses said 0."""
+        assert CacheSim().plan(lookup(seen_block=777)).body["seen_block"] == 0  # type: ignore[index]
+
+    def test_a_reset_puts_the_chain_head_back_to_zero(self) -> None:
+        """A reset cache has not seen a head, so it must stop reporting one.
+
+        The reset tests further down check that the staged ANSWER is gone. None
+        of them would notice a head surviving, because they read ``reply`` alone
+        — so without this, ``reset`` clearing the head is code nothing covers.
+        """
+        sim = CacheSim()
+        sim.stage(mode="miss", seen_block=25_946_041)
+        assert sim.plan(lookup()).body["seen_block"] == 25_946_041  # type: ignore[index]
+
+        sim.reset()
+        assert sim.plan(lookup()).body["seen_block"] == 0, (  # type: ignore[index]
+            "a reset cache reported a head it can no longer have seen"
+        )
+        assert sim.state()["seen_block"] == 0
 
     def test_an_unstaged_sim_never_claims_a_hit(self) -> None:
         sim = CacheSim()
         assert sim.state()["has_entry"] is False
-        assert sim.plan(lookup()).body == {"reply": None}
+        assert sim.plan(lookup()).body["reply"] is None  # type: ignore[index]
 
 
 class TestTheReplyTheRouterDecodes:
@@ -123,17 +185,36 @@ class TestTheReplyTheRouterDecodes:
         assert body["is_node_error"] is True
         assert body["status_code"] == 429
 
-    def test_unset_byte_fields_are_null_not_empty_string(self) -> None:
+    def test_a_byte_field_set_to_none_is_null_not_empty_string(self) -> None:
         """Go writes a nil []byte as null. An empty string decodes to empty
         bytes, which is a different thing from absent and would let a test
         claiming "the signature was stripped" pass against an entry that never
-        carried one."""
+        carried one.
+
+        The distinction this test defends is unchanged. What changed is which
+        field carries it by default: ``sig`` now defaults to empty bytes because
+        that is what a real cache stores, so the absent case is asked for
+        explicitly here instead of arriving by accident.
+        """
         sim = CacheSim()
-        sim.stage(mode="hit", entry=CacheEntry(data=b"x"))
+        sim.stage(mode="hit", entry=CacheEntry(data=b"x", sig=None))
         reply = sim.plan(lookup()).body["reply"]  # type: ignore[index]
         assert reply["sig"] is None
         assert reply["sig_blocks"] is None
         assert reply["finalized_blocks_hashes"] is None
+
+    def test_an_untouched_entry_signs_the_way_a_real_cache_does(self) -> None:
+        """Empty signature, absent signature blocks -- and they are not the same.
+
+        One real message makes both statements at once, which is the evidence
+        that the encoder is right and only the default was wrong: all 26 hits
+        recorded from a real cache carry ``sig: ""`` beside ``sig_blocks: null``.
+        """
+        sim = CacheSim()
+        sim.stage(mode="hit", entry=CacheEntry(data=b"x"))
+        reply = sim.plan(lookup()).body["reply"]  # type: ignore[index]
+        assert reply["sig"] == "", f"a stored-but-empty signature is \"\", got {reply['sig']!r}"
+        assert reply["sig_blocks"] is None, "nothing was stored here, so it is absent"
 
     def test_a_status_of_zero_survives_and_is_not_turned_into_two_hundred(self) -> None:
         """Zero means the entry's writer recorded no status, which the router
@@ -181,7 +262,7 @@ class TestBehavingBadlyOnPurpose:
     def test_hang_answers_a_miss_because_the_answer_is_never_read(self) -> None:
         sim = CacheSim()
         sim.stage(mode="hang")
-        assert sim.plan(lookup()).body == {"reply": None}
+        assert sim.plan(lookup()).body["reply"] is None  # type: ignore[index]
 
     def test_malformed_mode_sends_bytes_that_are_not_a_reply(self) -> None:
         sim = CacheSim()
@@ -310,7 +391,7 @@ class TestTheCallLog:
         sim = CacheSim()
         plan = sim.plan(b"not json at all")
         assert sim.call_count() == 1
-        assert plan.body == {"reply": None}
+        assert plan.body["reply"] is None  # type: ignore[index]
 
     def test_clear_calls_keeps_the_staged_answer(self) -> None:
         sim = CacheSim()
@@ -326,7 +407,7 @@ class TestTheCallLog:
         sim.plan(lookup())
         sim.reset()
         assert sim.call_count() == 0
-        assert sim.plan(lookup()).body == {"reply": None}
+        assert sim.plan(lookup()).body["reply"] is None  # type: ignore[index]
 
 
 class TestTheKeyHelper:
@@ -355,7 +436,7 @@ class TestAddressingByName:
         other = registry.get_or_create("other-zone")
 
         internal.stage(mode="hit", entry=CacheEntry(data=b"internal"))
-        assert other.plan(lookup()).body == {"reply": None}
+        assert other.plan(lookup()).body["reply"] is None  # type: ignore[index]
         assert internal.plan(lookup()).body["reply"] is not None  # type: ignore[index]
         assert other.call_count() == 1
         assert internal.call_count() == 1
@@ -377,7 +458,7 @@ class TestAddressingByName:
         for name in ("a", "b"):
             sim = registry.get_or_create(name)
             assert sim.call_count() == 0
-            assert sim.plan(lookup()).body == {"reply": None}
+            assert sim.plan(lookup()).body["reply"] is None  # type: ignore[index]
 
 
 class TestStagingRefusesInputTheRouterCannotAct0n:

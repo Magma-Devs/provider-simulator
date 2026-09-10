@@ -528,6 +528,14 @@ class ControlApi:
         Both a bad mode and a hit with no entry are refused here rather than
         answered — an entry-less hit would serve a reply with no data and read
         as a cache that answered.
+
+        ``seen_block`` appears at two levels and they mean different things. At
+        the top it is the CACHE's own view of the chain head, which a miss
+        reports and which persists until it is set again or the cache is reset.
+        Inside ``entry`` it is the value stored with that one entry. A real
+        cache reports its own head on every lookup, so the top-level one is the
+        faithful knob; the entry-level one stays because a test needs to offer
+        a chain head the router is supposed to refuse.
         """
         if not isinstance(body, dict):
             return 400, {"error": "request body must be a JSON object"}
@@ -546,6 +554,11 @@ class ControlApi:
                 error_status=body.get("error_status"),
                 error_message=body.get("error_message"),
                 malformed_body=body.get("malformed_body"),
+                # Absent means "leave the head alone", not "set it to zero" —
+                # a stage that silently reset it would wipe the head an earlier
+                # call established, and the miss would report 0 with nothing
+                # naming the cause.
+                seen_block=(_as_int(body["seen_block"], 0) if "seen_block" in body else None),
             )
         except (UnknownMode, ValueError) as exc:
             return 400, {"error": str(exc)}

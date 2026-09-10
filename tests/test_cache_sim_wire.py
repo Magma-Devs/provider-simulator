@@ -143,9 +143,17 @@ class TestTheBytesTravel:
 
     def test_a_miss_travels_as_a_successful_call_with_no_reply(self) -> None:
         sim = CacheSim("internal")
+        sim.stage(mode="miss", seen_block=25_946_041)
         with _Listener(sim) as listener:
             raw = call_get_relay(listener.target, a_lookup())
-        assert json.loads(raw) == {"reply": None}
+        assert json.loads(raw) == {
+            "reply": None,
+            "optional_metadata": None,
+            "seen_block": 25_946_041,
+            "blocks_hashes_to_heights": None,
+            "is_node_error": False,
+            "status_code": 0,
+        }, f"the miss did not survive the wire unchanged: {raw!r}"
 
     def test_the_call_is_recorded_with_the_key_the_caller_asked_under(self) -> None:
         sim = CacheSim("internal")
