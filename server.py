@@ -659,7 +659,12 @@ def _dispatch_cache_post(control: ControlApi, path: str, body: dict) -> tuple[in
         return control.cache_reset(name)
     if action == "calls/clear":
         return control.cache_clear_calls(name)
-    return 404, {"error": f"unknown cache-sim action {action!r}", "actions": ["entry", "reset", "calls/clear"]}
+    if action == "selftest-write":
+        return control.cache_selftest_write(name)
+    return 404, {
+        "error": f"unknown cache-sim action {action!r}",
+        "actions": ["entry", "reset", "calls/clear", "selftest-write"],
+    }
 
 
 def _dispatch_cache_get(control: ControlApi, path: str) -> tuple[int, dict]:
@@ -963,7 +968,7 @@ class SimulatorServer:
         self.cache_ports = dict(CACHE_SIM_PORTS if cache_ports is None else cache_ports)
         for cache_name in self.cache_ports:
             self.caches.get_or_create(cache_name)
-        self.control = ControlApi(self.registry, self.subscriptions, self.caches)
+        self.control = ControlApi(self.registry, self.subscriptions, self.caches, self.cache_ports)
         if scenario_ttl_s is None:
             scenario_ttl_s = int(os.environ.get("SIM_SCENARIO_TTL_SECONDS", "900"))
         self.scenario_ttl_s = scenario_ttl_s
