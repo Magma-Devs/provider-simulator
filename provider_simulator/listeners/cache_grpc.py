@@ -45,12 +45,25 @@ def _identity(value: bytes) -> bytes:
 
 
 def build_generic_handler(sim: CacheSim) -> grpc.GenericRpcHandler:
-    """Wrap one cache-sim as the RelayerCache service's GetRelay method.
+    """Wrap one cache-sim as the RelayerCache service.
 
-    Only GetRelay is registered. The other five methods the service declares are
-    unreachable on the secondary path -- the router holds a secondary behind a
-    read-only interface -- so leaving them out makes an unexpected call fail
-    loudly as UNIMPLEMENTED rather than answer something invented.
+    Every method on the service reaches this handler, not only GetRelay. Only
+    GetRelay is SERVED; anything else is recorded and then refused as
+    UNIMPLEMENTED, which is what the router would have seen before.
+
+    The recording is the point, and it is why this is a generic handler rather
+    than a method table. A method table registers GetRelay alone, so gRPC
+    answers any other method itself, this module never runs, and the call record
+    stays empty whatever the router did. A test asserting "the router never
+    wrote the second tier" against that record is asserting something the record
+    cannot contradict -- a check that cannot fail.
+
+    Accepting every method and recording the ones we refuse turns the same
+    assertion into evidence: zero writes now means none arrived, rather than
+    none could have been seen.
+
+    The refusal itself is unchanged. An unexpected call still fails loudly as
+    UNIMPLEMENTED rather than answering something invented.
     """
 
     async def get_relay(request: bytes, context: grpc.aio.ServicerContext) -> bytes:
@@ -70,12 +83,39 @@ def build_generic_handler(sim: CacheSim) -> grpc.GenericRpcHandler:
 
         return json.dumps(plan.body).encode()
 
-    handler = grpc.unary_unary_rpc_method_handler(
+    async def refuse_and_record(request: bytes, context: grpc.aio.ServicerContext) -> bytes:
+        """Record the method, then refuse it exactly as gRPC would have."""
+        method = context.method() if callable(getattr(context, "method", None)) else ""
+        sim.record_other_method(str(method))
+        await context.abort(
+            grpc.StatusCode.UNIMPLEMENTED,
+            "this cache serves GetRelay only; the call was recorded",
+        )
+        return b""
+
+    get_relay_handler = grpc.unary_unary_rpc_method_handler(
         get_relay,
         request_deserializer=_identity,
         response_serializer=_identity,
     )
-    return grpc.method_handlers_generic_handler(SERVICE_NAME, {"GetRelay": handler})
+    refuse_handler = grpc.unary_unary_rpc_method_handler(
+        refuse_and_record,
+        request_deserializer=_identity,
+        response_serializer=_identity,
+    )
+
+    class _EveryMethodOnTheService(grpc.GenericRpcHandler):
+        """Claims the whole service path, so no method bypasses the recorder."""
+
+        def service(self, handler_call_details):
+            path = handler_call_details.method or ""
+            if not path.startswith(f"/{SERVICE_NAME}/"):
+                return None
+            if path == GET_RELAY_METHOD:
+                return get_relay_handler
+            return refuse_handler
+
+    return _EveryMethodOnTheService()
 
 
 async def serve(

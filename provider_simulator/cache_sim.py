@@ -463,6 +463,39 @@ class CacheSim:
             self._latency_ms = 0
             self._calls.clear()
 
+    def record_other_method(self, method: str) -> None:
+        """Record a call to a method this cache does not serve.
+
+        The router holds its second tier behind a read-only interface, so a
+        write should never arrive. "Should never" is the claim a test wants to
+        make, and it can only be made by something that WOULD have seen one.
+
+        A cache that registers GetRelay alone cannot make it: gRPC answers any
+        other method itself, the handler never runs, and the record stays empty
+        whatever the router did -- so a count of zero there proves nothing. The
+        listener therefore accepts every method on the service and calls this
+        for the ones it does not serve, before refusing them as UNIMPLEMENTED.
+
+        Only the method name and the time are real here. The other fields
+        describe a cache lookup, and this was not one.
+        """
+        with self._lock:
+            self._calls.append(
+                RecordedCall(
+                    method=method,
+                    chain_id="",
+                    request_hash_hex="",
+                    requested_block=0,
+                    finalized=False,
+                    seen_block=0,
+                    shared_state_id="",
+                    blocks_hashes_to_heights=[],
+                    key="",
+                    mode=self._mode,
+                    ts=time.time(),
+                )
+            )
+
     def clear_calls(self) -> None:
         """Drop the call log, keeping whatever is staged."""
         with self._lock:
@@ -476,14 +509,20 @@ class CacheSim:
             return [c.as_dict() for c in self._calls]
 
     def call_count(self) -> int:
-        """How many lookups the router has made.
+        """How many LOOKUPS the router has made.
 
         The number a test asserts on to prove the secondary was asked exactly
         once, or never -- the router must reach it only after its own cache
         misses.
+
+        Counts GetRelay alone. The record also holds calls to methods this
+        cache refuses, and those are not lookups: a refused write means the
+        router tried to write, which is a different fault from asking twice, and
+        adding it here would make both numbers unreadable. Ask ``calls()`` and
+        filter on ``method`` for that question.
         """
         with self._lock:
-            return len(self._calls)
+            return sum(1 for c in self._calls if c.method == GET_RELAY_METHOD)
 
     def state(self) -> dict[str, Any]:
         with self._lock:
@@ -492,7 +531,8 @@ class CacheSim:
                 "mode": self._mode,
                 "latency_ms": self._latency_ms,
                 "has_entry": self._entry is not None,
-                "calls": len(self._calls),
+                "calls": sum(1 for c in self._calls if c.method == GET_RELAY_METHOD),
+                "other_method_calls": sum(1 for c in self._calls if c.method != GET_RELAY_METHOD),
             }
 
     # ── the decision ──────────────────────────────────────────────────────

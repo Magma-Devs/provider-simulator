@@ -27,6 +27,7 @@ import pytest
 from provider_simulator.cache_sim import (
     GET_RELAY_METHOD,
     HANG_SECONDS,
+    SERVICE_NAME,
     CacheEntry,
     CacheSim,
     CacheSimRegistry,
@@ -510,3 +511,99 @@ class TestTheResultConvenienceReachesTheWire:
     def test_an_unknown_field_is_refused_naming_the_known_set(self) -> None:
         with pytest.raises(ValueError, match="unknown entry field.*resutl"):
             CacheEntry.from_dict({"resutl": "typo"})
+
+
+class TestEveryMethodReachesTheRecord:
+    """A zero in the call record only means something if a write could appear in it.
+
+    The cache serves GetRelay alone. Before this, it also REGISTERED GetRelay
+    alone, so gRPC answered any other method itself and the record stayed empty
+    whatever the router did. "The router never wrote the second tier" was then a
+    claim the record could not contradict.
+    """
+
+    @staticmethod
+    def _details(path: str):
+        class _D:
+            method = path
+
+        return _D()
+
+    def test_get_relay_is_served(self) -> None:
+        from provider_simulator.listeners.cache_grpc import build_generic_handler
+
+        handler = build_generic_handler(CacheSim())
+        assert handler.service(self._details(GET_RELAY_METHOD)) is not None
+
+    def test_another_method_on_the_service_is_answered_by_us_not_by_grpc(self) -> None:
+        """The one that matters: gRPC must not get to answer it itself."""
+        from provider_simulator.listeners.cache_grpc import build_generic_handler
+
+        handler = build_generic_handler(CacheSim())
+        served = handler.service(self._details(f"/{SERVICE_NAME}/SetRelay"))
+        assert served is not None, (
+            "SetRelay was left to gRPC, so it never reaches the call record and " "a count of zero writes cannot fail"
+        )
+
+    def test_a_different_service_is_not_claimed(self) -> None:
+        """Claiming the whole server would swallow methods that are not ours."""
+        from provider_simulator.listeners.cache_grpc import build_generic_handler
+
+        handler = build_generic_handler(CacheSim())
+        assert handler.service(self._details("/some.other.Service/Method")) is None
+
+    def test_a_recorded_foreign_call_names_its_method_and_claims_no_lookup(self) -> None:
+        sim = CacheSim()
+        sim.record_other_method(f"/{SERVICE_NAME}/SetRelay")
+
+        calls = sim.calls()
+        assert len(calls) == 1
+        assert calls[0]["method"] == f"/{SERVICE_NAME}/SetRelay"
+        assert calls[0]["key"] == ""
+        assert calls[0]["chain_id"] == ""
+        assert calls[0]["requested_block"] == 0
+
+    def test_a_foreign_call_does_not_disturb_what_is_staged(self) -> None:
+        """Recording must not cost the entry a test staged before it."""
+        sim = CacheSim()
+        sim.stage(mode="hit", entry={"result": "0xkept"})
+        sim.record_other_method(f"/{SERVICE_NAME}/FlushCache")
+
+        body = sim.plan(lookup()).body
+        assert body is not None
+        assert "0xkept" in base64.b64decode(body["reply"]["data"]).decode()
+
+    def test_a_refused_method_is_in_the_record_but_is_not_a_lookup(self) -> None:
+        """Two questions, two numbers, and conflating them loses both.
+
+        "Was the secondary asked twice" and "did the router try to write" are
+        different faults. An existing wire test asserts a refused write leaves
+        call_count at zero, and it is right: that number means lookups. The
+        record still has to carry the write, or the claim this class exists for
+        cannot be made.
+        """
+        sim = CacheSim()
+        sim.plan(lookup())
+        sim.record_other_method(f"/{SERVICE_NAME}/SetRelay")
+
+        assert sim.call_count() == 1, "a refused write must not count as a lookup"
+        assert len(sim.calls()) == 2, "but it must still be in the record"
+        assert sim.state()["calls"] == 1
+        assert sim.state()["other_method_calls"] == 1
+
+    def test_zero_writes_is_the_claim_this_makes_possible(self) -> None:
+        """The shape a P2.1-style test asserts, and its own control.
+
+        Asserting no non-read call appears means nothing unless a non-read call
+        WOULD appear. The second half proves the first half can fail.
+        """
+        sim = CacheSim()
+        sim.plan(lookup())
+        writes = [c for c in sim.calls() if c["method"] != GET_RELAY_METHOD]
+        assert writes == []
+
+        sim.record_other_method(f"/{SERVICE_NAME}/SetRelay")
+        writes = [c for c in sim.calls() if c["method"] != GET_RELAY_METHOD]
+        assert len(writes) == 1, (
+            "the control failed: a non-read call did not reach the record, so " "the empty list above proved nothing"
+        )
