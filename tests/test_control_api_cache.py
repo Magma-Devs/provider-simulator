@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import base64
 
+import pytest
+
 from provider_simulator.cache_sim import CacheSimRegistry
 from provider_simulator.control_api import ControlApi
 from provider_simulator.domain.registry import build_registry
@@ -142,6 +144,59 @@ class TestStaging:
         sim = control.caches.get("secondary")
         assert sim is not None
         assert sim.plan(b"{}").body["seen_block"] == 25_946_041  # type: ignore[index]
+
+    def test_an_explicit_null_head_leaves_the_head_alone(self) -> None:
+        """JSON null is how a caller says "no value", so it must mean the same
+        as omitting the key. Reading it as 0 would silently wipe the head for
+        the one client that spells its absent fields out."""
+        control = api("secondary")
+        control.cache_stage("secondary", {"mode": "miss", "seen_block": 25_946_041})
+        status, _ = control.cache_stage("secondary", {"mode": "miss", "seen_block": None})
+        assert status == 200
+
+        sim = control.caches.get("secondary")
+        assert sim is not None
+        assert sim.plan(b"{}").body["seen_block"] == 25_946_041  # type: ignore[index]
+
+    def test_a_head_of_zero_is_accepted_and_does_set_the_head(self) -> None:
+        """0 is a real head -- a cache that has not seen one -- so a caller who
+        asks for it gets it, and it is not confused with the null above."""
+        control = api("secondary")
+        control.cache_stage("secondary", {"mode": "miss", "seen_block": 25_946_041})
+        control.cache_stage("secondary", {"mode": "miss", "seen_block": 0})
+
+        sim = control.caches.get("secondary")
+        assert sim is not None
+        assert sim.plan(b"{}").body["seen_block"] == 0  # type: ignore[index]
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param("banana", id="a-word"),
+            pytest.param("25946041", id="a-number-as-a-string"),
+            pytest.param([], id="a-list"),
+            pytest.param({"a": 1}, id="an-object"),
+            pytest.param(True, id="a-boolean"),
+            pytest.param(1.5, id="a-fraction"),
+            pytest.param(-1, id="a-negative-block"),
+        ],
+    )
+    def test_a_head_that_is_not_a_whole_number_refuses_loudly(self, value) -> None:
+        """Every one of these used to become 0 in silence, which RESET the head
+        rather than failing. A staged value that vanishes without a word is the
+        shape of MAG-3562, and it took three green suite runs to notice."""
+        control = api("secondary")
+        control.cache_stage("secondary", {"mode": "miss", "seen_block": 25_946_041})
+        status, payload = control.cache_stage("secondary", {"mode": "miss", "seen_block": value})
+
+        assert status == 400, f"{value!r} was accepted as a chain head"
+        assert "seen_block" in payload["error"], f"the refusal does not name the field: {payload}"
+
+        sim = control.caches.get("secondary")
+        assert sim is not None
+        assert sim.plan(b"{}").body["seen_block"] == 25_946_041, (  # type: ignore[index]
+            "a refused stage changed the head anyway"
+        )
 
     def test_a_refused_stage_leaves_the_previous_answer_in_place(self) -> None:
         control = api("secondary")

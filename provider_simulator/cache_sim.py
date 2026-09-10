@@ -154,15 +154,25 @@ def _b64(raw: bytes | str | None) -> str | None:
 
 
 def _list_or_null(items: list[Any]) -> list[Any] | None:
-    """Render a list the way Go's encoding/json does: null when it holds nothing.
+    """Render an empty list as null, the way a real cache's empty fields arrive.
 
-    The same rule ``_b64`` follows for bytes. Go writes a nil slice as null and
-    an empty one as ``[]``, and a cache that stored nothing under a field holds
-    a nil slice, so the wire shows null. Every reply a real cache sent in
-    ``recorded-2026-09-10.jsonl`` agrees: ``optional_metadata`` and
-    ``blocks_hashes_to_heights`` are null in all 307 of them, hits and misses
-    alike. We used to send ``[]``, which says "present and empty" -- a different
-    statement, and one no real cache made.
+    **This deliberately collapses a distinction Go keeps, and the difference is
+    worth stating.** Go writes a NIL slice as null and an EMPTY one as ``[]`` --
+    two states. Python has one: a list is either populated or not, with no way
+    to say "present but holding nothing" separately from "never set". So this
+    maps our single empty state onto the null a real cache sends, rather than
+    reproducing Go's rule. ``_b64`` faces no such problem because Python's
+    ``None`` and ``b""`` already give it the two states Go has.
+
+    The consequence, so nobody re-derives it: an entry cannot stage ``[]`` on
+    the wire. Every reply a real cache sent in ``recorded-2026-09-10.jsonl``
+    supports that -- ``optional_metadata`` and ``blocks_hashes_to_heights`` are
+    null in all 307 of them, hits and misses alike, and ``[]`` appears nowhere.
+    If a real cache is ever recorded sending ``[]``, this helper is where that
+    changes, and it would need a second state on ``CacheEntry`` to express it.
+
+    We used to send ``[]`` unconditionally, which says "present and empty" -- a
+    different statement, and one no real cache made.
     """
     return list(items) if items else None
 
