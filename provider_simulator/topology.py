@@ -136,7 +136,7 @@ the universal exception (MAG-2092) and fires on every listener regardless of
     18608-18613  Lava Tendermint-RPC cross-validation
     18614-18619  ETH cache writer (3 primary, 3 backup)
     18620-18625  ETH cache reader (3 primary, 3 backup)
-    (next free: 18626)
+    (next free: 18629)
 
 The ETH backup block sits at 18560-18562 rather than next to its primaries
 because 18548-18559 were already claimed by the gRPC / REST / Tendermint /

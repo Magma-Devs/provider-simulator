@@ -223,3 +223,29 @@ def test_a_write_attempt_leaves_the_store_untouched(store, listener):
     would satisfy a status-code check and defeat the rule."""
     _post(listener, "/resp/set", {"key": "sr:planted", "value": "x"})
     assert _get(listener, "/resp/keys")[1]["count"] == 0
+
+
+def test_post_resp_counters_reset_zeroes_them_through_the_route(store, listener):
+    """The route, not the object behind it.
+
+    The counter reset was reachable only through RespProxy in the tests, so a
+    typo in the action name or a regression in query selection would have passed
+    unnoticed while the route 404'd.
+    """
+    _get(listener, "/resp/keys")
+    before = _get(listener, "/resp/state")[1]["counters"]
+    assert before["accepted"] >= 0
+    status, payload = _post(listener, "/resp/counters/reset")
+    assert status == 200
+    assert payload["proxy"]["counters"] == {
+        "accepted": 0,
+        "forwarded": 0,
+        "carried": 0,
+        "closed_by_cut_off": 0,
+    }
+
+
+def test_resetting_counters_does_not_move_the_gate(listener):
+    _post(listener, "/resp/cutoff", {"kind": "timeout"})
+    _post(listener, "/resp/counters/reset")
+    assert _get(listener, "/resp/state")[1]["state"] == "timeout"

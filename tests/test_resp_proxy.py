@@ -286,3 +286,47 @@ def test_counters_can_be_zeroed_without_changing_the_gate(proxy, through_proxy):
     proxy.reset_counters()
     assert proxy.counters()["accepted"] == 0
     assert proxy.state() == TIMEOUT
+
+
+def test_a_held_connection_with_a_pending_request_does_not_burn_a_core(store, runner, proxy):
+    """The held path must WAIT, not spin.
+
+    ``_peer_gone`` blocks for the poll interval only while nothing is pending.
+    The normal case here is the opposite: the router has already sent a request
+    and is waiting for a reply, so the socket is readable, the peek returns at
+    once, and a loop with no wait would spin on bytes it is deliberately not
+    reading. One held connection would consume a whole core, and a router pool
+    holds several.
+
+    Measured as processor time rather than by reading the loop, because "there
+    is a sleep in the code" and "this connection is not burning a core" are
+    different claims and only the second one matters. The threshold is loose on
+    purpose: a spin costs roughly the whole wall-clock period, and sleeping
+    costs almost nothing, so anything in between still fails.
+    """
+    proxy.cut_off(TIMEOUT)
+    conn = socket.create_connection(("127.0.0.1", runner.port), timeout=1.0)
+    try:
+        conn.sendall(b"*1\r\n$4\r\nPING\r\n")
+        time.sleep(0.1)  # let the held loop get going
+        before = time.process_time()
+        time.sleep(_HOLD_SECONDS)
+        spent = time.process_time() - before
+    finally:
+        conn.close()
+    assert spent < _HOLD_SECONDS / 2, (
+        f"the held path used {spent:.3f}s of processor time over {_HOLD_SECONDS}s of "
+        f"waiting; it is spinning on a readable socket instead of waiting"
+    )
+
+
+def test_the_counters_do_not_claim_to_partition_accepted(store, through_proxy, proxy):
+    """One ordinary connection increments three of them, so they are not parts
+    of a whole. An earlier version named one of them 'held', which read as a
+    live state while counting every connection the proxy ever took on."""
+    through_proxy.ping()
+    counters = proxy.counters()
+    assert counters["accepted"] == 1
+    assert counters["carried"] == 1
+    assert counters["forwarded"] == 1
+    assert counters["closed_by_cut_off"] == 0

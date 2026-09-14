@@ -24,9 +24,9 @@ from nothing -- it cannot put a chosen entry in.
 Why a hand-written client
 -------------------------
 This repository installs nothing outside the standard library except gRPC. Adding
-``redis-py`` for four commands would be the largest dependency here for the
-smallest surface. RESP2 is a short protocol and only the replies these four
-commands produce need decoding.
+``redis-py`` for five commands -- PING, SCAN, GET, TTL and FLUSHDB -- would be
+the largest dependency here for the smallest surface. RESP2 is a short protocol
+and only the replies those five produce need decoding.
 
 What the keys look like
 -----------------------
@@ -64,6 +64,11 @@ _SCAN_COUNT = 500
 # rounds. This bounds a loop that would otherwise be unbounded if a reply were
 # ever malformed.
 _MAX_SCAN_ROUNDS = 1000
+
+# The two TTL answers that are not durations. The store uses them as sentinels:
+# -1 for a key that never expires, -2 for a key that is not there at all.
+TTL_NO_EXPIRY = -1
+TTL_NO_SUCH_KEY = -2
 
 
 class RespStoreError(RuntimeError):
@@ -169,13 +174,24 @@ class RespStore:
         A key can expire between the scan and the read of its value. That is a
         real store behaving normally, so such a key is dropped rather than
         reported with a missing value.
+
+        It can also expire between the value read and the lifetime read, which
+        is the same race one step later and needs the same answer. The store
+        reports that as ``ttl == -2``, "no such key", so an entry that comes back
+        holding a value and a -2 is a key that left while we were looking at it.
+        Reporting it would put a key in the answer that is not in the store, and
+        a caller reading the count would be told the router stored something it
+        no longer has.
         """
         out: list[Entry] = []
         for key in self.scan(pattern):
             value = self.get(key)
             if value is None:
                 continue
-            out.append(Entry(key=key, value=value, ttl=self.ttl(key)))
+            ttl = self.ttl(key)
+            if ttl == TTL_NO_SUCH_KEY:
+                continue
+            out.append(Entry(key=key, value=value, ttl=ttl))
         return out
 
     def flushdb(self) -> None:

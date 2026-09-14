@@ -169,3 +169,47 @@ def test_the_reader_sends_scan_rather_than_keys(store, reader):
     sent = [parts[0].upper() for parts in store.commands]
     assert "SCAN" in sent
     assert "KEYS" not in sent
+
+
+def test_a_key_that_expires_between_the_value_read_and_the_lifetime_read_is_dropped(store, reader):
+    """The race one step later than the scan, and it needs the same answer.
+
+    A key can go after its value is read and before its lifetime is. The store
+    reports that as -2, "no such key", so an entry holding a value and a -2 is a
+    key that left while we were looking at it. Reporting it would put a key in
+    the answer that is not in the store.
+
+    Driven by making the lifetime read answer -2 for a key whose value read
+    succeeded, which is exactly what the store does in that window.
+    """
+    store.put("sr:vanishing", "value")
+    real_ttl = reader.ttl
+
+    def ttl_says_gone(key: str) -> int:
+        return -2 if key == "sr:vanishing" else real_ttl(key)
+
+    reader.ttl = ttl_says_gone  # type: ignore[method-assign]
+    assert reader.entries() == []
+
+
+def test_a_key_with_no_expiry_is_still_reported(store, reader):
+    """The positive control for the test above. Dropping on -2 must not drop on
+    -1, which means "this key never expires" and is a perfectly present key."""
+    store.put("sr:forever", "value")
+    entries = reader.entries()
+    assert len(entries) == 1
+    assert entries[0].ttl == -1
+
+
+def test_rewriting_a_key_without_a_lifetime_clears_the_old_one(store, reader):
+    """A property of the test double, checked because a test depends on it.
+
+    Redis drops an existing expiry when a key is rewritten with no TTL. A double
+    that kept the old deadline would make a test's permanent entry vanish
+    partway through, and the reader would be blamed for a store that had quietly
+    expired it.
+    """
+    store.put("sr:reused", "first", ttl=1)
+    store.put("sr:reused", "second")
+    assert reader.ttl("sr:reused") == -1
+    assert reader.get("sr:reused") == "second"

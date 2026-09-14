@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import socket
 import threading
+import time
 from dataclasses import dataclass
 
 # What the proxy is doing with the router's traffic. Mutually exclusive, the same
@@ -110,26 +111,35 @@ class UnknownCutOffKind(ValueError):
 class ProxyCounters:
     """What the proxy has done, for a test that wants to prove it was involved.
 
-    ``accepted`` counts every connection the router opened. The three below it
-    say what happened to each, and they add up to it only while no connection is
-    still open -- a connection being pumped right now has been accepted and has
-    not yet been counted anywhere else.
+    ``accepted`` counts every connection the router opened. ``carried`` counts
+    the ones the gate let through to be carried, ``forwarded`` the ones that
+    went on to open a connection to the store, and ``closed_by_cut_off`` the
+    ones a cut-off ended.
+
+    **They do not partition ``accepted``.** One ordinary connection increments
+    three of them. Do not write a test that adds them up.
 
     ``closed_by_cut_off`` is the one worth reading. It is how a test proves the
     cut-off reached connections that already existed, rather than only the next
     one.
+
+    **All four are cumulative and none is ever decremented**, so none of them is
+    a count of what is happening right now. ``live_connections()`` answers that.
+    An earlier version called ``carried`` "held", which read as a live state and
+    was not one -- it counted every connection the proxy took on, including ones
+    it went on to forward normally.
     """
 
     accepted: int = 0
     forwarded: int = 0
-    held: int = 0
+    carried: int = 0
     closed_by_cut_off: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
             "accepted": self.accepted,
             "forwarded": self.forwarded,
-            "held": self.held,
+            "carried": self.carried,
             "closed_by_cut_off": self.closed_by_cut_off,
         }
 
@@ -253,7 +263,7 @@ class RespProxy:
         entry = _Live(downstream=downstream)
         with self._lock:
             self._live.add(entry)
-            self._counters.held += 1
+            self._counters.carried += 1
         try:
             self._carry(entry)
         finally:
@@ -284,6 +294,14 @@ class RespProxy:
                 # out its own deadline, which is the point.
                 if _peer_gone(entry.downstream):
                     return
+                # The wait is not optional, and leaving it out is a real fault
+                # rather than a tidiness one. ``_peer_gone`` blocks for the poll
+                # interval only while nothing is pending. The normal case here
+                # is the opposite: the router has already sent a request and is
+                # waiting for a reply, so the socket is readable, the peek
+                # returns at once, and this loop would spin on bytes it is
+                # deliberately not reading -- a whole core per held connection.
+                time.sleep(_POLL_SECONDS)
                 continue
 
             if entry.upstream is None:
@@ -315,9 +333,27 @@ class RespProxy:
                 return False
             if not chunk:
                 return False
-            # The gate can change while a read is in flight. Re-check before
-            # delivering, so a cut-off does not let one last reply through.
-            if self.state() != FORWARDING:
+            if not self._send_if_forwarding(dst, chunk):
+                return False
+        return True
+
+    def _send_if_forwarding(self, dst: socket.socket, chunk: bytes) -> bool:
+        """Deliver a chunk, but only while the gate is open.
+
+        The check and the write are under ONE hold of the lock. Two steps let a
+        cut-off land between them, and one last reply would cross a cut-off that
+        promises to move no bytes -- which is exactly the promise a test reads.
+
+        Holding the lock across ``sendall`` makes a concurrent ``cut_off`` wait
+        for the write. That is the right way round: the writes here are single
+        cache replies, and a cut-off that returned while a write was still in
+        flight would be telling the caller something untrue.
+
+        False means the connection is finished. A closed gate is not a failure --
+        the bytes are dropped and the connection stays.
+        """
+        with self._lock:
+            if self._state != FORWARDING:
                 return True
             try:
                 dst.sendall(chunk)

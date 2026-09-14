@@ -97,6 +97,7 @@ class _SimThreadingHTTPServer(ThreadingHTTPServer):
     subscriptions: "_WireSubscriptions"
     control: ControlApi
     registry: Registry
+    extra_ready_ports: "frozenset[int]"
 
 
 # ── HTTP request/response adapter (jsonrpc / rest / tendermintrpc) ────────────
@@ -766,8 +767,16 @@ class _ControlHandler(BaseHTTPRequestHandler):
         """Real readiness: every registry port accepts a TCP connection — not
         just "the python process started". Wired to the chart's readinessProbe
         so the router's earliest relays can't race the listener binds (a
-        connection-refused there poisons the router's pairing pool)."""
-        ports = self.server.registry.ports()
+        connection-refused there poisons the router's pairing pool).
+
+        ``extra_ready_ports`` carries listeners the topology cannot see. The
+        RESP proxy and its control listener are neither providers nor rows, so
+        registry.ports() looks straight past them, and without this the pod
+        reports ready while either of them is unbound or has died.
+
+        The cache-sim port is deliberately still absent. It needs grpcio, which
+        is optional here, so a cluster without it would never become ready."""
+        ports = sorted(set(self.server.registry.ports()) | set(getattr(self.server, "extra_ready_ports", ())))
         missing = []
         for port in ports:
             probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1159,9 +1168,25 @@ class SimulatorServer:
         self.resp_control_port = resp_control_port
         self.resp_proxy_ports = dict(RESP_PROXY_PORTS if resp_proxy_ports is None else resp_proxy_ports)
         self.resp_store = resp_store if resp_store is not None else (RESP_STORE_HOST, RESP_STORE_PORT)
+        # One target, applied to every proxy name. With more than one name that
+        # is wrong rather than incomplete: two names would each get a proxy and a
+        # reader, ?store= would appear to choose between them, and both would
+        # reach the same store. A test would then believe it had read one store
+        # and cut off the other. Refused here rather than left to be discovered,
+        # because the failure produces no error of its own.
+        if len(self.resp_proxy_ports) > 1:
+            raise ValueError(
+                f"resp_proxy_ports names {sorted(self.resp_proxy_ports)} but there is one "
+                f"target, {self.resp_store[0]}:{self.resp_store[1]}. Every name would reach "
+                f"the same store while ?store= implied otherwise. Give each store its own "
+                f"target before running more than one."
+            )
         self.resp_control = RespControlApi()
         for store_name in self.resp_proxy_ports:
             self.resp_control.register(store_name, self.resp_store[0], self.resp_store[1])
+        self.extra_ready_ports = frozenset(self.resp_proxy_ports.values()) | (
+            {self.resp_control_port} if self.resp_proxy_ports else frozenset()
+        )
         if scenario_ttl_s is None:
             scenario_ttl_s = int(os.environ.get("SIM_SCENARIO_TTL_SECONDS", "900"))
         self.scenario_ttl_s = scenario_ttl_s
@@ -1188,6 +1213,7 @@ class SimulatorServer:
         ctrl = _SimThreadingHTTPServer((self.host, self.control_port), _ControlHandler)
         ctrl.control = self.control
         ctrl.registry = self.registry
+        ctrl.extra_ready_ports = self.extra_ready_ports
         self._servers.append(ctrl)
 
         # The RESP proxies and their control listener. Plain sockets, so unlike
@@ -1274,7 +1300,7 @@ class SimulatorServer:
         Callers that race the bind (tests, scripted boots) use this instead of
         a sleep."""
         deadline = time.monotonic() + timeout_s
-        pending = set(self.registry.ports())
+        pending = set(self.registry.ports()) | set(self.extra_ready_ports)
         probe_host = "127.0.0.1" if self.host == "0.0.0.0" else self.host
         while pending:
             for port in sorted(pending):

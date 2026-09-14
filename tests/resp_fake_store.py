@@ -80,7 +80,13 @@ class FakeRespStore:
         nothing reachable from outside the simulator can plant an entry.
         """
         self.values[key] = value
-        if ttl is not None:
+        if ttl is None:
+            # Redis drops an existing expiry when SET rewrites a key without
+            # one. Leaving the old deadline behind would make a test's
+            # "permanent" entry vanish partway through, and the reader would be
+            # blamed for a store that had quietly expired it.
+            self.expiries.pop(key, None)
+        else:
             self.expiries[key] = time.monotonic() + ttl
 
     # ── the wire ──────────────────────────────────────────────────────────────
