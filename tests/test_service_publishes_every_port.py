@@ -16,7 +16,7 @@ silent. That asymmetry is why this test only checks one direction.
 import pathlib
 import re
 
-from constants import CACHE_SIM_PORTS, CONTROL_PORT
+from constants import CACHE_SIM_PORTS, CONTROL_PORT, RESP_CONTROL_PORT, RESP_PROXY_PORTS
 from provider_simulator.topology import TOPOLOGY
 
 _K8S = pathlib.Path(__file__).resolve().parents[1] / "k8s"
@@ -126,6 +126,79 @@ def test_no_cache_sim_port_collides_with_a_provider_or_the_control_port():
         f"a cache-sim port collides with a provider port: " f"{sorted(cache_ports & _topology_ports())}"
     )
     assert CONTROL_PORT not in cache_ports, "a cache-sim port collides with the control port"
+
+
+def _resp_ports() -> set:
+    """Both RESP ports: the proxy the router dials and the control listener."""
+    return set(RESP_PROXY_PORTS.values()) | {RESP_CONTROL_PORT}
+
+
+def test_the_service_publishes_every_resp_port():
+    """The RESP proxy and its control listener bind ports the topology cannot see.
+
+    Same shape as the cache-sim check above, and the same silence if it is
+    missed. A router whose resp-cache addresses point at an unpublished proxy
+    port never connects to its store, falls through to the chain nodes on every
+    request, and answers every one of them correctly. Nothing in the reply says
+    the cache was never reached.
+
+    The control listener fails differently and just as quietly: a test asking
+    what the router stored gets a connection error, which reads as the store
+    being empty unless somebody looks closely.
+    """
+    missing = sorted(_resp_ports() - _service_ports())
+    assert not missing, (
+        f"a RESP listener binds {missing} and k8s/service.yml does not publish "
+        f"them. The router would never reach its store, and no test could read "
+        f"what it put there. Add them to k8s/service.yml."
+    )
+
+
+def test_the_deployment_declares_every_resp_port():
+    missing = sorted(_resp_ports() - _container_ports())
+    assert not missing, (
+        f"a RESP listener binds {missing} and k8s/deployment.yml does not "
+        f"declare them as container ports, so the manifest lies about what the "
+        f"container serves. Add them to k8s/deployment.yml."
+    )
+
+
+def test_no_resp_port_collides_with_anything_else_this_process_binds():
+    """A collision here is loud, unlike a missing Service port — keep it that way.
+
+    A second bind on a held port raises OSError and kills the listener's thread.
+    The process survives, so the simulator keeps answering everything else while
+    the RESP half is silently absent. Keeping the sets disjoint is cheaper than
+    relying on anyone reading the log line.
+    """
+    resp = _resp_ports()
+    assert not (
+        resp & _topology_ports()
+    ), f"a RESP port collides with a provider port: {sorted(resp & _topology_ports())}"
+    cache_ports = set(CACHE_SIM_PORTS.values())
+    assert not (resp & cache_ports), f"a RESP port collides with a cache-sim port: {sorted(resp & cache_ports)}"
+    assert CONTROL_PORT not in resp, "a RESP port collides with the control port"
+    assert RESP_CONTROL_PORT not in set(
+        RESP_PROXY_PORTS.values()
+    ), "the RESP control listener and a RESP proxy claim the same port"
+
+
+def test_the_control_route_sends_the_resp_prefix_to_the_control_listener():
+    """The route must carry /resp to 19101, or no test outside the cluster reaches it.
+
+    The listener binds inside the pod whether or not this rule exists, so the
+    simulator looks healthy and `GET /resp/...` on the control hostname simply
+    arrives at the provider control API, which answers 404 "unknown path". That
+    reads as the feature being absent rather than as a missing route.
+    """
+    text = (_K8S / "httproute-control.yml").read_text()
+    assert (
+        "/resp" in text
+    ), "k8s/httproute-control.yml carries no /resp rule, so the RESP control listener is unreachable"
+    assert str(RESP_CONTROL_PORT) in text, (
+        f"k8s/httproute-control.yml names no backend on port {RESP_CONTROL_PORT}, "
+        f"so the /resp rule cannot reach the RESP control listener"
+    )
 
 
 def test_service_port_names_are_unique():

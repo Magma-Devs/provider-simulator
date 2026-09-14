@@ -91,6 +91,21 @@ spec:
       port: 19100
       targetPort: 19100
       protocol: TCP
+    # RESP proxy: the router's path to the Redis or Valkey it keeps its cache
+    # in. The router's resp-cache addresses point here, not at the store, so a
+    # test can cut the router off from the store without stopping the store.
+    # Not a provider and not in the topology, same as the cache-sim above.
+    - name: resp-proxy
+      port: 19102
+      targetPort: 19102
+      protocol: TCP
+    # RESP control: read the store, cut the router off, restore, flush. Reads
+    # the store directly rather than through the proxy, which is what lets a
+    # test read an entry while the router cannot reach it.
+    - name: resp-control
+      port: 19101
+      targetPort: 19101
+      protocol: TCP
     # gRPC provider ports (MAG-1780). HTTP/2 by virtue of gRPC; the named
     # ports here are used by GRPCRoute backendRefs as well as direct
     # in-cluster Service access. REST sim (MAG-1777) reserves 18551-18553.

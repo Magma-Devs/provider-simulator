@@ -347,6 +347,17 @@ POOLS_WITH_NO_ROUTER_HERE = {
     # same topology on the shared cluster is MAG-3537 and is not built.
     "eth-cache-writer-sim",
     "eth-cache-reader-sim",
+    # The router that keeps its cache in a Redis or Valkey. Same situation as
+    # the cache pair above and for the same reason: its router entry lands in
+    # smart_router_automation, in the story that deploys the store and the
+    # router together. Until that merges this pool listens and nothing dials it.
+    #
+    # Its rows are here rather than waiting for that story because CI in the
+    # automation repository reads THIS repository's default branch, never a
+    # branch under review. So the router entry cannot merge there until the pool
+    # exists here, and adding a router entry here would claim a deployment that
+    # does not exist yet.
+    "eth-resp-sim",
 }
 
 

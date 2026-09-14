@@ -10,6 +10,21 @@ spec:
   hostnames:
     - "__CONTROL_HOSTNAME__"
   rules:
+    # The RESP control listener, on its own port in the same pod. Listed first
+    # for readability; Gateway API picks the longest matching path prefix, not
+    # the first rule, so /resp/... reaches 19101 and everything else 19000.
+    #
+    # A path rule rather than a second hostname on purpose: a new hostname would
+    # be another name to render, another certificate to hold and another thing
+    # the two clusters can disagree about. One hostname, two ports behind it.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /resp
+      backendRefs:
+        - name: provider-simulator
+          namespace: smart-router
+          port: 19101
     - matches:
         - path:
             type: PathPrefix

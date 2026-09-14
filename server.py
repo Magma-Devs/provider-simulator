@@ -31,13 +31,21 @@ import os
 import queue
 import secrets
 import socket
+import socketserver
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import stubs_ws
-from constants import CACHE_SIM_PORTS, CONTROL_PORT
+from constants import (
+    CACHE_SIM_PORTS,
+    CONTROL_PORT,
+    RESP_CONTROL_PORT,
+    RESP_PROXY_PORTS,
+    RESP_STORE_HOST,
+    RESP_STORE_PORT,
+)
 from provider_simulator import fault_policy
 from provider_simulator.cache_sim import CacheSimRegistry
 from provider_simulator.control_api import ControlApi
@@ -54,6 +62,8 @@ from provider_simulator.listeners import (
 )
 from provider_simulator.listeners.rest import allowed_verbs
 from provider_simulator.listeners.ws import WsSubscriptions
+from provider_simulator.resp_control import RespControlApi
+from provider_simulator.resp_proxy import RespProxy
 
 _log = logging.getLogger(__name__)
 
@@ -789,6 +799,176 @@ class _ControlHandler(BaseHTTPRequestHandler):
         """Suppress the default per-request stdout logging."""
 
 
+# ── RESP proxy adapter (the router's path to its store) ───────────────────────
+
+
+class _RespProxyServer(socketserver.ThreadingTCPServer):
+    """One bound port per RESP store, carrying the router's traffic to it.
+
+    Raw TCP rather than HTTP: RESP is its own protocol and nothing here parses
+    it. The proxy moves bytes and decides whether to move them at all, which is
+    the entire job.
+    """
+
+    allow_reuse_address = True
+    daemon_threads = True
+    request_queue_size = 128
+
+    # Attached by SimulatorServer.start() before serving begins.
+    proxy: RespProxy
+
+
+class _RespProxyHandler(socketserver.BaseRequestHandler):
+    """One connection from the router. Handed straight to the proxy."""
+
+    server: _RespProxyServer
+
+    def handle(self) -> None:
+        self.server.proxy.serve(self.request)
+
+
+# ── RESP control adapter (port 19101) ─────────────────────────────────────────
+
+
+def _resp_action(path: str) -> str:
+    """The action named after ``/resp/``.
+
+    The store is NOT in the path. It is an optional ``?store=`` parameter that
+    defaults to the only store there is, which phase 1 always has exactly one
+    of. A path segment was the first design here, mirroring the cache-sim's
+    ``/cache/<name>/<action>`` -- a cache-sim genuinely has one per zone, so its
+    name belongs in the path. A RESP store does not yet, and writing a name into
+    every URL for a set of size one buys nothing.
+
+    The parameter rather than nothing at all is the part that matters: the
+    sentinel and cluster phases add more than one address, and a flat route with
+    no way to say which store would have to change shape then. This one does not.
+    """
+    return path[len("/resp/") :].strip("/")
+
+
+def _resp_store_name(control: RespControlApi, query: dict) -> tuple[str | None, dict]:
+    """Which store a request means, or a payload saying why that is unanswerable.
+
+    Silence is refused rather than guessed at when more than one store exists. A
+    default picked here would send a cut-off to a store the caller did not mean,
+    and everything downstream would look correct.
+    """
+    named = query.get("store")
+    known = control.names()
+    if named:
+        return (named, {}) if named in known else (None, {"error": f"unknown RESP store {named!r}", "stores": known})
+    if len(known) == 1:
+        return known[0], {}
+    if not known:
+        return None, {"error": "no RESP store is running here", "stores": []}
+    return None, {
+        "error": "more than one RESP store is running, so ?store= is required",
+        "stores": known,
+    }
+
+
+def _dispatch_resp_post(control: RespControlApi, path: str, body: dict, query: dict) -> tuple[int, dict]:
+    action = _resp_action(path)
+    name, problem = _resp_store_name(control, query)
+    if name is None:
+        return 404, problem
+    if action == "cutoff":
+        return control.cut_off(name, body)
+    if action == "restore":
+        return control.restore(name)
+    if action == "flush":
+        return control.flush(name)
+    if action == "counters/reset":
+        return control.reset_counters(name)
+    return 404, {
+        "error": f"unknown RESP action {action!r}",
+        "actions": ["cutoff", "restore", "flush", "counters/reset"],
+        "note": "there is deliberately no write: a test that can plant an entry "
+        "will plant one instead of making the router store it",
+    }
+
+
+def _dispatch_resp_get(control: RespControlApi, path: str, query: dict) -> tuple[int, dict]:
+    action = _resp_action(path)
+    name, problem = _resp_store_name(control, query)
+    if name is None:
+        return 404, problem
+    if action == "keys":
+        return control.get_entries(name, query)
+    if action == "state":
+        return control.get_state(name)
+    return 404, {"error": f"unknown RESP action {action!r}", "actions": ["keys", "state"]}
+
+
+class _RespControlHandler(BaseHTTPRequestHandler):
+    """HTTP surface for the RespControlApi routes. Parsing and dispatch only.
+
+    A listener of its own rather than more routes on the provider control port.
+    The two answer about different things — one about simulated chain nodes, one
+    about a store the router keeps its cache in — and a caller that reaches one
+    has no business reaching the other by accident.
+    """
+
+    timeout = 30
+
+    server: "_RespControlServer"
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        try:
+            body = json.loads(self.rfile.read(length)) if length else {}
+        except json.JSONDecodeError as exc:
+            self._reply(400, {"error": f"request body is not valid JSON: {exc}"})
+            return
+        if not isinstance(body, dict):
+            self._reply(400, {"error": f"request body must be a JSON object, got {type(body).__name__}"})
+            return
+
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        if path.startswith("/resp/"):
+            status, payload = _dispatch_resp_post(self.server.resp_control, path, body, query)
+        else:
+            status, payload = 404, {"error": "unknown path"}
+        self._reply(status, payload)
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        query = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+
+        control = self.server.resp_control
+        if path == "/health":
+            status, payload = control.health()
+        elif path == "/resp":
+            status, payload = control.get_stores()
+        elif path.startswith("/resp/"):
+            status, payload = _dispatch_resp_get(control, path, query)
+        else:
+            status, payload = 404, {"error": "unknown path"}
+        self._reply(status, payload)
+
+    def _reply(self, status: int, data: dict) -> None:
+        body = json.dumps(data).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_):
+        """Suppress the default per-request stdout logging."""
+
+
+class _RespControlServer(_SimThreadingHTTPServer):
+    """The RESP control listener. Carries its own api object, not ControlApi's."""
+
+    resp_control: RespControlApi
+
+
 # ── gRPC adapter ──────────────────────────────────────────────────────────────
 
 
@@ -953,6 +1133,9 @@ class SimulatorServer:
         control_port: int = CONTROL_PORT,
         scenario_ttl_s: "int | None" = None,
         cache_ports: "dict[str, int] | None" = None,
+        resp_control_port: int = RESP_CONTROL_PORT,
+        resp_proxy_ports: "dict[str, int] | None" = None,
+        resp_store: "tuple[str, int] | None" = None,
     ) -> None:
         self.host = host
         self.control_port = control_port
@@ -969,12 +1152,24 @@ class SimulatorServer:
         for cache_name in self.cache_ports:
             self.caches.get_or_create(cache_name)
         self.control = ControlApi(self.registry, self.subscriptions, self.caches, self.cache_ports)
+        # One proxy per RESP store, each with a reader pointed at the same place.
+        # Overridable for the same reason the cache ports are: a second server in
+        # one process needs its own ports, and {} runs the simulator with no RESP
+        # proxy at all.
+        self.resp_control_port = resp_control_port
+        self.resp_proxy_ports = dict(RESP_PROXY_PORTS if resp_proxy_ports is None else resp_proxy_ports)
+        self.resp_store = resp_store if resp_store is not None else (RESP_STORE_HOST, RESP_STORE_PORT)
+        self.resp_control = RespControlApi()
+        for store_name in self.resp_proxy_ports:
+            self.resp_control.register(store_name, self.resp_store[0], self.resp_store[1])
         if scenario_ttl_s is None:
             scenario_ttl_s = int(os.environ.get("SIM_SCENARIO_TTL_SECONDS", "900"))
         self.scenario_ttl_s = scenario_ttl_s
         self.grpc_enabled = False
         self.cache_sims_enabled = False
-        self._servers: list[_SimThreadingHTTPServer] = []
+        # The RESP proxies are raw TCP rather than HTTP, so this list carries two
+        # server types. Both answer shutdown(), which is all stop() asks of them.
+        self._servers: list[socketserver.BaseServer] = []
         self._threads: list[threading.Thread] = []
 
     def start(self) -> None:
@@ -994,6 +1189,21 @@ class SimulatorServer:
         ctrl.control = self.control
         ctrl.registry = self.registry
         self._servers.append(ctrl)
+
+        # The RESP proxies and their control listener. Plain sockets, so unlike
+        # the cache-sims they need no optional dependency and are always on.
+        for store_name, proxy_port in self.resp_proxy_ports.items():
+            proxy = self.resp_control.proxies.get(store_name)
+            if proxy is None:  # pragma: no cover - register() ran for every name
+                continue
+            proxy_srv = _RespProxyServer((self.host, proxy_port), _RespProxyHandler)
+            proxy_srv.proxy = proxy
+            self._servers.append(proxy_srv)
+
+        if self.resp_proxy_ports:
+            resp_ctrl = _RespControlServer((self.host, self.resp_control_port), _RespControlHandler)
+            resp_ctrl.resp_control = self.resp_control
+            self._servers.append(resp_ctrl)
 
         self._threads = [threading.Thread(target=srv.serve_forever, daemon=True) for srv in self._servers]
 

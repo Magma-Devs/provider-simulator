@@ -498,6 +498,25 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
     ("eth-cache-reader-sim", "eth", "4", "EthCacheReaderBackupProvider4", True, "", (("jsonrpc", "http", 18623),)),
     ("eth-cache-reader-sim", "eth", "5", "EthCacheReaderBackupProvider5", True, "", (("jsonrpc", "http", 18624),)),
     ("eth-cache-reader-sim", "eth", "6", "EthCacheReaderBackupProvider6", True, "", (("jsonrpc", "http", 18625),)),
+    # eth-resp-sim: the chain nodes for the router that keeps its cache in a
+    # Redis or Valkey rather than in the cache process beside it.
+    #
+    # Three providers and no backup tier. The tests on this router are about
+    # where the CACHE lives, so a second provider tier would add a second reason
+    # for a request to be answered and nothing here needs one.
+    #
+    # The role is Primary. There is no role called Resp, so nothing merges and
+    # the role word stays — the same shape as eth-cv-sim giving
+    # EthCvPrimaryProvider1. The shorter EthRespProvider1 was proposed and is
+    # wrong: an empty role is rejected by the naming rule. EthBestProvider1 and
+    # EthSoloProvider1 look like counter-examples and are not — Best and Solo ARE
+    # roles, and repeat a word their pool already carries, so one copy drops.
+    #
+    # No cross-validation group on any of the three: this router carries no
+    # cross-validation policy, so a label here would name a bloc nothing counts.
+    ("eth-resp-sim", "eth", "1", "EthRespPrimaryProvider1", False, "", (("jsonrpc", "http", 18626),)),
+    ("eth-resp-sim", "eth", "2", "EthRespPrimaryProvider2", False, "", (("jsonrpc", "http", 18627),)),
+    ("eth-resp-sim", "eth", "3", "EthRespPrimaryProvider3", False, "", (("jsonrpc", "http", 18628),)),
 )
 
 

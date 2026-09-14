@@ -33,7 +33,7 @@ def test_every_provider_in_the_topology_is_served():
     """One entry per provider, keyed the way stats and scenario already key
     theirs: the pool name, a colon, then the pool slot."""
     providers = _providers()
-    assert len(providers) == 75, sorted(providers)
+    assert len(providers) == 78, sorted(providers)
     assert "eth-sim:1" in providers
     assert "lava-sim-tm:6" in providers
 
@@ -97,12 +97,12 @@ def test_a_provider_with_no_label_reports_an_empty_string():
     assert len(unlabelled) + len(labelled) == len(providers)
     # 30 labelled today: eth-sim 3, eth-cv-sim 6, the three lava-sim routers 3
     # each (MAG-2791), lava-cv-rest-sim 6 (MAG-3046) and lava-cv-tm-sim 6.
-    # The two cache pools add 12 unlabelled: neither router carries a
-    # cross-validation policy, so a label there would name a bloc nothing
-    # counts (MAG-3541).
+    # The two cache pools add 12 unlabelled and eth-resp-sim adds 3: none of
+    # those three routers carries a cross-validation policy, so a label there
+    # would name a bloc nothing counts (MAG-3541).
     # Update both numbers together when a router gains or loses a label.
     assert len(labelled) == 30, f"expected 30 labelled, got {len(labelled)}"
-    assert len(unlabelled) == 45, f"expected 45 unlabelled, got {len(unlabelled)}"
+    assert len(unlabelled) == 48, f"expected 48 unlabelled, got {len(unlabelled)}"
 
 
 # ── Filters ───────────────────────────────────────────────────────────────────
