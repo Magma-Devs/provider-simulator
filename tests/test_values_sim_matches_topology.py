@@ -347,6 +347,30 @@ POOLS_WITH_NO_ROUTER_HERE = {
     # same topology on the shared cluster is MAG-3537 and is not built.
     "eth-cache-writer-sim",
     "eth-cache-reader-sim",
+    # The router that keeps its cache in a Redis or Valkey. It is deployed from
+    # smart_router_automation, on the local cluster. The shared cluster gets it
+    # in a later phase of the RESP work, not with phase 1, so a router entry
+    # here would claim a deployment phase 1 does not make.
+    #
+    # Deliberately NOT phrased as "until the companion change merges", which is
+    # how the cache pair above is written. An excuse naming a pending merge
+    # stops being true the day that merge lands and nothing here notices:
+    # test_the_named_exceptions_are_real_pools_and_really_absent checks that the
+    # pool exists and is absent from this file, and never that the reason still
+    # holds. So an expired excuse passes silently.
+    #
+    # That is not hypothetical. The cache pair's reason says their routers are
+    # k3d-only and that the shared-cluster topology is not built. Both halves
+    # have expired: smart-router-standalone's main carries eth-cache-writer-sim
+    # and eth-cache-reader-sim in values/simulator/values_sim.yml, six providers
+    # each. Read there on 2026-09-14. Their entry is worth rewriting, in a change
+    # that owns it rather than this one.
+    #
+    # Why these rows are here at all, ahead of any router: CI in the automation
+    # repository checks this repository out with no ref, so it always reads this
+    # repository's default branch and never a branch under review. Its router
+    # entry cannot merge until this pool exists here.
+    "eth-resp-sim",
 }
 
 

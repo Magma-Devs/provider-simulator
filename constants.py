@@ -31,6 +31,45 @@ CONTROL_PORT = 19000
 CACHE_SIM_PORTS = {"secondary": 19100}
 
 
+# ── RESP proxy and its control listener ───────────────────────────────────────
+# The router can keep its cache in a Redis or Valkey instead of the cache process
+# beside it. A test has to be able to take that store away from the router and
+# give it back, and it cannot do that by stopping the store: this pod has no
+# service account and no role binding, so it cannot act on the cluster at all.
+#
+# So a proxy sits between the router and the store. The router points at
+# RESP_PROXY_PORTS instead of at the store, and the proxy stops forwarding when a
+# test says so. The store itself runs throughout — say "cut the router off from
+# the store", never "stop the store".
+#
+# Two ports, for the same reason the cache-sims have one: neither is a provider,
+# so neither has a pool or a pid and neither belongs in the topology table.
+#
+# RESP_CONTROL_PORT is separate from CONTROL_PORT because the two answer about
+# different things — one about simulated chain nodes, one about a store the
+# router keeps its cache in. It reads the store DIRECTLY, never through the
+# proxy, which is what lets a test read an entry while the router is cut off and
+# so prove the entry was never lost.
+RESP_CONTROL_PORT = 19101
+RESP_PROXY_PORTS = {"primary": 19102}
+
+# Where the proxy forwards to. Overridable at pod start, because the store is its
+# own deployment and its Service name is a deployment decision rather than a
+# simulator one. The default matches the Service the RESP story deploys.
+RESP_STORE_HOST = os.getenv("SIM_RESP_STORE_HOST", "resp-cache")
+RESP_STORE_PORT = int(os.getenv("SIM_RESP_STORE_PORT", "6379"))
+
+# Credentials for the READER only, and only when the store demands them. The
+# proxy needs none -- it moves the router's bytes without reading them, and the
+# router carries its own. A store with a password set and nothing here answers
+# NOAUTH to every read, which reads as a broken feature rather than a missing
+# setting, so these exist rather than waiting for the phase that needs them.
+# TLS is NOT supported by the reader; a store with tls.enabled needs more work.
+RESP_STORE_USERNAME = os.getenv("SIM_RESP_STORE_USERNAME") or None
+RESP_STORE_PASSWORD = os.getenv("SIM_RESP_STORE_PASSWORD") or None
+RESP_STORE_DB = int(os.getenv("SIM_RESP_STORE_DB", "0"))
+
+
 # ── Provider history — call-log ring-buffer ───────────────────────────────────
 # Each provider keeps the last N calls in memory.
 # When full, the oldest entry is dropped to make room for the newest.

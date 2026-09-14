@@ -26,6 +26,7 @@ EXPECTED_POOLS = {
     "lava-cv-tm-sim",
     "eth-cache-writer-sim",
     "eth-cache-reader-sim",
+    "eth-resp-sim",
 }
 
 
@@ -313,6 +314,13 @@ AGREED_NAMES = {
     ("eth-cache-reader-sim", "4"): "EthCacheReaderBackupProvider4",
     ("eth-cache-reader-sim", "5"): "EthCacheReaderBackupProvider5",
     ("eth-cache-reader-sim", "6"): "EthCacheReaderBackupProvider6",
+    # eth-resp-sim: the role is Primary and it survives, because there is no
+    # role called Resp for the pool's own word to merge with. The same shape as
+    # eth-cv-sim above. EthRespProvider1 was proposed and is wrong -- the naming
+    # rule rejects an empty role.
+    ("eth-resp-sim", "1"): "EthRespPrimaryProvider1",
+    ("eth-resp-sim", "2"): "EthRespPrimaryProvider2",
+    ("eth-resp-sim", "3"): "EthRespPrimaryProvider3",
 }
 
 # Slots 4 to 6 of the six six-provider pools that HAVE a backup tier. The

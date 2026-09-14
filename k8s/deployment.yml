@@ -129,6 +129,14 @@ spec:
             - name: cache-sim
               containerPort: 19100
               protocol: TCP
+            # RESP proxy (the router's path to its Redis or Valkey) and the
+            # control listener that reads that store directly
+            - name: resp-proxy
+              containerPort: 19102
+              protocol: TCP
+            - name: resp-control
+              containerPort: 19101
+              protocol: TCP
             # gRPC provider ports (MAG-1780)
             - name: grpc-sim-1
               containerPort: 18548
