@@ -5,9 +5,14 @@ CI installs nothing else either. A test that needed a real Redis would skip
 there while passing on a developer's machine, and a skipped test and a passing
 one look the same in a green run.
 
-It speaks only what ``RespStore`` sends: PING, SCAN, GET, TTL, FLUSHDB. Anything
-else is answered with an error, loudly, so a command added to the reader without
-being added here fails rather than being quietly ignored.
+It speaks only what ``RespStore`` sends: PING, SCAN, GET, TTL, DEL, AUTH and
+SELECT. Anything else is answered with an error, loudly, so a command added to
+the reader without being added here fails rather than being quietly ignored.
+
+Two knobs exist for tests rather than for realism. ``page_size`` makes SCAN page,
+which is the path a real store with many keys takes and which nothing exercised
+until it was added. ``password`` makes it demand AUTH, so the reader's
+credentials can be proved to work rather than assumed.
 
 **It is a test double for the STORE, not a second implementation of one.** It
 holds a dict. Expiry is a stored deadline that is checked on read. Nothing here
@@ -32,10 +37,18 @@ class FakeRespStore:
     port, which is chosen by the operating system so two tests never collide.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, page_size: int = 0, password: str | None = None) -> None:
         self.values: dict[str, str] = {}
         self.expiries: dict[str, float] = {}
         self.commands: list[list[str]] = []
+        self.connections = 0
+        # 0 means "answer every SCAN in one round", which is what a small store
+        # does. A positive value forces the cursor loop to go round more than
+        # once, which is the path that runs against a real store with many keys
+        # and which nothing exercised until this was added.
+        self.page_size = page_size
+        self.password = password
+        self.authenticated = password is None
         self._server: socketserver.ThreadingTCPServer | None = None
         self._thread: threading.Thread | None = None
         self.port = 0
@@ -92,6 +105,7 @@ class FakeRespStore:
     # ── the wire ──────────────────────────────────────────────────────────────
 
     def _serve(self, conn: socket.socket) -> None:
+        self.connections += 1
         buf = bytearray()
         while True:
             try:
@@ -117,6 +131,24 @@ class FakeRespStore:
         if not parts:
             return _err("empty command")
         name = parts[0].upper()
+        if name == "AUTH":
+            given = parts[-1] if len(parts) > 1 else ""
+            if self.password is not None and given == self.password:
+                self.authenticated = True
+                return b"+OK\r\n"
+            return _err("WRONGPASS invalid username-password pair")
+        if self.password is not None and not self.authenticated:
+            return _err("NOAUTH Authentication required.")
+        if name == "SELECT":
+            return b"+OK\r\n"
+        if name == "DEL":
+            removed = 0
+            for key in parts[1:]:
+                if key in self.values:
+                    del self.values[key]
+                    self.expiries.pop(key, None)
+                    removed += 1
+            return f":{removed}\r\n".encode()
         if name == "PING":
             return b"+PONG\r\n"
         if name == "FLUSHDB":
@@ -144,11 +176,29 @@ class FakeRespStore:
         for i, part in enumerate(parts):
             if part.upper() == "MATCH" and i + 1 < len(parts):
                 pattern = parts[i + 1]
+        cursor = 0
+        for i, part in enumerate(parts):
+            if part.upper() == "MATCH" and i + 1 < len(parts):
+                pattern = parts[i + 1]
+            if part == parts[1]:
+                cursor = int(parts[1]) if parts[1].isdigit() else 0
         keys = [k for k in sorted(self.values) if not self._expired(k) and _glob(pattern, k)]
-        # One round: cursor straight back to 0. A real server may page; the
-        # reader handles that and this does not need to prove it does.
-        body = [b"*2\r\n", _bulk("0"), f"*{len(keys)}\r\n".encode()]
-        body += [_bulk(k) for k in keys]
+        if not self.page_size:
+            # One round: cursor straight back to 0, which is what a small store
+            # does.
+            body = [b"*2\r\n", _bulk("0"), f"*{len(keys)}\r\n".encode()]
+            body += [_bulk(k) for k in keys]
+            return b"".join(body)
+        # Paged. The cursor is an index into the sorted key list, which is not
+        # what a real Redis cursor is -- a real one encodes a position in the
+        # hash table -- but it pages, and paging is the behaviour the reader's
+        # cursor loop has to survive.
+        page = keys[cursor : cursor + self.page_size]
+        nxt = cursor + self.page_size
+        if nxt >= len(keys):
+            nxt = 0
+        body = [b"*2\r\n", _bulk(str(nxt)), f"*{len(page)}\r\n".encode()]
+        body += [_bulk(k) for k in page]
         return b"".join(body)
 
     def _expired(self, key: str) -> bool:

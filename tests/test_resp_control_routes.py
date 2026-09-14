@@ -285,3 +285,31 @@ def test_resetting_counters_does_not_move_the_gate(listener):
     _post(listener, "/resp/cutoff", {"kind": "timeout"})
     _post(listener, "/resp/counters/reset")
     assert _get(listener, "/resp/state")[1]["state"] == "timeout"
+
+
+def test_post_resp_flush_takes_a_pattern_through_the_route(store, listener):
+    """Scoped destruction, reachable the way a helper reaches it.
+
+    The route sent a bare FLUSHDB before this, which empties the whole logical
+    database and ignores the router's key-prefix. Two routers sharing one store
+    meant one test's flush took the other's cache.
+    """
+    store.put("sr:mine", "1")
+    store.put("other:theirs", "2")
+    status, payload = _post(listener, "/resp/flush?pattern=sr:*")
+    assert status == 200
+    assert payload["removed"] == 1
+    assert payload["pattern"] == "sr:*"
+    remaining = [e["key"] for e in _get(listener, "/resp/keys")[1]["entries"]]
+    assert remaining == ["other:theirs"]
+
+
+def test_post_resp_flush_without_a_pattern_still_empties_everything(store, listener):
+    """The default is unchanged, so no existing caller has to learn a new
+    argument to keep the behaviour it had."""
+    store.put("sr:mine", "1")
+    store.put("other:theirs", "2")
+    status, payload = _post(listener, "/resp/flush")
+    assert status == 200
+    assert payload["removed"] == 2
+    assert _get(listener, "/resp/keys")[1]["count"] == 0

@@ -56,10 +56,23 @@ class RespControlApi:
         self.proxies = proxies if proxies is not None else RespProxyRegistry()
         self._stores: dict[str, RespStore] = {}
 
-    def register(self, name: str, target_host: str, target_port: int) -> RespProxy:
-        """Run a proxy and a reader for one store, both pointed at the same place."""
+    def register(
+        self,
+        name: str,
+        target_host: str,
+        target_port: int,
+        *,
+        username: str | None = None,
+        password: str | None = None,
+        db: int = 0,
+    ) -> RespProxy:
+        """Run a proxy and a reader for one store, both pointed at the same place.
+
+        The credentials reach the READER only. The proxy needs none: it moves the
+        router's bytes without reading them, and the router carries its own.
+        """
         proxy = self.proxies.add(name, target_host, target_port)
-        self._stores[name] = RespStore(target_host, target_port)
+        self._stores[name] = RespStore(target_host, target_port, username=username, password=password, db=db)
         return proxy
 
     def names(self) -> list[str]:
@@ -153,21 +166,36 @@ class RespControlApi:
         proxy.restore()
         return 200, {"status": "restored", "proxy": proxy.as_dict()}
 
-    def flush(self, name: str) -> tuple[int, dict]:
-        """Empty the store, so a test starts from nothing.
+    def flush(self, name: str, query: dict | None = None) -> tuple[int, dict]:
+        """Remove the entries matching a pattern, so a test starts from nothing.
 
         Goes straight to the store. It works while the router is cut off, which
         is what a test needs when it is setting up the next case without first
         putting the router back.
+
+        **Scoped by a pattern, and it used to send a bare FLUSHDB.** That empties
+        the whole logical database and knows nothing about the router's
+        ``key-prefix``. The read path already defaults to every key BECAUSE
+        prefixes vary, so the reading half knew prefixes mattered while the
+        destroying half did not. The day two routers share a store, one test's
+        flush takes the other's cache with it. Pass ``?pattern=sr:*`` to remove
+        one router's entries and leave the rest.
         """
         store = self._stores.get(name)
         if store is None:
             return 404, self._unknown(name)
+        pattern = (query or {}).get("pattern", "*")
         try:
-            store.flushdb()
+            removed = store.delete_matching(pattern)
         except RespStoreError as exc:
             return 503, {"error": str(exc), "store": name, "target": store.target()}
-        return 200, {"status": "flushed", "store": name, "target": store.target()}
+        return 200, {
+            "status": "flushed",
+            "store": name,
+            "target": store.target(),
+            "pattern": pattern,
+            "removed": removed,
+        }
 
     def reset_counters(self, name: str) -> tuple[int, dict]:
         """Zero the proxy's counters without changing what it is doing."""

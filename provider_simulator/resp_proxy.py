@@ -96,6 +96,11 @@ _POLL_SECONDS = 0.05
 # delivery deadline has to be a delivery deadline rather than a liveness knob.
 _SEND_TIMEOUT_SECONDS = 30.0
 
+# Linux signals "the peer closed its end" with POLLRDHUP, and only when asked.
+# macOS has no such flag and reports POLLHUP instead, so this is 0 there and the
+# POLLHUP branch does the work. Both are needed; neither alone is portable.
+_POLLRDHUP = getattr(select, "POLLRDHUP", 0)
+
 
 class UnknownCutOffKind(ValueError):
     """Raised for a cut-off kind outside CUT_OFF_KINDS, naming the ones that exist.
@@ -422,12 +427,21 @@ def _peer_gone(conn: socket.socket) -> bool:
 
     So ask the operating system whether the socket has hung up, which it can
     answer with bytes still unread, and keep the peek for the no-data case.
+
+    **The two operating systems answer that differently, and CI found it.** On
+    macOS a full close raises POLLHUP even with unread data waiting. Linux does
+    not: with data still readable it reports POLLIN, and signals the peer's close
+    through POLLRDHUP, which has to be asked for. So the first version of this
+    passed on a developer's machine and failed on the Linux runner, on exactly
+    the test written for it. POLLRDHUP does not exist on macOS, hence the
+    getattr rather than a direct reference.
     """
+    hung_up = select.POLLHUP | select.POLLERR | select.POLLNVAL | _POLLRDHUP
     try:
         poller = select.poll()
-        poller.register(conn, select.POLLIN | select.POLLHUP | select.POLLERR | select.POLLNVAL)
+        poller.register(conn, select.POLLIN | hung_up)
         for _fd, event in poller.poll(0):
-            if event & (select.POLLHUP | select.POLLERR | select.POLLNVAL):
+            if event & hung_up:
                 return True
             if event & select.POLLIN:
                 # Readable. Empty means end-of-file; anything else is the request

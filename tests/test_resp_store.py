@@ -133,14 +133,35 @@ def test_flush_empties_the_store(store, reader):
     store.put("sr:one", "1")
     store.put("sr:two", "2")
     assert len(reader.entries()) == 2
-    reader.flushdb()
+    assert reader.delete_matching() == 2
     assert reader.entries() == []
+
+
+def test_flush_takes_a_pattern_and_leaves_everything_else(store, reader):
+    """The reason this is a pattern and not a FLUSHDB.
+
+    An earlier version emptied the whole logical database, which knows nothing
+    about the router's key-prefix. Two routers sharing one store meant one test's
+    flush took the other's cache with it.
+    """
+    store.put("sr:mine", "1")
+    store.put("other:theirs", "2")
+    assert reader.delete_matching("sr:*") == 1
+    assert [e.key for e in reader.entries()] == ["other:theirs"]
+
+
+def test_flush_removes_nothing_when_the_pattern_matches_nothing(store, reader):
+    """The positive control for the test above: a delete that always removed
+    everything would pass it only by luck of ordering."""
+    store.put("other:theirs", "2")
+    assert reader.delete_matching("sr:*") == 0
+    assert [e.key for e in reader.entries()] == ["other:theirs"]
 
 
 def test_flush_on_an_unreachable_store_raises(store, reader):
     store.stop()
     with pytest.raises(RespStoreError):
-        reader.flushdb()
+        reader.delete_matching()
 
 
 # ── there is no write, and that is the design ─────────────────────────────────
@@ -154,7 +175,7 @@ def test_the_reader_offers_no_way_to_put_an_entry_in():
     method exists to be found, whatever it might be called.
     """
     surface = {name for name in dir(RespStore) if not name.startswith("_")}
-    assert surface == {"entries", "flushdb", "get", "ping", "scan", "target", "ttl"}
+    assert surface == {"delete_matching", "entries", "get", "ping", "scan", "target", "ttl"}
 
 
 def test_the_reader_sends_scan_rather_than_keys(store, reader):
@@ -183,12 +204,12 @@ def test_a_key_that_expires_between_the_value_read_and_the_lifetime_read_is_drop
     succeeded, which is exactly what the store does in that window.
     """
     store.put("sr:vanishing", "value")
-    real_ttl = reader.ttl
+    real = reader._ttl_on
 
-    def ttl_says_gone(key: str) -> int:
-        return -2 if key == "sr:vanishing" else real_ttl(key)
+    def ttl_says_gone(conn, key: str) -> int:
+        return -2 if key == "sr:vanishing" else real(conn, key)
 
-    reader.ttl = ttl_says_gone  # type: ignore[method-assign]
+    reader._ttl_on = ttl_says_gone  # type: ignore[method-assign]
     assert reader.entries() == []
 
 
@@ -213,3 +234,57 @@ def test_rewriting_a_key_without_a_lifetime_clears_the_old_one(store, reader):
     store.put("sr:reused", "second")
     assert reader.ttl("sr:reused") == -1
     assert reader.get("sr:reused") == "second"
+
+
+# ── paging, credentials, and how many connections a sweep costs ──────────────
+
+
+def test_scan_follows_the_cursor_across_pages():
+    """The path a real store with many keys takes, and nothing ran it before.
+
+    The fake answered every SCAN in one round, so the reader's cursor loop
+    executed exactly once in every test and its dedupe and its round guard never
+    did anything. With paging on, the loop has to go round to collect them all.
+    """
+    with FakeRespStore(page_size=7) as store:
+        reader = RespStore("127.0.0.1", store.port)
+        for i in range(50):
+            store.put(f"sr:key{i:03d}", str(i))
+        found = reader.scan("sr:*")
+    assert len(found) == 50, f"the cursor loop stopped early: {len(found)} of 50"
+    assert found[0] == "sr:key000" and found[-1] == "sr:key049"
+    scans = [c for c in store.commands if c[0].upper() == "SCAN"]
+    assert len(scans) > 1, "the store answered in one round, so paging was never exercised"
+
+
+def test_a_store_that_demands_a_password_is_readable_with_one():
+    """The router's own config supports credentials, so the reader has to.
+
+    Without this the reader sent no AUTH and every read came back NOAUTH, with
+    no way to configure one.
+    """
+    with FakeRespStore(password="hunter2") as store:
+        store.put("sr:one", "1")
+        reader = RespStore("127.0.0.1", store.port, password="hunter2")
+        assert [e.key for e in reader.entries()] == ["sr:one"]
+
+
+def test_a_store_that_demands_a_password_refuses_without_one():
+    """The negative. A reader that silently worked either way would make the
+    test above prove nothing."""
+    with FakeRespStore(password="hunter2") as store:
+        store.put("sr:one", "1")
+        reader = RespStore("127.0.0.1", store.port)
+        with pytest.raises(RespStoreError) as caught:
+            reader.entries()
+    assert "NOAUTH" in str(caught.value)
+
+
+def test_a_whole_sweep_costs_one_connection(store, reader):
+    """It used to cost one per command: a SCAN plus a GET and a TTL per key, so
+    500 keys was 1001 connections and 1001 handshakes."""
+    for i in range(20):
+        store.put(f"sr:key{i}", str(i))
+    before = store.connections
+    assert len(reader.entries()) == 20
+    assert store.connections - before == 1, f"the sweep opened {store.connections - before} connections"

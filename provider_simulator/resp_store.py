@@ -43,7 +43,9 @@ test can read it, which reads as an empty store and is not.
 
 from __future__ import annotations
 
+import contextlib
 import socket
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 # RESP2's five reply types, by their leading byte.
@@ -64,6 +66,10 @@ _SCAN_COUNT = 500
 # rounds. This bounds a loop that would otherwise be unbounded if a reply were
 # ever malformed.
 _MAX_SCAN_ROUNDS = 1000
+
+# How many keys one DEL carries. Keeps a single command from growing without
+# bound on a store with many keys.
+_DELETE_BATCH = 500
 
 # The two TTL answers that are not durations. The store uses them as sentinels:
 # -1 for a key that never expires, -2 for a key that is not there at all.
@@ -101,14 +107,36 @@ class Entry:
 class RespStore:
     """A read-only client for one RESP store.
 
-    One connection per call rather than a pool. These calls happen once per test,
-    not once per request, so a pool would be complexity nothing here needs.
+    **One connection per CALL SEQUENCE, not per command.** An earlier version
+    opened a fresh connection for every command and said in this docstring that
+    a pool was complexity nothing here needed. That was true of the pool and
+    wrong about the cost: ``entries()`` runs one SCAN and then a GET and a TTL
+    per key, so 500 keys meant 1001 connections and 1001 handshakes. On loopback
+    that measured 0.21 seconds; across a pod network each one is a round trip.
+    ``_session()`` now holds one connection open for a whole sequence.
+
+    ``username`` / ``password`` / ``db`` are sent when set, because the router's
+    own ``resp-cache`` block supports all three and a store with any of them
+    turned on would otherwise answer NOAUTH to every read. TLS is NOT supported
+    here; a store with ``tls.enabled`` needs work this class has not had.
     """
 
-    def __init__(self, host: str, port: int, *, timeout: float = 2.0) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        *,
+        timeout: float = 2.0,
+        username: str | None = None,
+        password: str | None = None,
+        db: int = 0,
+    ) -> None:
         self.host = host
         self.port = port
         self.timeout = timeout
+        self.username = username
+        self.password = password
+        self.db = db
 
     def target(self) -> str:
         return f"{self.host}:{self.port}"
@@ -130,12 +158,60 @@ class RespStore:
         a test store and dangerous on a customer's is the wrong one to write down
         in a repository people copy from.
         """
+        with self._session() as conn:
+            return self._scan_on(conn, pattern)
+
+    def get(self, key: str) -> str | None:
+        """The value at a key, or None when the key is not there."""
+        with self._session() as conn:
+            return self._get_on(conn, key)
+
+    def ttl(self, key: str) -> int:
+        """Seconds left on a key. -1 means no expiry, -2 means no key."""
+        with self._session() as conn:
+            return self._ttl_on(conn, key)
+
+    def entries(self, pattern: str = "*") -> list[Entry]:
+        """Every matching key with its value and remaining lifetime.
+
+        One connection for the whole sweep. It used to open a fresh one per
+        command, which meant one SCAN plus a GET and a TTL for every key: 500
+        keys was 1001 connections and 1001 handshakes.
+
+        A key can expire between the scan and the read of its value. That is a
+        real store behaving normally, so such a key is dropped rather than
+        reported with a missing value.
+
+        It can also expire between the value read and the lifetime read, which
+        is the same race one step later and needs the same answer. The store
+        reports that as ``ttl == -2``, "no such key", so an entry that comes back
+        holding a value and a -2 is a key that left while we were looking at it.
+        Reporting it would put a key in the answer that is not in the store, and
+        a caller reading the count would be told the router stored something it
+        no longer has.
+        """
+        out: list[Entry] = []
+        with self._session() as conn:
+            for key in self._scan_on(conn, pattern):
+                value = self._get_on(conn, key)
+                if value is None:
+                    continue
+                ttl = self._ttl_on(conn, key)
+                if ttl == TTL_NO_SUCH_KEY:
+                    continue
+                out.append(Entry(key=key, value=value, ttl=ttl))
+        return out
+
+    # ── the same reads, on a connection somebody else is holding ─────────────
+
+    def _scan_on(self, conn: socket.socket, pattern: str) -> list[str]:
+        """The cursor loop. A real store pages; this follows the cursor home."""
         cursor = "0"
         found: list[str] = []
         seen: set[str] = set()
         for _ in range(_MAX_SCAN_ROUNDS):
-            reply = self._command(
-                b"SCAN", cursor.encode(), b"MATCH", pattern.encode(), b"COUNT", str(_SCAN_COUNT).encode()
+            reply = self._run(
+                conn, b"SCAN", cursor.encode(), b"MATCH", pattern.encode(), b"COUNT", str(_SCAN_COUNT).encode()
             )
             if not isinstance(reply, list) or len(reply) != 2:
                 raise RespStoreError(f"SCAN answered {reply!r}, which is not a cursor and a key list")
@@ -154,74 +230,86 @@ class RespStore:
                 return sorted(found)
         raise RespStoreError(f"SCAN did not finish in {_MAX_SCAN_ROUNDS} rounds")
 
-    def get(self, key: str) -> str | None:
-        """The value at a key, or None when the key is not there."""
-        reply = self._command(b"GET", key.encode())
-        if reply is None:
-            return None
-        return _as_text(reply)
+    def _get_on(self, conn: socket.socket, key: str) -> str | None:
+        reply = self._run(conn, b"GET", key.encode())
+        return None if reply is None else _as_text(reply)
 
-    def ttl(self, key: str) -> int:
-        """Seconds left on a key. -1 means no expiry, -2 means no key."""
-        reply = self._command(b"TTL", key.encode())
+    def _ttl_on(self, conn: socket.socket, key: str) -> int:
+        reply = self._run(conn, b"TTL", key.encode())
         if not isinstance(reply, int):
             raise RespStoreError(f"TTL answered {reply!r} where a number belongs")
         return reply
 
-    def entries(self, pattern: str = "*") -> list[Entry]:
-        """Every matching key with its value and remaining lifetime.
+    def delete_matching(self, pattern: str = "*") -> int:
+        """Remove every key matching the pattern. Returns how many went.
 
-        A key can expire between the scan and the read of its value. That is a
-        real store behaving normally, so such a key is dropped rather than
-        reported with a missing value.
+        **Scoped by a pattern rather than emptying the database**, and the
+        earlier version was not. It sent a bare ``FLUSHDB``, which empties the
+        whole logical database and knows nothing about the router's
+        ``key-prefix``. The read path already defaults its pattern to every key
+        precisely BECAUSE prefixes vary, so the reading half knew prefixes
+        mattered while the destroying half did not. The day two routers share one
+        store, one test's flush would take the other's cache with it.
 
-        It can also expire between the value read and the lifetime read, which
-        is the same race one step later and needs the same answer. The store
-        reports that as ``ttl == -2``, "no such key", so an entry that comes back
-        holding a value and a -2 is a key that left while we were looking at it.
-        Reporting it would put a key in the answer that is not in the store, and
-        a caller reading the count would be told the router stored something it
-        no longer has.
-        """
-        out: list[Entry] = []
-        for key in self.scan(pattern):
-            value = self.get(key)
-            if value is None:
-                continue
-            ttl = self.ttl(key)
-            if ttl == TTL_NO_SUCH_KEY:
-                continue
-            out.append(Entry(key=key, value=value, ttl=ttl))
-        return out
-
-    def flushdb(self) -> None:
-        """Empty the store, so a test starts from nothing.
-
-        The one command here that changes the store. It can only remove; it
+        The only command here that changes the store, and it can only remove. It
         cannot put a chosen entry in, which is what keeps a test honest about
         where its entry came from.
         """
-        self._command(b"FLUSHDB")
+        with self._session() as conn:
+            keys = self._scan_on(conn, pattern)
+            if not keys:
+                return 0
+            # In batches, so a large store does not build one enormous command.
+            removed = 0
+            for start in range(0, len(keys), _DELETE_BATCH):
+                batch = keys[start : start + _DELETE_BATCH]
+                reply = self._run(conn, b"DEL", *(k.encode() for k in batch))
+                removed += reply if isinstance(reply, int) else 0
+            return removed
 
     # ── the wire ──────────────────────────────────────────────────────────────
 
-    def _command(self, *parts: bytes) -> object:
-        """Send one command and decode one reply."""
+    @contextlib.contextmanager
+    def _session(self) -> "Iterator[socket.socket]":
+        """One connection, authenticated and on the right database.
+
+        Every read goes through this. AUTH and SELECT are sent only when they
+        were configured, so a store without them sees exactly the traffic it saw
+        before -- but a store WITH them now works, where every read used to come
+        back NOAUTH.
+        """
         try:
             conn = socket.create_connection((self.host, self.port), timeout=self.timeout)
         except OSError as exc:
             raise RespStoreError(f"cannot reach the RESP store at {self.target()}: {exc}") from exc
         try:
             conn.settimeout(self.timeout)
-            conn.sendall(_encode(parts))
-            return _read_reply(_Reader(conn))
-        except OSError as exc:
-            raise RespStoreError(f"the RESP store at {self.target()} stopped answering: {exc}") from exc
+            if self.password is not None:
+                if self.username:
+                    self._run(conn, b"AUTH", self.username.encode(), self.password.encode())
+                else:
+                    self._run(conn, b"AUTH", self.password.encode())
+            if self.db:
+                self._run(conn, b"SELECT", str(self.db).encode())
+            yield conn
         finally:
             try:
                 conn.close()
             except OSError:
                 pass
+
+    def _run(self, conn: socket.socket, *parts: bytes) -> object:
+        """Send one command on an open connection and decode one reply."""
+        try:
+            conn.sendall(_encode(parts))
+            return _read_reply(_Reader(conn))
+        except OSError as exc:
+            raise RespStoreError(f"the RESP store at {self.target()} stopped answering: {exc}") from exc
+
+    def _command(self, *parts: bytes) -> object:
+        """One command on a connection of its own. Used by PING only."""
+        with self._session() as conn:
+            return self._run(conn, *parts)
 
 
 def _encode(parts: tuple[bytes, ...]) -> bytes:

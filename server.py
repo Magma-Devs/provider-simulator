@@ -43,8 +43,11 @@ from constants import (
     CONTROL_PORT,
     RESP_CONTROL_PORT,
     RESP_PROXY_PORTS,
+    RESP_STORE_DB,
     RESP_STORE_HOST,
+    RESP_STORE_PASSWORD,
     RESP_STORE_PORT,
+    RESP_STORE_USERNAME,
 )
 from provider_simulator import fault_policy
 from provider_simulator.cache_sim import CacheSimRegistry
@@ -887,7 +890,7 @@ def _dispatch_resp_post(control: RespControlApi, path: str, body: dict, query: d
     if action == "restore":
         return control.restore(name)
     if action == "flush":
-        return control.flush(name)
+        return control.flush(name, query)
     if action == "counters/reset":
         return control.reset_counters(name)
     return 404, {
@@ -1182,7 +1185,14 @@ class SimulatorServer:
             )
         self.resp_control = RespControlApi()
         for store_name in self.resp_proxy_ports:
-            self.resp_control.register(store_name, self.resp_store[0], self.resp_store[1])
+            self.resp_control.register(
+                store_name,
+                self.resp_store[0],
+                self.resp_store[1],
+                username=RESP_STORE_USERNAME,
+                password=RESP_STORE_PASSWORD,
+                db=RESP_STORE_DB,
+            )
         self.extra_ready_ports = frozenset(self.resp_proxy_ports.values()) | (
             {self.resp_control_port} if self.resp_proxy_ports else frozenset()
         )

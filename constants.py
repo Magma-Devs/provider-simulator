@@ -59,6 +59,16 @@ RESP_PROXY_PORTS = {"primary": 19102}
 RESP_STORE_HOST = os.getenv("SIM_RESP_STORE_HOST", "resp-cache")
 RESP_STORE_PORT = int(os.getenv("SIM_RESP_STORE_PORT", "6379"))
 
+# Credentials for the READER only, and only when the store demands them. The
+# proxy needs none -- it moves the router's bytes without reading them, and the
+# router carries its own. A store with a password set and nothing here answers
+# NOAUTH to every read, which reads as a broken feature rather than a missing
+# setting, so these exist rather than waiting for the phase that needs them.
+# TLS is NOT supported by the reader; a store with tls.enabled needs more work.
+RESP_STORE_USERNAME = os.getenv("SIM_RESP_STORE_USERNAME") or None
+RESP_STORE_PASSWORD = os.getenv("SIM_RESP_STORE_PASSWORD") or None
+RESP_STORE_DB = int(os.getenv("SIM_RESP_STORE_DB", "0"))
+
 
 # ── Provider history — call-log ring-buffer ───────────────────────────────────
 # Each provider keeps the last N calls in memory.
