@@ -19,6 +19,8 @@ agreed contract:
 from __future__ import annotations
 
 import json
+import socket
+import socketserver
 import threading
 import urllib.error
 import urllib.request
@@ -38,25 +40,58 @@ def store():
 
 @pytest.fixture
 def listener(store):
-    """The real control listener, on a port the operating system picks."""
+    """The real control listener AND a bound proxy, both on picked ports.
+
+    The proxy is bound rather than merely registered. An earlier version left it
+    unbound, so no traffic could ever reach it, every counter stayed at zero, and
+    the counter-reset test below zeroed something already zero. Replacing
+    reset_counters with a no-op left every test in this file passing.
+    """
     control = RespControlApi()
-    control.register("primary", "127.0.0.1", store.port)
+    proxy = control.register("primary", "127.0.0.1", store.port)
+
+    class _ProxyServer(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+        daemon_threads = True
+
+    class _ProxyHandler(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            proxy.serve(self.request)
+
+    proxy_srv = _ProxyServer(("127.0.0.1", 0), _ProxyHandler)
+    threading.Thread(target=proxy_srv.serve_forever, daemon=True).start()
+
     srv = server._RespControlServer(("127.0.0.1", 0), server._RespControlHandler)
     srv.resp_control = control
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
-    yield f"http://127.0.0.1:{srv.server_address[1]}"
+    yield {
+        "url": f"http://127.0.0.1:{srv.server_address[1]}",
+        "proxy_port": proxy_srv.server_address[1],
+    }
     srv.shutdown()
     srv.server_close()
+    proxy_srv.shutdown()
+    proxy_srv.server_close()
 
 
-def _get(base: str, path: str) -> tuple[int, dict]:
-    return _call(urllib.request.Request(base + path, method="GET"))
+def _through_proxy(listener) -> None:
+    """Send one command through the PROXY, so its counters actually move."""
+    conn = socket.create_connection(("127.0.0.1", listener["proxy_port"]), timeout=5)
+    try:
+        conn.sendall(b"*1\r\n$4\r\nPING\r\n")
+        conn.recv(64)
+    finally:
+        conn.close()
 
 
-def _post(base: str, path: str, body: dict | None = None) -> tuple[int, dict]:
+def _get(listener, path: str) -> tuple[int, dict]:
+    return _call(urllib.request.Request(listener["url"] + path, method="GET"))
+
+
+def _post(listener, path: str, body: dict | None = None) -> tuple[int, dict]:
     raw = json.dumps(body or {}).encode()
-    request = urllib.request.Request(base + path, data=raw, method="POST")
+    request = urllib.request.Request(listener["url"] + path, data=raw, method="POST")
     request.add_header("Content-Type", "application/json")
     return _call(request)
 
@@ -228,13 +263,14 @@ def test_a_write_attempt_leaves_the_store_untouched(store, listener):
 def test_post_resp_counters_reset_zeroes_them_through_the_route(store, listener):
     """The route, not the object behind it.
 
-    The counter reset was reachable only through RespProxy in the tests, so a
-    typo in the action name or a regression in query selection would have passed
-    unnoticed while the route 404'd.
+    Traffic goes through the PROXY first, so there is a non-zero count to zero.
+    The first version of this asserted ``before["accepted"] >= 0``, which is true
+    of every count there has ever been, against a fixture that bound no proxy --
+    so replacing reset_counters with a no-op left the whole file green.
     """
-    _get(listener, "/resp/keys")
+    _through_proxy(listener)
     before = _get(listener, "/resp/state")[1]["counters"]
-    assert before["accepted"] >= 0
+    assert before["accepted"] >= 1, f"nothing reached the proxy, so this proves nothing: {before}"
     status, payload = _post(listener, "/resp/counters/reset")
     assert status == 200
     assert payload["proxy"]["counters"] == {

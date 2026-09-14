@@ -11,8 +11,17 @@ spec:
     - "__CONTROL_HOSTNAME__"
   rules:
     # The RESP control listener, on its own port in the same pod. Listed first
-    # for readability; Gateway API picks the longest matching path prefix, not
-    # the first rule, so /resp/... reaches 19101 and everything else 19000.
+    # for readability, which on its own decides nothing: this arrangement relies
+    # on the Gateway API rule that the LONGEST matching path prefix wins rather
+    # than the first rule written, so /resp/... reaches 19101 and everything else
+    # 19000.
+    #
+    # That rule is the gateway implementation's, not ours, and nothing here
+    # proves it. The test beside this file checks only that the rule exists and
+    # names the right port. Confirm the routing itself the first time this is
+    # deployed, by asking the control hostname for a /resp path and checking it
+    # is answered by the RESP api rather than by the provider control API's
+    # "unknown path".
     #
     # A path rule rather than a second hostname on purpose: a new hostname would
     # be another name to render, another certificate to hold and another thing

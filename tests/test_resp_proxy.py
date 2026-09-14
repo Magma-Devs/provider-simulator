@@ -330,3 +330,89 @@ def test_the_counters_do_not_claim_to_partition_accepted(store, through_proxy, p
     assert counters["carried"] == 1
     assert counters["forwarded"] == 1
     assert counters["closed_by_cut_off"] == 0
+
+
+def test_a_reply_larger_than_one_socket_buffer_arrives_whole(proxy, runner):
+    """The write deadline must be a write deadline, not the gate-poll interval.
+
+    A socket carries one timeout. The poll interval and the send deadline were
+    the same value, so a reply that could not be written in 50 milliseconds
+    raised and the connection was torn down. Measured before the fix: a 4 MB
+    reply arrived truncated at about 540 KB, and the cut moved when the interval
+    moved, which is what proved the cause.
+
+    A cache reply can be this large — a full block, or a page of logs — so this
+    is the ordinary case rather than an extreme one. The client waits before
+    reading, which is what makes the proxy's write block.
+    """
+    payload = b"x" * (4 * 1024 * 1024)
+    big = b"$" + str(len(payload)).encode() + b"\r\n" + payload + b"\r\n"
+
+    class _Slow(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            self.request.recv(65536)
+            self.request.sendall(big)
+            time.sleep(2)
+
+    class _Server(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+        daemon_threads = True
+
+    upstream = _Server(("127.0.0.1", 0), _Slow)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    slow_proxy = RespProxy("127.0.0.1", upstream.server_address[1])
+    slow_runner = _ProxyRunner(slow_proxy)
+    try:
+        conn = socket.create_connection(("127.0.0.1", slow_runner.port), timeout=15)
+        try:
+            conn.sendall(b"*1\r\n$4\r\nPING\r\n")
+            time.sleep(1.0)  # make the proxy's write block on a full buffer
+            conn.settimeout(10)
+            received = 0
+            while received < len(big):
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                received += len(chunk)
+        finally:
+            conn.close()
+    finally:
+        slow_runner.stop()
+        upstream.shutdown()
+    assert received == len(big), f"the reply was cut short: {received} of {len(big)} bytes"
+
+
+def test_a_held_connection_is_released_when_its_client_goes_away(store, runner, proxy):
+    """The peer check must see a hang-up with bytes still unread.
+
+    A held connection normally has an unread request sitting in it — that is
+    what the held path creates. The first version peeked and called the peer
+    gone only on an empty read, so those same bytes came back for ever and the
+    answer was always "still here". The guard was blind in the only case it saw,
+    and each abandoned connection kept a thread and a file descriptor until the
+    gate was restored or the process ended.
+    """
+    proxy.cut_off(TIMEOUT)
+    conn = socket.create_connection(("127.0.0.1", runner.port), timeout=5)
+    conn.sendall(b"*1\r\n$4\r\nPING\r\n")
+    time.sleep(0.2)
+    assert proxy.live_connections() == 1, "the connection should be held while the client is there"
+    conn.close()
+
+    deadline = time.monotonic() + 3.0
+    while proxy.live_connections() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert proxy.live_connections() == 0, "a held connection outlived the client that abandoned it"
+
+
+def test_a_held_connection_that_sent_nothing_is_also_released(store, runner, proxy):
+    """The case the old check DID handle, kept so the fix cannot lose it."""
+    proxy.cut_off(TIMEOUT)
+    conn = socket.create_connection(("127.0.0.1", runner.port), timeout=5)
+    time.sleep(0.2)
+    conn.close()
+
+    deadline = time.monotonic() + 3.0
+    while proxy.live_connections() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert proxy.live_connections() == 0

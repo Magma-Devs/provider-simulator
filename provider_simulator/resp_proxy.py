@@ -59,6 +59,7 @@ it never staged into.
 
 from __future__ import annotations
 
+import select
 import socket
 import threading
 import time
@@ -83,6 +84,17 @@ _CHUNK = 65536
 # connection that is sitting idle in the router's pool, so the pump cannot block
 # on recv() for ever.
 _POLL_SECONDS = 0.05
+
+# How long ONE delivery may take. Separate from the poll interval on purpose, and
+# the two were the same value until it was measured: a socket carries one
+# timeout, so the poll interval was also the deadline for sendall, and a reply
+# that could not be written in 50 milliseconds raised and the connection was torn
+# down. A 4 MB cached reply arrived truncated at about 540 KB, and the cut moved
+# when the interval moved, which is what proved the cause.
+#
+# A cache reply can be large -- a full block, or an eth_getLogs page -- so the
+# delivery deadline has to be a delivery deadline rather than a liveness knob.
+_SEND_TIMEOUT_SECONDS = 30.0
 
 
 class UnknownCutOffKind(ValueError):
@@ -356,9 +368,19 @@ class RespProxy:
             if self._state != FORWARDING:
                 return True
             try:
+                # The socket's own timeout is the poll interval, which is far too
+                # short to write a large reply. Raise it for the write and put it
+                # back, so liveness stays responsive and delivery gets a real
+                # deadline.
+                dst.settimeout(_SEND_TIMEOUT_SECONDS)
                 dst.sendall(chunk)
             except OSError:
                 return False
+            finally:
+                try:
+                    dst.settimeout(_POLL_SECONDS)
+                except OSError:
+                    pass
         return True
 
 
@@ -386,15 +408,36 @@ def _peer_gone(conn: socket.socket) -> bool:
     """True when the other side has closed, while we are holding and not reading.
 
     Used only by the held path. Without it a held connection whose client gave up
-    would keep a thread spinning until the process ended.
+    keeps its thread and its file descriptor until the gate is restored or the
+    process ends.
+
+    **A peek alone cannot answer this, and the first version of this function got
+    it exactly backwards.** It peeked and returned "gone" only for an empty read.
+    A held connection normally has an unread request sitting in it -- that is the
+    whole situation the held path creates -- so the peek returned those same bytes
+    for ever and the answer was always "still here". The guard was blind in the
+    only case it ever saw. Measured: a client that sent a request and then closed
+    left one connection live indefinitely, while a client that sent nothing was
+    released correctly.
+
+    So ask the operating system whether the socket has hung up, which it can
+    answer with bytes still unread, and keep the peek for the no-data case.
     """
     try:
-        chunk = conn.recv(_CHUNK, socket.MSG_PEEK)
+        poller = select.poll()
+        poller.register(conn, select.POLLIN | select.POLLHUP | select.POLLERR | select.POLLNVAL)
+        for _fd, event in poller.poll(0):
+            if event & (select.POLLHUP | select.POLLERR | select.POLLNVAL):
+                return True
+            if event & select.POLLIN:
+                # Readable. Empty means end-of-file; anything else is the request
+                # this path is deliberately not reading.
+                return not conn.recv(_CHUNK, socket.MSG_PEEK)
     except (TimeoutError, socket.timeout):
         return False
-    except OSError:
+    except (OSError, ValueError):
         return True
-    return not chunk
+    return False
 
 
 class RespProxyRegistry:

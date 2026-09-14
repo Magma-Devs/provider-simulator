@@ -210,3 +210,50 @@ def test_health_answers_without_touching_the_store(store, control):
     status, payload = control.health()
     assert status == 200
     assert payload["stores"] == ["primary"]
+
+
+# ── a reset puts the gate back ────────────────────────────────────────────────
+
+
+def test_resetting_the_simulator_restores_a_cut_off_gate(store):
+    """A cut-off is per-process state, and it outlives a test that dies early.
+
+    Missing this is worse than missing a staged cache entry. A staged entry that
+    survives makes the next test pass for the wrong reason; a cut-off that
+    survives leaves the router unable to reach its store for the rest of the run,
+    and every later test STILL passes — a router with no cache answers every
+    request correctly from the chain nodes. Nothing in any reply says the cache
+    was never consulted.
+    """
+    from provider_simulator.control_api import ControlApi
+    from provider_simulator.domain.registry import build_registry
+    from provider_simulator.listeners.ws import WsSubscriptions
+
+    resp = RespControlApi()
+    resp.register("primary", "127.0.0.1", store.port)
+    registry = build_registry()
+    api = ControlApi(registry, WsSubscriptions(), None, {}, resp.proxies)
+
+    resp.cut_off("primary", {"kind": ERROR})
+    assert resp.get_state("primary")[1]["state"] == ERROR
+
+    status, payload = api.reset_all(None)
+    assert status == 200
+    assert payload["resp_proxies"] == ["primary"]
+    assert resp.get_state("primary")[1]["state"] == FORWARDING
+
+
+def test_a_history_only_clear_leaves_the_gate_alone(store):
+    """Scenario-scoped, like a provider's fault settings. Clearing history is not
+    a request to undo what a test deliberately set up."""
+    from provider_simulator.control_api import ControlApi
+    from provider_simulator.domain.registry import build_registry
+    from provider_simulator.listeners.ws import WsSubscriptions
+
+    resp = RespControlApi()
+    resp.register("primary", "127.0.0.1", store.port)
+    api = ControlApi(build_registry(), WsSubscriptions(), None, {}, resp.proxies)
+
+    resp.cut_off("primary", {"kind": TIMEOUT})
+    api.clear_history(None)
+    assert resp.get_state("primary")[1]["state"] == TIMEOUT

@@ -1160,7 +1160,6 @@ class SimulatorServer:
         self.cache_ports = dict(CACHE_SIM_PORTS if cache_ports is None else cache_ports)
         for cache_name in self.cache_ports:
             self.caches.get_or_create(cache_name)
-        self.control = ControlApi(self.registry, self.subscriptions, self.caches, self.cache_ports)
         # One proxy per RESP store, each with a reader pointed at the same place.
         # Overridable for the same reason the cache ports are: a second server in
         # one process needs its own ports, and {} runs the simulator with no RESP
@@ -1186,6 +1185,11 @@ class SimulatorServer:
             self.resp_control.register(store_name, self.resp_store[0], self.resp_store[1])
         self.extra_ready_ports = frozenset(self.resp_proxy_ports.values()) | (
             {self.resp_control_port} if self.resp_proxy_ports else frozenset()
+        )
+        # Built after the RESP half, because a reset has to be able to put the
+        # proxies' gates back and therefore needs the registry that holds them.
+        self.control = ControlApi(
+            self.registry, self.subscriptions, self.caches, self.cache_ports, self.resp_control.proxies
         )
         if scenario_ttl_s is None:
             scenario_ttl_s = int(os.environ.get("SIM_SCENARIO_TTL_SECONDS", "900"))

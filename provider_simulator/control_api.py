@@ -19,6 +19,7 @@ from provider_simulator.cache_sim import CacheEntry, CacheSimRegistry, UnknownMo
 from provider_simulator.chains import CHAINS
 from provider_simulator.domain.registry import Registry
 from provider_simulator.listeners.ws import WsSubscriptions
+from provider_simulator.resp_proxy import RespProxyRegistry
 
 _MODES = {"success", "error", "rate_limit", "down", "hang", "drop_connection"}
 _CORRUPTION_MODES = {
@@ -112,6 +113,7 @@ class ControlApi:
         subscriptions: WsSubscriptions,
         caches: CacheSimRegistry | None = None,
         cache_ports: "dict[str, int] | None" = None,
+        resp_proxies: "RespProxyRegistry | None" = None,
     ) -> None:
         self.registry = registry
         self.subscriptions = subscriptions
@@ -124,6 +126,10 @@ class ControlApi:
         # cache with no port here is one whose listener never started, and the
         # self-test says so rather than dialling nothing.
         self.cache_ports = dict(cache_ports or {})
+        # The RESP proxies, so a reset can put their gates back. A cut-off is
+        # per-process state exactly like a staged cache entry, and it outlives a
+        # test that dies before its teardown. See _perform_reset.
+        self.resp_proxies = resp_proxies if resp_proxies is not None else RespProxyRegistry()
 
     # ── POST /scenario ──────────────────────────────────────────────────────
     def apply_scenario(self, body: object) -> tuple[int, dict]:
@@ -267,12 +273,28 @@ class ControlApi:
                 elif history:
                     sim.clear_calls()
                 cache_names.append(name)
+        # A cut-off RESP proxy is reset for the same reason a staged cache entry
+        # is, and missing it is worse. A staged entry that survives makes the
+        # next test pass for the wrong reason; a cut-off that survives leaves the
+        # router unable to reach its store for the rest of the run, and every
+        # later test STILL passes -- a router with no cache answers every request
+        # correctly from the chain nodes. Nothing in any reply says the cache was
+        # never consulted, so the contamination surfaces much later as an
+        # unexplainable cache miss.
+        #
+        # Scenario-scoped, like a provider's fault settings: a history-only clear
+        # leaves the gate alone. Not pool-scoped, because a store has no pool.
+        resp_names: list = []
+        if pool is None and scenario:
+            resp_names = self.resp_proxies.names()
+            self.resp_proxies.restore_all()
         return 200, {
             "status": status,
             "pool": pool,
             "providers": sorted(p.key for p in providers),
             "chains": sorted({name for name, _ in chains}) if scenario else [],
             "caches": sorted(cache_names),
+            "resp_proxies": sorted(resp_names),
         }
 
     def _scope(self, pool: str | None) -> tuple[list, list, str]:
