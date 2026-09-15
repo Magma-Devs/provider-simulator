@@ -427,9 +427,14 @@ def test_a_held_connection_that_sent_nothing_is_also_released(store, runner, pro
 # behind at two every ten seconds, and they were still there an hour later,
 # ESTABLISHED at both ends, while fresh connections came and went normally.
 #
-# A real Redis has ``timeout`` for exactly this. These four tests are that
-# setting, and the last two matter more than the first two: a reclaimer that
-# also takes connections somebody still wants is a worse bug than the leak.
+# A real Redis has ``timeout`` for exactly this. These five tests are that
+# setting.
+#
+# Two of them have teeth against the reclaimer itself, and three are controls on
+# the ways it could go wrong -- because a reclaimer that also takes connections
+# somebody still wants is a worse bug than the leak it fixes. Said plainly
+# because an earlier version of this comment called the controls the stronger
+# half, and one of them passes against a reclaimer that does nothing at all.
 
 
 def _idle_proxy(store, idle_seconds):
@@ -479,11 +484,23 @@ def test_a_connection_still_in_use_is_never_reclaimed(store):
     connection's birth rather than from its last byte would close a connection
     in continuous use, and the router would see its store drop it mid-run.
     """
-    proxy, runner = _idle_proxy(store, 0.6)
+    proxy, runner = _idle_proxy(store, 1.5)
     try:
         conn = socket.create_connection(("127.0.0.1", runner.port), timeout=5)
-        # Four exchanges spanning well over twice the idle limit.
-        for _ in range(4):
+        # Two things have to be true at once here, and getting one of them right
+        # alone breaks the test in opposite directions.
+        #
+        # Each gap must sit well under the limit, or an overrun on a loaded
+        # runner fails the test claiming the router dropped a live connection.
+        # 0.35s against 1.5s is under a quarter of the budget; an earlier version
+        # left 0.35s against 0.6s, which is more than half.
+        #
+        # And the gaps must TOTAL more than the limit, or a clock that never
+        # resets is never caught: six gaps span 2.1s against a 1.5s limit. A
+        # version of this test ran four gaps against a 2.0s limit and passed with
+        # the reset deleted, which is the third time in this change that widening
+        # a margin quietly removed what the test was for.
+        for _ in range(6):
             conn.sendall(b"*1\r\n$4\r\nPING\r\n")
             assert conn.recv(65536), "the store stopped answering mid-test"
             time.sleep(0.35)
@@ -504,7 +521,7 @@ def test_a_connection_idle_for_less_than_the_limit_is_kept_and_still_works(store
     already useless. This sends a command down the same socket after the quiet
     period and requires the store's answer to come back.
     """
-    proxy, runner = _idle_proxy(store, 1.5)
+    proxy, runner = _idle_proxy(store, 3.0)
     try:
         conn = socket.create_connection(("127.0.0.1", runner.port), timeout=5)
         conn.sendall(b"*1\r\n$4\r\nPING\r\n")
@@ -541,7 +558,7 @@ def test_a_connection_held_longer_than_the_idle_limit_survives_the_restore(store
     Each version was caught by planting the mutation rather than by reasoning:
     four others went red and this one stayed green, twice.
     """
-    proxy, runner = _idle_proxy(store, 0.5)
+    proxy, runner = _idle_proxy(store, 1.0)
     try:
         conn = socket.create_connection(("127.0.0.1", runner.port), timeout=5)
         conn.sendall(b"*1\r\n$4\r\nPING\r\n")
@@ -549,7 +566,7 @@ def test_a_connection_held_longer_than_the_idle_limit_survives_the_restore(store
         assert _wait_for_live(proxy, 1) == 1
 
         proxy.cut_off(TIMEOUT)
-        time.sleep(1.5)  # three times the idle limit, all of it cut off, nothing pending
+        time.sleep(3.0)  # three times the idle limit, all of it cut off, nothing pending
         proxy.restore()
         time.sleep(0.3)  # several polls, so a reclaim would have happened by now
 
@@ -564,6 +581,87 @@ def test_a_connection_held_longer_than_the_idle_limit_survives_the_restore(store
         conn.sendall(b"*1\r\n$4\r\nPING\r\n")
         conn.settimeout(5)
         assert conn.recv(65536), "the connection survived the restore but no longer reaches the store"
+        conn.close()
+    finally:
+        runner.stop()
+
+
+def test_a_cut_off_landing_just_before_the_limit_does_not_reclaim(store):
+    """The race between the gate and the reclaimer, which the other four miss.
+
+    `_carry` reads the gate at the top of its loop and checks the idle limit at
+    the bottom, with a whole pump in between — two poll intervals, and longer
+    under lock contention. A cut-off landing inside that window is invisible to
+    the iteration already in flight. So a connection one poll short of its limit
+    can be reclaimed AFTER `cut_off(TIMEOUT)` has returned: the router reads a
+    CLOSE where the test staged a HANG, which is the `error` kind arriving under
+    the name of the `timeout` kind.
+
+    The other four tests cannot see this. Each one either leaves the connection
+    busy right up to the cut-off, so it is nowhere near its limit, or never
+    approaches the boundary at all. This one aims at the boundary deliberately.
+
+    Found by an adversarial review round that drove it rather than arguing it:
+    40 trials, reclaimed after the cut-off returned in 40 of them. Three trials
+    here, because one was enough to catch it every time.
+    """
+    for trial in range(3):
+        proxy, runner = _idle_proxy(store, 1.0)
+        try:
+            conn = socket.create_connection(("127.0.0.1", runner.port), timeout=5)
+            conn.sendall(b"*1\r\n$4\r\nPING\r\n")
+            assert conn.recv(65536), "the store did not answer"
+            assert _wait_for_live(proxy, 1) == 1
+
+            # Quiet until just short of the limit, so the cut-off lands inside
+            # the window between the gate being read and the limit being checked.
+            time.sleep(0.95)
+            proxy.cut_off(TIMEOUT)
+
+            # Several polls of the held branch, which is where the reclaim would
+            # have happened.
+            time.sleep(0.5)
+            assert proxy.counters()["closed_when_idle"] == 0, (
+                f"trial {trial}: a connection was reclaimed while the gate was cut off. "
+                f"The router would read a close where the test asked for a hang. "
+                f"counters={proxy.counters()}"
+            )
+            assert (
+                proxy.live_connections() == 1
+            ), f"trial {trial}: the held connection is gone; counters={proxy.counters()}"
+            conn.close()
+        finally:
+            runner.stop()
+
+
+def test_zero_turns_the_reclaimer_off(store):
+    """The documented off switch, which nothing else here exercises.
+
+    Every other test in this block passes a positive limit, so a regression that
+    made zero mean "reclaim immediately" — the natural reading of
+    ``now - last_active > 0`` if the guard above it were dropped — would put the
+    leak back for anyone who had deliberately turned the reclaimer off, and no
+    test would notice.
+
+    The connection here is quiet far longer than any limit the rest of the file
+    uses, so a reclaimer that is on at all takes it.
+    """
+    proxy, runner = _idle_proxy(store, 0)
+    try:
+        conn = socket.create_connection(("127.0.0.1", runner.port), timeout=5)
+        conn.sendall(b"*1\r\n$4\r\nPING\r\n")
+        assert conn.recv(65536), "the store did not answer"
+        assert _wait_for_live(proxy, 1) == 1
+
+        time.sleep(2.0)  # longer than every positive limit used in this file
+
+        assert proxy.live_connections() == 1, f"zero did not turn the reclaimer off; counters={proxy.counters()}"
+        assert proxy.counters()["closed_when_idle"] == 0
+
+        # Still usable, not merely counted.
+        conn.sendall(b"*1\r\n$4\r\nPING\r\n")
+        conn.settimeout(5)
+        assert conn.recv(65536), "the connection was kept but no longer reaches the store"
         conn.close()
     finally:
         runner.stop()

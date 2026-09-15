@@ -139,7 +139,7 @@ _SEND_TIMEOUT_SECONDS = 30.0
 # Carrying a connection nobody wants wastes a thread. Taking one somebody does
 # makes the router's store drop it mid-run, and that arrives in a test as
 # behaviour of the router.
-_IDLE_SECONDS = 120.0
+RESP_PROXY_IDLE_SECONDS = 120.0
 
 # Linux signals "the peer closed its end" with POLLRDHUP, and only when asked.
 # macOS has no such flag and reports POLLHUP instead, so this is 0 there and the
@@ -256,7 +256,7 @@ class RespProxy:
         target_port: int,
         *,
         name: str = "primary",
-        idle_seconds: float = _IDLE_SECONDS,
+        idle_seconds: float = RESP_PROXY_IDLE_SECONDS,
     ) -> None:
         self.name = name
         self.target_host = target_host
@@ -415,15 +415,32 @@ class RespProxy:
             if self._idle_expired(entry):
                 # The client is still there and has stopped speaking. Nothing
                 # will ever close this, so the proxy does.
+                #
+                # **Read the gate again, and under the same lock as the counter.**
+                # The state at the top of this iteration is already stale: a whole
+                # pump has run since, which is two poll intervals and longer under
+                # contention. A cut-off landing in that window would otherwise be
+                # answered with a CLOSE by the iteration already in flight, and a
+                # test that staged a hang would measure an error. Proven rather
+                # than argued: with the re-read removed, a connection one poll
+                # short of its limit was reclaimed after ``cut_off(TIMEOUT)``
+                # returned in 40 trials out of 40.
                 with self._lock:
-                    self._counters.closed_when_idle += 1
-                return
+                    reclaim = self._state == FORWARDING
+                    if reclaim:
+                        self._counters.closed_when_idle += 1
+                if reclaim:
+                    return
+                # The gate shut under us. Go round again and let the branch that
+                # owns this kind deal with it.
+                continue
 
     def _idle_expired(self, entry: _Live) -> bool:
         """True when this connection has carried no bytes for the idle limit.
 
-        Only reached while the gate is open -- the cut-off branches above return
-        or stamp the clock before getting here.
+        Says nothing about the gate. The caller re-reads that before acting,
+        because the state it read at the top of the iteration can be stale by
+        the time this answers.
         """
         if self._idle_seconds <= 0:
             return False
@@ -443,12 +460,15 @@ class RespProxy:
                 return False
             if not chunk:
                 return False
-            # Bytes moved, so this connection is in use. Written without the lock
-            # on purpose: only this connection's own thread touches it, and the
-            # one lock is already the busiest thing here.
-            entry.last_active = time.monotonic()
             if not self._send_if_forwarding(dst, chunk):
                 return False
+            # Bytes moved, so this connection is in use. Stamped AFTER the
+            # delivery rather than before it: a single reply may take up to
+            # ``_SEND_TIMEOUT_SECONDS`` to write, so a stamp taken first is
+            # already that stale when the write returns. Written without the
+            # lock on purpose -- only this connection's own thread touches it,
+            # and the one lock is already the busiest thing here.
+            entry.last_active = time.monotonic()
         return True
 
     def _send_if_forwarding(self, dst: socket.socket, chunk: bytes) -> bool:
@@ -563,9 +583,22 @@ class RespProxyRegistry:
         self._lock = threading.Lock()
         self._proxies: dict[str, RespProxy] = {}
 
-    def add(self, name: str, target_host: str, target_port: int) -> RespProxy:
+    def add(
+        self,
+        name: str,
+        target_host: str,
+        target_port: int,
+        *,
+        idle_seconds: float = RESP_PROXY_IDLE_SECONDS,
+    ) -> RespProxy:
+        """Register a proxy. ``idle_seconds`` is carried through deliberately.
+
+        Without it this is the only route a deployed simulator has to a proxy, so
+        the shipped value would be the one value no test could ever set, and the
+        off switch would be unreachable from anywhere real.
+        """
         with self._lock:
-            proxy = RespProxy(target_host, target_port, name=name)
+            proxy = RespProxy(target_host, target_port, name=name, idle_seconds=idle_seconds)
             self._proxies[name] = proxy
             return proxy
 

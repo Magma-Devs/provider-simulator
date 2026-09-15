@@ -34,7 +34,13 @@ router.
 
 from __future__ import annotations
 
-from provider_simulator.resp_proxy import CUT_OFF_KINDS, RespProxy, RespProxyRegistry, UnknownCutOffKind
+from provider_simulator.resp_proxy import (
+    CUT_OFF_KINDS,
+    RESP_PROXY_IDLE_SECONDS,
+    RespProxy,
+    RespProxyRegistry,
+    UnknownCutOffKind,
+)
 from provider_simulator.resp_store import RespStore, RespStoreError
 
 # What a caller gets back when it names a store that is not running here.
@@ -65,13 +71,19 @@ class RespControlApi:
         username: str | None = None,
         password: str | None = None,
         db: int = 0,
+        idle_seconds: float = RESP_PROXY_IDLE_SECONDS,
     ) -> RespProxy:
         """Run a proxy and a reader for one store, both pointed at the same place.
 
         The credentials reach the READER only. The proxy needs none: it moves the
         router's bytes without reading them, and the router carries its own.
+
+        ``idle_seconds`` is how long the proxy carries a connection that moves no
+        bytes while it is forwarding, before giving up on it. It is threaded all
+        the way down so the deployed value is one a test can also set; a default
+        that only production can reach is a default nothing checks.
         """
-        proxy = self.proxies.add(name, target_host, target_port)
+        proxy = self.proxies.add(name, target_host, target_port, idle_seconds=idle_seconds)
         self._stores[name] = RespStore(target_host, target_port, username=username, password=password, db=db)
         return proxy
 
