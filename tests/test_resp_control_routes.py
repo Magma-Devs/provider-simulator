@@ -278,6 +278,7 @@ def test_post_resp_counters_reset_zeroes_them_through_the_route(store, listener)
         "forwarded": 0,
         "carried": 0,
         "closed_by_cut_off": 0,
+        "closed_when_idle": 0,
     }
 
 
