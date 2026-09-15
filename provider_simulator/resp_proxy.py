@@ -55,6 +55,30 @@ This is the same shape as a fault that was measured on the secondary cache: a
 staged change travelled to a new pod while the router kept reading its
 established connection to the old one, and the test read the answer of a process
 it never staged into.
+
+A client can abandon a connection without closing it
+----------------------------------------------------
+Every exit from the carry loop needs one side to close, to error, or the gate to
+shut. None of those happens when a client simply stops using a connection and
+leaves it open, and the router does exactly that to every connection whose
+operation timed out while it could not reach the store.
+
+Measured on the local cluster: while a ``timeout`` cut-off was in force the
+carried count climbed by two every ten seconds, and after the gate was restored
+it never fell again -- still there many minutes later, while fresh connections
+came and went normally. Inside the pod those sockets read ESTABLISHED on both
+ends, not CLOSE_WAIT, so there was no close to be missed. The peer was alive and
+was never going to speak again.
+
+So a connection that carries no bytes for ``idle_seconds`` is given up. A real
+Redis has ``timeout`` for the same reason, which makes the proxy more faithful
+to the thing it stands in for rather than less.
+
+**The idle clock does not run while the gate is cut off**, and that is not a
+detail. Holding a connection open and moving nothing is the whole definition of
+the ``timeout`` kind. Reclaiming one would end it, the router would read a
+connection that CLOSED rather than one that HUNG, and the two kinds it counts
+separately would collapse into one.
 """
 
 from __future__ import annotations
@@ -63,7 +87,7 @@ import select
 import socket
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # What the proxy is doing with the router's traffic. Mutually exclusive, the same
 # way a simulated provider's mode is.
@@ -95,6 +119,27 @@ _POLL_SECONDS = 0.05
 # A cache reply can be large -- a full block, or an eth_getLogs page -- so the
 # delivery deadline has to be a delivery deadline rather than a liveness knob.
 _SEND_TIMEOUT_SECONDS = 30.0
+
+# How long a carried connection may move no bytes, while the gate is OPEN, before
+# the proxy gives up on it. Zero disables the reclaimer entirely.
+#
+# Why this number. It bounds what a cut-off leaves behind to about two minutes
+# rather than the life of the process, which is what it cost before this existed,
+# and it is twelve times the router's own ten-second store ping
+# (``respCacheHealthInterval`` in the smart-router source) so the connection
+# carrying that ping is never near it.
+#
+# **A pooled connection the client is holding in reserve CAN reach it**, and that
+# is not a defect to be designed around. It is exactly what a real Redis with
+# ``timeout`` set does to an idle client, and a client meets it by opening
+# another one. Saying so here because the opposite reading -- that the limit is
+# chosen so no wanted connection is ever taken -- is tempting and wrong.
+#
+# It is deliberately not tight, because the two mistakes do not cost the same.
+# Carrying a connection nobody wants wastes a thread. Taking one somebody does
+# makes the router's store drop it mid-run, and that arrives in a test as
+# behaviour of the router.
+_IDLE_SECONDS = 120.0
 
 # Linux signals "the peer closed its end" with POLLRDHUP, and only when asked.
 # macOS has no such flag and reports POLLHUP instead, so this is 0 there and the
@@ -140,7 +185,13 @@ class ProxyCounters:
     cut-off reached connections that already existed, rather than only the next
     one.
 
-    **All four are cumulative and none is ever decremented**, so none of them is
+    ``closed_when_idle`` counts the ones the proxy gave up on because they
+    carried no bytes for ``idle_seconds`` while the gate was open. A climbing
+    number is not a fault -- it is the reclaimer doing its job on connections a
+    client abandoned without closing. It climbing during NORMAL traffic would be,
+    because it would mean connections somebody still wanted were being taken.
+
+    **All five are cumulative and none is ever decremented**, so none of them is
     a count of what is happening right now. ``live_connections()`` answers that.
     An earlier version called ``carried`` "held", which read as a live state and
     was not one -- it counted every connection the proxy took on, including ones
@@ -151,6 +202,7 @@ class ProxyCounters:
     forwarded: int = 0
     carried: int = 0
     closed_by_cut_off: int = 0
+    closed_when_idle: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -158,6 +210,7 @@ class ProxyCounters:
             "forwarded": self.forwarded,
             "carried": self.carried,
             "closed_by_cut_off": self.closed_by_cut_off,
+            "closed_when_idle": self.closed_when_idle,
         }
 
 
@@ -173,10 +226,18 @@ class _Live:
     Held so a cut-off can reach it. ``upstream`` is None while the connection is
     being held open with nothing behind it, which is what a ``timeout`` cut-off
     does to a connection opened while it is in force.
+
+    ``last_active`` is when this connection last moved a byte, and it is what
+    separates a connection somebody is still using from one that was abandoned
+    without being closed. Only this connection's own thread reads or writes it,
+    so it needs no lock -- and keeping it off the one lock matters, because every
+    carried connection already takes that lock many times a second just to read
+    the gate.
     """
 
     downstream: socket.socket
     upstream: socket.socket | None = None
+    last_active: float = field(default_factory=time.monotonic)
 
 
 class RespProxy:
@@ -189,10 +250,18 @@ class RespProxy:
     and every connection runs on its own thread.
     """
 
-    def __init__(self, target_host: str, target_port: int, *, name: str = "primary") -> None:
+    def __init__(
+        self,
+        target_host: str,
+        target_port: int,
+        *,
+        name: str = "primary",
+        idle_seconds: float = _IDLE_SECONDS,
+    ) -> None:
         self.name = name
         self.target_host = target_host
         self.target_port = target_port
+        self._idle_seconds = idle_seconds
         self._lock = threading.Lock()
         self._state = FORWARDING
         self._live: set[_Live] = set()
@@ -309,6 +378,13 @@ class RespProxy:
             if state == TIMEOUT:
                 # Hold the socket open and move nothing. The router's read waits
                 # out its own deadline, which is the point.
+                #
+                # Stamping the clock here is what stops the idle reclaimer from
+                # running while the gate is shut. Moving no bytes is this kind's
+                # definition, so a reclaim would end the connection, the router
+                # would read a close rather than a hang, and the two kinds it
+                # counts separately would become one.
+                entry.last_active = time.monotonic()
                 if _peer_gone(entry.downstream):
                     return
                 # The wait is not optional, and leaving it out is a real fault
@@ -336,6 +412,23 @@ class RespProxy:
             if not self._pump_once(entry):
                 return
 
+            if self._idle_expired(entry):
+                # The client is still there and has stopped speaking. Nothing
+                # will ever close this, so the proxy does.
+                with self._lock:
+                    self._counters.closed_when_idle += 1
+                return
+
+    def _idle_expired(self, entry: _Live) -> bool:
+        """True when this connection has carried no bytes for the idle limit.
+
+        Only reached while the gate is open -- the cut-off branches above return
+        or stamp the clock before getting here.
+        """
+        if self._idle_seconds <= 0:
+            return False
+        return time.monotonic() - entry.last_active > self._idle_seconds
+
     def _pump_once(self, entry: _Live) -> bool:
         """One poll of both directions. False when the connection is finished."""
         upstream = entry.upstream
@@ -350,6 +443,10 @@ class RespProxy:
                 return False
             if not chunk:
                 return False
+            # Bytes moved, so this connection is in use. Written without the lock
+            # on purpose: only this connection's own thread touches it, and the
+            # one lock is already the busiest thing here.
+            entry.last_active = time.monotonic()
             if not self._send_if_forwarding(dst, chunk):
                 return False
         return True

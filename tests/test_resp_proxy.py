@@ -416,3 +416,154 @@ def test_a_held_connection_that_sent_nothing_is_also_released(store, runner, pro
     while proxy.live_connections() and time.monotonic() < deadline:
         time.sleep(0.05)
     assert proxy.live_connections() == 0
+
+
+# ── reclaiming a connection the client abandoned without closing ──────────────
+#
+# A client can stop using a connection without closing it. The proxy then sits
+# on an ESTABLISHED socket whose peer will never speak again, and nothing in the
+# carry loop ever gives it up: the loop only ends when a side closes, errors, or
+# the gate shuts. Measured on the local cluster — a cut-off left connections
+# behind at two every ten seconds, and they were still there an hour later,
+# ESTABLISHED at both ends, while fresh connections came and went normally.
+#
+# A real Redis has ``timeout`` for exactly this. These four tests are that
+# setting, and the last two matter more than the first two: a reclaimer that
+# also takes connections somebody still wants is a worse bug than the leak.
+
+
+def _idle_proxy(store, idle_seconds):
+    """A proxy that gives up on a silent connection after ``idle_seconds``."""
+    proxy = RespProxy("127.0.0.1", store.port, name="primary", idle_seconds=idle_seconds)
+    return proxy, _ProxyRunner(proxy)
+
+
+def _wait_for_live(proxy, want, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while proxy.live_connections() != want and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return proxy.live_connections()
+
+
+def test_a_connection_abandoned_without_being_closed_is_reclaimed(store):
+    """The leak, in one test.
+
+    The client stays alive and keeps the socket open. It simply never speaks
+    again — which is what the router does to every connection whose operation
+    timed out while it could not reach the store. Nothing closes, so no close
+    can be noticed, and before this the proxy carried it for the life of the
+    process.
+    """
+    proxy, runner = _idle_proxy(store, 0.6)
+    try:
+        conn = socket.create_connection(("127.0.0.1", runner.port), timeout=5)
+        conn.sendall(b"*1\r\n$4\r\nPING\r\n")
+        conn.recv(65536)
+        assert _wait_for_live(proxy, 1) == 1, "the connection should be carried while it is in use"
+
+        # The client does nothing further and does NOT close.
+        assert _wait_for_live(proxy, 0) == 0, (
+            "a connection whose client stopped speaking was carried past the idle limit; "
+            f"counters={proxy.counters()}"
+        )
+        assert proxy.counters()["closed_when_idle"] == 1, f"the reclaim was not counted: {proxy.counters()}"
+        conn.close()
+    finally:
+        runner.stop()
+
+
+def test_a_connection_still_in_use_is_never_reclaimed(store):
+    """The regression this fix could cause, guarded.
+
+    Activity has to push the limit out. A reclaimer that counts from the
+    connection's birth rather than from its last byte would close a connection
+    in continuous use, and the router would see its store drop it mid-run.
+    """
+    proxy, runner = _idle_proxy(store, 0.6)
+    try:
+        conn = socket.create_connection(("127.0.0.1", runner.port), timeout=5)
+        # Four exchanges spanning well over twice the idle limit.
+        for _ in range(4):
+            conn.sendall(b"*1\r\n$4\r\nPING\r\n")
+            assert conn.recv(65536), "the store stopped answering mid-test"
+            time.sleep(0.35)
+        assert proxy.live_connections() == 1, (
+            "a connection in continuous use was reclaimed; the idle clock is not "
+            f"being reset by traffic. counters={proxy.counters()}"
+        )
+        assert proxy.counters()["closed_when_idle"] == 0
+        conn.close()
+    finally:
+        runner.stop()
+
+
+def test_a_connection_idle_for_less_than_the_limit_is_kept_and_still_works(store):
+    """Quiet is not abandoned, and the proof is that it still carries bytes.
+
+    Counting it as live is the weaker claim — a connection can be in the set and
+    already useless. This sends a command down the same socket after the quiet
+    period and requires the store's answer to come back.
+    """
+    proxy, runner = _idle_proxy(store, 1.5)
+    try:
+        conn = socket.create_connection(("127.0.0.1", runner.port), timeout=5)
+        conn.sendall(b"*1\r\n$4\r\nPING\r\n")
+        conn.recv(65536)
+        time.sleep(0.7)  # quiet, but inside the limit
+        assert proxy.live_connections() == 1, "a connection inside the idle limit was reclaimed"
+
+        conn.sendall(b"*1\r\n$4\r\nPING\r\n")
+        assert conn.recv(65536), "the kept connection no longer reaches the store"
+        conn.close()
+    finally:
+        runner.stop()
+
+
+def test_a_connection_held_longer_than_the_idle_limit_survives_the_restore(store):
+    """The quiet of a cut-off must not be counted against the connection.
+
+    ``timeout`` holds the connection open and moves no bytes — that is the whole
+    definition of the kind. So a cut-off longer than the idle limit leaves every
+    held connection looking abandoned, and a clock that kept running through it
+    would reclaim them all the moment the gate reopened. The router, still
+    waiting on its read, would see the connection END rather than resume: a
+    ``timeout`` turned into an ``error`` at the instant of recovery, which is
+    precisely the distinction the two kinds exist to keep apart.
+
+    **The connection is QUIET before the cut-off, and that is the whole design of
+    this test.** Two earlier versions passed with the protection deleted. The
+    first asserted during the cut-off, where the idle check is never reached at
+    all — the held branch loops before it. The second left an unread request in
+    the socket, and forwarding that request after the restore stamped the clock
+    a moment before it was read, so the connection rescued itself. Only a
+    connection with nothing pending exposes the missing stamp.
+
+    Each version was caught by planting the mutation rather than by reasoning:
+    four others went red and this one stayed green, twice.
+    """
+    proxy, runner = _idle_proxy(store, 0.5)
+    try:
+        conn = socket.create_connection(("127.0.0.1", runner.port), timeout=5)
+        conn.sendall(b"*1\r\n$4\r\nPING\r\n")
+        assert conn.recv(65536), "the store did not answer before the cut-off"
+        assert _wait_for_live(proxy, 1) == 1
+
+        proxy.cut_off(TIMEOUT)
+        time.sleep(1.5)  # three times the idle limit, all of it cut off, nothing pending
+        proxy.restore()
+        time.sleep(0.3)  # several polls, so a reclaim would have happened by now
+
+        assert proxy.live_connections() == 1, (
+            "a connection was reclaimed for being quiet during a cut-off; a timeout has "
+            f"been turned into an error at the moment of recovery. counters={proxy.counters()}"
+        )
+        assert (
+            proxy.counters()["closed_when_idle"] == 0
+        ), f"a held connection was counted as abandoned: {proxy.counters()}"
+        # The strong claim: it is not merely counted, it still carries bytes.
+        conn.sendall(b"*1\r\n$4\r\nPING\r\n")
+        conn.settimeout(5)
+        assert conn.recv(65536), "the connection survived the restore but no longer reaches the store"
+        conn.close()
+    finally:
+        runner.stop()
