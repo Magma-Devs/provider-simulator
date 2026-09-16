@@ -24,6 +24,7 @@ import time
 
 import pytest
 
+from provider_simulator import resp_proxy as resp_proxy_module
 from provider_simulator.resp_proxy import ERROR, FORWARDING, TIMEOUT, RespProxy, UnknownCutOffKind
 from provider_simulator.resp_store import RespStore, RespStoreError
 from tests.resp_fake_store import FakeRespStore
@@ -380,6 +381,378 @@ def test_a_reply_larger_than_one_socket_buffer_arrives_whole(proxy, runner):
         slow_runner.stop()
         upstream.shutdown()
     assert received == len(big), f"the reply was cut short: {received} of {len(big)} bytes"
+
+
+# ── a slow client must not become everybody's wait ────────────────────────────
+
+# How long a control call may take while some client is being slow. The ticket
+# measured 0.00 s with nothing unusual happening and 27.9 s with one stuck
+# client, so anything between those two separates the two worlds. A second is
+# far above the real cost and far below the fault.
+_CONTROL_CALL_BOUND_SECONDS = 1.0
+
+# How long a restore must be held up while a cut-off drains, before the test
+# accepts that the two were serialised. Far above the microseconds a thread race
+# produces, and far below the drain it is waiting out.
+_RESTORE_MUST_WAIT_SECONDS = 0.5
+
+# A write deadline short enough for a suite. The real one is thirty seconds,
+# which is a delivery budget for a 4 MB cache reply and not a number a test
+# should sit through. Only the WAIT changes; the ordering under test does not.
+_SHORT_SEND_DEADLINE = 2.0
+
+
+class _RecordingSocket:
+    """A socket that remembers when each write began and ended.
+
+    ``RespProxy.serve`` takes a socket, so a test can hand it one of these. No
+    production code changes and nothing private is reached into.
+
+    The end is stamped in a ``finally``. A write that ends by RAISING has still
+    ended, and the first version of this recorder stamped only success — so a
+    write that hit its deadline looked like it was still running for ever, and
+    it reported a violation against correct code.
+    """
+
+    def __init__(self, wrapped: socket.socket) -> None:
+        self._wrapped = wrapped
+        self._lock = threading.Lock()
+        self.started = 0
+        self.finished = 0
+
+    def sendall(self, data):  # noqa: ANN001, ANN201 - mirrors socket.sendall
+        with self._lock:
+            self.started += 1
+        try:
+            return self._wrapped.sendall(data)
+        finally:
+            with self._lock:
+                self.finished += 1
+
+    def in_flight(self) -> int:
+        with self._lock:
+            return self.started - self.finished
+
+    def __getattr__(self, name):  # noqa: ANN001, ANN204 - pass the rest through
+        return getattr(self._wrapped, name)
+
+
+def _wait_until(condition, why: str, limit: float = 5.0) -> None:
+    """Block until ``condition()`` is true, or fail saying what never happened.
+
+    A fixed sleep only ESTIMATES when the proxy reached its blocked write. This
+    asks. Without it a loaded machine runs the control call before the write
+    ever started, and the test passes having exercised nothing.
+    """
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        if condition():
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"{why} within {limit}s")
+
+
+def _stuck_delivery(monkeypatch):
+    """A proxy with one delivery that cannot finish, and the recorder watching it.
+
+    An upstream that answers with more than the socket pair can swallow, and a
+    client that never reads. Returns the proxy, the recorder and a closer.
+
+    A socket pair rather than a listening server, because ``serve`` takes a
+    socket and that is what lets a test hand it a recorder.
+    """
+    monkeypatch.setattr(resp_proxy_module, "_SEND_TIMEOUT_SECONDS", _SHORT_SEND_DEADLINE)
+
+    payload = b"x" * (8 * 1024 * 1024)
+    big = b"$" + str(len(payload)).encode() + b"\r\n" + payload + b"\r\n"
+
+    class _BigReply(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            self.request.recv(65536)
+            try:
+                self.request.sendall(big)
+            except OSError:
+                # Teardown ends the connection while this write is deliberately
+                # blocked, so the disconnect is expected. Left unhandled it
+                # surfaces as a thread-exception warning, or as a failure where
+                # warnings are fatal.
+                pass
+
+    class _Server(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+        daemon_threads = True
+
+    upstream = _Server(("127.0.0.1", 0), _BigReply)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    proxy = RespProxy("127.0.0.1", upstream.server_address[1])
+
+    router_side, client_side = socket.socketpair()
+    # A small receive buffer on the client makes the delivery block sooner, so
+    # the window these tests need is reached in well under a second.
+    client_side.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
+    recorder = _RecordingSocket(router_side)
+    threading.Thread(target=proxy.serve, args=(recorder,), daemon=True).start()
+    # The control, taken HERE and nowhere later: the same call on the same proxy
+    # while nothing is stuck. Taken after the delivery is blocked it is no longer
+    # a control -- on a proxy that holds its lock across the write, THIS call is
+    # the frozen one, and it absorbs the whole freeze while nothing asserts on
+    # it. The measured call then runs against a proxy that is already free and
+    # the test passes on the very code it exists to catch. Measured: the
+    # misplaced baseline took 1.992 s and left zero deliveries running.
+    started = time.monotonic()
+    proxy.state()
+    baseline = time.monotonic() - started
+
+    client_side.sendall(b"*1\r\n$4\r\nPING\r\n")
+    _wait_until(lambda: recorder.in_flight() > 0, "the delivery never started")
+
+    def close() -> None:
+        client_side.close()
+        router_side.close()
+        upstream.shutdown()
+
+    return proxy, recorder, close, baseline
+
+
+def test_a_client_that_stopped_reading_does_not_freeze_the_control_calls(monkeypatch):
+    """Reading the proxy's state is a question about the proxy, not about its
+    slowest connection.
+
+    Scenario. One client asks for something large and then stops reading. Its
+    reply cannot be written, so the delivery sits there until the write deadline
+    gives up on it. Meanwhile a test asks the proxy a simple question, such as
+    what its gate is set to.
+
+    What is tested. That the question is answered anyway. The proxy has one
+    lock, and the delivery must not hold it across the write. When it did, every
+    control path waited behind the slowest client for the whole deadline —
+    reading the state, reading the counters, restoring, and accepting the next
+    connection.
+
+    ``cut_off`` is the deliberate exception and is not covered here. It waits
+    for a delivery already in progress, because it must not report the gate
+    closed while bytes are still crossing it. That promise has its own test,
+    ``test_cutting_off_does_not_return_while_a_write_is_still_running``.
+
+    Setup. ``_stuck_delivery`` arranges a write that cannot finish and does not
+    return until the recorder confirms it started. That confirmation is the
+    point: a fixed sleep only estimates it, and on a loaded machine the control
+    call would run first and the test would pass having exercised nothing.
+
+    Assertions and why. The baseline first, so a failure below is about the
+    stuck client rather than about the instrument. Then the control call on its
+    own thread with a bounded wait — answered inside it means a slow client
+    costs other callers nothing. The thread is used so a broken proxy costs the
+    suite one second rather than the whole deadline.
+
+    How to read a failure. "did not answer" means the lock is held across the
+    write — look at the delivery path in ``resp_proxy``.
+    """
+    proxy, recorder, close, baseline = _stuck_delivery(monkeypatch)
+    answer: dict[str, object] = {}
+
+    def ask_the_proxy_what_its_gate_is() -> None:
+        answer["state"] = proxy.state()
+
+    try:
+        assert recorder.in_flight() > 0, "no delivery is running; nothing is being measured"
+
+        asking = threading.Thread(target=ask_the_proxy_what_its_gate_is, daemon=True)
+        asking.start()
+        asking.join(_CONTROL_CALL_BOUND_SECONDS)
+        answered = not asking.is_alive()
+    finally:
+        close()
+
+    assert answered, (
+        f"a control call did not answer within {_CONTROL_CALL_BOUND_SECONDS}s "
+        f"while one client had stopped reading its reply. The proxy's lock is "
+        f"held across the delivery, so every caller waits for the slowest "
+        f"client (the same call with nothing stuck: {baseline:.4f}s)"
+    )
+    assert answer["state"] == FORWARDING, f"the control call answered but with the wrong gate: {answer['state']!r}"
+
+
+class _AcceptSignallingSocket:
+    """A socket that says when the proxy started carrying it.
+
+    ``serve`` takes the lock to count the connection and add it to the live set,
+    and only then does ``_carry`` set this socket's timeout. So the first
+    ``settimeout`` is the moment the accept path got THROUGH the lock, which is
+    what this measures. Reading a counter instead would not work: the counter
+    readers take the same lock, so a frozen proxy would freeze the measurement
+    as well as the thing being measured.
+    """
+
+    def __init__(self, wrapped: socket.socket) -> None:
+        self._wrapped = wrapped
+        self.carried = threading.Event()
+
+    def settimeout(self, value):  # noqa: ANN001, ANN201 - mirrors socket.settimeout
+        self.carried.set()
+        return self._wrapped.settimeout(value)
+
+    def __getattr__(self, name):  # noqa: ANN001, ANN204 - pass the rest through
+        return getattr(self._wrapped, name)
+
+
+def test_a_client_that_stopped_reading_does_not_block_accepting_the_next_one(monkeypatch):
+    """A new connection must be accepted while another client is being slow.
+
+    Scenario. One client has stopped reading its reply, so a delivery is stuck.
+    A second client arrives.
+
+    What is tested. That the second one is taken on anyway. Accepting needs the
+    same lock every control path needs, so when the delivery held that lock the
+    arrivals queued behind it — **this is the symptom that was actually reported
+    from the cluster**: the control listener starved at roughly 770 live
+    connections, and the connection count climbed because nothing could finish
+    being accepted.
+
+    It had no test until now. The freeze test covers reading the state; this one
+    covers the path that broke.
+
+    Setup. A stuck delivery, then a second connection handed to ``serve`` on its
+    own thread, wrapped so it reports the moment the accept path got through.
+
+    Assertions and why. That the report arrives inside a bound. Waiting for a
+    counter instead would deadlock the measurement against the thing measured,
+    because the counter readers take the same lock.
+
+    How to read a failure. "was not accepted" means arrivals are queued behind
+    the slow client, which is the reported symptom returning.
+    """
+    proxy, recorder, close, baseline = _stuck_delivery(monkeypatch)
+    second_router_side, second_client_side = socket.socketpair()
+    arriving = _AcceptSignallingSocket(second_router_side)
+
+    try:
+        assert recorder.in_flight() > 0, "no delivery is running; nothing is being measured"
+
+        threading.Thread(target=proxy.serve, args=(arriving,), daemon=True).start()
+        accepted = arriving.carried.wait(_CONTROL_CALL_BOUND_SECONDS)
+    finally:
+        second_client_side.close()
+        second_router_side.close()
+        close()
+
+    assert accepted, (
+        f"a second connection was not accepted within "
+        f"{_CONTROL_CALL_BOUND_SECONDS}s while one client had stopped reading. "
+        f"Arrivals are queued behind the slow client's delivery, which is the "
+        f"symptom reported from the cluster — the connection count climbs and "
+        f"the control listener starves (a control call with nothing stuck "
+        f"takes {baseline:.4f}s)"
+    )
+
+
+def test_cutting_off_does_not_return_while_a_write_is_still_running(monkeypatch):
+    """After ``cut_off`` returns, nothing further is written. Including a write
+    that was already running when it was called.
+
+    Scenario. A client asks for something large and stops reading, so the
+    delivery cannot finish. A test cuts the router off while it is still running.
+
+    What is tested. That ``cut_off`` does not answer until the delivery has
+    stopped. A call that returned early would tell its caller the router can no
+    longer reach the store while bytes were still moving, and every measurement
+    in the cut-off tests rests on that call meaning what it says.
+
+    **Say what the contract is NOT.** It is not "no bytes cross a closed gate".
+    Bytes in a running write DO cross — they cross before ``cut_off`` returns,
+    because it waits for them. The promise is about what is true once it has
+    answered.
+
+    Assertions and why. First that a write was actually running when the cut-off
+    was called — without it the test proves nothing and would pass on anything.
+    Then that none is running once ``cut_off`` has returned.
+
+    How to read a failure. "still running" means the delivery no longer holds
+    the cut-off back, which is what happens when the gate check and the write
+    stop being one step.
+    """
+    proxy, recorder, close, baseline = _stuck_delivery(monkeypatch)
+    try:
+        running_before = recorder.in_flight()
+        assert running_before > 0, (
+            "no write was running when the cut-off was called, so this test "
+            "proves nothing — the arrangement failed to fill the socket buffers"
+        )
+        proxy.cut_off(TIMEOUT)
+        running_after = recorder.in_flight()
+    finally:
+        close()
+
+    assert running_after == 0, (
+        f"cut_off returned while {running_after} write(s) were still running. "
+        f"It must not answer until the delivery has stopped, or a caller is "
+        f"told the gate is closed while bytes are still crossing it "
+        f"(running when it was called: {running_before})"
+    )
+
+
+def test_restoring_while_a_cut_off_waits_does_not_let_it_claim_a_closed_gate(monkeypatch):
+    """Two control calls that both move the gate must not interleave.
+
+    Scenario. A cut-off is waiting for a delivery to finish. While it waits,
+    something else restores the gate. Both calls return.
+
+    What is tested. That the cut-off does not answer "cut off" on a gate that
+    has since been reopened. It waits with the lock released, so another gate
+    move can land inside it — and a caller told the gate is closed, on a gate
+    that is open, has been told something untrue. Writes go on happening after
+    that answer.
+
+    Assertions and why. First that the cut-off really was waiting — without it
+    the two calls ran in sequence and nothing was tested. Then that the gate
+    matches what the cut-off returned.
+
+    How to read a failure. A returned kind that does not match the gate means
+    gate moves are interleaving and have to be serialised against each other.
+    Reads and the accept path must NOT be serialised with them; that is the
+    fault this whole section exists to fix.
+    """
+    proxy, recorder, close, baseline = _stuck_delivery(monkeypatch)
+
+    def cut_it_off() -> None:
+        proxy.cut_off(TIMEOUT)
+
+    try:
+        cutting = threading.Thread(target=cut_it_off, daemon=True)
+        cutting.start()
+        cutting.join(0.3)
+        assert cutting.is_alive(), (
+            "the cut-off returned before the delivery finished, so it never "
+            "waited and this test proves nothing about interleaving"
+        )
+
+        # This is the interleaving attempt. Serialised, it cannot complete until
+        # the cut-off has. Not serialised, it returns straight away -- and the
+        # cut-off then answers "cut off" on a gate this call has reopened.
+        # Measure how long the restore is HELD UP, not which thread stamps a
+        # clock first. Comparing two timestamps taken in two threads either side
+        # of the same lock release decides on a scheduling coin flip: measured
+        # 15 passes in 17 against the unserialised code, on a margin of 35
+        # microseconds. Held-up time separates the two by three orders of
+        # magnitude instead -- serialised it waits out the rest of the drain,
+        # unserialised it returns at once.
+        started = time.monotonic()
+        proxy.restore()
+        restore_waited = time.monotonic() - started
+
+        cutting.join(_SHORT_SEND_DEADLINE + 3.0)
+        assert not cutting.is_alive(), "the cut-off never returned"
+    finally:
+        close()
+
+    assert restore_waited >= _RESTORE_MUST_WAIT_SECONDS, (
+        f"restore returned in {restore_waited:.4f}s while a cut-off was still "
+        f"draining, so it did not wait for it and the two gate moves overlap. "
+        f"The cut-off then answers on a gate the restore has already reopened, "
+        f"and writes continue after that answer. Gate moves must be serialised "
+        f"against each other -- but never against reads or the accept path, "
+        f"which is the fault this section exists to fix"
+    )
 
 
 def test_a_held_connection_is_released_when_its_client_goes_away(store, runner, proxy):

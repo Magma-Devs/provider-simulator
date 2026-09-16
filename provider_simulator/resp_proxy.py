@@ -266,6 +266,20 @@ class RespProxy:
         self._state = FORWARDING
         self._live: set[_Live] = set()
         self._counters = ProxyCounters()
+        # How many deliveries passed the gate check and have not finished. The
+        # lock is held only to read or change this, never across the write, so
+        # a slow client costs no other caller anything. ``cut_off`` waits on the
+        # condition instead, which is the one place waiting is the promise.
+        self._delivering = 0
+        self._deliveries_finished = threading.Condition(self._lock)
+        # Gate MOVES are serialised against each other here, never against a
+        # read. ``cut_off`` releases ``_lock`` while it waits for deliveries, so
+        # without this a ``restore`` lands inside that wait and the cut-off then
+        # answers "cut off" on a gate somebody else has reopened.
+        #
+        # Always taken BEFORE ``_lock``, never after, so the two cannot deadlock.
+        # Readers and the accept path take neither.
+        self._transitions = threading.Lock()
 
     # ── the gate ──────────────────────────────────────────────────────────────
 
@@ -281,11 +295,35 @@ class RespProxy:
         """
         if kind not in CUT_OFF_KINDS:
             raise UnknownCutOffKind(kind)
-        with self._lock:
+        with self._transitions, self._lock:
             self._state = kind
+            # Read the live set BEFORE the wait below, not after. This counter
+            # is how a test proves a cut-off reached connections that ALREADY
+            # EXISTED, so the population it means is the one present when the
+            # cut-off was asked for. Snapshotting after the wait counts a later
+            # set, and a connection that died during the wait would make a
+            # cut-off look as though it reached nothing.
             live = list(self._live)
             if kind == ERROR:
                 self._counters.closed_by_cut_off += len(live)
+
+            # Deliveries that passed the gate check before it closed are still
+            # running. Wait for them, because the promise this call makes is
+            # that nothing is written once it has answered -- and a caller told
+            # the gate is closed while bytes are still crossing it has been told
+            # something untrue.
+            #
+            # ``wait`` releases ``_lock``, so reads and the accept path keep
+            # answering throughout. They are the callers this whole change is
+            # for. ``_transitions`` is what stops another GATE MOVE using the
+            # same opening.
+            #
+            # Note what this call does NOT do: it never makes the store
+            # unreachable. It cuts the ROUTER off from the store, and the
+            # control listener keeps reading the store directly throughout,
+            # which is what makes a recovery test a recovery and not a re-fetch.
+            while self._delivering:
+                self._deliveries_finished.wait()
         if kind == ERROR:
             for conn in live:
                 _shutdown(conn.downstream)
@@ -300,7 +338,7 @@ class RespProxy:
         their next poll. Connections closed by an ``error`` cut-off are gone --
         the client opens new ones, which is what a real client does.
         """
-        with self._lock:
+        with self._transitions, self._lock:
             self._state = FORWARDING
         return FORWARDING
 
@@ -474,35 +512,71 @@ class RespProxy:
     def _send_if_forwarding(self, dst: socket.socket, chunk: bytes) -> bool:
         """Deliver a chunk, but only while the gate is open.
 
-        The check and the write are under ONE hold of the lock. Two steps let a
-        cut-off land between them, and one last reply would cross a cut-off that
-        promises to move no bytes -- which is exactly the promise a test reads.
+        The gate check and the COUNT are under one hold of the lock; the write
+        is not. Checking and counting together is what makes a cut-off arriving
+        next see this delivery and wait for it, so the promise survives without
+        the write holding anything.
 
-        Holding the lock across ``sendall`` makes a concurrent ``cut_off`` wait
-        for the write. That is the right way round: the writes here are single
-        cache replies, and a cut-off that returned while a write was still in
-        flight would be telling the caller something untrue.
+        **What the promise is.** After ``cut_off`` returns, nothing further is
+        written. It is NOT "no bytes cross a closed gate" -- bytes in a running
+        write do cross, before ``cut_off`` answers, because it waits for them.
+        The two readings need different tests and only the first one is true.
+        ``test_cutting_off_does_not_return_while_a_write_is_still_running``
+        holds it.
+
+        **Why the write is outside the lock.** It used to be inside, with a
+        thirty-second deadline, and one lock serves every control path and the
+        accept path too -- so a client that stopped reading froze all of them
+        until the deadline gave up. Measured while making this change:
+        ``cut_off`` took 29.199 s with one stuck client and 0.000 s without.
+        The ticket that reported it measured a plain state read at 27.9 s
+        against a 0.00 s baseline, with live connections climbing 5 to 17
+        because accepting also needed the lock.
+
+        Waiting is right for ``cut_off`` alone, and it now waits on the count.
+        ``restore`` is the one exception, and it is deliberate: it queues behind
+        a ``cut_off`` that is still draining, because two gate moves that
+        overlap let the cut-off answer on a gate the restore has reopened. So a
+        restore CAN be held up for the write deadline. Reads and the accept path
+        cannot.
 
         False means the connection is finished. A closed gate is not a failure --
         the bytes are dropped and the connection stays.
         """
-        with self._lock:
-            if self._state != FORWARDING:
-                return True
+        registered = False
+        try:
+            with self._lock:
+                if self._state != FORWARDING:
+                    return True
+                self._delivering += 1
+                registered = True
+            # The socket's own timeout is the poll interval, which is far too
+            # short to write a large reply. Raise it for the write and put it
+            # back, so liveness stays responsive and delivery gets a real
+            # deadline.
+            dst.settimeout(_SEND_TIMEOUT_SECONDS)
+            dst.sendall(chunk)
+        except OSError:
+            return False
+        finally:
             try:
-                # The socket's own timeout is the poll interval, which is far too
-                # short to write a large reply. Raise it for the write and put it
-                # back, so liveness stays responsive and delivery gets a real
-                # deadline.
-                dst.settimeout(_SEND_TIMEOUT_SECONDS)
-                dst.sendall(chunk)
+                dst.settimeout(_POLL_SECONDS)
             except OSError:
-                return False
-            finally:
-                try:
-                    dst.settimeout(_POLL_SECONDS)
-                except OSError:
-                    pass
+                pass
+            # In the finally, so a write that ends by RAISING still releases the
+            # cut-off waiting on it. Without this a failed delivery would hold
+            # every later cut-off for ever, which is worse than the fault being
+            # fixed here.
+            #
+            # The ``try`` opens BEFORE the registering lock rather than after it,
+            # so nothing can land between the count going up and the handler that
+            # brings it down. ``registered`` is what makes that safe: the early
+            # return on a closed gate has not counted anything and must not
+            # discount anything.
+            if registered:
+                with self._lock:
+                    self._delivering -= 1
+                    self._deliveries_finished.notify_all()
         return True
 
 
