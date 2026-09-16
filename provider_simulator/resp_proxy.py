@@ -266,6 +266,12 @@ class RespProxy:
         self._state = FORWARDING
         self._live: set[_Live] = set()
         self._counters = ProxyCounters()
+        # How many deliveries passed the gate check and have not finished. The
+        # lock is held only to read or change this, never across the write, so
+        # a slow client costs no other caller anything. ``cut_off`` waits on the
+        # condition instead, which is the one place waiting is the promise.
+        self._delivering = 0
+        self._deliveries_finished = threading.Condition(self._lock)
 
     # ── the gate ──────────────────────────────────────────────────────────────
 
@@ -283,6 +289,21 @@ class RespProxy:
             raise UnknownCutOffKind(kind)
         with self._lock:
             self._state = kind
+            # Deliveries that passed the gate check before it closed are still
+            # running. Wait for them, because the promise this call makes is
+            # that nothing is written once it has answered -- and a caller told
+            # the gate is closed while bytes are still crossing it has been told
+            # something untrue.
+            #
+            # Note what this call does NOT do: it never makes the store
+            # unreachable. It cuts the ROUTER off from the store, and the
+            # control listener keeps reading the store directly throughout,
+            # which is what makes a recovery test a recovery and not a re-fetch.
+            #
+            # ``wait`` releases the lock, so readers, ``restore`` and the accept
+            # path keep answering throughout. Only this call waits.
+            while self._delivering:
+                self._deliveries_finished.wait()
             live = list(self._live)
             if kind == ERROR:
                 self._counters.closed_by_cut_off += len(live)
@@ -474,14 +495,28 @@ class RespProxy:
     def _send_if_forwarding(self, dst: socket.socket, chunk: bytes) -> bool:
         """Deliver a chunk, but only while the gate is open.
 
-        The check and the write are under ONE hold of the lock. Two steps let a
-        cut-off land between them, and one last reply would cross a cut-off that
-        promises to move no bytes -- which is exactly the promise a test reads.
+        The gate check and the COUNT are under one hold of the lock; the write
+        is not. Checking and counting together is what makes a cut-off arriving
+        next see this delivery and wait for it, so the promise survives without
+        the write holding anything.
 
-        Holding the lock across ``sendall`` makes a concurrent ``cut_off`` wait
-        for the write. That is the right way round: the writes here are single
-        cache replies, and a cut-off that returned while a write was still in
-        flight would be telling the caller something untrue.
+        **What the promise is.** After ``cut_off`` returns, nothing further is
+        written. It is NOT "no bytes cross a closed gate" -- bytes in a running
+        write do cross, before ``cut_off`` answers, because it waits for them.
+        The two readings need different tests and only the first one is true.
+        ``test_cutting_off_does_not_return_while_a_write_is_still_running``
+        holds it.
+
+        **Why the write is outside the lock.** It used to be inside, with a
+        thirty-second deadline, and one lock serves every control path and the
+        accept path too -- so a client that stopped reading froze all of them
+        until the deadline gave up. Measured while making this change:
+        ``cut_off`` took 29.199 s with one stuck client and 0.000 s without.
+        The ticket that reported it measured a plain state read at 27.9 s
+        against a 0.00 s baseline, with live connections climbing 5 to 17
+        because accepting also needed the lock.
+
+        Waiting is right for ``cut_off`` alone, and it now waits on the count.
 
         False means the connection is finished. A closed gate is not a failure --
         the bytes are dropped and the connection stays.
@@ -489,20 +524,28 @@ class RespProxy:
         with self._lock:
             if self._state != FORWARDING:
                 return True
+            self._delivering += 1
+        try:
+            # The socket's own timeout is the poll interval, which is far too
+            # short to write a large reply. Raise it for the write and put it
+            # back, so liveness stays responsive and delivery gets a real
+            # deadline.
+            dst.settimeout(_SEND_TIMEOUT_SECONDS)
+            dst.sendall(chunk)
+        except OSError:
+            return False
+        finally:
             try:
-                # The socket's own timeout is the poll interval, which is far too
-                # short to write a large reply. Raise it for the write and put it
-                # back, so liveness stays responsive and delivery gets a real
-                # deadline.
-                dst.settimeout(_SEND_TIMEOUT_SECONDS)
-                dst.sendall(chunk)
+                dst.settimeout(_POLL_SECONDS)
             except OSError:
-                return False
-            finally:
-                try:
-                    dst.settimeout(_POLL_SECONDS)
-                except OSError:
-                    pass
+                pass
+            # In the finally, so a write that ends by RAISING still releases the
+            # cut-off waiting on it. Without this a failed delivery would hold
+            # every later cut-off for ever, which is worse than the fault being
+            # fixed here.
+            with self._lock:
+                self._delivering -= 1
+                self._deliveries_finished.notify_all()
         return True
 
 
