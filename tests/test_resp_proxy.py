@@ -391,131 +391,8 @@ def test_a_reply_larger_than_one_socket_buffer_arrives_whole(proxy, runner):
 # far above the real cost and far below the fault.
 _CONTROL_CALL_BOUND_SECONDS = 1.0
 
-
-def _buffers_of_a_local_pair() -> int:
-    """How many bytes a loopback pair can swallow before a write blocks.
-
-    The sender's send buffer plus the receiver's receive buffer. A payload has
-    to beat this for ``sendall`` to block at all, so the test asserts against it
-    rather than hoping a round number is enough.
-    """
-    probe = socket.socket()
-    try:
-        send = probe.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
-        receive = probe.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
-    finally:
-        probe.close()
-    return send + receive
-
-
-def test_a_client_that_stopped_reading_does_not_freeze_the_control_calls():
-    """Reading the proxy's state is a question about the proxy, not about its
-    slowest connection.
-
-    Scenario. One client asks for something large and then stops reading. Its
-    reply cannot be written, so the delivery sits there until the write deadline
-    gives up on it — thirty seconds. Meanwhile a test asks the proxy a simple
-    question, such as what its gate is set to.
-
-    What is tested. That the question is answered anyway. The proxy has one
-    lock, and the delivery must not hold it across the write. When it did, every
-    control path waited behind the slowest client for the whole thirty seconds —
-    reading the state, reading the counters, restoring, and accepting the next
-    connection.
-
-    ``cut_off`` is the deliberate exception and is not covered here. It waits
-    for a delivery already in progress, because it must not report the gate
-    closed while bytes are still crossing it. That promise has its own test,
-    ``test_cutting_off_does_not_return_while_a_write_is_still_running``.
-
-    Setup. An upstream that replies with more bytes than a loopback pair can
-    swallow, and a client that sends a request and then never reads. After that
-    the proxy is inside a write that cannot finish.
-
-    Assertions and why. The control call runs on its own thread and the test
-    waits a bounded time for it. Answered inside the bound means a slow client
-    costs other callers nothing. Still running at the bound means the caller is
-    waiting on the delivery, which is the defect. The thread is used so a broken
-    proxy costs the suite one second rather than thirty.
-
-    How to read a failure. "did not answer" means the lock is held across the
-    write — look at the delivery path in ``resp_proxy``. If instead the
-    precondition assertion fires, the payload no longer beats the socket
-    buffers on this machine, the write never blocked, and the test was about to
-    pass while measuring nothing.
-    """
-    swallowed = _buffers_of_a_local_pair()
-    payload = b"x" * (8 * swallowed)
-    big = b"$" + str(len(payload)).encode() + b"\r\n" + payload + b"\r\n"
-    assert len(big) > swallowed, (
-        f"the payload does not beat the socket buffers, so the write would "
-        f"never block and this test would pass without measuring anything: "
-        f"payload={len(big)} buffers={swallowed}"
-    )
-
-    class _BigReply(socketserver.BaseRequestHandler):
-        def handle(self) -> None:
-            self.request.recv(65536)
-            self.request.sendall(big)
-            time.sleep(5)
-
-    class _Server(socketserver.ThreadingTCPServer):
-        allow_reuse_address = True
-        daemon_threads = True
-
-    upstream = _Server(("127.0.0.1", 0), _BigReply)
-    threading.Thread(target=upstream.serve_forever, daemon=True).start()
-    blocked_proxy = RespProxy("127.0.0.1", upstream.server_address[1])
-    blocked_runner = _ProxyRunner(blocked_proxy)
-
-    answer: dict[str, object] = {}
-
-    def ask_the_proxy_what_its_gate_is() -> None:
-        started = time.monotonic()
-        answer["state"] = blocked_proxy.state()
-        answer["took"] = time.monotonic() - started
-
-    conn = socket.create_connection(("127.0.0.1", blocked_runner.port), timeout=15)
-    try:
-        # Before anything is stuck, the same call on the same proxy. This is the
-        # control: it proves the question can be answered at all, so a failure
-        # below is about the stuck client rather than about the instrument.
-        baseline = time.monotonic()
-        blocked_proxy.state()
-        baseline_took = time.monotonic() - baseline
-        assert baseline_took < _CONTROL_CALL_BOUND_SECONDS, (
-            f"the control call was already slow with nothing stuck "
-            f"({baseline_took:.2f}s) — this test cannot tell you anything"
-        )
-
-        conn.sendall(b"*1\r\n$4\r\nPING\r\n")
-        # Give the proxy time to pull the reply and get stuck writing it to a
-        # client that is not reading. The neighbouring send-deadline test waits
-        # the same way and for the same reason.
-        time.sleep(1.0)
-
-        asking = threading.Thread(target=ask_the_proxy_what_its_gate_is, daemon=True)
-        asking.start()
-        asking.join(_CONTROL_CALL_BOUND_SECONDS)
-        answered = not asking.is_alive()
-    finally:
-        # Ending the client fails the stuck write, which releases the lock. Do
-        # this before reading the result so nothing is left holding it.
-        conn.close()
-        blocked_runner.stop()
-        upstream.shutdown()
-
-    assert answered, (
-        f"a control call did not answer within {_CONTROL_CALL_BOUND_SECONDS}s "
-        f"while one client had stopped reading its reply. The proxy's lock is "
-        f"held across the delivery, so every caller waits for the slowest "
-        f"client (baseline with nothing stuck: {baseline_took:.4f}s)"
-    )
-    assert answer["state"] == FORWARDING, f"the control call answered but with the wrong gate: {answer['state']!r}"
-
-
 # A write deadline short enough for a suite. The real one is thirty seconds,
-# which is a delivery deadline for a 4 MB cache reply and not a number a test
+# which is a delivery budget for a 4 MB cache reply and not a number a test
 # should sit through. Only the WAIT changes; the ordering under test does not.
 _SHORT_SEND_DEADLINE = 2.0
 
@@ -529,7 +406,7 @@ class _RecordingSocket:
     The end is stamped in a ``finally``. A write that ends by RAISING has still
     ended, and the first version of this recorder stamped only success — so a
     write that hit its deadline looked like it was still running for ever, and
-    the guard reported a violation against correct code.
+    it reported a violation against correct code.
     """
 
     def __init__(self, wrapped: socket.socket) -> None:
@@ -555,39 +432,29 @@ class _RecordingSocket:
         return getattr(self._wrapped, name)
 
 
-def test_cutting_off_does_not_return_while_a_write_is_still_running(monkeypatch):
-    """After ``cut_off`` returns, nothing further is written. Including a write
-    that was already running when it was called.
+def _wait_until(condition, why: str, limit: float = 5.0) -> None:
+    """Block until ``condition()`` is true, or fail saying what never happened.
 
-    Scenario. A client asks for something large and stops reading, so the
-    delivery cannot finish. A test cuts the router off while that delivery is
-    still in progress.
+    A fixed sleep only ESTIMATES when the proxy reached its blocked write. This
+    asks. Without it a loaded machine runs the control call before the write
+    ever started, and the test passes having exercised nothing.
+    """
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        if condition():
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"{why} within {limit}s")
 
-    What is tested. That ``cut_off`` does not answer until the delivery has
-    stopped. A call that returned early would tell its caller the router can no
-    longer reach the store while bytes were still moving, and every measurement
-    in the cut-off tests rests on that call meaning what it says.
 
-    **Say what the contract is NOT.** It is not "no bytes cross a closed gate".
-    Bytes in a running write DO cross — they cross before ``cut_off`` returns,
-    because it waits for them. The promise is about what is true once it has
-    answered.
+def _stuck_delivery(monkeypatch):
+    """A proxy with one delivery that cannot finish, and the recorder watching it.
 
-    Setup. A socket pair stands in for the router's connection so the test can
-    hand the proxy a recorder, and an upstream that replies with more than the
-    pair can swallow. The write deadline is shortened, because the real thirty
-    seconds is a delivery budget for a large cache reply and not a wait a suite
-    should sit through. Only the wait changes; the ordering does not.
+    An upstream that answers with more than the socket pair can swallow, and a
+    client that never reads. Returns the proxy, the recorder and a closer.
 
-    Assertions and why. First that a write was actually running when the cut-off
-    was called — without it the test proves nothing and would pass on anything.
-    Then that no write is running once ``cut_off`` has returned.
-
-    How to read a failure. "a write was still running" means the delivery no
-    longer holds the cut-off back. That is what happens when the gate check and
-    the write stop being one step, so look at the delivery path. If instead the
-    precondition fires, no write ever started and the arrangement is broken
-    rather than the proxy.
+    A socket pair rather than a listening server, because ``serve`` takes a
+    socket and that is what lets a test hand it a recorder.
     """
     monkeypatch.setattr(resp_proxy_module, "_SEND_TIMEOUT_SECONDS", _SHORT_SEND_DEADLINE)
 
@@ -600,6 +467,10 @@ def test_cutting_off_does_not_return_while_a_write_is_still_running(monkeypatch)
             try:
                 self.request.sendall(big)
             except OSError:
+                # Teardown ends the connection while this write is deliberately
+                # blocked, so the disconnect is expected. Left unhandled it
+                # surfaces as a thread-exception warning, or as a failure where
+                # warnings are fatal.
                 pass
 
     class _Server(socketserver.ThreadingTCPServer):
@@ -608,37 +479,188 @@ def test_cutting_off_does_not_return_while_a_write_is_still_running(monkeypatch)
 
     upstream = _Server(("127.0.0.1", 0), _BigReply)
     threading.Thread(target=upstream.serve_forever, daemon=True).start()
-    delivering = RespProxy("127.0.0.1", upstream.server_address[1])
+    proxy = RespProxy("127.0.0.1", upstream.server_address[1])
 
     router_side, client_side = socket.socketpair()
     # A small receive buffer on the client makes the delivery block sooner, so
-    # the window this test needs is reached in well under a second.
+    # the window these tests need is reached in well under a second.
     client_side.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
     recorder = _RecordingSocket(router_side)
-    threading.Thread(target=delivering.serve, args=(recorder,), daemon=True).start()
+    threading.Thread(target=proxy.serve, args=(recorder,), daemon=True).start()
+    client_side.sendall(b"*1\r\n$4\r\nPING\r\n")
+    _wait_until(lambda: recorder.in_flight() > 0, "the delivery never started")
+
+    def close() -> None:
+        client_side.close()
+        router_side.close()
+        upstream.shutdown()
+
+    return proxy, recorder, close
+
+
+def test_a_client_that_stopped_reading_does_not_freeze_the_control_calls(monkeypatch):
+    """Reading the proxy's state is a question about the proxy, not about its
+    slowest connection.
+
+    Scenario. One client asks for something large and then stops reading. Its
+    reply cannot be written, so the delivery sits there until the write deadline
+    gives up on it. Meanwhile a test asks the proxy a simple question, such as
+    what its gate is set to.
+
+    What is tested. That the question is answered anyway. The proxy has one
+    lock, and the delivery must not hold it across the write. When it did, every
+    control path waited behind the slowest client for the whole deadline —
+    reading the state, reading the counters, restoring, and accepting the next
+    connection.
+
+    ``cut_off`` is the deliberate exception and is not covered here. It waits
+    for a delivery already in progress, because it must not report the gate
+    closed while bytes are still crossing it. That promise has its own test,
+    ``test_cutting_off_does_not_return_while_a_write_is_still_running``.
+
+    Setup. ``_stuck_delivery`` arranges a write that cannot finish and does not
+    return until the recorder confirms it started. That confirmation is the
+    point: a fixed sleep only estimates it, and on a loaded machine the control
+    call would run first and the test would pass having exercised nothing.
+
+    Assertions and why. The baseline first, so a failure below is about the
+    stuck client rather than about the instrument. Then the control call on its
+    own thread with a bounded wait — answered inside it means a slow client
+    costs other callers nothing. The thread is used so a broken proxy costs the
+    suite one second rather than the whole deadline.
+
+    How to read a failure. "did not answer" means the lock is held across the
+    write — look at the delivery path in ``resp_proxy``.
+    """
+    proxy, recorder, close = _stuck_delivery(monkeypatch)
+    answer: dict[str, object] = {}
+
+    def ask_the_proxy_what_its_gate_is() -> None:
+        answer["state"] = proxy.state()
 
     try:
-        client_side.sendall(b"*1\r\n$4\r\nPING\r\n")
-        time.sleep(0.8)  # let the proxy pull the reply and get into the write
+        assert recorder.in_flight() > 0, "no delivery is running; nothing is being measured"
 
+        baseline = time.monotonic()
+        proxy.state()
+        baseline_took = time.monotonic() - baseline
+
+        asking = threading.Thread(target=ask_the_proxy_what_its_gate_is, daemon=True)
+        asking.start()
+        asking.join(_CONTROL_CALL_BOUND_SECONDS)
+        answered = not asking.is_alive()
+    finally:
+        close()
+
+    assert answered, (
+        f"a control call did not answer within {_CONTROL_CALL_BOUND_SECONDS}s "
+        f"while one client had stopped reading its reply. The proxy's lock is "
+        f"held across the delivery, so every caller waits for the slowest "
+        f"client (the same call with nothing stuck: {baseline_took:.4f}s)"
+    )
+    assert answer["state"] == FORWARDING, f"the control call answered but with the wrong gate: {answer['state']!r}"
+
+
+def test_cutting_off_does_not_return_while_a_write_is_still_running(monkeypatch):
+    """After ``cut_off`` returns, nothing further is written. Including a write
+    that was already running when it was called.
+
+    Scenario. A client asks for something large and stops reading, so the
+    delivery cannot finish. A test cuts the router off while it is still running.
+
+    What is tested. That ``cut_off`` does not answer until the delivery has
+    stopped. A call that returned early would tell its caller the router can no
+    longer reach the store while bytes were still moving, and every measurement
+    in the cut-off tests rests on that call meaning what it says.
+
+    **Say what the contract is NOT.** It is not "no bytes cross a closed gate".
+    Bytes in a running write DO cross — they cross before ``cut_off`` returns,
+    because it waits for them. The promise is about what is true once it has
+    answered.
+
+    Assertions and why. First that a write was actually running when the cut-off
+    was called — without it the test proves nothing and would pass on anything.
+    Then that none is running once ``cut_off`` has returned.
+
+    How to read a failure. "still running" means the delivery no longer holds
+    the cut-off back, which is what happens when the gate check and the write
+    stop being one step.
+    """
+    proxy, recorder, close = _stuck_delivery(monkeypatch)
+    try:
         running_before = recorder.in_flight()
         assert running_before > 0, (
             "no write was running when the cut-off was called, so this test "
             "proves nothing — the arrangement failed to fill the socket buffers"
         )
-
-        delivering.cut_off(TIMEOUT)
+        proxy.cut_off(TIMEOUT)
         running_after = recorder.in_flight()
     finally:
-        client_side.close()
-        router_side.close()
-        upstream.shutdown()
+        close()
 
     assert running_after == 0, (
         f"cut_off returned while {running_after} write(s) were still running. "
         f"It must not answer until the delivery has stopped, or a caller is "
-        f"told the store is unreachable while bytes are still moving "
+        f"told the gate is closed while bytes are still crossing it "
         f"(running when it was called: {running_before})"
+    )
+
+
+def test_restoring_while_a_cut_off_waits_does_not_let_it_claim_a_closed_gate(monkeypatch):
+    """Two control calls that both move the gate must not interleave.
+
+    Scenario. A cut-off is waiting for a delivery to finish. While it waits,
+    something else restores the gate. Both calls return.
+
+    What is tested. That the cut-off does not answer "cut off" on a gate that
+    has since been reopened. It waits with the lock released, so another gate
+    move can land inside it — and a caller told the gate is closed, on a gate
+    that is open, has been told something untrue. Writes go on happening after
+    that answer.
+
+    Assertions and why. First that the cut-off really was waiting — without it
+    the two calls ran in sequence and nothing was tested. Then that the gate
+    matches what the cut-off returned.
+
+    How to read a failure. A returned kind that does not match the gate means
+    gate moves are interleaving and have to be serialised against each other.
+    Reads and the accept path must NOT be serialised with them; that is the
+    fault this whole section exists to fix.
+    """
+    proxy, recorder, close = _stuck_delivery(monkeypatch)
+    when: dict[str, float] = {}
+
+    def cut_it_off() -> None:
+        proxy.cut_off(TIMEOUT)
+        when["cut_off_returned"] = time.monotonic()
+
+    try:
+        cutting = threading.Thread(target=cut_it_off, daemon=True)
+        cutting.start()
+        cutting.join(0.3)
+        assert cutting.is_alive(), (
+            "the cut-off returned before the delivery finished, so it never "
+            "waited and this test proves nothing about interleaving"
+        )
+
+        # This is the interleaving attempt. Serialised, it cannot complete until
+        # the cut-off has. Not serialised, it returns straight away -- and the
+        # cut-off then answers "cut off" on a gate this call has reopened.
+        proxy.restore()
+        when["restore_returned"] = time.monotonic()
+
+        cutting.join(_SHORT_SEND_DEADLINE + 3.0)
+        assert not cutting.is_alive(), "the cut-off never returned"
+    finally:
+        close()
+
+    assert when["restore_returned"] >= when["cut_off_returned"], (
+        f"the restore completed {when['cut_off_returned'] - when['restore_returned']:.3f}s "
+        f"BEFORE the cut-off returned, so it landed inside the cut-off's wait. "
+        f"The cut-off then answered on a gate the restore had already reopened, "
+        f"and writes continue after that answer. Gate moves must be serialised "
+        f"against each other -- but never against reads or the accept path, "
+        f"which is the fault this section exists to fix"
     )
 
 

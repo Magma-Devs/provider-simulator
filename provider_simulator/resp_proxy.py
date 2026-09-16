@@ -272,6 +272,14 @@ class RespProxy:
         # condition instead, which is the one place waiting is the promise.
         self._delivering = 0
         self._deliveries_finished = threading.Condition(self._lock)
+        # Gate MOVES are serialised against each other here, never against a
+        # read. ``cut_off`` releases ``_lock`` while it waits for deliveries, so
+        # without this a ``restore`` lands inside that wait and the cut-off then
+        # answers "cut off" on a gate somebody else has reopened.
+        #
+        # Always taken BEFORE ``_lock``, never after, so the two cannot deadlock.
+        # Readers and the accept path take neither.
+        self._transitions = threading.Lock()
 
     # ── the gate ──────────────────────────────────────────────────────────────
 
@@ -287,7 +295,7 @@ class RespProxy:
         """
         if kind not in CUT_OFF_KINDS:
             raise UnknownCutOffKind(kind)
-        with self._lock:
+        with self._transitions, self._lock:
             self._state = kind
             # Deliveries that passed the gate check before it closed are still
             # running. Wait for them, because the promise this call makes is
@@ -302,11 +310,17 @@ class RespProxy:
             #
             # ``wait`` releases the lock, so readers, ``restore`` and the accept
             # path keep answering throughout. Only this call waits.
-            while self._delivering:
-                self._deliveries_finished.wait()
+            # Read the live set BEFORE the wait, not after. This counter is how
+            # a test proves the cut-off reached connections that ALREADY EXISTED,
+            # so the population it means is the one present when the cut-off was
+            # asked for. Snapshotting after the wait counts a later set, and a
+            # connection that died during the wait would make a cut-off look as
+            # though it reached nothing.
             live = list(self._live)
             if kind == ERROR:
                 self._counters.closed_by_cut_off += len(live)
+            while self._delivering:
+                self._deliveries_finished.wait()
         if kind == ERROR:
             for conn in live:
                 _shutdown(conn.downstream)
@@ -321,7 +335,7 @@ class RespProxy:
         their next poll. Connections closed by an ``error`` cut-off are gone --
         the client opens new ones, which is what a real client does.
         """
-        with self._lock:
+        with self._transitions, self._lock:
             self._state = FORWARDING
         return FORWARDING
 
@@ -521,11 +535,13 @@ class RespProxy:
         False means the connection is finished. A closed gate is not a failure --
         the bytes are dropped and the connection stays.
         """
-        with self._lock:
-            if self._state != FORWARDING:
-                return True
-            self._delivering += 1
+        registered = False
         try:
+            with self._lock:
+                if self._state != FORWARDING:
+                    return True
+                self._delivering += 1
+                registered = True
             # The socket's own timeout is the poll interval, which is far too
             # short to write a large reply. Raise it for the write and put it
             # back, so liveness stays responsive and delivery gets a real
@@ -543,9 +559,16 @@ class RespProxy:
             # cut-off waiting on it. Without this a failed delivery would hold
             # every later cut-off for ever, which is worse than the fault being
             # fixed here.
-            with self._lock:
-                self._delivering -= 1
-                self._deliveries_finished.notify_all()
+            #
+            # The ``try`` opens BEFORE the registering lock rather than after it,
+            # so nothing can land between the count going up and the handler that
+            # brings it down. ``registered`` is what makes that safe: the early
+            # return on a closed gate has not counted anything and must not
+            # discount anything.
+            if registered:
+                with self._lock:
+                    self._delivering -= 1
+                    self._deliveries_finished.notify_all()
         return True
 
 
