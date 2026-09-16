@@ -391,6 +391,11 @@ def test_a_reply_larger_than_one_socket_buffer_arrives_whole(proxy, runner):
 # far above the real cost and far below the fault.
 _CONTROL_CALL_BOUND_SECONDS = 1.0
 
+# How long a restore must be held up while a cut-off drains, before the test
+# accepts that the two were serialised. Far above the microseconds a thread race
+# produces, and far below the drain it is waiting out.
+_RESTORE_MUST_WAIT_SECONDS = 0.5
+
 # A write deadline short enough for a suite. The real one is thirty seconds,
 # which is a delivery budget for a 4 MB cache reply and not a number a test
 # should sit through. Only the WAIT changes; the ordering under test does not.
@@ -487,6 +492,17 @@ def _stuck_delivery(monkeypatch):
     client_side.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
     recorder = _RecordingSocket(router_side)
     threading.Thread(target=proxy.serve, args=(recorder,), daemon=True).start()
+    # The control, taken HERE and nowhere later: the same call on the same proxy
+    # while nothing is stuck. Taken after the delivery is blocked it is no longer
+    # a control -- on a proxy that holds its lock across the write, THIS call is
+    # the frozen one, and it absorbs the whole freeze while nothing asserts on
+    # it. The measured call then runs against a proxy that is already free and
+    # the test passes on the very code it exists to catch. Measured: the
+    # misplaced baseline took 1.992 s and left zero deliveries running.
+    started = time.monotonic()
+    proxy.state()
+    baseline = time.monotonic() - started
+
     client_side.sendall(b"*1\r\n$4\r\nPING\r\n")
     _wait_until(lambda: recorder.in_flight() > 0, "the delivery never started")
 
@@ -495,7 +511,7 @@ def _stuck_delivery(monkeypatch):
         router_side.close()
         upstream.shutdown()
 
-    return proxy, recorder, close
+    return proxy, recorder, close, baseline
 
 
 def test_a_client_that_stopped_reading_does_not_freeze_the_control_calls(monkeypatch):
@@ -532,7 +548,7 @@ def test_a_client_that_stopped_reading_does_not_freeze_the_control_calls(monkeyp
     How to read a failure. "did not answer" means the lock is held across the
     write — look at the delivery path in ``resp_proxy``.
     """
-    proxy, recorder, close = _stuck_delivery(monkeypatch)
+    proxy, recorder, close, baseline = _stuck_delivery(monkeypatch)
     answer: dict[str, object] = {}
 
     def ask_the_proxy_what_its_gate_is() -> None:
@@ -540,10 +556,6 @@ def test_a_client_that_stopped_reading_does_not_freeze_the_control_calls(monkeyp
 
     try:
         assert recorder.in_flight() > 0, "no delivery is running; nothing is being measured"
-
-        baseline = time.monotonic()
-        proxy.state()
-        baseline_took = time.monotonic() - baseline
 
         asking = threading.Thread(target=ask_the_proxy_what_its_gate_is, daemon=True)
         asking.start()
@@ -556,9 +568,82 @@ def test_a_client_that_stopped_reading_does_not_freeze_the_control_calls(monkeyp
         f"a control call did not answer within {_CONTROL_CALL_BOUND_SECONDS}s "
         f"while one client had stopped reading its reply. The proxy's lock is "
         f"held across the delivery, so every caller waits for the slowest "
-        f"client (the same call with nothing stuck: {baseline_took:.4f}s)"
+        f"client (the same call with nothing stuck: {baseline:.4f}s)"
     )
     assert answer["state"] == FORWARDING, f"the control call answered but with the wrong gate: {answer['state']!r}"
+
+
+class _AcceptSignallingSocket:
+    """A socket that says when the proxy started carrying it.
+
+    ``serve`` takes the lock to count the connection and add it to the live set,
+    and only then does ``_carry`` set this socket's timeout. So the first
+    ``settimeout`` is the moment the accept path got THROUGH the lock, which is
+    what this measures. Reading a counter instead would not work: the counter
+    readers take the same lock, so a frozen proxy would freeze the measurement
+    as well as the thing being measured.
+    """
+
+    def __init__(self, wrapped: socket.socket) -> None:
+        self._wrapped = wrapped
+        self.carried = threading.Event()
+
+    def settimeout(self, value):  # noqa: ANN001, ANN201 - mirrors socket.settimeout
+        self.carried.set()
+        return self._wrapped.settimeout(value)
+
+    def __getattr__(self, name):  # noqa: ANN001, ANN204 - pass the rest through
+        return getattr(self._wrapped, name)
+
+
+def test_a_client_that_stopped_reading_does_not_block_accepting_the_next_one(monkeypatch):
+    """A new connection must be accepted while another client is being slow.
+
+    Scenario. One client has stopped reading its reply, so a delivery is stuck.
+    A second client arrives.
+
+    What is tested. That the second one is taken on anyway. Accepting needs the
+    same lock every control path needs, so when the delivery held that lock the
+    arrivals queued behind it — **this is the symptom that was actually reported
+    from the cluster**: the control listener starved at roughly 770 live
+    connections, and the connection count climbed because nothing could finish
+    being accepted.
+
+    It had no test until now. The freeze test covers reading the state; this one
+    covers the path that broke.
+
+    Setup. A stuck delivery, then a second connection handed to ``serve`` on its
+    own thread, wrapped so it reports the moment the accept path got through.
+
+    Assertions and why. That the report arrives inside a bound. Waiting for a
+    counter instead would deadlock the measurement against the thing measured,
+    because the counter readers take the same lock.
+
+    How to read a failure. "was not accepted" means arrivals are queued behind
+    the slow client, which is the reported symptom returning.
+    """
+    proxy, recorder, close, baseline = _stuck_delivery(monkeypatch)
+    second_router_side, second_client_side = socket.socketpair()
+    arriving = _AcceptSignallingSocket(second_router_side)
+
+    try:
+        assert recorder.in_flight() > 0, "no delivery is running; nothing is being measured"
+
+        threading.Thread(target=proxy.serve, args=(arriving,), daemon=True).start()
+        accepted = arriving.carried.wait(_CONTROL_CALL_BOUND_SECONDS)
+    finally:
+        second_client_side.close()
+        second_router_side.close()
+        close()
+
+    assert accepted, (
+        f"a second connection was not accepted within "
+        f"{_CONTROL_CALL_BOUND_SECONDS}s while one client had stopped reading. "
+        f"Arrivals are queued behind the slow client's delivery, which is the "
+        f"symptom reported from the cluster — the connection count climbs and "
+        f"the control listener starves (a control call with nothing stuck "
+        f"takes {baseline:.4f}s)"
+    )
 
 
 def test_cutting_off_does_not_return_while_a_write_is_still_running(monkeypatch):
@@ -586,7 +671,7 @@ def test_cutting_off_does_not_return_while_a_write_is_still_running(monkeypatch)
     the cut-off back, which is what happens when the gate check and the write
     stop being one step.
     """
-    proxy, recorder, close = _stuck_delivery(monkeypatch)
+    proxy, recorder, close, baseline = _stuck_delivery(monkeypatch)
     try:
         running_before = recorder.in_flight()
         assert running_before > 0, (
@@ -627,12 +712,10 @@ def test_restoring_while_a_cut_off_waits_does_not_let_it_claim_a_closed_gate(mon
     Reads and the accept path must NOT be serialised with them; that is the
     fault this whole section exists to fix.
     """
-    proxy, recorder, close = _stuck_delivery(monkeypatch)
-    when: dict[str, float] = {}
+    proxy, recorder, close, baseline = _stuck_delivery(monkeypatch)
 
     def cut_it_off() -> None:
         proxy.cut_off(TIMEOUT)
-        when["cut_off_returned"] = time.monotonic()
 
     try:
         cutting = threading.Thread(target=cut_it_off, daemon=True)
@@ -646,18 +729,26 @@ def test_restoring_while_a_cut_off_waits_does_not_let_it_claim_a_closed_gate(mon
         # This is the interleaving attempt. Serialised, it cannot complete until
         # the cut-off has. Not serialised, it returns straight away -- and the
         # cut-off then answers "cut off" on a gate this call has reopened.
+        # Measure how long the restore is HELD UP, not which thread stamps a
+        # clock first. Comparing two timestamps taken in two threads either side
+        # of the same lock release decides on a scheduling coin flip: measured
+        # 15 passes in 17 against the unserialised code, on a margin of 35
+        # microseconds. Held-up time separates the two by three orders of
+        # magnitude instead -- serialised it waits out the rest of the drain,
+        # unserialised it returns at once.
+        started = time.monotonic()
         proxy.restore()
-        when["restore_returned"] = time.monotonic()
+        restore_waited = time.monotonic() - started
 
         cutting.join(_SHORT_SEND_DEADLINE + 3.0)
         assert not cutting.is_alive(), "the cut-off never returned"
     finally:
         close()
 
-    assert when["restore_returned"] >= when["cut_off_returned"], (
-        f"the restore completed {when['cut_off_returned'] - when['restore_returned']:.3f}s "
-        f"BEFORE the cut-off returned, so it landed inside the cut-off's wait. "
-        f"The cut-off then answered on a gate the restore had already reopened, "
+    assert restore_waited >= _RESTORE_MUST_WAIT_SECONDS, (
+        f"restore returned in {restore_waited:.4f}s while a cut-off was still "
+        f"draining, so it did not wait for it and the two gate moves overlap. "
+        f"The cut-off then answers on a gate the restore has already reopened, "
         f"and writes continue after that answer. Gate moves must be serialised "
         f"against each other -- but never against reads or the accept path, "
         f"which is the fault this section exists to fix"

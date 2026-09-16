@@ -297,28 +297,31 @@ class RespProxy:
             raise UnknownCutOffKind(kind)
         with self._transitions, self._lock:
             self._state = kind
+            # Read the live set BEFORE the wait below, not after. This counter
+            # is how a test proves a cut-off reached connections that ALREADY
+            # EXISTED, so the population it means is the one present when the
+            # cut-off was asked for. Snapshotting after the wait counts a later
+            # set, and a connection that died during the wait would make a
+            # cut-off look as though it reached nothing.
+            live = list(self._live)
+            if kind == ERROR:
+                self._counters.closed_by_cut_off += len(live)
+
             # Deliveries that passed the gate check before it closed are still
             # running. Wait for them, because the promise this call makes is
             # that nothing is written once it has answered -- and a caller told
             # the gate is closed while bytes are still crossing it has been told
             # something untrue.
             #
+            # ``wait`` releases ``_lock``, so reads and the accept path keep
+            # answering throughout. They are the callers this whole change is
+            # for. ``_transitions`` is what stops another GATE MOVE using the
+            # same opening.
+            #
             # Note what this call does NOT do: it never makes the store
             # unreachable. It cuts the ROUTER off from the store, and the
             # control listener keeps reading the store directly throughout,
             # which is what makes a recovery test a recovery and not a re-fetch.
-            #
-            # ``wait`` releases the lock, so readers, ``restore`` and the accept
-            # path keep answering throughout. Only this call waits.
-            # Read the live set BEFORE the wait, not after. This counter is how
-            # a test proves the cut-off reached connections that ALREADY EXISTED,
-            # so the population it means is the one present when the cut-off was
-            # asked for. Snapshotting after the wait counts a later set, and a
-            # connection that died during the wait would make a cut-off look as
-            # though it reached nothing.
-            live = list(self._live)
-            if kind == ERROR:
-                self._counters.closed_by_cut_off += len(live)
             while self._delivering:
                 self._deliveries_finished.wait()
         if kind == ERROR:
@@ -531,6 +534,11 @@ class RespProxy:
         because accepting also needed the lock.
 
         Waiting is right for ``cut_off`` alone, and it now waits on the count.
+        ``restore`` is the one exception, and it is deliberate: it queues behind
+        a ``cut_off`` that is still draining, because two gate moves that
+        overlap let the cut-off answer on a gate the restore has reopened. So a
+        restore CAN be held up for the write deadline. Reads and the accept path
+        cannot.
 
         False means the connection is finished. A closed gate is not a failure --
         the bytes are dropped and the connection stays.
