@@ -147,6 +147,18 @@ def test_post_resp_cutoff_takes_both_kinds(listener):
         assert payload["proxy"]["state"] == kind
 
 
+def test_post_resp_latency_sets_how_long_the_store_takes_to_answer(listener):
+    status, payload = _post(listener, "/resp/latency", {"ms": 150})
+    assert status == 200
+    assert payload["proxy"]["latency_ms"] == 150
+
+
+def test_an_unknown_post_action_is_a_404_that_lists_latency_among_the_real_ones(listener):
+    status, payload = _post(listener, "/resp/nope")
+    assert status == 404
+    assert payload["actions"] == ["cutoff", "restore", "flush", "counters/reset", "latency"]
+
+
 def test_post_resp_cutoff_without_a_kind_is_refused(listener):
     status, payload = _post(listener, "/resp/cutoff", {})
     assert status == 400

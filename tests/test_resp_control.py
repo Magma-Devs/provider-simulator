@@ -148,6 +148,45 @@ def test_restoring_puts_the_gate_back(control):
     assert payload["proxy"]["state"] == FORWARDING
 
 
+# ── latency ───────────────────────────────────────────────────────────────────
+
+
+def test_setting_a_latency_answers_with_the_value_it_set(control):
+    status, payload = control.set_latency("primary", {"ms": 150})
+    assert status == 200
+    assert payload["proxy"]["latency_ms"] == 150
+
+
+def test_the_state_route_reports_the_current_latency(control):
+    control.set_latency("primary", {"ms": 150})
+    status, payload = control.get_state("primary")
+    assert status == 200
+    assert payload["latency_ms"] == 150
+
+
+def test_a_latency_for_a_store_that_does_not_exist_is_refused(control):
+    status, payload = control.set_latency("no-such-store", {"ms": 150})
+    assert status == 404
+    assert "no-such-store" in payload["error"]
+
+
+def test_a_latency_with_no_value_says_what_it_needed(control):
+    status, payload = control.set_latency("primary", {})
+    assert status == 400
+    assert "ms" in payload["error"]
+
+
+def test_a_non_numeric_latency_is_refused(control):
+    status, payload = control.set_latency("primary", {"ms": "abc"})
+    assert status == 400
+    assert "abc" in payload["error"]
+
+
+def test_a_negative_latency_is_refused(control):
+    status, payload = control.set_latency("primary", {"ms": -1})
+    assert status == 400
+
+
 # ── flush ─────────────────────────────────────────────────────────────────────
 
 
@@ -196,6 +235,7 @@ def test_the_control_api_offers_no_way_to_put_an_entry_in():
         "register",
         "reset_counters",
         "restore",
+        "set_latency",
     }
 
 

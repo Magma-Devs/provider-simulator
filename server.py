@@ -893,9 +893,11 @@ def _dispatch_resp_post(control: RespControlApi, path: str, body: dict, query: d
         return control.flush(name, query)
     if action == "counters/reset":
         return control.reset_counters(name)
+    if action == "latency":
+        return control.set_latency(name, body)
     return 404, {
         "error": f"unknown RESP action {action!r}",
-        "actions": ["cutoff", "restore", "flush", "counters/reset"],
+        "actions": ["cutoff", "restore", "flush", "counters/reset", "latency"],
         "note": "there is deliberately no write: a test that can plant an entry "
         "will plant one instead of making the router store it",
     }
