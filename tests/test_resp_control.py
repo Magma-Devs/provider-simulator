@@ -182,9 +182,20 @@ def test_a_non_numeric_latency_is_refused(control):
     assert "abc" in payload["error"]
 
 
+def test_an_infinite_latency_is_refused(control):
+    """``int()`` cannot round an infinite float, and Python's own json module
+    both emits and accepts the non-standard literal ``Infinity`` -- so this
+    value can arrive from a real caller, not only from a test that constructs
+    it directly."""
+    status, payload = control.set_latency("primary", {"ms": float("inf")})
+    assert status == 400
+    assert "must be a whole number of milliseconds" in payload["error"]
+
+
 def test_a_negative_latency_is_refused(control):
     status, payload = control.set_latency("primary", {"ms": -1})
     assert status == 400
+    assert "latency must be zero or more" in payload["error"]
 
 
 # ── flush ─────────────────────────────────────────────────────────────────────
@@ -303,6 +314,10 @@ def test_a_history_only_clear_leaves_the_gate_alone(store):
 
 
 def test_a_whole_simulator_reset_clears_the_latency(store):
+    """A latency left set does not fail the next test -- it only makes it
+    slower, and a slow pass never explains why. A whole-simulator reset is
+    where that leftover has to end, the same way it already ends a leftover
+    cut-off gate."""
     from provider_simulator.control_api import ControlApi
     from provider_simulator.domain.registry import build_registry
     from provider_simulator.listeners.ws import WsSubscriptions

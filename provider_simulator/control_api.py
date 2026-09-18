@@ -238,6 +238,10 @@ class ControlApi:
         a whole-simulator reset), every provider key it touched and every chain
         whose head it moved. A caller can therefore check what happened rather
         than trust that the call meant what it asked for.
+
+        The RESP proxy latency is the one exception to that promise: it is
+        cleared on every call regardless of scope, so there is no scope for
+        the reply to name.
         """
         providers, chains, error = self._scope(pool)
         if error:

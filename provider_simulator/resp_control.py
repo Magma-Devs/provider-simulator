@@ -203,7 +203,11 @@ class RespControlApi:
             }
         try:
             latency_ms = int(raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError is what int() raises for a float infinity, not a
+            # ValueError -- and Python's own json module both emits and parses
+            # the non-standard literal `Infinity`, so this is reachable from a
+            # real request body, not only from a test.
             return 400, {"error": f"ms must be a whole number of milliseconds, got {raw!r}"}
         try:
             proxy.set_latency(latency_ms)
