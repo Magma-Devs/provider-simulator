@@ -148,6 +148,56 @@ def test_restoring_puts_the_gate_back(control):
     assert payload["proxy"]["state"] == FORWARDING
 
 
+# ── latency ───────────────────────────────────────────────────────────────────
+
+
+def test_setting_a_latency_answers_with_the_value_it_set(control):
+    status, payload = control.set_latency("primary", {"ms": 150})
+    assert status == 200
+    assert payload["proxy"]["latency_ms"] == 150
+
+
+def test_the_state_route_reports_the_current_latency(control):
+    control.set_latency("primary", {"ms": 150})
+    status, payload = control.get_state("primary")
+    assert status == 200
+    assert payload["latency_ms"] == 150
+
+
+def test_a_latency_for_a_store_that_does_not_exist_is_refused(control):
+    status, payload = control.set_latency("no-such-store", {"ms": 150})
+    assert status == 404
+    assert "no-such-store" in payload["error"]
+
+
+def test_a_latency_with_no_value_says_what_it_needed(control):
+    status, payload = control.set_latency("primary", {})
+    assert status == 400
+    assert "ms" in payload["error"]
+
+
+def test_a_non_numeric_latency_is_refused(control):
+    status, payload = control.set_latency("primary", {"ms": "abc"})
+    assert status == 400
+    assert "abc" in payload["error"]
+
+
+def test_an_infinite_latency_is_refused(control):
+    """``int()`` cannot round an infinite float, and Python's own json module
+    both emits and accepts the non-standard literal ``Infinity`` -- so this
+    value can arrive from a real caller, not only from a test that constructs
+    it directly."""
+    status, payload = control.set_latency("primary", {"ms": float("inf")})
+    assert status == 400
+    assert "must be a whole number of milliseconds" in payload["error"]
+
+
+def test_a_negative_latency_is_refused(control):
+    status, payload = control.set_latency("primary", {"ms": -1})
+    assert status == 400
+    assert "latency must be zero or more" in payload["error"]
+
+
 # ── flush ─────────────────────────────────────────────────────────────────────
 
 
@@ -196,6 +246,7 @@ def test_the_control_api_offers_no_way_to_put_an_entry_in():
         "register",
         "reset_counters",
         "restore",
+        "set_latency",
     }
 
 
@@ -257,3 +308,59 @@ def test_a_history_only_clear_leaves_the_gate_alone(store):
     resp.cut_off("primary", {"kind": TIMEOUT})
     api.clear_history(None)
     assert resp.get_state("primary")[1]["state"] == TIMEOUT
+
+
+# ── a reset clears the latency ──────────────────────────────────────────────
+
+
+def test_a_whole_simulator_reset_clears_the_latency(store):
+    """A latency left set does not fail the next test -- it only makes it
+    slower, and a slow pass never explains why. A whole-simulator reset is
+    where that leftover has to end, the same way it already ends a leftover
+    cut-off gate."""
+    from provider_simulator.control_api import ControlApi
+    from provider_simulator.domain.registry import build_registry
+    from provider_simulator.listeners.ws import WsSubscriptions
+
+    resp = RespControlApi()
+    resp.register("primary", "127.0.0.1", store.port)
+    api = ControlApi(build_registry(), WsSubscriptions(), None, {}, resp.proxies)
+
+    resp.set_latency("primary", {"ms": 150})
+    api.reset_all(None)
+    _, state = resp.get_state("primary")
+    assert state["latency_ms"] == 0
+
+
+def test_a_pool_scoped_reset_also_clears_the_latency(store):
+    """A leftover latency makes a later test slow, never wrong, so nothing
+    would report it. It is cleared on every reset, not only a whole-simulator
+    one — which is deliberately different from the cut-off gate."""
+    from provider_simulator.control_api import ControlApi
+    from provider_simulator.domain.registry import build_registry
+    from provider_simulator.listeners.ws import WsSubscriptions
+
+    resp = RespControlApi()
+    resp.register("primary", "127.0.0.1", store.port)
+    api = ControlApi(build_registry(), WsSubscriptions(), None, {}, resp.proxies)
+
+    resp.set_latency("primary", {"ms": 150})
+    api.reset_all("eth-sim")
+    _, state = resp.get_state("primary")
+    assert state["latency_ms"] == 0
+
+
+def test_a_pool_scoped_reset_still_leaves_the_gate_alone(store):
+    """The gate's own rule is unchanged by this work."""
+    from provider_simulator.control_api import ControlApi
+    from provider_simulator.domain.registry import build_registry
+    from provider_simulator.listeners.ws import WsSubscriptions
+
+    resp = RespControlApi()
+    resp.register("primary", "127.0.0.1", store.port)
+    api = ControlApi(build_registry(), WsSubscriptions(), None, {}, resp.proxies)
+
+    resp.cut_off("primary", {"kind": ERROR})
+    api.reset_all("eth-sim")
+    _, state = resp.get_state("primary")
+    assert state["state"] == ERROR

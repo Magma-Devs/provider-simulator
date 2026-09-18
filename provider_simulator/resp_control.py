@@ -37,6 +37,7 @@ from __future__ import annotations
 from provider_simulator.resp_proxy import (
     CUT_OFF_KINDS,
     RESP_PROXY_IDLE_SECONDS,
+    NegativeLatency,
     RespProxy,
     RespProxyRegistry,
     UnknownCutOffKind,
@@ -177,6 +178,42 @@ class RespControlApi:
             return 404, self._unknown(name)
         proxy.restore()
         return 200, {"status": "restored", "proxy": proxy.as_dict()}
+
+    def set_latency(self, name: str, body: dict) -> tuple[int, dict]:
+        """How long this store takes to answer, in milliseconds.
+
+        Separate from the gate: the gate says whether the router can reach the
+        store at all, and this says how quickly it answers when it can. A test
+        can set both.
+
+        The reply carries the proxy's whole state, so a caller can confirm the
+        value landed rather than trust that the call meant what it asked for. A
+        latency that did not apply is the worst failure this route has: the
+        router then answers from its cache and the test reads a hit, which looks
+        like the router handling a slow store correctly.
+        """
+        proxy = self.proxies.get(name)
+        if proxy is None:
+            return 404, self._unknown(name)
+        raw = body.get("ms")
+        if raw is None:
+            return 400, {
+                "error": "latency needs an ms value",
+                "note": "how many milliseconds the store takes to answer; 0 is instant",
+            }
+        try:
+            latency_ms = int(raw)
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError is what int() raises for a float infinity, not a
+            # ValueError -- and Python's own json module both emits and parses
+            # the non-standard literal `Infinity`, so this is reachable from a
+            # real request body, not only from a test.
+            return 400, {"error": f"ms must be a whole number of milliseconds, got {raw!r}"}
+        try:
+            proxy.set_latency(latency_ms)
+        except NegativeLatency as exc:
+            return 400, {"error": str(exc)}
+        return 200, {"status": "latency set", "proxy": proxy.as_dict()}
 
     def flush(self, name: str, query: dict | None = None) -> tuple[int, dict]:
         """Remove the entries matching a pattern, so a test starts from nothing.
