@@ -309,7 +309,12 @@ class RespProxy:
             return self._latency_ms
 
     def set_latency(self, latency_ms: int) -> int:
-        """How long the store takes to answer, in milliseconds. Zero is instant."""
+        """How long the store takes to answer, in milliseconds. Zero is instant.
+
+        Paid once per ``_CHUNK`` of the store's reply that the proxy carries,
+        so a reply larger than ``_CHUNK`` bytes waits a multiple of this value,
+        not a single helping of it.
+        """
         if latency_ms < 0:
             raise NegativeLatency(latency_ms)
         with self._lock:
@@ -618,6 +623,10 @@ class RespProxy:
         discipline ``_send_if_forwarding`` uses for its write: one lock serves
         every control path and the accept path, so holding it across a sleep
         would freeze a state read for as long as the latency.
+
+        Called once per chunk carried from the store, not once per reply, so a
+        reply larger than ``_CHUNK`` bytes pays this sleep that many times and
+        waits a multiple of the configured latency.
         """
         with self._lock:
             latency_ms = self._latency_ms
