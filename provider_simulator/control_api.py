@@ -288,6 +288,12 @@ class ControlApi:
         if pool is None and scenario:
             resp_names = self.resp_proxies.names()
             self.resp_proxies.restore_all()
+        # The gate is reopened only by a whole-simulator reset, above. The
+        # latency is cleared by every reset, including a pool-scoped one. The
+        # two differ on purpose: a gate left closed makes a later test read a
+        # store it cannot reach, which its own checks catch, while a latency
+        # left set only makes a later test slow — nothing reports that.
+        self.resp_proxies.clear_latency_all()
         return 200, {
             "status": status,
             "pool": pool,

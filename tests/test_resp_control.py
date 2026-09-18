@@ -297,3 +297,55 @@ def test_a_history_only_clear_leaves_the_gate_alone(store):
     resp.cut_off("primary", {"kind": TIMEOUT})
     api.clear_history(None)
     assert resp.get_state("primary")[1]["state"] == TIMEOUT
+
+
+# ── a reset clears the latency ──────────────────────────────────────────────
+
+
+def test_a_whole_simulator_reset_clears_the_latency(store):
+    from provider_simulator.control_api import ControlApi
+    from provider_simulator.domain.registry import build_registry
+    from provider_simulator.listeners.ws import WsSubscriptions
+
+    resp = RespControlApi()
+    resp.register("primary", "127.0.0.1", store.port)
+    api = ControlApi(build_registry(), WsSubscriptions(), None, {}, resp.proxies)
+
+    resp.set_latency("primary", {"ms": 150})
+    api.reset_all(None)
+    _, state = resp.get_state("primary")
+    assert state["latency_ms"] == 0
+
+
+def test_a_pool_scoped_reset_also_clears_the_latency(store):
+    """A leftover latency makes a later test slow, never wrong, so nothing
+    would report it. It is cleared on every reset, not only a whole-simulator
+    one — which is deliberately different from the cut-off gate."""
+    from provider_simulator.control_api import ControlApi
+    from provider_simulator.domain.registry import build_registry
+    from provider_simulator.listeners.ws import WsSubscriptions
+
+    resp = RespControlApi()
+    resp.register("primary", "127.0.0.1", store.port)
+    api = ControlApi(build_registry(), WsSubscriptions(), None, {}, resp.proxies)
+
+    resp.set_latency("primary", {"ms": 150})
+    api.reset_all("eth-sim")
+    _, state = resp.get_state("primary")
+    assert state["latency_ms"] == 0
+
+
+def test_a_pool_scoped_reset_still_leaves_the_gate_alone(store):
+    """The gate's own rule is unchanged by this work."""
+    from provider_simulator.control_api import ControlApi
+    from provider_simulator.domain.registry import build_registry
+    from provider_simulator.listeners.ws import WsSubscriptions
+
+    resp = RespControlApi()
+    resp.register("primary", "127.0.0.1", store.port)
+    api = ControlApi(build_registry(), WsSubscriptions(), None, {}, resp.proxies)
+
+    resp.cut_off("primary", {"kind": ERROR})
+    api.reset_all("eth-sim")
+    _, state = resp.get_state("primary")
+    assert state["state"] == ERROR
