@@ -25,7 +25,7 @@ import time
 import pytest
 
 from provider_simulator import resp_proxy as resp_proxy_module
-from provider_simulator.resp_proxy import ERROR, FORWARDING, TIMEOUT, RespProxy, UnknownCutOffKind
+from provider_simulator.resp_proxy import ERROR, FORWARDING, TIMEOUT, NegativeLatency, RespProxy, UnknownCutOffKind
 from provider_simulator.resp_store import RespStore, RespStoreError
 from tests.resp_fake_store import FakeRespStore
 
@@ -242,6 +242,50 @@ def test_restore_reports_the_state_it_returned_to(proxy):
     proxy.cut_off(ERROR)
     assert proxy.restore() == FORWARDING
     assert proxy.state() == FORWARDING
+
+
+# ── latency ───────────────────────────────────────────────────────────────────
+
+
+def test_a_new_proxy_carries_no_latency(proxy):
+    assert proxy.latency_ms() == 0
+    assert proxy.as_dict()["latency_ms"] == 0
+
+
+def test_a_negative_latency_is_refused_by_name(proxy):
+    with pytest.raises(NegativeLatency):
+        proxy.set_latency(-1)
+    assert proxy.latency_ms() == 0, "a refused value must not be stored"
+
+
+def test_a_carried_reply_arrives_after_the_latency(proxy, through_proxy):
+    proxy.set_latency(200)
+    started = time.monotonic()
+    through_proxy.ping()
+    elapsed_ms = (time.monotonic() - started) * 1000.0
+    assert elapsed_ms >= 200, f"the reply came back in {elapsed_ms:.0f}ms, so the latency was not applied"
+
+
+def test_a_round_trip_pays_the_latency_once_not_twice(proxy, through_proxy):
+    """The latency belongs to the store's reply. The command going out is not held.
+
+    A lower bound alone is a weak proof: it only shows that some sleep happened
+    somewhere on the path between sending and reading back the reply. A proxy
+    that delayed BOTH directions would still clear "took at least one latency".
+    The upper bound is what actually tells the two designs apart -- one delayed
+    direction costs at least ``latency_ms`` and less than ``2 * latency_ms``,
+    while two delayed directions cost at least ``2 * latency_ms`` and would
+    fail this bound.
+    """
+    latency_ms = 200
+    proxy.set_latency(latency_ms)
+    started = time.monotonic()
+    through_proxy.ping()
+    elapsed_ms = (time.monotonic() - started) * 1000.0
+    assert latency_ms <= elapsed_ms < 2 * latency_ms, (
+        f"a round trip took {elapsed_ms:.0f}ms with a {latency_ms}ms latency set, "
+        f"so the delay is not being applied to exactly one direction"
+    )
 
 
 # ── refusing a kind nobody can act on ─────────────────────────────────────────

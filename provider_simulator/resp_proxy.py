@@ -169,6 +169,19 @@ class UnknownCutOffKind(ValueError):
         )
 
 
+class NegativeLatency(ValueError):
+    """Raised for a latency below zero, naming the value that was asked for.
+
+    A negative sleep is not a faster store; it is a caller who has confused the
+    field with something else. Refusing it by name is cheaper than a proxy that
+    silently behaves as though nothing was asked.
+    """
+
+    def __init__(self, latency_ms: object) -> None:
+        super().__init__(f"latency must be zero or more, got {latency_ms!r}")
+        self.latency_ms = latency_ms
+
+
 @dataclass
 class ProxyCounters:
     """What the proxy has done, for a test that wants to prove it was involved.
@@ -264,6 +277,10 @@ class RespProxy:
         self._idle_seconds = idle_seconds
         self._lock = threading.Lock()
         self._state = FORWARDING
+        # How long the store takes to answer, in milliseconds. Orthogonal to the
+        # gate on purpose: a store can be slow and later be cut off, and a
+        # fourth gate state would have made those two mutually exclusive.
+        self._latency_ms = 0
         self._live: set[_Live] = set()
         self._counters = ProxyCounters()
         # How many deliveries passed the gate check and have not finished. The
@@ -286,6 +303,18 @@ class RespProxy:
     def state(self) -> str:
         with self._lock:
             return self._state
+
+    def latency_ms(self) -> int:
+        with self._lock:
+            return self._latency_ms
+
+    def set_latency(self, latency_ms: int) -> int:
+        """How long the store takes to answer, in milliseconds. Zero is instant."""
+        if latency_ms < 0:
+            raise NegativeLatency(latency_ms)
+        with self._lock:
+            self._latency_ms = int(latency_ms)
+            return self._latency_ms
 
     def cut_off(self, kind: str) -> str:
         """Stop the router reaching the store, in one of the two ways.
@@ -360,6 +389,7 @@ class RespProxy:
             return {
                 "name": self.name,
                 "state": self._state,
+                "latency_ms": self._latency_ms,
                 "target": f"{self.target_host}:{self.target_port}",
                 "live_connections": len(self._live),
                 "counters": self._counters.as_dict(),
@@ -498,6 +528,8 @@ class RespProxy:
                 return False
             if not chunk:
                 return False
+            if src is upstream:
+                self._sleep_latency()
             if not self._send_if_forwarding(dst, chunk):
                 return False
             # Bytes moved, so this connection is in use. Stamped AFTER the
@@ -578,6 +610,19 @@ class RespProxy:
                     self._delivering -= 1
                     self._deliveries_finished.notify_all()
         return True
+
+    def _sleep_latency(self) -> None:
+        """Wait out the configured latency, with the lock released.
+
+        The value is read under the lock and slept on outside it, the same
+        discipline ``_send_if_forwarding`` uses for its write: one lock serves
+        every control path and the accept path, so holding it across a sleep
+        would freeze a state read for as long as the latency.
+        """
+        with self._lock:
+            latency_ms = self._latency_ms
+        if latency_ms > 0:
+            time.sleep(latency_ms / 1000.0)
 
 
 def _dial(host: str, port: int, timeout: float = 2.0) -> socket.socket | None:
@@ -689,3 +734,10 @@ class RespProxyRegistry:
             proxies = list(self._proxies.values())
         for proxy in proxies:
             proxy.restore()
+
+    def clear_latency_all(self) -> None:
+        """Set every proxy back to answering instantly."""
+        with self._lock:
+            proxies = list(self._proxies.values())
+        for proxy in proxies:
+            proxy.set_latency(0)
