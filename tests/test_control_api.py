@@ -611,3 +611,43 @@ def test_a_malformed_move_is_refused_rather_than_answered_as_a_read():
             assert after == before, f"the refused {body} moved something: {before} then {after}"
     finally:
         api.reset()
+
+
+def test_advance_moves_every_chains_head_through_the_real_registry():
+    """The control route has to reach the chain the LISTENER serves.
+
+    The per-chain tests build their own chain object, so they cannot tell
+    whether a head is wired to the ``CHAINS`` singleton that answers real
+    traffic. Proven by mutation: taking the heads off btc and solana entirely
+    left this whole file green, because only eth was ever driven through here.
+
+    Each chain is moved on its own and the others are read back unmoved, so a
+    head shared between chains fails rather than passing on the total.
+    """
+    api = _api()
+    try:
+        names = ["eth", "btc", "solana"]
+        start = {c: api.advance({"chain": c})[1]["heads"]["default"] for c in names}
+        for moving in names:
+            st, resp = api.advance({"chain": moving, "blocks": 3})
+            assert st == 200, resp
+            assert resp["heads"]["default"] == start[moving] + 3, resp
+            for other in names:
+                if other == moving:
+                    continue
+                now = api.advance({"chain": other})[1]["heads"]["default"]
+                expected = start[other] + (3 if names.index(other) < names.index(moving) else 0)
+                assert now == expected, f"moving {moving} disturbed {other}: {now} != {expected}"
+    finally:
+        api.reset()
+
+
+def test_a_reset_rewinds_the_new_heads_too():
+    """A head nothing rewinds leaks into whatever runs next."""
+    api = _api()
+    start = {c: api.advance({"chain": c})[1]["heads"]["default"] for c in ("btc", "solana")}
+    for chain in ("btc", "solana"):
+        api.advance({"chain": chain, "blocks": 250})
+    assert {c: api.advance({"chain": c})[1]["heads"]["default"] for c in ("btc", "solana")} != start
+    api.reset()
+    assert {c: api.advance({"chain": c})[1]["heads"]["default"] for c in ("btc", "solana")} == start

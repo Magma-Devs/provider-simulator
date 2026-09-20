@@ -19,10 +19,15 @@ from provider_simulator.chains.lava import LavaChain
 from provider_simulator.chains.ln import LnChain
 from provider_simulator.chains.solana import SolanaChain
 
+_BTC = BtcChain()
+
 CHAINS: dict[str, Chain] = {
     "eth": EthChain(),
-    "btc": BtcChain(),
-    "ln": LnChain(),
+    "btc": _BTC,
+    # LN reports the height of the BTC chain beneath it, so it is handed
+    # btc's head rather than a constant of its own. It still owns no head,
+    # so ``POST /advance`` on "ln" is refused: you advance btc.
+    "ln": LnChain(btc_head=_BTC.head),
     "solana": SolanaChain(),
     "lava": LavaChain(),
 }

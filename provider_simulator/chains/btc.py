@@ -21,6 +21,40 @@ from stubs_btc import BTC_ERROR_STUBS, BTC_METHOD_DEFAULTS, btc_block_hash
 _HEIGHT_METHODS = {"getblockcount"}
 _HEAD_HASH_METHODS = {"getbestblockhash", "getblockhash"}
 
+#: The head hash the stubs are written against, beside the height.
+_BASE_HEAD_HASH = btc_block_hash(BTC_LATEST_BLOCK)
+
+
+def _restamp_head(value: object, effective_head: int) -> object:
+    """Rewrite every base height and base head-hash in a stub to the head.
+
+    Every stub is written against ``BTC_LATEST_BLOCK``, so a number equal to
+    it IS this chain's height and a string equal to its hash IS this chain's
+    head hash, wherever in the reply they sit.
+
+    Walking the whole reply rather than listing the methods that carry one is
+    the point. A hand-written list was tried first and missed five:
+    ``getchaintips`` (a LIST of blocks), ``getblockstats``, ``getindexinfo``
+    (nested two deep), ``gettxoutsetinfo`` and ``gettxout`` (the hash alone,
+    with no height beside it to notice). Each would have answered the base
+    height while ``getblockcount`` answered the moved one, on the same chain,
+    in the same breath. A method added later is covered without an edit here.
+
+    ``bool`` is rejected before ``int`` because it subclasses it, and a stub
+    flag would otherwise be rewritten into a block height.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value == BTC_LATEST_BLOCK:
+        return effective_head
+    if isinstance(value, str) and value == _BASE_HEAD_HASH:
+        return btc_block_hash(effective_head)
+    if isinstance(value, dict):
+        return {k: _restamp_head(v, effective_head) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_restamp_head(v, effective_head) for v in value]
+    return value
+
 
 class BtcChain(Chain):
     name = "btc"
@@ -67,25 +101,11 @@ class BtcChain(Chain):
         # never see the head move. At rest this recomputes the same values the
         # stub carries, so a reply with a static head is unchanged.
         if method not in responses:
-            if method in _HEIGHT_METHODS:
-                result = effective_head
-            elif method in _HEAD_HASH_METHODS:
-                # ``getblockhash`` WITH a height is left to the block below,
-                # which validates it. Converting it here would raise on a bad
-                # height before that check ever runs -- which it did, once
-                # this recompute stopped being skipped at blocks_behind 0.
-                if not (method == "getblockhash" and params):
-                    result = btc_block_hash(effective_head)
-            elif method == "getblockchaininfo" and isinstance(result, dict):
-                result["blocks"] = effective_head
-                result["headers"] = effective_head
-                result["bestblockhash"] = btc_block_hash(effective_head)
-            elif method == "getblockheader" and isinstance(result, dict):
-                result["height"] = effective_head
-                result["hash"] = btc_block_hash(effective_head)
-            elif method == "getblock" and isinstance(result, dict):
-                result["height"] = effective_head
-                result["hash"] = btc_block_hash(effective_head)
+            # ``getblockhash`` WITH a height is left to the block below, which
+            # validates it -- the walk would restamp the base hash and the
+            # block below overwrites it anyway, so skipping is only clearer.
+            if not (method == "getblockhash" and params):
+                result = _restamp_head(result, effective_head)
 
         # getblockhash echoes the requested height (independent of blocks_behind).
         if method == "getblockhash" and params and method not in responses:
