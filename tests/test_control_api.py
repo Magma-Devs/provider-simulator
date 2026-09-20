@@ -556,3 +556,50 @@ def test_each_chain_owns_its_own_heads():
         )
     finally:
         getattr(eth, "heads", {}).pop(sentinel, None)
+
+
+def test_a_chain_that_is_not_a_string_is_refused_rather_than_crashing():
+    """A JSON body can carry a list or an object where a name belongs.
+
+    ``CHAINS.get`` is a dict lookup, so an unhashable key raises TypeError,
+    and ``do_POST`` does not catch what ``advance`` raises — the caller gets a
+    dropped connection instead of an answer. Every other control route already
+    checks the type of a name it is handed; this one did not.
+    """
+    api = _api()
+    for wrong in ([], {"a": 1}, 7, None):
+        st, resp = api.advance({"chain": wrong})
+        assert st == 400, f"chain={wrong!r} must be refused, got {st} {resp}"
+        assert "chain must be a string" in resp["error"], resp["error"]
+
+
+def test_a_malformed_move_is_refused_rather_than_answered_as_a_read():
+    """``blocks: null`` and ``blocks: false`` are falsey, not absent.
+
+    The move/read decision used to read the VALUE's truthiness, so a caller
+    who asked to move with a malformed number was quietly given a read, told
+    nothing was wrong, and saw an unmoved head. A string got past that and
+    reached ``bump``, which raised ValueError out of the handler. Both are
+    refused now, and neither may move anything.
+    """
+    api = _api()
+    try:
+        before = api.advance({"chain": "lava"})[1]["heads"]
+        for field_name, wrong in (
+            ("blocks", None),
+            ("blocks", False),
+            ("blocks", "abc"),
+            ("blocks", 1.5),
+            ("blocks", -1),
+            ("per_second", None),
+            ("per_second", "fast"),
+            ("per_second", -1),
+        ):
+            body = {"chain": "lava", "head": "rest", field_name: wrong}
+            st, resp = api.advance(body)
+            assert st == 400, f"{field_name}={wrong!r} must be refused, got {st} {resp}"
+            assert field_name in resp["error"], resp["error"]
+            after = api.advance({"chain": "lava"})[1]["heads"]
+            assert after == before, f"the refused {body} moved something: {before} then {after}"
+    finally:
+        api.reset()

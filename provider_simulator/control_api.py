@@ -54,9 +54,12 @@ def _bad_number(field_name: str, value: object) -> str:
     if field_name == "error_probability":
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0:
             return f"error_probability must be a number in [0.0, 1.0], got {value!r}"
-    if field_name in ("latency_ms", "fail_first_n"):
+    if field_name in ("latency_ms", "fail_first_n", "blocks"):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             return f"{field_name} must be a non-negative integer, got {value!r}"
+    if field_name == "per_second":
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            return f"per_second must be a non-negative number, got {value!r}"
     return ""
 
 
@@ -364,6 +367,13 @@ class ControlApi:
         if not isinstance(body, dict):
             return 400, {"error": "request body must be a JSON object"}
         chain_name = body.get("chain", "eth")
+        # A non-string chain reaches ``CHAINS.get`` as an unhashable key and
+        # raises straight out of the handler: ``do_POST`` does not catch what
+        # ``advance`` raises, so the caller gets a dropped connection rather
+        # than a 400 naming the problem. Checked here for the same reason
+        # ``_scope`` checks its pool.
+        if not isinstance(chain_name, str):
+            return 400, {"error": f"chain must be a string, got {type(chain_name).__name__}"}
         chain = CHAINS.get(chain_name)
         if chain is None:
             return 400, {"error": f"there is no chain {chain_name!r}. Chains: {sorted(CHAINS)}"}
@@ -371,12 +381,23 @@ class ControlApi:
         if not heads:
             return 400, {"error": f"chain {chain_name!r} has no advanceable head"}
 
+        # Both numbers are checked BEFORE anything decides move-or-read.
+        # Unchecked, a malformed value chose its own meaning: ``blocks: null``
+        # and ``blocks: false`` are falsey, so a caller who meant to move was
+        # answered with a read and told nothing, and ``blocks: "abc"`` got
+        # past that to ``bump`` and raised ValueError out of the handler.
+        for field_name in ("blocks", "per_second"):
+            if field_name in body:
+                err = _bad_number(field_name, body[field_name])
+                if err:
+                    return 400, {"error": err}
+
         # A move is a request that CHANGES something. ``blocks: 0`` changes
         # nothing, and callers send it as a read — testing for the key rather
         # than the value refused those with a 400 that named a move they had
         # not asked for. ``per_second`` counts even at 0, because setting the
         # rate to zero stops an advancing head, which is a real change.
-        moving = "per_second" in body or bool(body.get("blocks"))
+        moving = "per_second" in body or body.get("blocks", 0) != 0
         head_name = body.get("head")
         if head_name is None:
             # One head means there is nothing to choose, whatever the caller
