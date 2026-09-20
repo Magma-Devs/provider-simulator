@@ -66,6 +66,33 @@ class Chain(ABC):
     name: str
     quirks_type: type[Quirks] = Quirks
 
+    #: Heads this chain serves, keyed by the interface that serves each one.
+    #:
+    #: A chain that speaks one protocol keeps a single ``head`` attribute and
+    #: leaves this empty — eth does. A chain that speaks several serves a
+    #: DIFFERENT height on each, so one head cannot describe it: lava answers
+    #: 20 million over REST, 25 million over gRPC and 5 million over
+    #: Tendermint-RPC. The router tracks a tip per endpoint, so a head per
+    #: interface is what it is actually observing.
+    heads: dict[str, "AdvancingHead"] = {}
+
+    def iter_heads(self) -> "list[tuple[str, AdvancingHead]]":
+        """Every head this chain owns, as ``(name, head)``.
+
+        Callers that move or reset a head go through this rather than reading
+        ``head`` directly, so a chain with one head and a chain with several
+        are handled by the same code. A chain with neither yields nothing.
+
+        The single ``head`` is reported under the name ``"default"``, which is
+        also the name ``POST /advance`` assumes when a caller names none.
+        """
+        found: "list[tuple[str, AdvancingHead]]" = []
+        single = getattr(self, "head", None)
+        if single is not None:
+            found.append(("default", single))
+        found.extend(sorted(self.heads.items()))
+        return found
+
     @abstractmethod
     def build_success(self, request: dict, scenario: dict, quirks: dict, interface: str = "") -> tuple[int, dict]:
         """Return (http_status, response_body) for the success path.

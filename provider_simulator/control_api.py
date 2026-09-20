@@ -248,8 +248,11 @@ class ControlApi:
             return 400, {"error": error}
         if scenario:
             for _, chain in chains:
-                head = getattr(chain, "head", None)
-                if head is not None:
+                # Every head, not only a single ``head`` attribute. A chain
+                # that speaks several protocols owns one head per interface,
+                # and leaving the others un-reset would carry one test's
+                # advance into the next.
+                for _name, head in chain.iter_heads():
                     head.reset()
         for provider in providers:
             if scenario:
@@ -332,18 +335,47 @@ class ControlApi:
 
     # ── POST /advance ─────────────────────────────────────────────────────────
     def advance(self, body: object) -> tuple[int, dict]:
+        """Move a chain's head, or read it back without moving it.
+
+        A body naming neither ``blocks`` nor ``per_second`` moves nothing and
+        still answers with the head, so this is also the read. That is what a
+        test comparing the router's reported tip against the truth asks for.
+
+        ``head`` names which one on a chain that serves several — lava answers
+        a different height over REST, gRPC and Tendermint-RPC, so one name per
+        interface. A chain with a single head takes ``"default"``, which is
+        also what a caller naming none gets.
+        """
         if not isinstance(body, dict):
             return 400, {"error": "request body must be a JSON object"}
         chain_name = body.get("chain", "eth")
         chain = CHAINS.get(chain_name)
-        head = getattr(chain, "head", None) if chain is not None else None
-        if head is None:
+        if chain is None:
+            return 400, {"error": f"there is no chain {chain_name!r}. Chains: {sorted(CHAINS)}"}
+        heads = dict(chain.iter_heads())
+        if not heads:
             return 400, {"error": f"chain {chain_name!r} has no advanceable head"}
+        head_name = body.get("head", "default" if "default" in heads else None)
+        if head_name is None:
+            return 400, {
+                "error": (
+                    f"chain {chain_name!r} serves several heads, so name one with " f"'head'. Heads: {sorted(heads)}"
+                )
+            }
+        head = heads.get(head_name)
+        if head is None:
+            return 400, {"error": (f"chain {chain_name!r} has no head {head_name!r}. Heads: {sorted(heads)}")}
         if "per_second" in body:
             head.set_rate(body["per_second"])
         if "blocks" in body:
             head.bump(body["blocks"])
-        return 200, {"status": "ok", "chain": chain_name, "head": head.current()}
+        return 200, {
+            "status": "ok",
+            "chain": chain_name,
+            "head_name": head_name,
+            "head": head.current(),
+            "heads": {name: h.current() for name, h in sorted(heads.items())},
+        }
 
     # ── GET /scenario, /stats, /topology ──────────────────────────────────────
     def get_scenario(self) -> tuple[int, dict]:

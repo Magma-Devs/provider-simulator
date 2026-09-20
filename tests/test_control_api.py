@@ -355,3 +355,84 @@ def test_version_is_200_when_nothing_was_stamped(monkeypatch):
         200,
         {"version": None, "commit": None, "git_describe": None, "state": "unknown"},
     )
+
+
+# ── a chain that serves several heads ─────────────────────────────────────────
+# Lava answers a different height on each of its three protocols, so one head
+# cannot describe it. These pin that each is addressable, that reading one
+# never moves it, and that a reset clears all three rather than one.
+
+
+def test_advance_reads_a_head_back_without_moving_it():
+    """A body naming no movement is the READ, and it must not move anything.
+
+    This is what a test comparing the router's reported tip against the truth
+    calls. If it moved the head, the comparison would chase its own change.
+    """
+    api = _api()
+    try:
+        first = api.advance({"chain": "eth"})[1]["head"]
+        second = api.advance({"chain": "eth"})[1]["head"]
+        assert first == second, f"reading the head moved it: {first} then {second}"
+    finally:
+        api.reset()
+
+
+def test_lava_serves_one_head_per_interface():
+    api = _api()
+    try:
+        st, resp = api.advance({"chain": "lava", "head": "rest"})
+        assert st == 200
+        assert sorted(resp["heads"]) == ["grpc", "rest", "tendermintrpc"]
+        # The three differ on purpose. Equal values would mean one head was
+        # serving all three, which is the arrangement this replaced.
+        assert (
+            len(set(resp["heads"].values())) == 3
+        ), f"the three interfaces must keep their own heights, got {resp['heads']}"
+    finally:
+        api.reset()
+
+
+def test_lava_without_a_head_name_is_refused_and_names_the_heads():
+    """Refusing beats guessing: picking one silently would move the wrong one."""
+    api = _api()
+    st, resp = api.advance({"chain": "lava", "blocks": 5})
+    assert st == 400
+    for name in ("rest", "grpc", "tendermintrpc"):
+        assert name in resp["error"], f"the refusal must name {name}: {resp['error']}"
+
+
+def test_advancing_one_lava_head_leaves_the_others_alone():
+    api = _api()
+    try:
+        before = api.advance({"chain": "lava", "head": "rest"})[1]["heads"]
+        after = api.advance({"chain": "lava", "head": "rest", "blocks": 7})[1]["heads"]
+        assert after["rest"] == before["rest"] + 7
+        assert after["grpc"] == before["grpc"]
+        assert after["tendermintrpc"] == before["tendermintrpc"]
+    finally:
+        api.reset()
+
+
+def test_a_reset_clears_every_lava_head_not_only_one():
+    """One un-reset head carries a test's advance into the next test."""
+    api = _api()
+    try:
+        base = api.advance({"chain": "lava", "head": "rest"})[1]["heads"]
+        for name in ("rest", "grpc", "tendermintrpc"):
+            api.advance({"chain": "lava", "head": name, "blocks": 11})
+        api.reset()
+        after = api.advance({"chain": "lava", "head": "rest"})[1]["heads"]
+        assert after == base, f"a reset left a head moved: {base} then {after}"
+    finally:
+        api.reset()
+
+
+def test_advance_names_the_chains_when_the_chain_does_not_exist():
+    api = _api()
+    st, resp = api.advance({"chain": "nosuchchain"})
+    assert st == 400
+    # Before this, a missing chain and a chain with no head gave the identical
+    # message, so a caller could not tell a typo from an unsupported chain.
+    assert "no chain" in resp["error"], resp["error"]
+    assert "lava" in resp["error"], resp["error"]

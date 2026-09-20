@@ -22,8 +22,8 @@ quirks, so the quirks snapshot is unused.
 from copy import deepcopy
 from typing import Any
 
-from constants import ETH_LATEST_BLOCK, TM_LATEST_HEIGHT
-from provider_simulator.chains.base import Chain
+from constants import TM_LATEST_HEIGHT
+from provider_simulator.chains.base import AdvancingHead, Chain
 from stubs_rest import REST_ERROR_STUBS, REST_METHOD_DEFAULTS
 from stubs_tendermintrpc import (
     TENDERMINT_ERROR_STUBS,
@@ -38,16 +38,23 @@ from stubs_tendermintrpc import (
 GRPC_LATEST_BLOCK = 25_000_000
 LAVA_SIM_CHAIN_ID = "lava-sim"
 
-# Cosmos REST head — the ETH simulator's "latest block" reused so the same
-# blocks_behind primitive shifts consistently. Cosmos heights are decimal.
-_REST_LATEST_HEIGHT = int(ETH_LATEST_BLOCK, 16)
-
 
 def _int_height(value: Any) -> int:
     """Parse a Cosmos-shape height (decimal string OR int) into an int."""
     if isinstance(value, int):
         return value
     return int(str(value))
+
+
+# The Cosmos REST reply template, and the head read out of it.
+#
+# The height is READ FROM the template rather than written here again. A
+# constant beside it said the REST head was the ETH one converted from hex —
+# the right number, and referenced by nothing, while the template carried its
+# own copy. Two places holding one number is how they drift, and the dead one
+# could not have shown it.
+_REST_BLOCKS_LATEST_KEY = ("GET", "/cosmos/base/tendermint/v1beta1/blocks/latest")
+REST_LATEST_HEIGHT = _int_height(REST_METHOD_DEFAULTS[_REST_BLOCKS_LATEST_KEY]["block"]["header"]["height"])
 
 
 def _to_int(value: Any, default: int) -> int:
@@ -115,6 +122,20 @@ def _pick_status(cfg: dict, primary: str, secondary: str, default: int) -> int:
 class LavaChain(Chain):
     name = "lava"
 
+    def __init__(self) -> None:
+        # One head per interface, because lava genuinely serves a different
+        # height on each. These three numbers were three separate constants
+        # before, so the difference is preserved rather than introduced.
+        #
+        # The router tracks a tip per endpoint, and a lava REST endpoint and a
+        # lava gRPC endpoint are different endpoints. A single head would make
+        # two of the three wrong the moment anything moved it.
+        self.heads = {
+            "rest": AdvancingHead(_int_height(REST_LATEST_HEIGHT)),
+            "grpc": AdvancingHead(GRPC_LATEST_BLOCK),
+            "tendermintrpc": AdvancingHead(TM_LATEST_HEIGHT),
+        }
+
     def build_success(self, request: dict, scenario: dict, quirks: dict, interface: str = "") -> tuple[int, dict]:
         if interface == "rest":
             return self._build_rest(request, scenario)
@@ -173,8 +194,12 @@ class LavaChain(Chain):
         blocks_behind = scenario.get("blocks_behind", 0)
 
         if template == "/cosmos/base/tendermint/v1beta1/blocks/latest":
-            if blocks_behind != 0 and isinstance(result, dict):
-                shifted = str(_int_height(REST_METHOD_DEFAULTS[key]["block"]["header"]["height"]) - blocks_behind)
+            # Always stamp the head, not only when blocks_behind moves it. The
+            # template's own height was returned unchanged before, so a head
+            # that had been advanced was ignored on the one reply that is
+            # supposed to report it.
+            if isinstance(result, dict):
+                shifted = str(max(self.heads["rest"].current() - blocks_behind, 0))
                 result["block"]["header"]["height"] = shifted
                 try:
                     result["block"]["last_commit"]["height"] = str(max(int(shifted) - 1, 0))
@@ -241,14 +266,14 @@ class LavaChain(Chain):
             if requested_height is not None:
                 height_i = _to_int(requested_height, 0)
             else:
-                height_i = max(TM_LATEST_HEIGHT - blocks_behind, 0)
+                height_i = max(self.heads["tendermintrpc"].current() - blocks_behind, 0)
             result = _block_response(height=height_i)
         elif method == "validators":
             height_raw = params.get("height")
             height_i = (
-                _to_int(height_raw, TM_LATEST_HEIGHT)
+                _to_int(height_raw, self.heads["tendermintrpc"].current())
                 if height_raw is not None
-                else max(TM_LATEST_HEIGHT - blocks_behind, 0)
+                else max(self.heads["tendermintrpc"].current() - blocks_behind, 0)
             )
             page = max(_to_int(params.get("page"), 1), 1)
             per_page = max(_to_int(params.get("per_page"), 30), 1)
@@ -263,6 +288,13 @@ class LavaChain(Chain):
             )
         else:
             result = deepcopy(TENDERMINT_METHOD_DEFAULTS[method])
+            # ``status`` is how a Tendermint caller asks for the tip, and its
+            # template carries a baked height. Returned verbatim it reported a
+            # number the head no longer held — the same fault the REST reply
+            # had. Stamp the head, and only on the field that means the tip.
+            sync = result.get("sync_info") if isinstance(result, dict) else None
+            if isinstance(sync, dict) and "latest_block_height" in sync:
+                sync["latest_block_height"] = str(max(self.heads["tendermintrpc"].current() - blocks_behind, 0))
 
         return http_status, {"jsonrpc": "2.0", "id": req_id, "result": result}
 
@@ -279,7 +311,7 @@ class LavaChain(Chain):
             return 200, {"grpc_method": method, "result": method_cfg["result"]}
 
         if method == "GetLatestBlock":
-            head = GRPC_LATEST_BLOCK - scenario.get("blocks_behind", 0)
+            head = max(self.heads["grpc"].current() - scenario.get("blocks_behind", 0), 0)
             return 200, {
                 "grpc_method": method,
                 "height": head,
