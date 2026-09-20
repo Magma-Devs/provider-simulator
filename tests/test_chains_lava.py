@@ -340,3 +340,16 @@ def test_every_interfaces_reply_follows_its_own_head():
         assert after == before + 13, (
             f"the {name} reply did not follow its own head: {before} then {after}. " f"It is reading something else."
         )
+
+
+def test_abci_info_reports_the_same_tip_as_status():
+    """Both replies carry the tip, so both must move with the head.
+
+    The router's pruning check reads abci_info's last_block_height. Stamping
+    only status would make the two replies disagree after any advance.
+    """
+    chain = _chain()
+    chain.heads["tendermintrpc"].bump(21)
+    status = chain.build_success(_tm("status"), _sc(), {}, "tendermintrpc")[1]
+    abci = chain.build_success(_tm("abci_info"), _sc(), {}, "tendermintrpc")[1]
+    assert abci["result"]["response"]["last_block_height"] == (status["result"]["sync_info"]["latest_block_height"])

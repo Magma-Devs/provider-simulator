@@ -485,3 +485,74 @@ def test_a_single_headed_chain_needs_no_name_either_way():
         assert moved["head"] == read["head"] + 6
     finally:
         api.reset()
+
+
+def test_a_wrong_head_name_is_refused_rather_than_silently_substituted():
+    """A typo must not move a different head.
+
+    Added after a review mutation: replacing the unknown-name guard with a
+    silent pick of the first head passed the ENTIRE suite. The tests covered
+    an OMITTED name and never a WRONG one, so the guard was free to delete.
+    'tendermint' is the realistic typo for 'tendermintrpc'.
+    """
+    api = _api()
+    try:
+        before = api.advance({"chain": "lava"})[1]["heads"]
+        st, resp = api.advance({"chain": "lava", "head": "tendermint", "blocks": 100})
+        assert st == 400, f"a wrong head name must be refused, got {st} {resp}"
+        assert "tendermint'" in resp["error"], resp["error"]
+        after = api.advance({"chain": "lava"})[1]["heads"]
+        assert after == before, f"the refused call moved something: {before} then {after}"
+    finally:
+        api.reset()
+
+
+def test_blocks_zero_is_a_read_not_a_move():
+    """``blocks: 0`` changes nothing, so it must not demand a head name.
+
+    Callers send it as a read. Testing for the KEY rather than the value
+    refused those on a many-headed chain, naming a move they had not asked for.
+    """
+    api = _api()
+    try:
+        st, resp = api.advance({"chain": "lava", "blocks": 0})
+        assert st == 200, f"blocks=0 is a read and must be allowed: {resp}"
+        assert sorted(resp["heads"]) == ["grpc", "rest", "tendermintrpc"]
+    finally:
+        api.reset()
+
+
+def test_setting_a_rate_to_zero_still_counts_as_a_move():
+    """Stopping an advancing head IS a change, so it still needs a name."""
+    api = _api()
+    st, resp = api.advance({"chain": "lava", "per_second": 0})
+    assert st == 400, f"per_second is a move at any value, got {st} {resp}"
+
+
+def test_each_chain_owns_its_own_heads():
+    """A mutable default on the base class would be ONE dict for every chain.
+
+    Proven by a review: writing a head onto eth gave btc and solana the same
+    one, so a bogus head name would have been accepted on every chain.
+    """
+    from provider_simulator.chains import CHAINS
+    from provider_simulator.chains.base import AdvancingHead
+
+    # Detect the sharing directly. Comparing identity is NOT enough: a shared
+    # EMPTY dict looks the same as two chains that each own none, which is how
+    # the first version of this test passed against the very bug it names. A
+    # review mutation restoring the shared default left the whole suite green.
+    # Writing into one chain and reading another is what tells them apart.
+    eth, btc = CHAINS["eth"], CHAINS["btc"]
+    sentinel = "__only_eth_should_see_this__"
+    try:
+        if not hasattr(eth, "heads"):
+            eth.heads = {}
+        eth.heads[sentinel] = AdvancingHead(1)
+        leaked = [n for n, _ in btc.iter_heads()]
+        assert sentinel not in leaked, (
+            f"btc sees a head written onto eth: {leaked}. The base class is handing "
+            f"every chain ONE dict, so a head added to any chain exists on all of them."
+        )
+    finally:
+        getattr(eth, "heads", {}).pop(sentinel, None)

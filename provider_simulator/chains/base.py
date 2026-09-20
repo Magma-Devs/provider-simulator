@@ -74,7 +74,12 @@ class Chain(ABC):
     #: 20 million over REST, 25 million over gRPC and 5 million over
     #: Tendermint-RPC. The router tracks a tip per endpoint, so a head per
     #: interface is what it is actually observing.
-    heads: dict[str, "AdvancingHead"] = {}
+    #
+    # Declared as a type only. A mutable default here would be ONE dict shared
+    # by every chain that does not set its own, so writing a head onto eth
+    # would give btc and solana the same one. ``iter_heads`` reads it through
+    # ``getattr`` for exactly that reason.
+    heads: dict[str, "AdvancingHead"]
 
     def iter_heads(self) -> "list[tuple[str, AdvancingHead]]":
         """Every head this chain owns, as ``(name, head)``.
@@ -90,7 +95,7 @@ class Chain(ABC):
         single = getattr(self, "head", None)
         if single is not None:
             found.append(("default", single))
-        found.extend(sorted(self.heads.items()))
+        found.extend(sorted(getattr(self, "heads", {}).items()))
         return found
 
     @abstractmethod

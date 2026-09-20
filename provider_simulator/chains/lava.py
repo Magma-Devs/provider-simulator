@@ -24,7 +24,7 @@ from typing import Any
 
 from constants import TM_LATEST_HEIGHT
 from provider_simulator.chains.base import AdvancingHead, Chain
-from stubs_rest import REST_ERROR_STUBS, REST_METHOD_DEFAULTS
+from stubs_rest import REST_ERROR_STUBS, REST_LATEST_HEIGHT, REST_METHOD_DEFAULTS
 from stubs_tendermintrpc import (
     TENDERMINT_ERROR_STUBS,
     TENDERMINT_METHOD_DEFAULTS,
@@ -46,15 +46,14 @@ def _int_height(value: Any) -> int:
     return int(str(value))
 
 
-# The Cosmos REST reply template, and the head read out of it.
+# The Cosmos REST head is ``stubs_rest.REST_LATEST_HEIGHT``, imported above.
+# That module builds the reply template FROM it, so importing it is what makes
+# one place hold the number.
 #
-# The height is READ FROM the template rather than written here again. A
-# constant beside it said the REST head was the ETH one converted from hex —
-# the right number, and referenced by nothing, while the template carried its
-# own copy. Two places holding one number is how they drift, and the dead one
-# could not have shown it.
-_REST_BLOCKS_LATEST_KEY = ("GET", "/cosmos/base/tendermint/v1beta1/blocks/latest")
-REST_LATEST_HEIGHT = _int_height(REST_METHOD_DEFAULTS[_REST_BLOCKS_LATEST_KEY]["block"]["header"]["height"])
+# A private copy of the same expression lived here, was referenced by nothing,
+# and is gone. It could not have drifted from the public one — both read the
+# same constant — so removing it buys clarity rather than correctness. Adding a
+# THIRD spelling of the name here would have been the real cost.
 
 
 def _to_int(value: Any, default: int) -> int:
@@ -131,7 +130,7 @@ class LavaChain(Chain):
         # lava gRPC endpoint are different endpoints. A single head would make
         # two of the three wrong the moment anything moved it.
         self.heads = {
-            "rest": AdvancingHead(_int_height(REST_LATEST_HEIGHT)),
+            "rest": AdvancingHead(REST_LATEST_HEIGHT),
             "grpc": AdvancingHead(GRPC_LATEST_BLOCK),
             "tendermintrpc": AdvancingHead(TM_LATEST_HEIGHT),
         }
@@ -288,13 +287,27 @@ class LavaChain(Chain):
             )
         else:
             result = deepcopy(TENDERMINT_METHOD_DEFAULTS[method])
-            # ``status`` is how a Tendermint caller asks for the tip, and its
-            # template carries a baked height. Returned verbatim it reported a
-            # number the head no longer held — the same fault the REST reply
-            # had. Stamp the head, and only on the field that means the tip.
-            sync = result.get("sync_info") if isinstance(result, dict) else None
-            if isinstance(sync, dict) and "latest_block_height" in sync:
-                sync["latest_block_height"] = str(max(self.heads["tendermintrpc"].current() - blocks_behind, 0))
+            # Two templates carry a baked height and both report the tip, so
+            # both are stamped. Returned verbatim they reported a number the
+            # head no longer held — the same fault the REST reply had.
+            #
+            # ``status`` is how a Tendermint caller asks for the tip.
+            # ``abci_info`` carries it too, and the router's pruning check
+            # reads that one, so leaving it stale would make the two replies
+            # disagree the moment anything advanced.
+            #
+            # ``latest_block_hash`` is deliberately NOT stamped: it encodes the
+            # base height, nothing here reads it, and recomputing it would be
+            # invention rather than fidelity. After an advance the hash and the
+            # height do not agree, and that is known rather than overlooked.
+            height = str(max(self.heads["tendermintrpc"].current() - blocks_behind, 0))
+            if isinstance(result, dict):
+                sync = result.get("sync_info")
+                if isinstance(sync, dict) and "latest_block_height" in sync:
+                    sync["latest_block_height"] = height
+                response = result.get("response")
+                if isinstance(response, dict) and "last_block_height" in response:
+                    response["last_block_height"] = height
 
         return http_status, {"jsonrpc": "2.0", "id": req_id, "result": result}
 

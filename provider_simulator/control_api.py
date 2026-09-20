@@ -209,11 +209,19 @@ class ControlApi:
     # so one router's clean-up can no longer reach into another router's
     # providers.
     #
-    # Block heads are a weaker guarantee, and the difference matters. A head is
-    # one value per CHAIN, shared by every pool on that chain. Scoping moves the
-    # heads of the chains that pool serves instead of every chain, but seven
-    # pools serve eth, so an eth-sim reset still rewinds the head an
-    # eth-solo-sim test is watching. Providers are isolated; heads are narrowed.
+    # Block heads are a weaker guarantee, and the difference matters. Heads
+    # belong to the CHAIN, shared by every pool on it. Scoping moves the heads
+    # of the chains that pool serves instead of every chain, but seven pools
+    # serve eth, so an eth-sim reset still rewinds the head an eth-solo-sim
+    # test is watching. Providers are isolated; heads are narrowed.
+    #
+    # A chain can own SEVERAL heads, one per interface, and a scoped reset
+    # clears all of them — it cannot do otherwise, because the pool names the
+    # chain and the chain owns the set. Five pools serve lava, so resetting
+    # lava-sim-grpc rewinds the REST and Tendermint-RPC heads that the two
+    # lava-cv pools are watching, on interfaces the gRPC pool does not serve.
+    # That is wider than it looks and is the reason to reset deliberately
+    # rather than as a habit.
     #
     # Only the scenario reset moves a head at all — clearing history leaves
     # every head alone.
@@ -363,7 +371,12 @@ class ControlApi:
         if not heads:
             return 400, {"error": f"chain {chain_name!r} has no advanceable head"}
 
-        moving = "per_second" in body or "blocks" in body
+        # A move is a request that CHANGES something. ``blocks: 0`` changes
+        # nothing, and callers send it as a read — testing for the key rather
+        # than the value refused those with a 400 that named a move they had
+        # not asked for. ``per_second`` counts even at 0, because setting the
+        # rate to zero stops an advancing head, which is a real change.
+        moving = "per_second" in body or bool(body.get("blocks"))
         head_name = body.get("head")
         if head_name is None:
             # One head means there is nothing to choose, whatever the caller
