@@ -72,3 +72,48 @@ def test_error_stub_override():
         _q(),
     )
     assert body["error"] == SOLANA_ERROR_STUBS["node_behind"]
+
+
+def test_the_head_moves_the_slot_every_reply_carries():
+    """A moved head has to reach the reply, not only the control route."""
+    chain = SolanaChain()
+    chain.head.bump(9)
+    try:
+        _, body = chain.build_success({"id": 1, "method": "getSlot"}, _sc(), _q())
+        assert body["result"] == BASE + 9
+
+        _, body = chain.build_success({"id": 1, "method": "getLatestBlockhash"}, _sc(), _q())
+        assert body["result"]["context"]["slot"] == BASE + 9
+        assert body["result"]["value"]["lastValidBlockHeight"] == BASE + 9 - GAP
+    finally:
+        chain.head.reset()
+
+
+def test_a_static_head_answers_the_base_slot_exactly():
+    """At rest the reply must be what it was before the head existed."""
+    chain = SolanaChain()
+    _, body = chain.build_success({"id": 1, "method": "getSlot"}, _sc(), _q())
+    assert body["result"] == BASE
+
+
+def test_the_head_moves_every_provider_and_keeps_their_offsets():
+    """``slot_offset`` is ONE provider's distance from the chain's slot.
+
+    Moving the head must carry every provider with it and leave the distances
+    between them unchanged — that is what makes it the chain's height rather
+    than a second per-provider knob.
+    """
+    chain = SolanaChain()
+    before = [
+        chain.build_success({"id": 1, "method": "getSlot"}, _sc(), _q(slot_offset=o))[1]["result"] for o in (0, 5, -5)
+    ]
+    chain.head.bump(1000)
+    try:
+        after = [
+            chain.build_success({"id": 1, "method": "getSlot"}, _sc(), _q(slot_offset=o))[1]["result"]
+            for o in (0, 5, -5)
+        ]
+        assert after == [b + 1000 for b in before]
+        assert [a - after[0] for a in after] == [b - before[0] for b in before]
+    finally:
+        chain.head.reset()

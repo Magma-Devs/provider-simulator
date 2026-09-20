@@ -47,3 +47,37 @@ def test_error_stub_override():
     name = next(iter(LND_ERROR_STUBS))
     _, body = chain.build_success({"id": 1, "method": "getinfo"}, _sc(responses={"getinfo": {"error_stub": name}}), {})
     assert body["error"] == LND_ERROR_STUBS[name]
+
+
+def test_getinfo_follows_the_btc_head_it_reports():
+    """LN reports the height of the BTC chain beneath it, so it must follow it.
+
+    The docstring said this while the code read a separate constant. Both were
+    850000, and btc's height could not move, so the claim could not be caught
+    being wrong. Giving btc a head made it falsifiable — and false.
+    """
+    from provider_simulator.chains import CHAINS
+
+    btc, ln = CHAINS["btc"], CHAINS["ln"]
+
+    def height(**scenario):
+        body = ln.build_success({"id": 1, "method": "getinfo"}, _sc(**scenario), {})[1]
+        return body["result"]["block_height"]
+
+    at_rest = height()
+    btc.head.bump(5000)
+    try:
+        assert height() == at_rest + 5000, "LN did not follow the chain it reports"
+        # The node's own lag is measured from wherever that chain now is.
+        assert height(blocks_behind=7) == at_rest + 5000 - 7
+    finally:
+        btc.head.reset()
+    assert height() == at_rest
+
+
+def test_ln_owns_no_head_of_its_own():
+    """Following btc is not the same as having a head. There is nothing to move
+    here, and ``POST /advance`` on 'ln' must keep saying so."""
+    from provider_simulator.chains import CHAINS
+
+    assert CHAINS["ln"].iter_heads() == []
