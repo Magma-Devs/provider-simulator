@@ -298,10 +298,18 @@ def test_advance_eth_head_then_reset():
     api.reset()  # heads are a shared singleton — don't leak into other tests
 
 
-def test_advance_unknown_head_is_400():
+def test_advance_a_chain_with_no_head_is_400():
+    """A chain nothing can advance is refused, and says so.
+
+    This asked about btc until btc grew a head. The behaviour it locks is
+    real and unchanged -- it just needed a chain that still has none, and
+    ln is the remaining one. Renamed because the old name said "unknown
+    head", which is a different refusal with its own test.
+    """
     api = _api()
-    st, resp = api.advance({"chain": "btc", "blocks": 5})
-    assert st == 400
+    st, resp = api.advance({"chain": "ln", "blocks": 5})
+    assert st == 400, resp
+    assert "no advanceable head" in resp["error"], resp["error"]
 
 
 # ── ws/emit ───────────────────────────────────────────────────────────────────

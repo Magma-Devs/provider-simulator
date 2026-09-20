@@ -13,7 +13,7 @@ The chain owns its error catalogue (``SOLANA_ERROR_STUBS``) — the flat
 """
 
 import stubs_solana
-from provider_simulator.chains.base import Chain
+from provider_simulator.chains.base import AdvancingHead, Chain
 from provider_simulator.domain.quirks import SolanaQuirks
 
 SOLANA_ERROR_STUBS: dict[str, dict] = {
@@ -52,6 +52,9 @@ class SolanaChain(Chain):
     name = "solana"
     quirks_type = SolanaQuirks
 
+    def __init__(self) -> None:
+        self.head = AdvancingHead(stubs_solana.SOLANA_BASE_SLOT)
+
     def error_stub(self, name: str) -> dict:
         return SOLANA_ERROR_STUBS[name]
 
@@ -77,7 +80,10 @@ class SolanaChain(Chain):
         if "result" in method_cfg:
             return http_status, {"jsonrpc": "2.0", "id": req_id, "result": method_cfg["result"]}
 
-        slot = stubs_solana.SOLANA_BASE_SLOT + quirks.get("slot_offset", 0)
+        # The head is the chain's slot; ``slot_offset`` stays what it always
+        # was, this ONE provider's distance from it. Moving the head moves
+        # every provider together and leaves the offsets between them intact.
+        slot = self.head.current() + quirks.get("slot_offset", 0)
 
         if method == "getLatestBlockhash":
             gap = quirks.get("slot_block_gap", stubs_solana.SOLANA_DEFAULT_SLOT_BLOCK_GAP)
