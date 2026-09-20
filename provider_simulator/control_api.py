@@ -54,9 +54,12 @@ def _bad_number(field_name: str, value: object) -> str:
     if field_name == "error_probability":
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0:
             return f"error_probability must be a number in [0.0, 1.0], got {value!r}"
-    if field_name in ("latency_ms", "fail_first_n"):
+    if field_name in ("latency_ms", "fail_first_n", "blocks"):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             return f"{field_name} must be a non-negative integer, got {value!r}"
+    if field_name == "per_second":
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            return f"per_second must be a non-negative number, got {value!r}"
     return ""
 
 
@@ -209,11 +212,19 @@ class ControlApi:
     # so one router's clean-up can no longer reach into another router's
     # providers.
     #
-    # Block heads are a weaker guarantee, and the difference matters. A head is
-    # one value per CHAIN, shared by every pool on that chain. Scoping moves the
-    # heads of the chains that pool serves instead of every chain, but seven
-    # pools serve eth, so an eth-sim reset still rewinds the head an
-    # eth-solo-sim test is watching. Providers are isolated; heads are narrowed.
+    # Block heads are a weaker guarantee, and the difference matters. Heads
+    # belong to the CHAIN, shared by every pool on it. Scoping moves the heads
+    # of the chains that pool serves instead of every chain, but seven pools
+    # serve eth, so an eth-sim reset still rewinds the head an eth-solo-sim
+    # test is watching. Providers are isolated; heads are narrowed.
+    #
+    # A chain can own SEVERAL heads, one per interface, and a scoped reset
+    # clears all of them — it cannot do otherwise, because the pool names the
+    # chain and the chain owns the set. Five pools serve lava, so resetting
+    # lava-sim-grpc rewinds the REST and Tendermint-RPC heads that the two
+    # lava-cv pools are watching, on interfaces the gRPC pool does not serve.
+    # That is wider than it looks and is the reason to reset deliberately
+    # rather than as a habit.
     #
     # Only the scenario reset moves a head at all — clearing history leaves
     # every head alone.
@@ -248,8 +259,11 @@ class ControlApi:
             return 400, {"error": error}
         if scenario:
             for _, chain in chains:
-                head = getattr(chain, "head", None)
-                if head is not None:
+                # Every head, not only a single ``head`` attribute. A chain
+                # that speaks several protocols owns one head per interface,
+                # and leaving the others un-reset would carry one test's
+                # advance into the next.
+                for _name, head in chain.iter_heads():
                     head.reset()
         for provider in providers:
             if scenario:
@@ -332,18 +346,94 @@ class ControlApi:
 
     # ── POST /advance ─────────────────────────────────────────────────────────
     def advance(self, body: object) -> tuple[int, dict]:
+        """Move a chain's head, or read it back without moving it.
+
+        A body naming neither ``blocks`` nor ``per_second`` moves nothing and
+        still answers with the head, so this is also the read. That is what a
+        test comparing the router's reported tip against the truth asks for.
+
+        ``head`` names which one on a chain that serves several — lava answers
+        a different height over REST, gRPC and Tendermint-RPC, so one name per
+        interface.
+
+        **A READ never needs that name; only a MOVE does.** Every head is in
+        the reply either way, so a caller reading them has already been told
+        all of them and has nothing to choose. A move is the ambiguous one:
+        with several heads and no name there is no right one to pick, so it is
+        refused rather than guessed. Requiring the name for a read as well
+        would force every caller to carry a table of which chain has which
+        heads, which is the kind of hand-written map that goes stale.
+        """
         if not isinstance(body, dict):
             return 400, {"error": "request body must be a JSON object"}
         chain_name = body.get("chain", "eth")
+        # A non-string chain reaches ``CHAINS.get`` as an unhashable key and
+        # raises straight out of the handler: ``do_POST`` does not catch what
+        # ``advance`` raises, so the caller gets a dropped connection rather
+        # than a 400 naming the problem. Checked here for the same reason
+        # ``_scope`` checks its pool.
+        if not isinstance(chain_name, str):
+            return 400, {"error": f"chain must be a string, got {type(chain_name).__name__}"}
         chain = CHAINS.get(chain_name)
-        head = getattr(chain, "head", None) if chain is not None else None
-        if head is None:
+        if chain is None:
+            return 400, {"error": f"there is no chain {chain_name!r}. Chains: {sorted(CHAINS)}"}
+        heads = dict(chain.iter_heads())
+        if not heads:
             return 400, {"error": f"chain {chain_name!r} has no advanceable head"}
-        if "per_second" in body:
-            head.set_rate(body["per_second"])
-        if "blocks" in body:
-            head.bump(body["blocks"])
-        return 200, {"status": "ok", "chain": chain_name, "head": head.current()}
+
+        # Both numbers are checked BEFORE anything decides move-or-read.
+        # Unchecked, a malformed value chose its own meaning: ``blocks: null``
+        # and ``blocks: false`` are falsey, so a caller who meant to move was
+        # answered with a read and told nothing, and ``blocks: "abc"`` got
+        # past that to ``bump`` and raised ValueError out of the handler.
+        for field_name in ("blocks", "per_second"):
+            if field_name in body:
+                err = _bad_number(field_name, body[field_name])
+                if err:
+                    return 400, {"error": err}
+
+        # A move is a request that CHANGES something. ``blocks: 0`` changes
+        # nothing, and callers send it as a read — testing for the key rather
+        # than the value refused those with a 400 that named a move they had
+        # not asked for. ``per_second`` counts even at 0, because setting the
+        # rate to zero stops an advancing head, which is a real change.
+        moving = "per_second" in body or body.get("blocks", 0) != 0
+        head_name = body.get("head")
+        if head_name is None:
+            # One head means there is nothing to choose, whatever the caller
+            # is doing. Several heads only force a choice when moving.
+            if len(heads) == 1:
+                head_name = next(iter(heads))
+            elif moving:
+                return 400, {
+                    "error": (
+                        f"chain {chain_name!r} serves several heads, so name the one to "
+                        f"move with 'head'. Heads: {sorted(heads)}"
+                    )
+                }
+        if head_name is not None and head_name not in heads:
+            return 400, {"error": (f"chain {chain_name!r} has no head {head_name!r}. Heads: {sorted(heads)}")}
+
+        if head_name is not None:
+            head = heads[head_name]
+            if "per_second" in body:
+                head.set_rate(body["per_second"])
+            if "blocks" in body:
+                head.bump(body["blocks"])
+
+        current = {name: h.current() for name, h in sorted(heads.items())}
+        return 200, {
+            "status": "ok",
+            "chain": chain_name,
+            "head_name": head_name,
+            # Always every head, so a reader never has to ask twice or know in
+            # advance which names this chain uses.
+            "heads": current,
+            # The single head's value stays on ``head`` for a caller that asked
+            # for one. A read of a many-headed chain names none, so this is
+            # null there and ``heads`` is the answer.
+            "head": None if head_name is None else current[head_name],
+        }
 
     # ── GET /scenario, /stats, /topology ──────────────────────────────────────
     def get_scenario(self) -> tuple[int, dict]:

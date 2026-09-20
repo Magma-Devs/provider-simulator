@@ -355,3 +355,251 @@ def test_version_is_200_when_nothing_was_stamped(monkeypatch):
         200,
         {"version": None, "commit": None, "git_describe": None, "state": "unknown"},
     )
+
+
+# ── a chain that serves several heads ─────────────────────────────────────────
+# Lava answers a different height on each of its three protocols, so one head
+# cannot describe it. These pin that each is addressable, that reading one
+# never moves it, and that a reset clears all three rather than one.
+
+
+def test_advance_reads_a_head_back_without_moving_it():
+    """A body naming no movement is the READ, and it must not move anything.
+
+    This is what a test comparing the router's reported tip against the truth
+    calls. If it moved the head, the comparison would chase its own change.
+    """
+    api = _api()
+    try:
+        first = api.advance({"chain": "eth"})[1]["head"]
+        second = api.advance({"chain": "eth"})[1]["head"]
+        assert first == second, f"reading the head moved it: {first} then {second}"
+    finally:
+        api.reset()
+
+
+def test_lava_serves_one_head_per_interface():
+    api = _api()
+    try:
+        st, resp = api.advance({"chain": "lava", "head": "rest"})
+        assert st == 200
+        assert sorted(resp["heads"]) == ["grpc", "rest", "tendermintrpc"]
+        # The three differ on purpose. Equal values would mean one head was
+        # serving all three, which is the arrangement this replaced.
+        assert (
+            len(set(resp["heads"].values())) == 3
+        ), f"the three interfaces must keep their own heights, got {resp['heads']}"
+    finally:
+        api.reset()
+
+
+def test_lava_without_a_head_name_is_refused_and_names_the_heads():
+    """Refusing beats guessing: picking one silently would move the wrong one."""
+    api = _api()
+    st, resp = api.advance({"chain": "lava", "blocks": 5})
+    assert st == 400
+    for name in ("rest", "grpc", "tendermintrpc"):
+        assert name in resp["error"], f"the refusal must name {name}: {resp['error']}"
+
+
+def test_advancing_one_lava_head_leaves_the_others_alone():
+    api = _api()
+    try:
+        before = api.advance({"chain": "lava", "head": "rest"})[1]["heads"]
+        after = api.advance({"chain": "lava", "head": "rest", "blocks": 7})[1]["heads"]
+        assert after["rest"] == before["rest"] + 7
+        assert after["grpc"] == before["grpc"]
+        assert after["tendermintrpc"] == before["tendermintrpc"]
+    finally:
+        api.reset()
+
+
+def test_a_reset_clears_every_lava_head_not_only_one():
+    """One un-reset head carries a test's advance into the next test."""
+    api = _api()
+    try:
+        base = api.advance({"chain": "lava", "head": "rest"})[1]["heads"]
+        for name in ("rest", "grpc", "tendermintrpc"):
+            api.advance({"chain": "lava", "head": name, "blocks": 11})
+        api.reset()
+        after = api.advance({"chain": "lava", "head": "rest"})[1]["heads"]
+        assert after == base, f"a reset left a head moved: {base} then {after}"
+    finally:
+        api.reset()
+
+
+def test_advance_names_the_chains_when_the_chain_does_not_exist():
+    api = _api()
+    st, resp = api.advance({"chain": "nosuchchain"})
+    assert st == 400
+    # Before this, a missing chain and a chain with no head gave the identical
+    # message, so a caller could not tell a typo from an unsupported chain.
+    assert "no chain" in resp["error"], resp["error"]
+    assert "lava" in resp["error"], resp["error"]
+
+
+def test_reading_a_many_headed_chain_needs_no_head_name():
+    """A read has nothing to choose, so it must not demand a choice.
+
+    Requiring the name to READ would make every caller carry a table of which
+    chain has which heads. The reply already contains all of them.
+    """
+    api = _api()
+    try:
+        st, resp = api.advance({"chain": "lava"})
+        assert st == 200
+        assert sorted(resp["heads"]) == ["grpc", "rest", "tendermintrpc"]
+        assert resp["head_name"] is None
+        assert resp["head"] is None, "a read that named no head must not claim one"
+    finally:
+        api.reset()
+
+
+def test_moving_a_many_headed_chain_still_needs_a_head_name():
+    """A move IS ambiguous, so it stays refused. The read relaxation is not a
+    licence to guess which head a caller meant to move."""
+    api = _api()
+    st, resp = api.advance({"chain": "lava", "blocks": 3})
+    assert st == 400
+    assert "move" in resp["error"], resp["error"]
+
+
+def test_reading_a_many_headed_chain_moves_nothing():
+    api = _api()
+    try:
+        first = api.advance({"chain": "lava"})[1]["heads"]
+        second = api.advance({"chain": "lava"})[1]["heads"]
+        assert first == second, f"the read moved a head: {first} then {second}"
+    finally:
+        api.reset()
+
+
+def test_a_single_headed_chain_needs_no_name_either_way():
+    """Eth has one head, so neither reading nor moving it forces a choice."""
+    api = _api()
+    try:
+        read = api.advance({"chain": "eth"})[1]
+        assert read["head_name"] == "default"
+        assert read["head"] == read["heads"]["default"]
+        moved = api.advance({"chain": "eth", "blocks": 6})[1]
+        assert moved["head"] == read["head"] + 6
+    finally:
+        api.reset()
+
+
+def test_a_wrong_head_name_is_refused_rather_than_silently_substituted():
+    """A typo must not move a different head.
+
+    Added after a review mutation: replacing the unknown-name guard with a
+    silent pick of the first head passed the ENTIRE suite. The tests covered
+    an OMITTED name and never a WRONG one, so the guard was free to delete.
+    'tendermint' is the realistic typo for 'tendermintrpc'.
+    """
+    api = _api()
+    try:
+        before = api.advance({"chain": "lava"})[1]["heads"]
+        st, resp = api.advance({"chain": "lava", "head": "tendermint", "blocks": 100})
+        assert st == 400, f"a wrong head name must be refused, got {st} {resp}"
+        assert "tendermint'" in resp["error"], resp["error"]
+        after = api.advance({"chain": "lava"})[1]["heads"]
+        assert after == before, f"the refused call moved something: {before} then {after}"
+    finally:
+        api.reset()
+
+
+def test_blocks_zero_is_a_read_not_a_move():
+    """``blocks: 0`` changes nothing, so it must not demand a head name.
+
+    Callers send it as a read. Testing for the KEY rather than the value
+    refused those on a many-headed chain, naming a move they had not asked for.
+    """
+    api = _api()
+    try:
+        st, resp = api.advance({"chain": "lava", "blocks": 0})
+        assert st == 200, f"blocks=0 is a read and must be allowed: {resp}"
+        assert sorted(resp["heads"]) == ["grpc", "rest", "tendermintrpc"]
+    finally:
+        api.reset()
+
+
+def test_setting_a_rate_to_zero_still_counts_as_a_move():
+    """Stopping an advancing head IS a change, so it still needs a name."""
+    api = _api()
+    st, resp = api.advance({"chain": "lava", "per_second": 0})
+    assert st == 400, f"per_second is a move at any value, got {st} {resp}"
+
+
+def test_each_chain_owns_its_own_heads():
+    """A mutable default on the base class would be ONE dict for every chain.
+
+    Proven by a review: writing a head onto eth gave btc and solana the same
+    one, so a bogus head name would have been accepted on every chain.
+    """
+    from provider_simulator.chains import CHAINS
+    from provider_simulator.chains.base import AdvancingHead
+
+    # Detect the sharing directly. Comparing identity is NOT enough: a shared
+    # EMPTY dict looks the same as two chains that each own none, which is how
+    # the first version of this test passed against the very bug it names. A
+    # review mutation restoring the shared default left the whole suite green.
+    # Writing into one chain and reading another is what tells them apart.
+    eth, btc = CHAINS["eth"], CHAINS["btc"]
+    sentinel = "__only_eth_should_see_this__"
+    try:
+        if not hasattr(eth, "heads"):
+            eth.heads = {}
+        eth.heads[sentinel] = AdvancingHead(1)
+        leaked = [n for n, _ in btc.iter_heads()]
+        assert sentinel not in leaked, (
+            f"btc sees a head written onto eth: {leaked}. The base class is handing "
+            f"every chain ONE dict, so a head added to any chain exists on all of them."
+        )
+    finally:
+        getattr(eth, "heads", {}).pop(sentinel, None)
+
+
+def test_a_chain_that_is_not_a_string_is_refused_rather_than_crashing():
+    """A JSON body can carry a list or an object where a name belongs.
+
+    ``CHAINS.get`` is a dict lookup, so an unhashable key raises TypeError,
+    and ``do_POST`` does not catch what ``advance`` raises — the caller gets a
+    dropped connection instead of an answer. Every other control route already
+    checks the type of a name it is handed; this one did not.
+    """
+    api = _api()
+    for wrong in ([], {"a": 1}, 7, None):
+        st, resp = api.advance({"chain": wrong})
+        assert st == 400, f"chain={wrong!r} must be refused, got {st} {resp}"
+        assert "chain must be a string" in resp["error"], resp["error"]
+
+
+def test_a_malformed_move_is_refused_rather_than_answered_as_a_read():
+    """``blocks: null`` and ``blocks: false`` are falsey, not absent.
+
+    The move/read decision used to read the VALUE's truthiness, so a caller
+    who asked to move with a malformed number was quietly given a read, told
+    nothing was wrong, and saw an unmoved head. A string got past that and
+    reached ``bump``, which raised ValueError out of the handler. Both are
+    refused now, and neither may move anything.
+    """
+    api = _api()
+    try:
+        before = api.advance({"chain": "lava"})[1]["heads"]
+        for field_name, wrong in (
+            ("blocks", None),
+            ("blocks", False),
+            ("blocks", "abc"),
+            ("blocks", 1.5),
+            ("blocks", -1),
+            ("per_second", None),
+            ("per_second", "fast"),
+            ("per_second", -1),
+        ):
+            body = {"chain": "lava", "head": "rest", field_name: wrong}
+            st, resp = api.advance(body)
+            assert st == 400, f"{field_name}={wrong!r} must be refused, got {st} {resp}"
+            assert field_name in resp["error"], resp["error"]
+            after = api.advance({"chain": "lava"})[1]["heads"]
+            assert after == before, f"the refused {body} moved something: {before} then {after}"
+    finally:
+        api.reset()

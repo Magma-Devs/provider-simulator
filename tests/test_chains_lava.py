@@ -262,3 +262,94 @@ def test_grpc_per_method_result_override():
         "grpc",
     )
     assert body["result"] == {"custom": 1}
+
+
+# ── the three heads ─────────────────────────────────────────────────────────
+# Lava serves a different height on each protocol, so it owns one head per
+# interface rather than the single ``head`` a one-protocol chain has.
+
+
+def test_lava_owns_one_head_per_interface():
+    chain = _chain()
+    assert sorted(chain.heads) == ["grpc", "rest", "tendermintrpc"]
+    # Reported through the base class the same way a single head is, so code
+    # that moves or resets heads needs no special case for this chain.
+    assert sorted(n for n, _ in chain.iter_heads()) == ["grpc", "rest", "tendermintrpc"]
+
+
+def test_the_three_heads_keep_their_own_heights():
+    """Three protocols, three heights. One head would make two of them wrong."""
+    chain = _chain()
+    heights = {name: head.current() for name, head in chain.iter_heads()}
+    assert len(set(heights.values())) == 3, heights
+
+
+def test_an_advanced_rest_head_reaches_the_reply():
+    """The behaviour this change adds, and the reason it was needed.
+
+    The reply used to carry the template's own height whenever blocks_behind
+    was zero, so a head that had been advanced was ignored on the one reply
+    that exists to report it. Nothing failed; the number was simply stale.
+    """
+    chain = _chain()
+    before = chain.build_success(_rest(_BLOCKS_LATEST), _sc(), {}, "rest")[1]
+    chain.heads["rest"].bump(9)
+    after = chain.build_success(_rest(_BLOCKS_LATEST), _sc(), {}, "rest")[1]
+    assert int(after["block"]["header"]["height"]) == int(before["block"]["header"]["height"]) + 9
+
+
+def test_advancing_one_head_does_not_move_another_interfaces_reply():
+    """Per-interface heads are only real if moving one leaves the others alone."""
+    chain = _chain()
+    grpc_before = chain.build_success({"method": "GetLatestBlock"}, _sc(), {}, "grpc")[1]["height"]
+    chain.heads["rest"].bump(50)
+    grpc_after = chain.build_success({"method": "GetLatestBlock"}, _sc(), {}, "grpc")[1]["height"]
+    assert grpc_after == grpc_before
+
+
+def test_blocks_behind_still_shifts_down_from_the_head():
+    """The existing primitive keeps working, and now shifts from the head."""
+    chain = _chain()
+    chain.heads["rest"].bump(30)
+    body = chain.build_success(_rest(_BLOCKS_LATEST), _sc(blocks_behind=4), {}, "rest")[1]
+    assert int(body["block"]["header"]["height"]) == chain.heads["rest"].current() - 4
+
+
+def test_every_interfaces_reply_follows_its_own_head():
+    """Each reply must MOVE with its head, not merely differ from the others.
+
+    Written after a mutation slipped through: reverting the gRPC reply to read
+    its old constant instead of its head failed nothing, because the tests only
+    checked that moving one head left the others alone. That passes whether or
+    not a reply reads a head at all.
+    """
+    chain = _chain()
+    reads = {
+        "rest": lambda c: int(
+            c.build_success(_rest(_BLOCKS_LATEST), _sc(), {}, "rest")[1]["block"]["header"]["height"]
+        ),
+        "grpc": lambda c: int(c.build_success({"method": "GetLatestBlock"}, _sc(), {}, "grpc")[1]["height"]),
+        "tendermintrpc": lambda c: int(
+            c.build_success(_tm("status"), _sc(), {}, "tendermintrpc")[1]["result"]["sync_info"]["latest_block_height"]
+        ),
+    }
+    for name, read in reads.items():
+        before = read(chain)
+        chain.heads[name].bump(13)
+        after = read(chain)
+        assert after == before + 13, (
+            f"the {name} reply did not follow its own head: {before} then {after}. " f"It is reading something else."
+        )
+
+
+def test_abci_info_reports_the_same_tip_as_status():
+    """Both replies carry the tip, so both must move with the head.
+
+    The router's pruning check reads abci_info's last_block_height. Stamping
+    only status would make the two replies disagree after any advance.
+    """
+    chain = _chain()
+    chain.heads["tendermintrpc"].bump(21)
+    status = chain.build_success(_tm("status"), _sc(), {}, "tendermintrpc")[1]
+    abci = chain.build_success(_tm("abci_info"), _sc(), {}, "tendermintrpc")[1]
+    assert abci["result"]["response"]["last_block_height"] == (status["result"]["sync_info"]["latest_block_height"])
