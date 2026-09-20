@@ -436,3 +436,52 @@ def test_advance_names_the_chains_when_the_chain_does_not_exist():
     # message, so a caller could not tell a typo from an unsupported chain.
     assert "no chain" in resp["error"], resp["error"]
     assert "lava" in resp["error"], resp["error"]
+
+
+def test_reading_a_many_headed_chain_needs_no_head_name():
+    """A read has nothing to choose, so it must not demand a choice.
+
+    Requiring the name to READ would make every caller carry a table of which
+    chain has which heads. The reply already contains all of them.
+    """
+    api = _api()
+    try:
+        st, resp = api.advance({"chain": "lava"})
+        assert st == 200
+        assert sorted(resp["heads"]) == ["grpc", "rest", "tendermintrpc"]
+        assert resp["head_name"] is None
+        assert resp["head"] is None, "a read that named no head must not claim one"
+    finally:
+        api.reset()
+
+
+def test_moving_a_many_headed_chain_still_needs_a_head_name():
+    """A move IS ambiguous, so it stays refused. The read relaxation is not a
+    licence to guess which head a caller meant to move."""
+    api = _api()
+    st, resp = api.advance({"chain": "lava", "blocks": 3})
+    assert st == 400
+    assert "move" in resp["error"], resp["error"]
+
+
+def test_reading_a_many_headed_chain_moves_nothing():
+    api = _api()
+    try:
+        first = api.advance({"chain": "lava"})[1]["heads"]
+        second = api.advance({"chain": "lava"})[1]["heads"]
+        assert first == second, f"the read moved a head: {first} then {second}"
+    finally:
+        api.reset()
+
+
+def test_a_single_headed_chain_needs_no_name_either_way():
+    """Eth has one head, so neither reading nor moving it forces a choice."""
+    api = _api()
+    try:
+        read = api.advance({"chain": "eth"})[1]
+        assert read["head_name"] == "default"
+        assert read["head"] == read["heads"]["default"]
+        moved = api.advance({"chain": "eth", "blocks": 6})[1]
+        assert moved["head"] == read["head"] + 6
+    finally:
+        api.reset()

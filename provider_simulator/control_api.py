@@ -343,8 +343,15 @@ class ControlApi:
 
         ``head`` names which one on a chain that serves several — lava answers
         a different height over REST, gRPC and Tendermint-RPC, so one name per
-        interface. A chain with a single head takes ``"default"``, which is
-        also what a caller naming none gets.
+        interface.
+
+        **A READ never needs that name; only a MOVE does.** Every head is in
+        the reply either way, so a caller reading them has already been told
+        all of them and has nothing to choose. A move is the ambiguous one:
+        with several heads and no name there is no right one to pick, so it is
+        refused rather than guessed. Requiring the name for a read as well
+        would force every caller to carry a table of which chain has which
+        heads, which is the kind of hand-written map that goes stale.
         """
         if not isinstance(body, dict):
             return 400, {"error": "request body must be a JSON object"}
@@ -355,26 +362,43 @@ class ControlApi:
         heads = dict(chain.iter_heads())
         if not heads:
             return 400, {"error": f"chain {chain_name!r} has no advanceable head"}
-        head_name = body.get("head", "default" if "default" in heads else None)
+
+        moving = "per_second" in body or "blocks" in body
+        head_name = body.get("head")
         if head_name is None:
-            return 400, {
-                "error": (
-                    f"chain {chain_name!r} serves several heads, so name one with " f"'head'. Heads: {sorted(heads)}"
-                )
-            }
-        head = heads.get(head_name)
-        if head is None:
+            # One head means there is nothing to choose, whatever the caller
+            # is doing. Several heads only force a choice when moving.
+            if len(heads) == 1:
+                head_name = next(iter(heads))
+            elif moving:
+                return 400, {
+                    "error": (
+                        f"chain {chain_name!r} serves several heads, so name the one to "
+                        f"move with 'head'. Heads: {sorted(heads)}"
+                    )
+                }
+        if head_name is not None and head_name not in heads:
             return 400, {"error": (f"chain {chain_name!r} has no head {head_name!r}. Heads: {sorted(heads)}")}
-        if "per_second" in body:
-            head.set_rate(body["per_second"])
-        if "blocks" in body:
-            head.bump(body["blocks"])
+
+        if head_name is not None:
+            head = heads[head_name]
+            if "per_second" in body:
+                head.set_rate(body["per_second"])
+            if "blocks" in body:
+                head.bump(body["blocks"])
+
+        current = {name: h.current() for name, h in sorted(heads.items())}
         return 200, {
             "status": "ok",
             "chain": chain_name,
             "head_name": head_name,
-            "head": head.current(),
-            "heads": {name: h.current() for name, h in sorted(heads.items())},
+            # Always every head, so a reader never has to ask twice or know in
+            # advance which names this chain uses.
+            "heads": current,
+            # The single head's value stays on ``head`` for a caller that asked
+            # for one. A read of a many-headed chain names none, so this is
+            # null there and ``heads`` is the answer.
+            "head": None if head_name is None else current[head_name],
         }
 
     # ── GET /scenario, /stats, /topology ──────────────────────────────────────
