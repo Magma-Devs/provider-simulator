@@ -220,9 +220,9 @@ def test_a_height_far_beyond_a_claimed_head_is_null_rather_than_fabricated():
     absurd = hex(BASE + 10_000_000)
     status, body = chain.build_success({"id": 1, "method": "eth_getBlockByNumber", "params": [absurd, False]}, sc, q)
     assert status == 200
-    assert body["result"] is None, (
-        "a provider claiming to be ahead still fabricated a block far beyond its own claimed head"
-    )
+    assert (
+        body["result"] is None
+    ), "a provider claiming to be ahead still fabricated a block far beyond its own claimed head"
 
 
 def test_named_tags_still_return_a_block_when_provider_is_ahead():
