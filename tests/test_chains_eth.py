@@ -180,7 +180,12 @@ def test_block_above_chain_head_still_echoes_when_provider_is_not_behind():
 def _ahead(blocks: int):
     """A chain plus the scenario snapshot of ONE provider that claims to be
     `blocks` ahead of the chain. ``blocks_behind`` is signed, so this passes a
-    negative value — the same field, the other direction."""
+    negative value — the same field, the other direction.
+
+    Pass a non-zero number. Python has no negative zero, so ``_ahead(0)`` is
+    ``_behind(0)``, which is the provider at rest and takes the carve-out rather
+    than the guard. Nothing calls it with zero, and this says why it must not.
+    """
     return _behind(-blocks)
 
 
@@ -226,11 +231,24 @@ def test_a_height_far_beyond_a_claimed_head_is_null_rather_than_fabricated():
 
 
 def test_named_tags_still_return_a_block_when_provider_is_ahead():
-    """The tags shift with the claimed head, so each must still serve a block."""
+    """The tags shift with the CLAIMED head, so each must serve the right block.
+
+    The height matters as much as the block. Asserting only that a block came
+    back would still pass if somebody mis-signed one tag's offset on the
+    negative path alone — `pending` and `finalized` are the two that carry an
+    offset, so they are the two a sign error would land on.
+    """
     chain, sc, q = _ahead(50)
-    for tag in ("latest", "earliest", "pending", "safe", "finalized"):
+    for tag, expected in (
+        ("latest", _upper(BASE + 50)),
+        ("pending", _upper(BASE + 51)),
+        ("safe", _upper(BASE + 50)),
+        ("finalized", _upper(BASE + 49)),
+        ("earliest", "0x0"),
+    ):
         _, body = chain.build_success({"id": 1, "method": "eth_getBlockByNumber", "params": [tag, False]}, sc, q)
-        assert isinstance(body["result"], dict), f"tag {tag} must return a block, not null"
+        assert isinstance(body["result"], dict), f"{tag} must resolve to a block, not null"
+        assert body["result"]["number"] == expected, tag
 
 
 def test_one_provider_being_behind_does_not_change_what_its_peers_answer():
