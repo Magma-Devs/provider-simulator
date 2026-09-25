@@ -4,6 +4,29 @@ A Chain builds the success-path response for one blockchain and owns any state
 that response depends on — most notably the block head. The head is INSTANCE
 state on the chain, not a module global, so each chain has its own and nothing
 is shared across the process by accident.
+
+THE RULE FOR BLOCK HASHES
+-------------------------
+Derive a block hash from the block HEIGHT and from nothing else.
+
+Never from the provider — not its name, not its pool slot, not a quirk it
+carries, not how far behind it is. Two of our providers asked about the same
+height must answer with the same hash, even when they sit at different heads.
+
+The reason is not tidiness. The router watches for forks, and two providers
+giving different hashes for one height is exactly how a real chain announces
+that it has split. A hash that changed with the provider would make the router
+believe our simulator had forked. It would then behave differently for the rest
+of the test — and the test would go on passing, having measured our harness
+instead of the router. Nothing turns red. Nobody looks.
+
+A head-relative reply is a separate matter and is fine. ``getbestblockhash``
+names no height, so a lagging provider naming an older block there is correct,
+not a fork.
+
+``tests/test_chains_block_hash_agreement.py`` enforces this. A new chain must
+add an entry there, even an empty one; the suite fails on a missing key rather
+than skipping a chain in silence.
 """
 
 import threading
