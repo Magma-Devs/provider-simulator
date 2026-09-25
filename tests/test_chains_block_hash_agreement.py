@@ -345,6 +345,86 @@ def test_the_guard_notices_a_hash_that_changes_with_the_provider() -> None:
     assert disagreements(unsalted, unsalted) == {}
 
 
+#: How many hash fields the control below must see disagree, per chain. The same
+#: numbers ``test_the_probes_actually_find_hashes`` records, for the same reason:
+#: derived from the call they check, they would compare the walk with itself.
+DISAGREEMENTS_THE_CONTROL_MUST_SEE = {"btc": 4, "eth": 4, "lava": 14}
+
+
+@pytest.mark.parametrize("chain_name", sorted(DISAGREEMENTS_THE_CONTROL_MUST_SEE))
+def test_the_guard_names_every_hash_field_in_a_real_chains_reply_when_one_differs(
+    chain_name: str,
+) -> None:
+    """The control above, run against each real chain instead of one synthetic one.
+
+    The control beside it proves the comparison works on a reply with a single
+    top-level ``hash`` key. That is not the shape any real chain answers with.
+    Lava's fourteen fields sit nested — ``block_id.parts.hash``,
+    ``last_commit.block_id.hash`` — and btc's ``getblockhash`` is a bare string
+    with no key at all. A walk that reached the top level and stopped would pass
+    the synthetic control and find nothing here.
+
+    So this asks each real chain its real probes, salts every hash in the reply,
+    and requires the comparison to name all of them. It is the difference
+    between "the comparison can report a difference" and "the comparison would
+    report a difference in the replies this chain actually sends".
+
+    The salt is applied by ``_salted`` below, which restates the field rule
+    rather than calling ``hashes_in``, so a walk that missed a field would show
+    up as a count that is too low rather than as agreement on both sides.
+    """
+    chain = chain_for(chain_name)
+    at_head, _behind = SECOND_PROVIDER_IS_BEHIND[chain_name]
+
+    named = 0
+    for probe in PER_HEIGHT_HASH_PROBES[chain_name]:
+        interface, method, params, result_is_hash = probe
+        request = {"id": 1, "method": method, "params": params}
+        _status, body = chain.build_success(request, _scenario(**at_head), _quirks(chain_name), interface)
+        result = body.get("result")
+
+        leader = hashes_in(result, result_is_hash)
+        forked = hashes_in(_salted(result), result_is_hash)
+
+        assert leader, f"{chain_name} {method} returned no hash, so this probe salted nothing"
+        split = disagreements(leader, forked)
+        assert set(split) == set(leader), (
+            f"{chain_name} {method}: the comparison named {sorted(split)} but the reply "
+            f"carries {sorted(leader)}. A hash the walk finds must be one a disagreement "
+            f"reports, or a fork in that field would pass unseen."
+        )
+        named += len(split)
+
+    assert named == DISAGREEMENTS_THE_CONTROL_MUST_SEE[chain_name], (
+        f"{chain_name}: the comparison named {named} differing hash fields, expected "
+        f"{DISAGREEMENTS_THE_CONTROL_MUST_SEE[chain_name]}. If a probe or a reply shape "
+        f"changed, fix the probe and the recorded number together."
+    )
+
+
+def _salted(value: object) -> object:
+    """A copy of one reply with every block hash changed, and nothing else.
+
+    The rule is ``hashes_in``'s rule restated rather than reused: a field whose
+    name ends in ``hash``, in any case, plus a bare string reply. Restating it
+    is the point — if the two walks ever disagree about what a hash is, the
+    control's count moves and says so.
+    """
+    if isinstance(value, str):
+        return "f" + value[1:] if value else value
+    if isinstance(value, dict):
+        out: dict = {}
+        for key, sub in value.items():
+            if isinstance(sub, str) and str(key).lower().endswith("hash"):
+                out[key] = "f" + sub[1:] if sub else sub
+            else:
+                out[key] = _salted(sub)
+        return out
+    if isinstance(value, list):
+        return [_salted(sub) for sub in value]
+    return value
+
+
 def test_a_reply_carrying_no_hash_is_not_mistaken_for_agreement() -> None:
     """The other way a green tick lies: nothing was there to compare.
 
