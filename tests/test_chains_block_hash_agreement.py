@@ -278,6 +278,12 @@ def test_every_known_chain_declares_whether_it_reports_a_hash_per_height() -> No
     # check has no way to tell two providers apart.
     has_probes = {k for k, v in PER_HEIGHT_HASH_PROBES.items() if v}
     assert has_probes <= set(LAG_IS_VISIBLE_AT), sorted(has_probes - set(LAG_IS_VISIBLE_AT))
+    # And every checked chain must be in the control's table too. Without this a
+    # chain added later with real probes gets silent zero coverage from the
+    # control — which is this file's own failure mode, reintroduced.
+    assert has_probes == set(DISAGREEMENTS_THE_CONTROL_MUST_SEE), sorted(
+        has_probes.symmetric_difference(DISAGREEMENTS_THE_CONTROL_MUST_SEE)
+    )
 
 
 def test_the_probes_actually_find_hashes() -> None:
@@ -369,9 +375,13 @@ def test_the_guard_names_every_hash_field_in_a_real_chains_reply_when_one_differ
     between "the comparison can report a difference" and "the comparison would
     report a difference in the replies this chain actually sends".
 
-    The salt is applied by ``_salted`` below, which restates the field rule
-    rather than calling ``hashes_in``, so a walk that missed a field would show
-    up as a count that is too low rather than as agreement on both sides.
+    What makes this trustworthy is that ``hashes_in`` runs on BOTH sides and the
+    two results are required to name the same fields. Nothing else. ``_salted``
+    below restates the field rule for readability, and that restatement is NOT a
+    second opinion that would expose drift: ``hashes_in`` filters by key name
+    downstream, so deleting the rule from ``_salted`` changes no result here.
+    Verified by deleting it — 11 passed either way. Said plainly because the
+    first version of this test claimed the independence it does not have.
     """
     chain = chain_for(chain_name)
     at_head, _behind = SECOND_PROVIDER_IS_BEHIND[chain_name]
@@ -384,7 +394,7 @@ def test_the_guard_names_every_hash_field_in_a_real_chains_reply_when_one_differ
         result = body.get("result")
 
         leader = hashes_in(result, result_is_hash)
-        forked = hashes_in(_salted(result), result_is_hash)
+        forked = hashes_in(_salted(result, bare_hash=result_is_hash), result_is_hash)
 
         assert leader, f"{chain_name} {method} returned no hash, so this probe salted nothing"
         split = disagreements(leader, forked)
@@ -402,21 +412,46 @@ def test_the_guard_names_every_hash_field_in_a_real_chains_reply_when_one_differ
     )
 
 
-def _salted(value: object) -> object:
+def _changed(text: str) -> str:
+    """One string, definitely different. Raises rather than returning the input.
+
+    A salt that returns what it was given is the worst outcome here: the two
+    sides then compare equal, the comparison reports agreement, and the control
+    passes having tested nothing. Replacing the first character with ``f`` does
+    that whenever the value already starts with ``f``, and every value is hex or
+    base64, so it is a question of which constant somebody writes next rather
+    than of whether it can happen.
+
+    So the character is chosen against the value, and the result is checked.
+    """
+    swapped = ("e" if text[:1] == "f" else "f") + text[1:] if text else "salt"
+    if swapped == text:
+        raise AssertionError(f"the salt did not change {text!r}, so nothing would be compared")
+    return swapped
+
+
+def _salted(value: object, *, bare_hash: bool = False) -> object:
     """A copy of one reply with every block hash changed, and nothing else.
 
-    The rule is ``hashes_in``'s rule restated rather than reused: a field whose
-    name ends in ``hash``, in any case, plus a bare string reply. Restating it
-    is the point — if the two walks ever disagree about what a hash is, the
-    control's count moves and says so.
+    The rule is ``hashes_in``'s rule restated: a field whose name ends in
+    ``hash``, in any case. The restatement buys readability, not a second
+    opinion — ``hashes_in`` filters by the same rule downstream, so no test here
+    can tell whether this one is applied. Do not add a comment claiming it can.
+
+    ``bare_hash`` is for btc's ``getblockhash``, whose whole reply is a hash with
+    no key to read. The caller names that case because it is the only place that
+    knows it. The first version of this helper instead salted every string it
+    met, which made the docstring above false — ``merkleroot`` and ``chain`` were
+    changed too — and would silently corrupt unrelated fields if anything reused
+    it on a full response body.
     """
-    if isinstance(value, str):
-        return "f" + value[1:] if value else value
+    if bare_hash:
+        return _changed(value) if isinstance(value, str) else value
     if isinstance(value, dict):
         out: dict = {}
         for key, sub in value.items():
             if isinstance(sub, str) and str(key).lower().endswith("hash"):
-                out[key] = "f" + sub[1:] if sub else sub
+                out[key] = _changed(sub)
             else:
                 out[key] = _salted(sub)
         return out
