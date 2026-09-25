@@ -11,14 +11,19 @@ Method-specific behaviour:
   response override pins a result). Static head + blocks_behind 0 = ``0x1312D00``.
 - ``eth_getBlockByNumber`` — echoes the requested block number so the router's
   pruning verification sees it; the named tags resolve to shifted heights. A
-  provider that is behind (``blocks_behind`` above zero) answers ``null`` for a
-  numeric block above its own effective head, which is the chain head minus its
+  provider whose ``blocks_behind`` is not zero answers ``null`` for a numeric
+  block above its own effective head, which is the chain head minus its
   ``blocks_behind``. A real node that has not reached a block does not fail: it
   answers HTTP 200 with a null result and no error field, the router does not
   classify that as a failure and does not retry, and the caller records a gap in
   the chain that is not there. Reproducing that symptom is why this exists.
+  ``blocks_behind`` is signed, so this covers both directions: a provider that
+  is behind, and one set AHEAD with a negative value, which is how a provider
+  that claims a head it cannot back up is modelled. Both have a head, and a
+  block above either one does not exist.
   ``blocks_behind`` of zero is left exactly as it was — the guard below is the
-  first thing tested, so a provider at rest never takes the new path.
+  first thing tested, so a provider at rest never takes the new path, because
+  the router's pruning verification asks it for block 0 and must get a block.
 - ``eth_getLogs`` — models head-fresh-but-logs-lagged: when the query's upper
   bound exceeds ``logs_indexed_up_to``, return no logs (``empty``) or only the
   indexed ones (``partial``).
@@ -137,8 +142,18 @@ class EthChain(Chain):
             # excluding by name: none of the five parses as a number, so
             # _parse_block_number returns None for each. That is what keeps them
             # out, so a test covers every tag rather than trusting this comment.
+            # A provider that claims to be AHEAD still has a head, and a block
+            # above it does not exist either. ``blocks_behind`` is signed: a
+            # negative value moves the provider's head UP, so effective_head
+            # already carries the right boundary for both directions and the
+            # comparison below needs no sign of its own.
+            #
+            # Zero is the one value left alone, and that is deliberate. A
+            # provider at the canonical head keeps answering for any height,
+            # because the router's pruning verification asks for block 0 and
+            # must receive a block.
             above_head = False
-            if blocks_behind > 0 and isinstance(params[0], (str, int)):
+            if blocks_behind != 0 and isinstance(params[0], (str, int)):
                 requested = _parse_block_number(params[0])
                 above_head = requested is not None and requested > effective_head
             if above_head:

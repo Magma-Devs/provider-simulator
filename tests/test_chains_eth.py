@@ -171,6 +171,68 @@ def test_block_above_chain_head_still_echoes_when_provider_is_not_behind():
     assert body["result"]["number"] == above
 
 
+# A provider can also be set AHEAD of the chain, with a negative
+# ``blocks_behind``. That is how a lying provider is modelled: it claims a head
+# it cannot back up. It still has a head, so a block above THAT does not exist
+# either, and the answer is the same null result.
+
+
+def _ahead(blocks: int):
+    """A chain plus the scenario snapshot of ONE provider that claims to be
+    `blocks` ahead of the chain. ``blocks_behind`` is signed, so this passes a
+    negative value — the same field, the other direction."""
+    return _behind(-blocks)
+
+
+def test_block_one_above_effective_head_is_null_when_provider_is_ahead():
+    chain, sc, q = _ahead(50)  # effective head == BASE + 50
+    req = {"id": 1, "method": "eth_getBlockByNumber", "params": [hex(BASE + 51), False]}
+    status, body = chain.build_success(req, sc, q)
+    assert status == 200
+    assert body["result"] is None, "a block above a provider's claimed head does not exist either"
+    assert "error" not in body
+
+
+def test_block_at_effective_head_still_returns_a_block_when_provider_is_ahead():
+    chain, sc, q = _ahead(50)
+    at_head = hex(BASE + 50)
+    status, body = chain.build_success({"id": 1, "method": "eth_getBlockByNumber", "params": [at_head, False]}, sc, q)
+    assert status == 200
+    assert isinstance(body["result"], dict), "a block at the claimed head must be a block, not null"
+    assert body["result"]["number"] == at_head
+
+
+def test_block_below_chain_head_still_returns_a_block_when_provider_is_ahead():
+    chain, sc, q = _ahead(50)
+    below = hex(BASE - 10)
+    _, body = chain.build_success({"id": 1, "method": "eth_getBlockByNumber", "params": [below, False]}, sc, q)
+    assert body["result"]["number"] == below
+
+
+def test_a_height_far_beyond_a_claimed_head_is_null_rather_than_fabricated():
+    """The shape that showed the guard was one-sided.
+
+    Ten million blocks beyond a provider's own inflated head is the clearest
+    case there is: nothing could serve it. Before the sign was removed from the
+    guard this returned a complete, real-looking block object.
+    """
+    chain, sc, q = _ahead(50)
+    absurd = hex(BASE + 10_000_000)
+    status, body = chain.build_success({"id": 1, "method": "eth_getBlockByNumber", "params": [absurd, False]}, sc, q)
+    assert status == 200
+    assert body["result"] is None, (
+        "a provider claiming to be ahead still fabricated a block far beyond its own claimed head"
+    )
+
+
+def test_named_tags_still_return_a_block_when_provider_is_ahead():
+    """The tags shift with the claimed head, so each must still serve a block."""
+    chain, sc, q = _ahead(50)
+    for tag in ("latest", "earliest", "pending", "safe", "finalized"):
+        _, body = chain.build_success({"id": 1, "method": "eth_getBlockByNumber", "params": [tag, False]}, sc, q)
+        assert isinstance(body["result"], dict), f"tag {tag} must return a block, not null"
+
+
 def test_one_provider_being_behind_does_not_change_what_its_peers_answer():
     """The chain object is shared by the pool; the scenario is per provider."""
     chain = EthChain()
