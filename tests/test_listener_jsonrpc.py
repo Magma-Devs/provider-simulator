@@ -134,3 +134,31 @@ def test_corruption_scoped_out_when_filter_excludes_transport():
     provider.scenario.update({"corruption_mode": "truncated", "transports": ["ws"]})
     res = _serve(listener, "eth_blockNumber")  # this endpoint is http, not ws
     assert res.corruption_mode is None
+
+
+def test_block_above_effective_head_serializes_as_a_null_result():
+    """The false-gap symptom, through the listener: HTTP 200, result null, no
+    error field. Held here and not only on the chain because what reaches the
+    caller is the serialized body, and null is the part that has to survive it."""
+    listener, provider = _listener()
+    head = int(_serve(listener, "eth_blockNumber").body["result"], 16)
+    provider.scenario.update({"blocks_behind": 100})
+
+    res = _serve(listener, "eth_getBlockByNumber", [hex(head - 99), False])
+    assert res.action == "respond"
+    assert res.status == 200
+    assert res.body["result"] is None
+    assert "error" not in res.body
+    assert json.dumps(res.body) == '{"jsonrpc": "2.0", "id": 1, "result": null}'
+
+
+def test_block_at_effective_head_still_serializes_a_block():
+    listener, provider = _listener()
+    head = int(_serve(listener, "eth_blockNumber").body["result"], 16)
+    provider.scenario.update({"blocks_behind": 100})
+
+    at_head = hex(head - 100)
+    res = _serve(listener, "eth_getBlockByNumber", [at_head, False])
+    assert res.status == 200
+    assert isinstance(res.body["result"], dict), "a block at the head must not be null"
+    assert res.body["result"]["number"] == at_head
