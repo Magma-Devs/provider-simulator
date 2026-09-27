@@ -122,6 +122,12 @@ class ServeResult:
     ``corruption_mode`` / ``missing_field`` tell the adapter how to break the
     serialized body on a ``respond`` response (None = clean).
 
+    ``pause_at`` / ``pause_ms`` hold a ``respond`` body part way through and
+    then finish it. The Content-Length is the WHOLE body's, so the client keeps
+    reading and receives all of it late. That is why a pause is not a fault:
+    the reply is correct, only its delivery is split. ``drop_at`` is the
+    opposite — it announces a size it never sends and closes.
+
     ``suppress_body`` says "send this response's status and headers, then stop"
     — the body is still built and still sized (Content-Length announces what a
     body-carrying request would have received), only the bytes are withheld.
@@ -134,6 +140,8 @@ class ServeResult:
     body: object = None
     drop_at: str = "before_headers"
     latency_ms: int = 0
+    pause_at: str | None = None
+    pause_ms: int = 0
     corruption_mode: str | None = None
     missing_field: str | None = None
     suppress_body: bool = False
@@ -238,6 +246,10 @@ class Listener(ABC):
         if result.action == "respond" and targeted:
             result.corruption_mode = scenario.get("corruption_mode")
             result.missing_field = scenario.get("missing_field")
+            # A pause composes the same way and for the same reason: it changes
+            # how a body reaches the wire, not what the body says.
+            result.pause_at = scenario.get("pause_at")
+            result.pause_ms = scenario.get("pause_ms", 0) or 0
 
         self.provider.log.finalize(
             entry,

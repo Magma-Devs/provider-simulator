@@ -91,6 +91,8 @@ curl -si -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json"
       "missing_field": null,
       "blocks_behind": 0,
       "drop_at": "before_headers",
+      "pause_at": null,
+      "pause_ms": 0,
       "responses": { "eth_blockNumber": {"result": "0xdeadbeef"} }
     },
     "2": { "chain_family": "btc", "mode": "success" },
@@ -162,6 +164,7 @@ The 6 primitives below apply to every provider regardless of `chain_family`. The
 | `corruption_mode` | byte-/structural-level corruption of the JSON body (truncated / invalid_json / empty_response / missing_field / wrong_type / null_body — the whole body becomes the JSON literal `null`) | `missing_field` clears the proto field; `truncated` / `empty_response` / `invalid_proto` / `null_body` abort `UNKNOWN`; `wrong_type` aborts `INTERNAL` |
 | `blocks_behind` | shifts `eth_blockNumber` head and named-tag block numbers | decrements `block.header.height` in `GetLatestBlockResponse` |
 | `latency_ms` | `time.sleep` before responding | `await asyncio.sleep` before responding |
+| `pause_at` / `pause_ms` | send the reply's start, hold, then send the rest, with the whole body's `Content-Length` throughout. `mid_body` splits the body in half; `after_headers` holds before any body. A body-less reply (`empty_response`, or a REST `HEAD`) has no midpoint, so `mid_body` degrades to `after_headers` rather than doing nothing | **not supported.** gRPC has its own performer with no pause branch. A pause scoped away from the `http` transport is REFUSED rather than ignored, so this cannot be reached by accident |
 | `error_probability` | random `mode=error` per request | random gRPC abort per request |
 
 The fault ladder is evaluated in the order above (first match wins). Only `latency_ms` does not short-circuit — it sleeps and then continues to the next branch.
