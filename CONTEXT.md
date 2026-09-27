@@ -134,7 +134,7 @@ never names a label. It only counts groups, through `min_groups` and
 out, `tests/test_control_api_providers.py`, and it does that to check that
 `GET /providers` serves the table as written.
 
-Eight pools carry a label today, and 33 providers between them. Read the count
+Seven pools carry a label today, and 30 providers between them. Read the count
 rather than trusting this sentence, which said "only two" for months after the
 fourth pool gained one:
 
@@ -143,11 +143,14 @@ fourth pool gained one:
 
 Two shapes are in use. `eth-sim`, `lava-sim-grpc`, `lava-sim-rest` and
 `lava-sim-tm` each split their providers across TWO blocs. `eth-cv-sim`,
-`lava-cv-rest-sim`, `lava-cv-tm-sim` and `eth-failover-cv-sim` each use THREE -
-the first three with six providers in blocs of two, the last with three providers
-one per bloc, so a test can ask for agreement across three blocs and know which
-provider is which. Every other row carries the empty string, which means the
-deployment put that provider in no group at all. It is an empty string and not
+`lava-cv-rest-sim` and `lava-cv-tm-sim` each use THREE, with six providers in
+blocs of two. Every other row carries the empty string, which means the
+deployment put that provider in no group at all.
+
+A pool named for cross-validation does not automatically carry labels.
+`eth-failover-cv-sim` carries none: no router deploys a policy for it yet, and a
+label with no policy names a bloc nothing counts. The labels arrive with the
+policy, in every copy of the values file at once. It is an empty string and not
 a missing value, so a caller grouping by label gets one bucket of unlabelled
 providers instead of a key that is not there.
 _Avoid_: tier, class, provider set

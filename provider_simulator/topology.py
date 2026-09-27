@@ -650,37 +650,31 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
     ("eth-failover-real-sim", "eth", "3", "EthFailoverRealPrimaryProvider3", False, "", (("jsonrpc", "http", 18642),)),
     # eth-failover-cv-sim: ports 18643-18645.
     # Scenario 19: a node taking part in a cross-check answers after the per-
-    # attempt mark and must still be counted. Three providers in three groups,
-    # mirroring eth-cv-sim's shape at smaller scale — a cross-validation
-    # policy can require the agreeing providers to span a minimum number of
-    # groups.
-    (
-        "eth-failover-cv-sim",
-        "eth",
-        "1",
-        "EthFailoverCvPrimaryProvider1",
-        False,
-        "voting-group-1",
-        (("jsonrpc", "http", 18643),),
-    ),
-    (
-        "eth-failover-cv-sim",
-        "eth",
-        "2",
-        "EthFailoverCvPrimaryProvider2",
-        False,
-        "voting-group-2",
-        (("jsonrpc", "http", 18644),),
-    ),
-    (
-        "eth-failover-cv-sim",
-        "eth",
-        "3",
-        "EthFailoverCvPrimaryProvider3",
-        False,
-        "voting-group-3",
-        (("jsonrpc", "http", 18645),),
-    ),
+    # attempt mark and must still be counted.
+    #
+    # NO GROUP LABEL, and the empty string here is a decision rather than an
+    # omission. An earlier version of these rows put the three providers in
+    # voting-group-1, -2 and -3, mirroring eth-cv-sim at smaller scale. That was
+    # wrong for two reasons, both found by trying it:
+    #
+    # 1. No router deploys a cross_validation_policies block for this pool, so a
+    #    group here names a bloc nothing counts. That is the same reason the
+    #    other nine failover pools carry none, and the reason the two cache pools
+    #    and eth-resp-sim carry none.
+    # 2. A group label has to agree across FIVE files - this table, the
+    #    automation repository's config/values_sim.yml, smart-router-standalone's
+    #    values/simulator/values_sim.yml, this repository's own config file, and
+    #    the deploy server's hand-edited copy. Two guards compare them. The
+    #    standalone copy does not carry this pool at all, because these ten
+    #    routers do not run on the shared cluster, so a label here cannot agree
+    #    with it and the drift guard goes red.
+    #
+    # Whoever gives this router a cross-validation policy adds the labels in the
+    # same change, in every copy at once. Labels first and policy later is the
+    # order that fails.
+    ("eth-failover-cv-sim", "eth", "1", "EthFailoverCvPrimaryProvider1", False, "", (("jsonrpc", "http", 18643),)),
+    ("eth-failover-cv-sim", "eth", "2", "EthFailoverCvPrimaryProvider2", False, "", (("jsonrpc", "http", 18644),)),
+    ("eth-failover-cv-sim", "eth", "3", "EthFailoverCvPrimaryProvider3", False, "", (("jsonrpc", "http", 18645),)),
     # eth-failover-archive-sim: ports 18646-18651.
     # The archive baseline: every provider carries the archive addon, so the
     # filter never fires and retry, tier fallback and recovery are visible
