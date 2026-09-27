@@ -516,3 +516,183 @@ spec:
       port: 18644
       targetPort: 18644
       protocol: TCP
+    - name: spare-18645
+      port: 18645
+      targetPort: 18645
+      protocol: TCP
+    - name: spare-18646
+      port: 18646
+      targetPort: 18646
+      protocol: TCP
+    - name: spare-18647
+      port: 18647
+      targetPort: 18647
+      protocol: TCP
+    - name: spare-18648
+      port: 18648
+      targetPort: 18648
+      protocol: TCP
+    - name: spare-18649
+      port: 18649
+      targetPort: 18649
+      protocol: TCP
+    - name: spare-18650
+      port: 18650
+      targetPort: 18650
+      protocol: TCP
+    - name: spare-18651
+      port: 18651
+      targetPort: 18651
+      protocol: TCP
+    - name: spare-18652
+      port: 18652
+      targetPort: 18652
+      protocol: TCP
+    - name: spare-18653
+      port: 18653
+      targetPort: 18653
+      protocol: TCP
+    - name: spare-18654
+      port: 18654
+      targetPort: 18654
+      protocol: TCP
+    - name: spare-18655
+      port: 18655
+      targetPort: 18655
+      protocol: TCP
+    - name: spare-18656
+      port: 18656
+      targetPort: 18656
+      protocol: TCP
+    - name: spare-18657
+      port: 18657
+      targetPort: 18657
+      protocol: TCP
+    - name: spare-18658
+      port: 18658
+      targetPort: 18658
+      protocol: TCP
+    - name: spare-18659
+      port: 18659
+      targetPort: 18659
+      protocol: TCP
+    - name: spare-18660
+      port: 18660
+      targetPort: 18660
+      protocol: TCP
+    - name: spare-18661
+      port: 18661
+      targetPort: 18661
+      protocol: TCP
+    - name: spare-18662
+      port: 18662
+      targetPort: 18662
+      protocol: TCP
+    - name: spare-18663
+      port: 18663
+      targetPort: 18663
+      protocol: TCP
+    - name: spare-18664
+      port: 18664
+      targetPort: 18664
+      protocol: TCP
+    - name: spare-18665
+      port: 18665
+      targetPort: 18665
+      protocol: TCP
+    - name: spare-18666
+      port: 18666
+      targetPort: 18666
+      protocol: TCP
+    - name: spare-18667
+      port: 18667
+      targetPort: 18667
+      protocol: TCP
+    - name: spare-18668
+      port: 18668
+      targetPort: 18668
+      protocol: TCP
+    - name: spare-18669
+      port: 18669
+      targetPort: 18669
+      protocol: TCP
+    - name: spare-18670
+      port: 18670
+      targetPort: 18670
+      protocol: TCP
+    - name: spare-18671
+      port: 18671
+      targetPort: 18671
+      protocol: TCP
+    - name: spare-18672
+      port: 18672
+      targetPort: 18672
+      protocol: TCP
+    - name: spare-18673
+      port: 18673
+      targetPort: 18673
+      protocol: TCP
+    - name: spare-18674
+      port: 18674
+      targetPort: 18674
+      protocol: TCP
+    - name: spare-18675
+      port: 18675
+      targetPort: 18675
+      protocol: TCP
+    - name: spare-18676
+      port: 18676
+      targetPort: 18676
+      protocol: TCP
+    - name: spare-18677
+      port: 18677
+      targetPort: 18677
+      protocol: TCP
+    - name: spare-18678
+      port: 18678
+      targetPort: 18678
+      protocol: TCP
+    - name: spare-18679
+      port: 18679
+      targetPort: 18679
+      protocol: TCP
+    - name: spare-18680
+      port: 18680
+      targetPort: 18680
+      protocol: TCP
+    - name: spare-18681
+      port: 18681
+      targetPort: 18681
+      protocol: TCP
+    - name: spare-18682
+      port: 18682
+      targetPort: 18682
+      protocol: TCP
+    - name: spare-18683
+      port: 18683
+      targetPort: 18683
+      protocol: TCP
+    - name: spare-18684
+      port: 18684
+      targetPort: 18684
+      protocol: TCP
+    - name: spare-18685
+      port: 18685
+      targetPort: 18685
+      protocol: TCP
+    - name: spare-18686
+      port: 18686
+      targetPort: 18686
+      protocol: TCP
+    - name: spare-18687
+      port: 18687
+      targetPort: 18687
+      protocol: TCP
+    - name: spare-18688
+      port: 18688
+      targetPort: 18688
+      protocol: TCP
+    - name: spare-18689
+      port: 18689
+      targetPort: 18689
+      protocol: TCP

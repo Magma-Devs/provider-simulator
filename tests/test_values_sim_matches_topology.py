@@ -371,6 +371,40 @@ POOLS_WITH_NO_ROUTER_HERE = {
     # repository's default branch and never a branch under review. Its router
     # entry cannot merge until this pool exists here.
     "eth-resp-sim",
+    # ── The ten failover pools (MAG-3916) ────────────────────────────────────
+    #
+    # Their ten routers run on the local k3d cluster and on the throwaway
+    # clusters CI builds, and are declared in smart_router_automation's
+    # tools/local-cluster/routers.yml plus its own config/values_sim.yml. The
+    # shared cluster does not run them, so a router entry in THIS file would
+    # claim a deployment nobody makes.
+    #
+    # Phrased as a decision, not as a pending merge, for the reason written
+    # above eth-resp-sim: an excuse that says "until X merges" stops being true
+    # the day X lands, and nothing here notices. What would make these entries
+    # wrong is a decision to run the failover suite on the shared cluster. Until
+    # somebody makes that decision, this is current.
+    #
+    # Six of the ten carry a backup tier. A backup tier can come only from a
+    # values file — writing one into routers.yml produces three primaries and
+    # silently no backups — so those six MUST appear in the automation
+    # repository's config/values_sim.yml. That is a different file from this one
+    # and a different repository.
+    #
+    # Why the rows are here at all, ahead of any router: the same reason as
+    # eth-resp-sim. The automation repository's CI checks this repository out
+    # with no ref, so it always reads this repository's default branch. Its
+    # router entries cannot merge until these pools exist here.
+    "eth-failover-prodlimits-sim",
+    "eth-failover-timing-sim",
+    "eth-failover-twoaddr-sim",
+    "eth-failover-real-sim",
+    "eth-failover-cv-sim",
+    "eth-failover-archive-sim",
+    "eth-failover-mixed-sim",
+    "eth-failover-excluded-sim",
+    "eth-failover-ineligible-sim",
+    "eth-failover-noarchive-sim",
 }
 
 

@@ -28,6 +28,19 @@ EXPECTED_POOLS = {
     "eth-cache-writer-sim",
     "eth-cache-reader-sim",
     "eth-resp-sim",
+    # The ten failover pools (MAG-3916). Every one carries "failover" in its
+    # name so a reader can tell at a glance which pools belong to that suite,
+    # and the word after it says what makes that router different.
+    "eth-failover-prodlimits-sim",
+    "eth-failover-timing-sim",
+    "eth-failover-twoaddr-sim",
+    "eth-failover-real-sim",
+    "eth-failover-cv-sim",
+    "eth-failover-archive-sim",
+    "eth-failover-mixed-sim",
+    "eth-failover-excluded-sim",
+    "eth-failover-ineligible-sim",
+    "eth-failover-noarchive-sim",
 }
 
 
@@ -171,24 +184,78 @@ def test_port_of_distinguishes_the_same_slot_in_different_pools():
     ), f"two pools' slot 1 resolved to the same port: {slot_one_ports}"
 
 
-def test_port_of_reaches_every_endpoint_in_the_table():
-    """Completeness: every listener the server binds is addressable through
-    port_of. A row shape port_of cannot read would bind a port no test can
-    reach, and the gap would look like a dead listener rather than a lookup
-    that cannot express it."""
+def test_every_endpoint_in_the_table_is_reachable_through_a_lookup():
+    """Completeness: every listener the server binds is addressable. A row shape
+    no lookup can read would bind a port no test can reach, and the gap would
+    look like a dead listener rather than a lookup that cannot express it.
+
+    This asks ports_of rather than port_of, and compares the WHOLE set of ports
+    each door serves rather than one port at a time. One shipped row —
+    eth-failover-twoaddr-sim:1 — serves jsonrpc/http at two addresses, and
+    port_of refuses that question on purpose instead of answering with whichever
+    address it met first. Asking one port at a time could not see the second
+    address at all.
+
+    port_of is checked too, in both directions: it answers wherever the question
+    has one answer, and refuses wherever it does not. A regression that made it
+    answer an ambiguous question by picking one would fail here.
+    """
     for pool, _chain, pid, _n, _b, _group, endpoints in TOPOLOGY:
+        by_door: dict[tuple[str, str], set[int]] = {}
         for interface, transport, port in endpoints:
-            assert (
-                port_of(pool, pid, interface, transport) == port
-            ), f"port_of could not resolve {pool}:{pid} {interface}/{transport}"
+            by_door.setdefault((interface, transport), set()).add(port)
+        for (interface, transport), ports in by_door.items():
+            found = set(ports_of(pool, pid, interface, transport))
+            assert found == ports, (
+                f"ports_of returned {sorted(found)} for {pool}:{pid} "
+                f"{interface}/{transport}, the table says {sorted(ports)}"
+            )
+            if len(ports) == 1:
+                assert port_of(pool, pid, interface, transport) == next(iter(ports))
+            else:
+                with pytest.raises(KeyError):
+                    port_of(pool, pid, interface, transport)
+
+
+def test_the_two_address_pool_really_serves_two_addresses():
+    """The one pool whose whole purpose is the two-address shape, pinned as a
+    literal.
+
+    The test above compares each lookup against the table, so if somebody
+    removed the second address BOTH sides would change together and it would
+    still pass — it would simply stop exercising the shape. Then
+    eth-failover-twoaddr-sim would be an ordinary one-address provider, its
+    router's test would pass without ever moving traffic between two addresses,
+    and nothing would say so.
+
+    Measured: deleting the second address from the row leaves the test above
+    green. That is why this one exists and why the ports are written out rather
+    than read from the row.
+    """
+    rows = [row for row in TOPOLOGY if row[0] == "eth-failover-twoaddr-sim"]
+    assert len(rows) == 1, "the pool holds exactly one provider — that is the point of it"
+    _pool, chain, pid, name, is_backup, group, endpoints = rows[0]
+    assert chain == "eth"
+    assert pid == "1"
+    assert name == "EthFailoverTwoaddrSoloProvider1"
+    assert is_backup is False, "one provider cannot be the tier behind itself"
+    assert group == "", "no cross-validation policy here, so no group to claim"
+    assert endpoints == (("jsonrpc", "http", 18638), ("jsonrpc", "http", 18639)), (
+        "one provider, the SAME interface and transport, TWO ports. A router "
+        "gives it two node-urls; a test silences one and requires the traffic to "
+        "move to the other."
+    )
+    assert sorted(ports_of("eth-failover-twoaddr-sim", "1")) == [18638, 18639]
 
 
 # ── one provider, two addresses on the same door ──────────────────────────────
 #
 # A provider can serve the SAME interface and transport at two DIFFERENT ports.
-# No row in the shipped table does it, so these tests supply their own: the
-# behaviour has to be correct BEFORE a pool relies on it, or the first pool that
-# does is debugging the helper instead of its own test.
+# One shipped row does it — eth-failover-twoaddr-sim:1, added for MAG-3916 —
+# and these tests still supply their own rows beside it. Two reasons they stay:
+# they cover the shapes no pool has yet (three addresses, a mix of shared and
+# unshared doors), and they keep working if that pool is ever renamed or
+# retired, which is when a helper quietly stops being tested.
 
 # Ports chosen above everything the real table binds, so a mistake here cannot
 # collide with a real provider and read as that provider misbehaving.
@@ -434,33 +501,109 @@ AGREED_NAMES = {
     ("eth-resp-sim", "1"): "EthRespPrimaryProvider1",
     ("eth-resp-sim", "2"): "EthRespPrimaryProvider2",
     ("eth-resp-sim", "3"): "EthRespPrimaryProvider3",
+    # ── The ten failover pools, named 2026-09-28 (MAG-3916) ──────────────────
+    #
+    # Every name follows the standing rule <Pool><Role>Provider<slot>: the pool
+    # name CamelCased with "-sim" dropped, then the role, then the slot number
+    # the control API answers to. The roles are the ones already in use —
+    # Primary for a provider the router tries first, Backup for one it keeps
+    # until every primary has failed.
+    #
+    # eth-failover-twoaddr-sim is the exception, and deliberately: it holds ONE
+    # provider serving two addresses, so it has neither a primary tier nor a
+    # backup tier to belong to. Solo is the role already used for that shape by
+    # eth-solo-sim and solana-solo-sim.
+    ("eth-failover-prodlimits-sim", "1"): "EthFailoverProdlimitsPrimaryProvider1",
+    ("eth-failover-prodlimits-sim", "2"): "EthFailoverProdlimitsPrimaryProvider2",
+    ("eth-failover-prodlimits-sim", "3"): "EthFailoverProdlimitsPrimaryProvider3",
+    ("eth-failover-prodlimits-sim", "4"): "EthFailoverProdlimitsBackupProvider4",
+    ("eth-failover-prodlimits-sim", "5"): "EthFailoverProdlimitsBackupProvider5",
+    ("eth-failover-prodlimits-sim", "6"): "EthFailoverProdlimitsBackupProvider6",
+    ("eth-failover-timing-sim", "1"): "EthFailoverTimingPrimaryProvider1",
+    ("eth-failover-timing-sim", "2"): "EthFailoverTimingPrimaryProvider2",
+    ("eth-failover-timing-sim", "3"): "EthFailoverTimingPrimaryProvider3",
+    ("eth-failover-twoaddr-sim", "1"): "EthFailoverTwoaddrSoloProvider1",
+    ("eth-failover-real-sim", "1"): "EthFailoverRealPrimaryProvider1",
+    ("eth-failover-real-sim", "2"): "EthFailoverRealPrimaryProvider2",
+    ("eth-failover-real-sim", "3"): "EthFailoverRealPrimaryProvider3",
+    ("eth-failover-cv-sim", "1"): "EthFailoverCvPrimaryProvider1",
+    ("eth-failover-cv-sim", "2"): "EthFailoverCvPrimaryProvider2",
+    ("eth-failover-cv-sim", "3"): "EthFailoverCvPrimaryProvider3",
+    ("eth-failover-archive-sim", "1"): "EthFailoverArchivePrimaryProvider1",
+    ("eth-failover-archive-sim", "2"): "EthFailoverArchivePrimaryProvider2",
+    ("eth-failover-archive-sim", "3"): "EthFailoverArchivePrimaryProvider3",
+    ("eth-failover-archive-sim", "4"): "EthFailoverArchiveBackupProvider4",
+    ("eth-failover-archive-sim", "5"): "EthFailoverArchiveBackupProvider5",
+    ("eth-failover-archive-sim", "6"): "EthFailoverArchiveBackupProvider6",
+    ("eth-failover-mixed-sim", "1"): "EthFailoverMixedPrimaryProvider1",
+    ("eth-failover-mixed-sim", "2"): "EthFailoverMixedPrimaryProvider2",
+    ("eth-failover-mixed-sim", "3"): "EthFailoverMixedPrimaryProvider3",
+    ("eth-failover-mixed-sim", "4"): "EthFailoverMixedBackupProvider4",
+    ("eth-failover-mixed-sim", "5"): "EthFailoverMixedBackupProvider5",
+    ("eth-failover-mixed-sim", "6"): "EthFailoverMixedBackupProvider6",
+    ("eth-failover-excluded-sim", "1"): "EthFailoverExcludedPrimaryProvider1",
+    ("eth-failover-excluded-sim", "2"): "EthFailoverExcludedPrimaryProvider2",
+    ("eth-failover-excluded-sim", "3"): "EthFailoverExcludedBackupProvider3",
+    ("eth-failover-excluded-sim", "4"): "EthFailoverExcludedBackupProvider4",
+    ("eth-failover-ineligible-sim", "1"): "EthFailoverIneligiblePrimaryProvider1",
+    ("eth-failover-ineligible-sim", "2"): "EthFailoverIneligiblePrimaryProvider2",
+    ("eth-failover-ineligible-sim", "3"): "EthFailoverIneligibleBackupProvider3",
+    ("eth-failover-ineligible-sim", "4"): "EthFailoverIneligibleBackupProvider4",
+    ("eth-failover-noarchive-sim", "1"): "EthFailoverNoarchivePrimaryProvider1",
+    ("eth-failover-noarchive-sim", "2"): "EthFailoverNoarchivePrimaryProvider2",
+    ("eth-failover-noarchive-sim", "3"): "EthFailoverNoarchiveBackupProvider3",
+    ("eth-failover-noarchive-sim", "4"): "EthFailoverNoarchiveBackupProvider4",
 }
 
-# Slots 4 to 6 of the six six-provider pools that HAVE a backup tier. The
-# router consults these only after the primary tier is exhausted, and the values
-# file marks them is_backup.
+# The pools that HAVE a backup tier, and which of their slots it is. The router
+# consults a backup only after the primary tier is exhausted, and the values file
+# marks them is_backup.
 #
-# eth-cache-writer-sim and eth-cache-reader-sim carry one because the router
-# answers from either cache tier BEFORE it picks any provider, primary tier and
-# backup tier alike. Without a backup tier a test cannot tell "the router never
-# reached the backup" from "there was no backup to reach".
+# Two shapes, because a backup tier does not always start at slot 4. A
+# six-provider pool has three primaries and slots 4 to 6 behind them. A
+# four-provider pool has two primaries and slots 3 and 4 behind them. Writing
+# both out is the point: a single "the last three slots" rule would silently
+# accept a pool whose tiers were split somewhere else.
+_SIX_PROVIDER_POOLS_WITH_A_BACKUP_TIER = (
+    "eth-sim",
+    "lava-sim-grpc",
+    "lava-sim-rest",
+    "lava-sim-tm",
+    "eth-cache-writer-sim",
+    "eth-cache-reader-sim",
+    # Three of the ten failover pools (MAG-3916). Each needs a full three-primary
+    # tier to fail before the backups answer.
+    "eth-failover-prodlimits-sim",
+    "eth-failover-archive-sim",
+    "eth-failover-mixed-sim",
+)
+
+# Four-provider failover pools (MAG-3916): two primaries, then two backups. Two
+# primaries are enough where the test only has to exhaust the primary tier, and
+# four providers cost two ports each instead of three.
+_FOUR_PROVIDER_POOLS_WITH_A_BACKUP_TIER = (
+    "eth-failover-excluded-sim",
+    "eth-failover-ineligible-sim",
+    "eth-failover-noarchive-sim",
+)
+
+# eth-cache-writer-sim and eth-cache-reader-sim carry a backup tier because the
+# router answers from either cache tier BEFORE it picks any provider, primary
+# tier and backup tier alike. Without a backup tier a test cannot tell "the
+# router never reached the backup" from "there was no backup to reach".
 #
 # eth-cv-sim, lava-cv-rest-sim and lava-cv-tm-sim are six-provider pools too and
 # are absent on purpose: all three are cross-validation topologies,
 # cross-validation never reaches a backup, and a provider labelled backup there
 # would claim a group the router can never count. Their slots 4 to 6 are
-# ordinary primaries.
-AGREED_BACKUPS = {
-    (pool, pid)
-    for pool in (
-        "eth-sim",
-        "lava-sim-grpc",
-        "lava-sim-rest",
-        "lava-sim-tm",
-        "eth-cache-writer-sim",
-        "eth-cache-reader-sim",
-    )
-    for pid in ("4", "5", "6")
+# ordinary primaries. eth-failover-cv-sim is absent for the same reason, and it
+# holds three providers rather than six.
+#
+# Three more failover pools are absent because they have no second tier at all:
+# eth-failover-timing-sim and eth-failover-real-sim are three primaries each, and
+# eth-failover-twoaddr-sim is a single provider serving two addresses.
+AGREED_BACKUPS = {(pool, pid) for pool in _SIX_PROVIDER_POOLS_WITH_A_BACKUP_TIER for pid in ("4", "5", "6")} | {
+    (pool, pid) for pool in _FOUR_PROVIDER_POOLS_WITH_A_BACKUP_TIER for pid in ("3", "4")
 }
 
 
