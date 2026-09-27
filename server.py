@@ -190,17 +190,37 @@ class _HttpListenerHandler(BaseHTTPRequestHandler):
         # suppress_body: the listener sized a body but told us to withhold it
         # (an HTTP HEAD). Content-Length above still announces the size a
         # body-carrying request would have received.
-        if raw and not result.suppress_body:
-            if result.pause_at == "mid_body":
-                # Content-Length above is the WHOLE body's, so the client is
-                # still waiting for the rest when the hold begins. That is what
-                # makes this a slow reply rather than a broken one.
-                split = len(raw) // 2
-                self.wfile.write(raw[:split])
+        try:
+            if raw and not result.suppress_body:
+                if result.pause_at == "mid_body":
+                    # Content-Length above is the WHOLE body's, so the client is
+                    # still waiting for the rest when the hold begins. That is
+                    # what makes this a slow reply rather than a broken one.
+                    split = len(raw) // 2
+                    self.wfile.write(raw[:split])
+                    self._hold(result.pause_ms)
+                    self.wfile.write(raw[split:])
+                else:
+                    self.wfile.write(raw)
+            elif result.pause_at == "mid_body":
+                # No body, so there is no "part way through" to hold at — an
+                # empty_response corruption or an HTTP HEAD. The caller still
+                # asked for the reply to be HELD, and holding is closer to that
+                # than answering at once, so this degrades to the after_headers
+                # behaviour rather than silently doing nothing.
+                #
+                # Silently doing nothing is what it used to do, and the two
+                # positions then disagreed on the same scenario: an empty body
+                # held for after_headers and did not hold for mid_body, with
+                # nothing said. A pause that vanishes reads as a router that
+                # answered quickly.
                 self._hold(result.pause_ms)
-                self.wfile.write(raw[split:])
-            else:
-                self.wfile.write(raw)
+        except OSError:
+            # The client may have gone during the hold, and on this feature that
+            # is the EXPECTED case rather than an exception: the whole point is a
+            # hold longer than the caller's own window, so the caller is meant to
+            # give up. ``_drop`` swallows the same error for the same reason.
+            pass
 
     def _drop(self, drop_at: str) -> None:
         try:

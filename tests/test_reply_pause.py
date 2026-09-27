@@ -345,3 +345,109 @@ def test_latency_alone_delays_the_reply_and_never_splits_it(sim):
     # Nothing was held back: once it started, it finished at once.
     assert marks[-1][0] - marks[0][0] < 0.5, f"latency_ms split the reply: marks={marks}"
     assert json.loads(body)["result"] == "0x1312D00"
+
+
+# ── the two cases an adversary review found, both now guarded ─────────────────
+
+
+def _seconds_until_the_connection_closes(port, deadline_s=30.0):
+    """Send one request and return how long the server kept the connection open.
+
+    This exists because ``_read_timed`` cannot see a hold on an EMPTY body. It
+    stops as soon as the body is complete, and a ``Content-Length: 0`` reply is
+    complete on its first chunk — so it returns at once however long the server
+    waits. Reading to end-of-file measures the hold instead, which works because
+    the request asks for ``Connection: close``.
+    """
+    conn = socket.create_connection(("127.0.0.1", port), timeout=deadline_s)
+    try:
+        started = time.monotonic()
+        conn.sendall(_request_bytes())
+        raw = b""
+        while True:
+            piece = conn.recv(65536)
+            if not piece:
+                break
+            raw += piece
+        return time.monotonic() - started, raw
+    finally:
+        conn.close()
+
+
+def _heal(sim):
+    """Clear the pool's scenario. ``_set(sim)`` with no fields sends an empty
+    update, which changes nothing — so a test that must un-arm a fault mid-body
+    has to reset rather than re-set."""
+    import urllib.request
+
+    req = urllib.request.Request(
+        f"{sim['control']}/reset/all",
+        data=json.dumps({"pool": "eth-sim"}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    urllib.request.urlopen(req, timeout=10).read()
+
+
+@pytest.mark.parametrize("position", ["mid_body", "after_headers"])
+def test_a_pause_holds_even_when_the_reply_has_no_body(sim, position):
+    """An empty body must not make a pause vanish, and the two positions must agree.
+
+    `empty_response` corruption and an HTTP HEAD both produce a reply with no
+    body, so there is no "part way through" for `mid_body` to hold at. The caller
+    still asked for the reply to be held, and holding is closer to that than
+    answering at once.
+
+    The two positions must reach the SAME answer here, because the scenario is
+    identical apart from a field whose meaning has run out. A pause that fires
+    for one position and vanishes for the other, on one scenario, with nothing
+    said, reads as a provider that simply answered quickly.
+    """
+    pause_ms = 1200
+    _set(sim, corruption_mode="empty_response", pause_at=position, pause_ms=pause_ms)
+    elapsed, raw = _seconds_until_the_connection_closes(_P1_PORT)
+
+    _, _, body = raw.partition(b"\r\n\r\n")
+    assert body == b"", f"empty_response should send no body, got {len(body)} bytes"
+    assert elapsed >= pause_ms / 1000.0 * 0.9, (
+        f"the pause vanished on an empty body at {position}: the connection closed "
+        f"after {elapsed:.3f}s, expected at least {pause_ms / 1000.0 * 0.9:.3f}s"
+    )
+
+
+def test_the_provider_keeps_serving_after_a_client_leaves_mid_hold(sim):
+    """A caller abandoning the request part way through a hold is the EXPECTED case,
+    and the provider must keep serving afterwards.
+
+    The whole purpose of a long pause is to outlast the caller's own window, so
+    the caller giving up is the normal outcome rather than an error. The write
+    that follows the hold then goes to a socket whose peer has gone.
+
+    What this test proves: the provider serves the NEXT request normally. It
+    would catch a wedged provider or a worker thread that never unwound, and it
+    fails on the second request rather than the first.
+
+    **What it does NOT prove, and the name says so on purpose.** It does not
+    exercise the ``OSError`` path around that write. Removing the guard leaves
+    this test passing on macOS: the write reaches the kernel buffer and never
+    raises, measured with a 50-byte body and again with an 8 MB one. Linux
+    reports a closed peer on a write differently, so the CI runner may reach the
+    path this machine cannot. The guard is kept because ``_drop`` guards the same
+    case for the same reason and it costs two lines — not because a test here
+    holds it.
+    """
+    _set(sim, pause_at="mid_body", pause_ms=3000)
+    conn = socket.create_connection(("127.0.0.1", _P1_PORT), timeout=30)
+    try:
+        conn.sendall(_request_bytes())
+        early = conn.recv(65536)
+        assert early, "nothing arrived before the hold, so the abandon is not the case under test"
+    finally:
+        conn.close()  # leave, mid-hold
+
+    time.sleep(3000 / 1000.0 + 0.5)  # let the hold expire and the second write happen
+
+    _heal(sim)
+    marks, headers, body = _read_timed(_P1_PORT)
+    assert json.loads(body)["result"] == "0x1312D00", "the provider stopped serving after a client left"
+    assert marks[-1][0] < 1.0, f"the provider answered slowly afterwards: {marks[-1][0]:.3f}s"
