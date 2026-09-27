@@ -114,6 +114,8 @@ Pick one `mode`; combine it with the orthogonal fields.
 | `missing_field` | str | Which field to drop or retype |
 | `blocks_behind` | int | Report a stale head (`eth_blockNumber` / `eth_getBlockByNumber` / gRPC `GetLatestBlock`) |
 | `drop_at` | `before_headers` \| `after_headers` \| `mid_body` | Where `drop_connection` cuts the socket |
+| `pause_at` | `after_headers` \| `mid_body` | Where a reply is HELD and then finished. Not a fault — `mode` stays `success`, the body is complete and the `Content-Length` honest, so the caller gets a correct reply late. `before_headers` is refused, because `latency_ms` already delays the first byte. HTTP transports only |
+| `pause_ms` | int | How long the hold lasts. Measured complete at 240s; the handler's 30s socket timeout governs the request READ, not the response write |
 | `fail_first_n` / `then_mode` | int / mode | Fail the first N calls, then switch to `then_mode` |
 | `transports` | list of `http` / `http2` / `ws` | Scope the block to specific endpoints (omit = all) |
 

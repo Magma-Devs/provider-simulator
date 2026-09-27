@@ -199,9 +199,18 @@ class ControlApi:
             # A fresh fail_first_n restarts the sequence counter.
             if "fail_first_n" in scenario_updates:
                 provider.reset_fail()
-            provider.scenario.update(scenario_updates)
-            if quirks_updates:
-                provider.quirks.update(quirks_updates)
+            # A cross-field rule lives in ScenarioConfig._validate and raises
+            # ValueError. Unguarded, that escapes the handler and the client sees
+            # its connection dropped rather than an answer — which reads as the
+            # simulator being broken rather than as the caller being refused.
+            # Measured on the shipped transports rule: transports=["grpc"] gave
+            # RemoteDisconnected, while an ordinary per-field error gave 400.
+            try:
+                provider.scenario.update(scenario_updates)
+                if quirks_updates:
+                    provider.quirks.update(quirks_updates)
+            except ValueError as exc:
+                return 400, {"error": f"{provider.key}: {exc}"}
             # `responses` is write-only on the wire (REST entries re-tuple to
             # (verb, template) keys, which JSON cannot carry) — echo every
             # other resolved field.

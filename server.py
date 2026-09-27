@@ -190,37 +190,43 @@ class _HttpListenerHandler(BaseHTTPRequestHandler):
         # suppress_body: the listener sized a body but told us to withhold it
         # (an HTTP HEAD). Content-Length above still announces the size a
         # body-carrying request would have received.
-        try:
-            if raw and not result.suppress_body:
-                if result.pause_at == "mid_body":
-                    # Content-Length above is the WHOLE body's, so the client is
-                    # still waiting for the rest when the hold begins. That is
-                    # what makes this a slow reply rather than a broken one.
-                    split = len(raw) // 2
+        if raw and not result.suppress_body:
+            if result.pause_at == "mid_body":
+                # Content-Length above is the WHOLE body's, so the client is
+                # still waiting for the rest when the hold begins. That is what
+                # makes this a slow reply rather than a broken one.
+                #
+                # Only the PAUSED writes are guarded. A hold outlasts the
+                # caller's own window on purpose, so the caller giving up is the
+                # expected outcome here and the second write routinely meets a
+                # closed peer. The ordinary write below is NOT guarded: a failure
+                # there is a real fault and must surface, and widening this
+                # except over it would silence write errors on every response the
+                # simulator sends.
+                split = len(raw) // 2
+                try:
                     self.wfile.write(raw[:split])
                     self._hold(result.pause_ms)
                     self.wfile.write(raw[split:])
-                else:
-                    self.wfile.write(raw)
-            elif result.pause_at == "mid_body":
-                # No body, so there is no "part way through" to hold at — an
-                # empty_response corruption or an HTTP HEAD. The caller still
-                # asked for the reply to be HELD, and holding is closer to that
-                # than answering at once, so this degrades to the after_headers
-                # behaviour rather than silently doing nothing.
-                #
-                # Silently doing nothing is what it used to do, and the two
-                # positions then disagreed on the same scenario: an empty body
-                # held for after_headers and did not hold for mid_body, with
-                # nothing said. A pause that vanishes reads as a router that
-                # answered quickly.
+                except OSError:
+                    pass  # the caller gave up during the hold, as intended
+            else:
+                self.wfile.write(raw)
+        elif result.pause_at == "mid_body":
+            # No body to be part way through. Two ways to get here: an
+            # ``empty_response`` corruption on any transport, and an HTTP HEAD —
+            # which is REST-ONLY, because ``suppress_body`` is set in exactly one
+            # place, ``listeners/rest.py``, and only ``_RestHttpHandler`` answers
+            # HEAD at all.
+            #
+            # The caller still asked for the reply to be HELD, and holding is
+            # closer to that than answering at once, so this degrades to the
+            # after_headers behaviour rather than silently doing nothing. A pause
+            # that vanishes reads as a provider that simply answered quickly.
+            try:
                 self._hold(result.pause_ms)
-        except OSError:
-            # The client may have gone during the hold, and on this feature that
-            # is the EXPECTED case rather than an exception: the whole point is a
-            # hold longer than the caller's own window, so the caller is meant to
-            # give up. ``_drop`` swallows the same error for the same reason.
-            pass
+            except OSError:
+                pass
 
     def _drop(self, drop_at: str) -> None:
         try:

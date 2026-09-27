@@ -83,19 +83,40 @@ def test_no_pause_configured_leaves_the_plan_alone():
     assert res.pause_ms == 0
 
 
-def test_the_transports_filter_scopes_a_pause():
-    """A pause aimed at the ws wire must not hold an http reply.
+def test_a_pause_aimed_at_a_wire_that_cannot_hold_it_is_refused():
+    """A pause scoped away from the HTTP wire is rejected, not accepted and ignored.
 
-    Every other field in the block is scoped by this filter. A field that
-    ignored it would fire on endpoints the caller never named, and the failure
-    would appear on an unrelated test sharing the provider.
+    Only the HTTP adapter performs a hold. The WebSocket and gRPC wires have
+    their own performers with no pause branch, so a pause scoped to ``ws`` would
+    be stored, echoed back by ``GET /scenario``, and never happen.
+
+    That is worse than a wrong-chain knob being ignored, because a paused reply
+    is a CORRECT reply: a test whose pause never armed reads a fast, valid answer
+    and concludes the router was fast. This file's own module docstring states
+    the rule — a knob that cannot apply fails loudly.
     """
-    listener, provider = _listener(HTTP)
-    provider.scenario.update({"pause_at": "mid_body", "pause_ms": 250, "transports": ["ws"]})
-    assert _serve(listener).pause_at is None
+    _, provider = _listener()
+    with pytest.raises(ValueError) as excinfo:
+        provider.scenario.update({"pause_at": "mid_body", "pause_ms": 250, "transports": ["ws"]})
+    message = str(excinfo.value)
+    assert "pause_at" in message
+    assert "http" in message, f"the error must name the wire that DOES hold, got: {message}"
 
-    ws_listener = JsonRpcListener(listener.provider, WS)
-    assert _serve(ws_listener).pause_at == "mid_body"
+
+def test_the_transports_filter_still_scopes_a_pause_to_the_wire_it_names():
+    """Scoped to ``http``, a pause fires on the http endpoint and not on the ws one.
+
+    The filter is the same one every other field in the block obeys. A field that
+    ignored it would fire on endpoints the caller never named, and the failure
+    would land on an unrelated test sharing the provider.
+    """
+    http_listener, provider = _listener(HTTP)
+    provider.scenario.update({"pause_at": "mid_body", "pause_ms": 250, "transports": ["http"]})
+
+    assert _serve(http_listener).pause_at == "mid_body", "the named wire must hold"
+
+    ws_listener = JsonRpcListener(provider, WS)
+    assert _serve(ws_listener).pause_at is None, "a wire the filter excludes must not hold"
 
 
 # ── control API validation ────────────────────────────────────────────────────
@@ -175,6 +196,62 @@ def test_before_headers_is_refused_and_names_the_right_field(sim):
     status, body = _set(sim, pause_at="before_headers", pause_ms=10)
     assert status == 400
     assert "latency_ms" in body["error"]
+
+
+@pytest.mark.parametrize("mode", ["down", "hang", "drop_connection"])
+def test_a_pause_is_refused_with_a_mode_that_never_reaches_the_reply(sim, mode):
+    """Three modes answer, or refuse to answer, before a reply is written.
+
+    ``down`` sends a bodiless 503 before the request is even parsed, ``hang``
+    sleeps out the caller's deadline and closes, and ``drop_connection`` hands off
+    to the adapter's drop path. A pause set with any of them used to be accepted,
+    stored and echoed back by ``GET /scenario`` while doing nothing at all.
+    """
+    status, body = _set(sim, mode=mode, pause_at="mid_body", pause_ms=500)
+    assert status == 400, f"mode={mode} with a pause must be refused, got {status}: {body}"
+    assert "pause_at" in body["error"] and mode in body["error"], body["error"]
+
+
+def test_a_pause_length_with_no_position_is_refused(sim):
+    """``pause_ms`` alone decides nothing: no field says WHERE to hold.
+
+    Every branch in the adapter tests ``pause_at``, so a length on its own is
+    inert — and a test that set only the length would wait for a hold that never
+    came and read the reply as fast.
+    """
+    status, body = _set(sim, pause_at=None, pause_ms=4000)
+    assert status == 400, f"a length with no position must be refused, got {status}: {body}"
+    assert "pause_ms" in body["error"] and "pause_at" in body["error"], body["error"]
+
+
+def test_a_rejected_update_answers_400_rather_than_dropping_the_connection(sim):
+    """A cross-field refusal must arrive as an answer, not as a network error.
+
+    ``ScenarioConfig._validate`` raises ``ValueError``, and the control-API
+    handler used to call ``update()`` unguarded — so the refusal escaped, the
+    connection died, and the caller saw its socket closed. A dropped connection
+    reads as the simulator being broken rather than as the caller being refused,
+    which sends the reader to the wrong place entirely.
+
+    This is asserted through the SHIPPED transports rule rather than the pause
+    rule, on purpose. That rule predates this change and behaved the same way, so
+    testing it here proves the fix is in the handler and not something the pause
+    rule arranges for itself.
+    """
+    status, body = _set(sim, transports=["grpc"])
+    assert status == 400, f"a refused update must answer 400, got {status}: {body}"
+    assert "grpc" in body["error"], body["error"]
+
+
+def test_a_position_with_a_zero_length_is_accepted(sim):
+    """The control for the test above: a position with no length is NOT refused.
+
+    A caller naming a position meant the reply to leave in two pieces, and that is
+    a coherent request even when the wait is nothing. Refusing it would be the
+    validator overreaching, which is how a guard starts costing more than it saves.
+    """
+    status, body = _set(sim, pause_at="mid_body", pause_ms=0)
+    assert status == 200, f"a position with a zero length must be accepted, got {status}: {body}"
 
 
 def test_an_unknown_position_is_refused(sim):
@@ -391,17 +468,18 @@ def _heal(sim):
 
 @pytest.mark.parametrize("position", ["mid_body", "after_headers"])
 def test_a_pause_holds_even_when_the_reply_has_no_body(sim, position):
-    """An empty body must not make a pause vanish, and the two positions must agree.
+    """An empty body must not make a pause vanish, whichever position was named.
 
     `empty_response` corruption and an HTTP HEAD both produce a reply with no
     body, so there is no "part way through" for `mid_body` to hold at. The caller
     still asked for the reply to be held, and holding is closer to that than
     answering at once.
 
-    The two positions must reach the SAME answer here, because the scenario is
-    identical apart from a field whose meaning has run out. A pause that fires
-    for one position and vanishes for the other, on one scenario, with nothing
-    said, reads as a provider that simply answered quickly.
+    Each position is asserted on its own run — this is parametrised, so nothing
+    here compares the two against each other. The claim is the one that matters:
+    NEITHER position may silently skip the hold. Before this was fixed,
+    ``mid_body`` skipped it and ``after_headers`` did not, and a pause that
+    vanishes reads as a provider that simply answered quickly.
     """
     pause_ms = 1200
     _set(sim, corruption_mode="empty_response", pause_at=position, pause_ms=pause_ms)
@@ -436,7 +514,8 @@ def test_the_provider_keeps_serving_after_a_client_leaves_mid_hold(sim):
     case for the same reason and it costs two lines — not because a test here
     holds it.
     """
-    _set(sim, pause_at="mid_body", pause_ms=3000)
+    status, applied = _set(sim, pause_at="mid_body", pause_ms=3000)
+    assert status == 200, f"the scenario was refused, so nothing below is the case under test: {applied}"
     conn = socket.create_connection(("127.0.0.1", _P1_PORT), timeout=30)
     try:
         conn.sendall(_request_bytes())
