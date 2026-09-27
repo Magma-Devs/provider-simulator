@@ -26,8 +26,13 @@ CONTROL_PORT = 19000
 # A router reaches one of these by port, through its --secondary-cache-be
 # setting. Tests reach the same one by name, on the control port.
 #
-# Chosen above the provider block (18545-18628) and the control port so a new
-# provider pool can be added without walking into a cache's port.
+# Chosen above the provider block and the control port so a new provider pool can
+# be added without walking into a cache's port. The provider block is 18545-18669
+# as of the ten failover pools, and the Service publishes spares to 18689, so the
+# gap to 19000 is what protects this port. Read the block's real end from the
+# topology rather than from this comment, which has been wrong once already:
+#   python3 -c "from provider_simulator.topology import TOPOLOGY; \
+#     p=sorted({e[2] for r in TOPOLOGY for e in r[6]}); print(p[0], p[-1])"
 CACHE_SIM_PORTS = {"secondary": 19100}
 
 

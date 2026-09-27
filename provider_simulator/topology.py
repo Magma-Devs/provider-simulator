@@ -524,8 +524,11 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
     # puts one provider on two addresses.
     #
     # Ports were chosen against the free-published headroom rather than after
-    # it: 18629-18644 were already published, and 18645-18669 are added to
-    # k8s/service.yml and k8s/deployment.yml in this same change.
+    # it. 18629-18644 were already published as spares. This change adds
+    # 18645-18689 to k8s/service.yml and k8s/deployment.yml: 18645-18669 for
+    # the pools below, and 18670-18689 as fresh headroom, so the NEXT pool
+    # needs no manifest edit. Do not read the end of this range as the end of
+    # the pools - there are 20 published ports past the highest one in use.
     #
     # Every pool name carries 'failover' plus a role, so a reader can tell at a
     # glance which of the nineteen older pools these ten are not.

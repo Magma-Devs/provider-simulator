@@ -134,9 +134,19 @@ never names a label. It only counts groups, through `min_groups` and
 out, `tests/test_control_api_providers.py`, and it does that to check that
 `GET /providers` serves the table as written.
 
-Only two pools carry a label today. `eth-sim` puts its first two primaries in
-one bloc and its third in another. `eth-cv-sim` puts its six providers in three
-blocs of two. Every other row carries the empty string, which means the
+Eight pools carry a label today, and 33 providers between them. Read the count
+rather than trusting this sentence, which said "only two" for months after the
+fourth pool gained one:
+
+    python3 -c "from provider_simulator.topology import TOPOLOGY; \
+      print(len({r[0] for r in TOPOLOGY if r[5]}))"
+
+Two shapes are in use. `eth-sim`, `lava-sim-grpc`, `lava-sim-rest` and
+`lava-sim-tm` each split their providers across TWO blocs. `eth-cv-sim`,
+`lava-cv-rest-sim`, `lava-cv-tm-sim` and `eth-failover-cv-sim` each use THREE -
+the first three with six providers in blocs of two, the last with three providers
+one per bloc, so a test can ask for agreement across three blocs and know which
+provider is which. Every other row carries the empty string, which means the
 deployment put that provider in no group at all. It is an empty string and not
 a missing value, so a caller grouping by label gets one bucket of unlabelled
 providers instead of a key that is not there.
