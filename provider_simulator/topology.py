@@ -520,13 +520,58 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
 )
 
 
+def ports_of(
+    pool: str,
+    pid: str,
+    interface: str = "jsonrpc",
+    transport: str = "http",
+) -> tuple[int, ...]:
+    """Return EVERY port one provider serves that interface and transport on, in
+    the order the topology lists them.
+
+    Almost every provider serves one port per interface and transport, so this
+    almost always returns a tuple of one and ``port_of`` is the better call. It
+    exists for the provider that serves the SAME interface and transport at two
+    DIFFERENT addresses — the shape a test needs to put one node behind two
+    node-urls, silence one of them, and require the traffic to move to the other.
+
+    ``pid`` is the pool-local slot, the same number the control API accepts in
+    ``<pool>:<pid>``. It restarts at "1" in every pool, so the pool argument is
+    what tells two pools' slot 1 apart.
+
+    Raises KeyError on any miss, with the same messages ``port_of`` gives: a miss
+    is a typo or a stale reference either way, and a silent empty tuple would let
+    a caller iterate over nothing and report that nothing was reached.
+    """
+    pool_pids = []
+    for row_pool, _chain, row_pid, _name, _is_backup, _group, endpoints in TOPOLOGY:
+        if row_pool != pool:
+            continue
+        pool_pids.append(row_pid)
+        if row_pid != pid:
+            continue
+        found = tuple(
+            port
+            for row_interface, row_transport, port in endpoints
+            if row_interface == interface and row_transport == transport
+        )
+        if found:
+            return found
+        served = ", ".join(f"{i}/{t}" for i, t, _p in endpoints)
+        raise KeyError(f"provider {pool}:{pid} does not serve {interface}/{transport}; it serves {served}")
+    if pool_pids:
+        raise KeyError(f"no provider {pool}:{pid} in the topology; {pool} has slots {pool_pids}")
+    known = sorted({row_pool for row_pool, _c, _p, _n, _b, _g, _e in TOPOLOGY})
+    raise KeyError(f"no pool {pool!r} in the topology; known pools: {known}")
+
+
 def port_of(
     pool: str,
     pid: str,
     interface: str = "jsonrpc",
     transport: str = "http",
 ) -> int:
-    """Return the TCP port one provider serves one interface/transport on.
+    """Return THE TCP port one provider serves one interface/transport on.
 
     ``pid`` is the pool-local slot, the same number the control API accepts in
     ``<pool>:<pid>``. It restarts at "1" in every pool, so the pool argument is
@@ -541,20 +586,19 @@ def port_of(
     names what the caller got wrong: an unknown pool lists the known pools, an
     unknown slot lists that pool's slots, and a wrong door lists the doors the
     provider does serve.
+
+    **Also raises when the provider serves that interface and transport at more
+    than ONE address**, because "the port" then has no single answer. Ask
+    ``ports_of`` instead. Returning the first would hand back one of two
+    addresses with nothing said — and a test that silenced the other one would
+    then be probing the address it did not silence, and reporting that silencing
+    a node changed nothing.
     """
-    pool_pids = []
-    for row_pool, _chain, row_pid, _name, _is_backup, _group, endpoints in TOPOLOGY:
-        if row_pool != pool:
-            continue
-        pool_pids.append(row_pid)
-        if row_pid != pid:
-            continue
-        for row_interface, row_transport, port in endpoints:
-            if row_interface == interface and row_transport == transport:
-                return port
-        served = ", ".join(f"{i}/{t}" for i, t, _p in endpoints)
-        raise KeyError(f"provider {pool}:{pid} does not serve {interface}/{transport}; it serves {served}")
-    if pool_pids:
-        raise KeyError(f"no provider {pool}:{pid} in the topology; {pool} has slots {pool_pids}")
-    known = sorted({row_pool for row_pool, _c, _p, _n, _b, _g, _e in TOPOLOGY})
-    raise KeyError(f"no pool {pool!r} in the topology; known pools: {known}")
+    found = ports_of(pool, pid, interface, transport)
+    if len(found) > 1:
+        raise KeyError(
+            f"provider {pool}:{pid} serves {interface}/{transport} on "
+            f"{len(found)} addresses, ports {list(found)}; 'the port' has no single "
+            f"answer here — call ports_of() and say which one you mean"
+        )
+    return found[0]
