@@ -185,11 +185,22 @@ class _HttpListenerHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
+        if result.pause_at == "after_headers":
+            self._hold(result.pause_ms)
         # suppress_body: the listener sized a body but told us to withhold it
         # (an HTTP HEAD). Content-Length above still announces the size a
         # body-carrying request would have received.
         if raw and not result.suppress_body:
-            self.wfile.write(raw)
+            if result.pause_at == "mid_body":
+                # Content-Length above is the WHOLE body's, so the client is
+                # still waiting for the rest when the hold begins. That is what
+                # makes this a slow reply rather than a broken one.
+                split = len(raw) // 2
+                self.wfile.write(raw[:split])
+                self._hold(result.pause_ms)
+                self.wfile.write(raw[split:])
+            else:
+                self.wfile.write(raw)
 
     def _drop(self, drop_at: str) -> None:
         try:
@@ -209,6 +220,28 @@ class _HttpListenerHandler(BaseHTTPRequestHandler):
         except OSError:
             pass  # client may already be gone
         self._close()
+
+    def _hold(self, pause_ms: int) -> None:
+        """Wait, leaving the socket open and whatever is written already sent.
+
+        The flush is DEFENSIVE, not load-bearing, and the difference is worth
+        recording because the obvious reading is the other one. ``wfile`` is
+        unbuffered here — ``BaseHTTPRequestHandler.wbufsize`` is 0 — so each
+        write has already reached the socket and the split happens without it.
+        Measured by removing the flush: the reply still arrived in two pieces.
+
+        It stays because a later change to ``wbufsize`` would otherwise turn
+        every paused reply into one late reply, silently, and the tests that
+        would catch it are the only thing standing between that and a suite that
+        still looks green. ``_drop`` flushes at its ``mid_body`` branch for the
+        same reason.
+        """
+        try:
+            self.wfile.flush()
+        except OSError:
+            return  # client already gone; nothing to hold for
+        if pause_ms > 0:
+            time.sleep(pause_ms / 1000.0)
 
     def _close(self) -> None:
         try:

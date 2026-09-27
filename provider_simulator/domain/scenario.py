@@ -40,6 +40,16 @@ class ScenarioConfig(IntrospectiveConfig):
     fail_first_n: int = 0
     then_mode: str = "success"
     drop_at: str = "before_headers"
+    # A pause holds a reply part way through and then FINISHES it. The
+    # Content-Length stays honest, so the client keeps reading and receives the
+    # whole body late. That is the opposite of ``drop_at``, which promises a
+    # size it never delivers and closes the connection.
+    #
+    # ``None`` means no pause. ``before_headers`` is refused rather than
+    # accepted, because ``latency_ms`` already delays the first byte and two
+    # ways to say one thing is how a test measures the wrong one.
+    pause_at: str | None = None  # None | after_headers | mid_body
+    pause_ms: int = 0
     transports: list[str] | None = None  # endpoint filter; None = all endpoints
 
     def _validate(self, cfg: dict) -> None:

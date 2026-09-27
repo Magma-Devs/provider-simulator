@@ -1,7 +1,7 @@
 """Shared fixtures for the simulator integration tests.
 
 One in-process ``SimulatorServer`` boots ONCE per pytest session, serving the
-REAL topology on the REAL ports (18545-18585 + control 19000) — the same
+REAL topology on the REAL ports (18545-18628 + control 19000) — the same
 registry, listeners, and control API a deployed pod runs, so the tests cannot
 drift from production wiring. Every integration file talks to it through
 ``sim`` and isolates itself with its own autouse reset fixture (POST

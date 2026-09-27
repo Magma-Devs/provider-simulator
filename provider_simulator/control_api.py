@@ -32,6 +32,9 @@ _CORRUPTION_MODES = {
     "invalid_proto",  # gRPC-only wire corruption; other listeners never emit it
 }
 _DROP_AT = {"before_headers", "after_headers", "mid_body"}
+# Where a reply may be HELD and then finished. The same vocabulary as
+# _DROP_AT minus "before_headers", which latency_ms already expresses.
+_PAUSE_AT = _DROP_AT - {"before_headers"}
 _LOGS_LAG_MODES = {"empty", "partial"}
 # Two calls with the same (request_id, method) within this window are one group.
 _CORRELATION_WINDOW_S = 0.050
@@ -40,6 +43,7 @@ _ENUMS = {
     "mode": _MODES,
     "corruption_mode": _CORRUPTION_MODES,
     "drop_at": _DROP_AT,
+    "pause_at": _PAUSE_AT,
     "then_mode": _MODES,
     "logs_lag_mode": _LOGS_LAG_MODES,
     "unknown_method_mode": {"null", "error"},
@@ -54,7 +58,7 @@ def _bad_number(field_name: str, value: object) -> str:
     if field_name == "error_probability":
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0:
             return f"error_probability must be a number in [0.0, 1.0], got {value!r}"
-    if field_name in ("latency_ms", "fail_first_n", "blocks"):
+    if field_name in ("latency_ms", "pause_ms", "fail_first_n", "blocks"):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             return f"{field_name} must be a non-negative integer, got {value!r}"
     if field_name == "per_second":
@@ -845,6 +849,16 @@ class ControlApi:
 
 
 def _bad_enum(field_name: str, value: object) -> str:
+    # pause_at="before_headers" gets its own message instead of the generic
+    # "allowed:" list, because the caller is not guessing — they want a delay
+    # before the reply, and latency_ms is the field that gives it. Naming the
+    # right field is what stops the next attempt being another wrong guess.
+    if field_name == "pause_at" and value == "before_headers":
+        return (
+            "pause_at 'before_headers' is not accepted: latency_ms already delays the "
+            "first byte. Use latency_ms for the delay before the reply starts, and "
+            "pause_at 'after_headers' or 'mid_body' to hold a reply part way through"
+        )
     allowed = _ENUMS.get(field_name)
     if allowed is not None and value is not None and value not in allowed:
         return f"invalid {field_name} {value!r}; allowed: {sorted(allowed)}"
