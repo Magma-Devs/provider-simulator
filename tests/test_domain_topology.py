@@ -1,7 +1,8 @@
 import pytest
 
 from provider_simulator.domain.quirks import known_chains
-from provider_simulator.topology import TOPOLOGY, port_of
+from provider_simulator.domain.registry import build_registry
+from provider_simulator.topology import TOPOLOGY, port_of, ports_of
 
 # The one deployment pin: this literal set mirrors the router-side
 # values_sim.yml ids (plus the two listener-only pools named in the topology
@@ -180,6 +181,118 @@ def test_port_of_reaches_every_endpoint_in_the_table():
             assert (
                 port_of(pool, pid, interface, transport) == port
             ), f"port_of could not resolve {pool}:{pid} {interface}/{transport}"
+
+
+# ── one provider, two addresses on the same door ──────────────────────────────
+#
+# A provider can serve the SAME interface and transport at two DIFFERENT ports.
+# No row in the shipped table does it, so these tests supply their own: the
+# behaviour has to be correct BEFORE a pool relies on it, or the first pool that
+# does is debugging the helper instead of its own test.
+
+# Ports chosen above everything the real table binds, so a mistake here cannot
+# collide with a real provider and read as that provider misbehaving.
+_TWO_ADDRESS_ROWS = (
+    (
+        "scratch-sim",
+        "eth",
+        "1",
+        "ScratchProvider1",
+        False,
+        "",
+        (("jsonrpc", "http", 18901), ("jsonrpc", "http", 18902)),
+    ),
+    ("scratch-sim", "eth", "2", "ScratchProvider2", False, "", (("jsonrpc", "http", 18903),)),
+)
+
+
+@pytest.fixture
+def two_address_topology(monkeypatch):
+    """Replace the table with two rows: one provider on two addresses, one on one.
+
+    The single-address row is the control. Without it a bug that returned every
+    port in the table would pass every assertion below.
+    """
+    monkeypatch.setattr("provider_simulator.topology.TOPOLOGY", _TWO_ADDRESS_ROWS)
+    return _TWO_ADDRESS_ROWS
+
+
+def test_ports_of_returns_one_port_for_an_ordinary_provider():
+    """Every provider in the shipped table serves one port per door, so this is
+    the shape almost every caller meets."""
+    assert ports_of("eth-sim", "1") == (18545,)
+    assert ports_of("eth-sim", "1", transport="ws") == (18557,)
+    assert ports_of("lava-sim-grpc", "1", "grpc", "http2") == (ports_of("lava-sim-grpc", "1", "grpc", "http2")[0],)
+    assert len(ports_of("btc-sim", "2")) == 1
+
+
+def test_ports_of_returns_every_address_in_table_order(two_address_topology):
+    """Both addresses, in the order the table lists them.
+
+    Order matters because a test that silences 'the first address' and probes
+    'the second' needs the two to mean the same thing on every run.
+    """
+    assert ports_of("scratch-sim", "1") == (18901, 18902)
+    assert ports_of("scratch-sim", "2") == (18903,), "the single-address control must still return one"
+
+
+def test_port_of_refuses_a_provider_with_two_addresses(two_address_topology):
+    """``port_of`` must not answer a question with two answers.
+
+    Returning the first would hand back one of two addresses with nothing said.
+    A test that silenced the other one would then probe the address it did NOT
+    silence and report that silencing a node changed nothing — a false pass on
+    the exact behaviour it was written to check.
+    """
+    with pytest.raises(KeyError) as excinfo:
+        port_of("scratch-sim", "1")
+    message = str(excinfo.value)
+    assert "scratch-sim:1" in message
+    assert "2 addresses" in message, f"the error must say how many, got: {message}"
+    assert "18901" in message and "18902" in message, f"it must name both ports, got: {message}"
+    assert "ports_of" in message, f"it must name the call that does answer, got: {message}"
+
+    # The control: one address is still a question with one answer.
+    assert port_of("scratch-sim", "2") == 18903
+
+
+def test_ports_of_raises_the_same_misses_as_port_of(two_address_topology):
+    """A miss is a typo either way, so both calls must fail the same way.
+
+    An empty tuple would be worse than an exception here: the caller would
+    iterate over nothing and report that no address was reached.
+    """
+    with pytest.raises(KeyError) as excinfo:
+        ports_of("scratch-sim-typo", "1")
+    assert "known pools" in str(excinfo.value)
+
+    with pytest.raises(KeyError) as excinfo:
+        ports_of("scratch-sim", "99")
+    assert "slots" in str(excinfo.value)
+
+    with pytest.raises(KeyError) as excinfo:
+        ports_of("scratch-sim", "1", transport="ws")
+    assert "does not serve" in str(excinfo.value)
+
+
+def test_the_registry_binds_both_addresses_of_one_provider():
+    """The helper is only half of it: the simulator must actually bind both.
+
+    Without this the pair could be readable and unreachable — two ports in the
+    table, one listener, and a test blaming the router for a node that was never
+    listening.
+    """
+    reg = build_registry(rows=_TWO_ADDRESS_ROWS)
+    assert reg.ports() == [18901, 18902, 18903], f"every address must bind a listener, got {reg.ports()}"
+
+    # Both addresses resolve to the SAME provider, which is the point: one node,
+    # two ways in. Two providers would be a different topology and a different test.
+    first, _ = reg.by_port(18901)
+    second, _ = reg.by_port(18902)
+    assert first.key == second.key == "scratch-sim:1"
+    # The control: the single-address provider is a different one.
+    other, _ = reg.by_port(18903)
+    assert other.key == "scratch-sim:2"
 
 
 def test_port_of_raises_on_an_unknown_pool_and_names_the_known_ones():
