@@ -33,7 +33,7 @@ def test_every_provider_in_the_topology_is_served():
     """One entry per provider, keyed the way stats and scenario already key
     theirs: the pool name, a colon, then the pool slot."""
     providers = _providers()
-    assert len(providers) == 78, sorted(providers)
+    assert len(providers) == 118, sorted(providers)
     assert "eth-sim:1" in providers
     assert "lava-sim-tm:6" in providers
 
@@ -99,10 +99,13 @@ def test_a_provider_with_no_label_reports_an_empty_string():
     # each (MAG-2791), lava-cv-rest-sim 6 (MAG-3046) and lava-cv-tm-sim 6.
     # The two cache pools add 12 unlabelled and eth-resp-sim adds 3: none of
     # those three routers carries a cross-validation policy, so a label there
-    # would name a bloc nothing counts (MAG-3541).
+    # would name a bloc nothing counts (MAG-3541). ALL TEN failover pools add 40
+    # unlabelled for the same reason, eth-failover-cv-sim included — its name
+    # says what it is FOR, not that a policy exists for it yet. The topology
+    # records why beside those rows.
     # Update both numbers together when a router gains or loses a label.
     assert len(labelled) == 30, f"expected 30 labelled, got {len(labelled)}"
-    assert len(unlabelled) == 48, f"expected 48 unlabelled, got {len(unlabelled)}"
+    assert len(unlabelled) == 88, f"expected 88 unlabelled, got {len(unlabelled)}"
 
 
 # ── Filters ───────────────────────────────────────────────────────────────────
@@ -123,8 +126,12 @@ def test_filter_by_is_backup_returns_the_backup_tier():
     assert providers
     assert all(e["is_backup"] is True for e in providers.values())
     # eth-sim, lava-sim-rest, lava-sim-grpc, lava-sim-tm, eth-cache-writer-sim
-    # and eth-cache-reader-sim each have 3.
-    assert len(providers) == 18, sorted(providers)
+    # and eth-cache-reader-sim each have 3, and so do three of the failover pools
+    # — eth-failover-prodlimits-sim, eth-failover-archive-sim and
+    # eth-failover-mixed-sim. Three more failover pools hold four providers each
+    # and have 2: eth-failover-excluded-sim, eth-failover-ineligible-sim and
+    # eth-failover-noarchive-sim. Nine pools of three plus three pools of two.
+    assert len(providers) == 33, sorted(providers)
 
 
 def test_filter_by_name_is_the_reverse_lookup():

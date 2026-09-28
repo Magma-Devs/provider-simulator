@@ -517,6 +517,380 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
     ("eth-resp-sim", "eth", "1", "EthRespPrimaryProvider1", False, "", (("jsonrpc", "http", 18626),)),
     ("eth-resp-sim", "eth", "2", "EthRespPrimaryProvider2", False, "", (("jsonrpc", "http", 18627),)),
     ("eth-resp-sim", "eth", "3", "EthRespPrimaryProvider3", False, "", (("jsonrpc", "http", 18628),)),
+    # ── The ten failover pools, MAG-3916 ──────────────────────────────────
+    #
+    # 40 providers on 41 ports, 18629-18669, contiguous. The count of ports
+    # exceeds the count of providers by one, because eth-failover-twoaddr-sim
+    # puts one provider on two addresses.
+    #
+    # Ports were chosen against the free-published headroom rather than after
+    # it. 18629-18644 were already published as spares. This change adds
+    # 18645-18689 to k8s/service.yml and k8s/deployment.yml: 18645-18669 for
+    # the pools below, and 18670-18689 as fresh headroom, so the NEXT pool
+    # needs no manifest edit. Do not read the end of this range as the end of
+    # the pools - there are 20 published ports past the highest one in use.
+    #
+    # Every pool name carries 'failover' plus a role, so a reader can tell at a
+    # glance which of the nineteen older pools these ten are not.
+    # eth-failover-prodlimits-sim: ports 18629-18634.
+    # The only one of the ten with BOTH tiers and the router's unmodified
+    # limits: 10s before a second node is asked, 30s for an ordinary call,
+    # 180s for an expensive one. That makes it the only pool shaped like a
+    # real deployment, which is why MAG-3923 reproduces here — three silent
+    # primaries, three healthy backups, and the caller waiting out the full 30
+    # seconds. The 30 seconds IS the defect, so its router must not shorten
+    # it.
+    (
+        "eth-failover-prodlimits-sim",
+        "eth",
+        "1",
+        "EthFailoverProdlimitsPrimaryProvider1",
+        False,
+        "",
+        (("jsonrpc", "http", 18629),),
+    ),
+    (
+        "eth-failover-prodlimits-sim",
+        "eth",
+        "2",
+        "EthFailoverProdlimitsPrimaryProvider2",
+        False,
+        "",
+        (("jsonrpc", "http", 18630),),
+    ),
+    (
+        "eth-failover-prodlimits-sim",
+        "eth",
+        "3",
+        "EthFailoverProdlimitsPrimaryProvider3",
+        False,
+        "",
+        (("jsonrpc", "http", 18631),),
+    ),
+    (
+        "eth-failover-prodlimits-sim",
+        "eth",
+        "4",
+        "EthFailoverProdlimitsBackupProvider4",
+        True,
+        "",
+        (("jsonrpc", "http", 18632),),
+    ),
+    (
+        "eth-failover-prodlimits-sim",
+        "eth",
+        "5",
+        "EthFailoverProdlimitsBackupProvider5",
+        True,
+        "",
+        (("jsonrpc", "http", 18633),),
+    ),
+    (
+        "eth-failover-prodlimits-sim",
+        "eth",
+        "6",
+        "EthFailoverProdlimitsBackupProvider6",
+        True,
+        "",
+        (("jsonrpc", "http", 18634),),
+    ),
+    # eth-failover-timing-sim: ports 18635-18637.
+    # 18 of MAG-3915's 22 scenarios. No backup tier on purpose: it means
+    # silencing three nodes instead of six, and a backup answering would hide
+    # the timing being measured.
+    (
+        "eth-failover-timing-sim",
+        "eth",
+        "1",
+        "EthFailoverTimingPrimaryProvider1",
+        False,
+        "",
+        (("jsonrpc", "http", 18635),),
+    ),
+    (
+        "eth-failover-timing-sim",
+        "eth",
+        "2",
+        "EthFailoverTimingPrimaryProvider2",
+        False,
+        "",
+        (("jsonrpc", "http", 18636),),
+    ),
+    (
+        "eth-failover-timing-sim",
+        "eth",
+        "3",
+        "EthFailoverTimingPrimaryProvider3",
+        False,
+        "",
+        (("jsonrpc", "http", 18637),),
+    ),
+    # eth-failover-twoaddr-sim: ports 18638-18639.
+    # ONE provider on TWO addresses, both jsonrpc/http. The only row in this
+    # table that repeats an interface and transport, and the reason ports_of
+    # exists — port_of returns one port and refuses when there are two.
+    # Scenario 12 needs one node whose first address is silent and whose
+    # second answers, so traffic moves and the silent address is switched off.
+    # On eth-sim a provider's two entries point at the SAME address, so there
+    # is nothing to move to.
+    (
+        "eth-failover-twoaddr-sim",
+        "eth",
+        "1",
+        "EthFailoverTwoaddrSoloProvider1",
+        False,
+        "",
+        (("jsonrpc", "http", 18638), ("jsonrpc", "http", 18639)),
+    ),
+    # eth-failover-real-sim: ports 18640-18642.
+    # The timing pool with one thing changed: the router's real limits, for
+    # the two scenarios where the real number is the claim.
+    ("eth-failover-real-sim", "eth", "1", "EthFailoverRealPrimaryProvider1", False, "", (("jsonrpc", "http", 18640),)),
+    ("eth-failover-real-sim", "eth", "2", "EthFailoverRealPrimaryProvider2", False, "", (("jsonrpc", "http", 18641),)),
+    ("eth-failover-real-sim", "eth", "3", "EthFailoverRealPrimaryProvider3", False, "", (("jsonrpc", "http", 18642),)),
+    # eth-failover-cv-sim: ports 18643-18645.
+    # Scenario 19: a node taking part in a cross-check answers after the per-
+    # attempt mark and must still be counted.
+    #
+    # NO GROUP LABEL, and the empty string here is a decision rather than an
+    # omission. An earlier version of these rows put the three providers in
+    # voting-group-1, -2 and -3, mirroring eth-cv-sim at smaller scale. That was
+    # wrong for two reasons, both found by trying it:
+    #
+    # 1. No router deploys a cross_validation_policies block for this pool, so a
+    #    group here names a bloc nothing counts. That is the same reason the
+    #    other nine failover pools carry none, and the reason the two cache pools
+    #    and eth-resp-sim carry none.
+    # 2. A group label has to agree across FIVE files - this table, the
+    #    automation repository's config/values_sim.yml, smart-router-standalone's
+    #    values/simulator/values_sim.yml, this repository's own config file, and
+    #    the deploy server's hand-edited copy. Two guards compare them. The
+    #    standalone copy does not carry this pool at all, because these ten
+    #    routers do not run on the shared cluster, so a label here cannot agree
+    #    with it and the drift guard goes red.
+    #
+    # Whoever gives this router a cross-validation policy adds the labels in the
+    # same change, in every copy at once. Labels first and policy later is the
+    # order that fails.
+    ("eth-failover-cv-sim", "eth", "1", "EthFailoverCvPrimaryProvider1", False, "", (("jsonrpc", "http", 18643),)),
+    ("eth-failover-cv-sim", "eth", "2", "EthFailoverCvPrimaryProvider2", False, "", (("jsonrpc", "http", 18644),)),
+    ("eth-failover-cv-sim", "eth", "3", "EthFailoverCvPrimaryProvider3", False, "", (("jsonrpc", "http", 18645),)),
+    # eth-failover-archive-sim: ports 18646-18651.
+    # The archive baseline: every provider carries the archive addon, so the
+    # filter never fires and retry, tier fallback and recovery are visible
+    # without it. The addon is router-side, in values_sim.yml; this table has
+    # no addon field and needs none.
+    (
+        "eth-failover-archive-sim",
+        "eth",
+        "1",
+        "EthFailoverArchivePrimaryProvider1",
+        False,
+        "",
+        (("jsonrpc", "http", 18646),),
+    ),
+    (
+        "eth-failover-archive-sim",
+        "eth",
+        "2",
+        "EthFailoverArchivePrimaryProvider2",
+        False,
+        "",
+        (("jsonrpc", "http", 18647),),
+    ),
+    (
+        "eth-failover-archive-sim",
+        "eth",
+        "3",
+        "EthFailoverArchivePrimaryProvider3",
+        False,
+        "",
+        (("jsonrpc", "http", 18648),),
+    ),
+    (
+        "eth-failover-archive-sim",
+        "eth",
+        "4",
+        "EthFailoverArchiveBackupProvider4",
+        True,
+        "",
+        (("jsonrpc", "http", 18649),),
+    ),
+    (
+        "eth-failover-archive-sim",
+        "eth",
+        "5",
+        "EthFailoverArchiveBackupProvider5",
+        True,
+        "",
+        (("jsonrpc", "http", 18650),),
+    ),
+    (
+        "eth-failover-archive-sim",
+        "eth",
+        "6",
+        "EthFailoverArchiveBackupProvider6",
+        True,
+        "",
+        (("jsonrpc", "http", 18651),),
+    ),
+    # eth-failover-mixed-sim: ports 18652-18657.
+    # The filter fires: archive and plain traffic route differently in one
+    # run.
+    (
+        "eth-failover-mixed-sim",
+        "eth",
+        "1",
+        "EthFailoverMixedPrimaryProvider1",
+        False,
+        "",
+        (("jsonrpc", "http", 18652),),
+    ),
+    (
+        "eth-failover-mixed-sim",
+        "eth",
+        "2",
+        "EthFailoverMixedPrimaryProvider2",
+        False,
+        "",
+        (("jsonrpc", "http", 18653),),
+    ),
+    (
+        "eth-failover-mixed-sim",
+        "eth",
+        "3",
+        "EthFailoverMixedPrimaryProvider3",
+        False,
+        "",
+        (("jsonrpc", "http", 18654),),
+    ),
+    ("eth-failover-mixed-sim", "eth", "4", "EthFailoverMixedBackupProvider4", True, "", (("jsonrpc", "http", 18655),)),
+    ("eth-failover-mixed-sim", "eth", "5", "EthFailoverMixedBackupProvider5", True, "", (("jsonrpc", "http", 18656),)),
+    ("eth-failover-mixed-sim", "eth", "6", "EthFailoverMixedBackupProvider6", True, "", (("jsonrpc", "http", 18657),)),
+    # eth-failover-excluded-sim: ports 18658-18661.
+    # The backup tier is excluded BEFORE selection — zero calls on it for
+    # archive traffic — while plain traffic fails over to it under the same
+    # fault. Named for what it proves rather than 'primary', because Primary
+    # is a role word and a pool called that would render
+    # EthFailoverPrimaryBackupProvider4.
+    (
+        "eth-failover-excluded-sim",
+        "eth",
+        "1",
+        "EthFailoverExcludedPrimaryProvider1",
+        False,
+        "",
+        (("jsonrpc", "http", 18658),),
+    ),
+    (
+        "eth-failover-excluded-sim",
+        "eth",
+        "2",
+        "EthFailoverExcludedPrimaryProvider2",
+        False,
+        "",
+        (("jsonrpc", "http", 18659),),
+    ),
+    (
+        "eth-failover-excluded-sim",
+        "eth",
+        "3",
+        "EthFailoverExcludedBackupProvider3",
+        True,
+        "",
+        (("jsonrpc", "http", 18660),),
+    ),
+    (
+        "eth-failover-excluded-sim",
+        "eth",
+        "4",
+        "EthFailoverExcludedBackupProvider4",
+        True,
+        "",
+        (("jsonrpc", "http", 18661),),
+    ),
+    # eth-failover-ineligible-sim: ports 18662-18665.
+    # Whether fallback is driven by exhaustion or by ineligibility. The one
+    # the other archive pools cannot surface.
+    (
+        "eth-failover-ineligible-sim",
+        "eth",
+        "1",
+        "EthFailoverIneligiblePrimaryProvider1",
+        False,
+        "",
+        (("jsonrpc", "http", 18662),),
+    ),
+    (
+        "eth-failover-ineligible-sim",
+        "eth",
+        "2",
+        "EthFailoverIneligiblePrimaryProvider2",
+        False,
+        "",
+        (("jsonrpc", "http", 18663),),
+    ),
+    (
+        "eth-failover-ineligible-sim",
+        "eth",
+        "3",
+        "EthFailoverIneligibleBackupProvider3",
+        True,
+        "",
+        (("jsonrpc", "http", 18664),),
+    ),
+    (
+        "eth-failover-ineligible-sim",
+        "eth",
+        "4",
+        "EthFailoverIneligibleBackupProvider4",
+        True,
+        "",
+        (("jsonrpc", "http", 18665),),
+    ),
+    # eth-failover-noarchive-sim: ports 18666-18669.
+    # Zero eligible providers in either tier from the start. Whether the
+    # router refuses cleanly, and whether plain traffic on the same router
+    # still works. MAG-3912 flags one open question here: whether a router
+    # with no archive provider anywhere starts at all. It builds its extension
+    # policy from provider addons, so with none the archive extension appears
+    # in no policy.
+    (
+        "eth-failover-noarchive-sim",
+        "eth",
+        "1",
+        "EthFailoverNoarchivePrimaryProvider1",
+        False,
+        "",
+        (("jsonrpc", "http", 18666),),
+    ),
+    (
+        "eth-failover-noarchive-sim",
+        "eth",
+        "2",
+        "EthFailoverNoarchivePrimaryProvider2",
+        False,
+        "",
+        (("jsonrpc", "http", 18667),),
+    ),
+    (
+        "eth-failover-noarchive-sim",
+        "eth",
+        "3",
+        "EthFailoverNoarchiveBackupProvider3",
+        True,
+        "",
+        (("jsonrpc", "http", 18668),),
+    ),
+    (
+        "eth-failover-noarchive-sim",
+        "eth",
+        "4",
+        "EthFailoverNoarchiveBackupProvider4",
+        True,
+        "",
+        (("jsonrpc", "http", 18669),),
+    ),
 )
 
 
