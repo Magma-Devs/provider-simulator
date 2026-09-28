@@ -95,17 +95,20 @@ def test_a_provider_with_no_label_reports_an_empty_string():
     unlabelled = [k for k, v in providers.items() if v["group_label"] == ""]
     labelled = [k for k, v in providers.items() if v["group_label"] != ""]
     assert len(unlabelled) + len(labelled) == len(providers)
-    # 30 labelled today: eth-sim 3, eth-cv-sim 6, the three lava-sim routers 3
-    # each (MAG-2791), lava-cv-rest-sim 6 (MAG-3046) and lava-cv-tm-sim 6.
+    # 33 labelled today: eth-sim 3, eth-cv-sim 6, the three lava-sim routers 3
+    # each (MAG-2791), lava-cv-rest-sim 6 (MAG-3046), lava-cv-tm-sim 6, and
+    # eth-failover-cv-sim 3 (MAG-3916).
     # The two cache pools add 12 unlabelled and eth-resp-sim adds 3: none of
     # those three routers carries a cross-validation policy, so a label there
-    # would name a bloc nothing counts (MAG-3541). ALL TEN failover pools add 40
-    # unlabelled for the same reason, eth-failover-cv-sim included — its name
-    # says what it is FOR, not that a policy exists for it yet. The topology
-    # records why beside those rows.
+    # would name a bloc nothing counts (MAG-3541). NINE of the ten failover
+    # pools add 37 unlabelled for the same reason. The tenth,
+    # eth-failover-cv-sim, gained its labels when its router gained a
+    # cross-validation policy — the two land together, because a label without
+    # a policy names a bloc nothing counts and a policy without labels cannot
+    # satisfy a min-groups bound. The topology records why beside those rows.
     # Update both numbers together when a router gains or loses a label.
-    assert len(labelled) == 30, f"expected 30 labelled, got {len(labelled)}"
-    assert len(unlabelled) == 88, f"expected 88 unlabelled, got {len(unlabelled)}"
+    assert len(labelled) == 33, f"expected 33 labelled, got {len(labelled)}"
+    assert len(unlabelled) == 85, f"expected 85 unlabelled, got {len(unlabelled)}"
 
 
 # ── Filters ───────────────────────────────────────────────────────────────────
