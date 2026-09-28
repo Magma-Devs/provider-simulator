@@ -58,6 +58,25 @@ NONE_VERDICT = Verdict(kind="none")
 _NONE = NONE_VERDICT  # backward-compatible module-private alias
 
 
+def targets(scenario: dict, endpoint: Endpoint) -> bool:
+    """Does this scenario block apply to this endpoint?
+
+    The ONE answer to that question. Both filters AND together, and either one
+    left as ``None`` means "no opinion", so a block with neither targets every
+    endpoint exactly as it did before ``ports`` existed.
+
+    Exported rather than inlined into ``resolve_mode`` because it is not the only
+    caller: ``GrpcListener`` gates ``corruption_mode`` on the same question, and
+    when it asked it separately the two answers drifted — it read ``transports``
+    and never learned about ``ports``. Five fault modes honoured the new filter
+    and corruption did not. One function is what makes this module's promise —
+    "a change to the fault rules happens once" — true rather than aspirational.
+    """
+    transports = scenario.get("transports")
+    ports = scenario.get("ports")
+    return (transports is None or endpoint.transport in transports) and (ports is None or endpoint.port in ports)
+
+
 def resolve_mode(scenario: dict, endpoint: Endpoint, provider: Provider) -> tuple[bool, str]:
     """Apply the transports filter and the fail_first_n window; return
     ``(targeted, effective_mode)``.
@@ -67,11 +86,7 @@ def resolve_mode(scenario: dict, endpoint: Endpoint, provider: Provider) -> tupl
     once per request. An untargeted endpoint neither faults nor advances the
     window — its effective mode is always ``success``.
     """
-    transports = scenario.get("transports")
-    ports = scenario.get("ports")
-    # Both filters AND together. Either one None means "no opinion", so a block
-    # with neither targets every endpoint, exactly as before this field existed.
-    targeted = (transports is None or endpoint.transport in transports) and (ports is None or endpoint.port in ports)
+    targeted = targets(scenario, endpoint)
 
     mode = scenario.get("mode", "success")
     fail_first_n = scenario.get("fail_first_n", 0)

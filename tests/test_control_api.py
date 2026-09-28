@@ -714,3 +714,87 @@ def test_a_port_belonging_to_another_provider_is_still_refused():
     st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down", "ports": [neighbour]}}})
     assert st == 400
     assert str(neighbour) in resp["error"]
+
+
+# ── a mis-shaped ports value must be ANSWERED, never dropped ─────────────────
+
+
+def test_a_scalar_ports_value_is_400_and_not_a_crash():
+    """The regression this guards is not a wrong answer, it is NO answer.
+
+    _ports_the_provider_does_not_serve used to iterate ``ports`` before anything
+    had judged its shape. A bare int is not iterable, so the comprehension raised
+    TypeError — which is not a ValueError, so the handler's guard never saw it, it
+    escaped do_POST and the client's connection was dropped. A dropped connection
+    reads as a broken simulator rather than a refused caller, which is exactly the
+    failure PR #125 measured and fixed for the transports rule.
+    """
+    for bad in (18545, True, "18545"):
+        api = _api()
+        st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down", "ports": bad}}})
+        assert st == 400, f"ports={bad!r} gave {st}"
+        assert "ports must be a list" in resp["error"], f"ports={bad!r} gave {resp['error']!r}"
+
+
+def test_a_string_ports_value_is_not_read_as_five_ports():
+    """A string is iterable, so it was the worst of the three: it did not crash,
+    it produced a refusal naming ['1', '8', '5', '4', '5'] as unserved ports."""
+    api = _api()
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down", "ports": "18545"}}})
+    assert st == 400
+    assert "'1'" not in resp["error"], f"the string was iterated: {resp['error']!r}"
+
+
+# ── a pause that no named address could perform ──────────────────────────────
+
+
+def test_a_pause_scoped_to_a_non_http_port_is_refused():
+    """The same intent had two spellings and opposite answers.
+
+    _validate_pause refuses a pause paired with transports lacking http, because
+    only the HTTP write path performs one. It cannot make that check for ``ports``
+    — a port's transport is a fact about the provider — so a pause scoped to a ws
+    port was accepted, stored, echoed back, and did nothing.
+
+    scenario.py names that as the worst outcome, and gives the reason: a paused
+    reply is a CORRECT reply, so a test whose pause never armed reads a fast valid
+    answer and concludes the router was fast.
+    """
+    api = _api()
+    _, providers = api.get_providers({})
+    eps = providers["providers"]["eth-sim:1"]["endpoints"]
+    ws_port = next(e["port"] for e in eps if e["transport"] == "ws")
+    st, resp = api.apply_scenario(
+        {"providers": {"eth-sim:1": {"pause_at": "mid_body", "pause_ms": 50, "ports": [ws_port]}}}
+    )
+    assert st == 400, f"a pause on a ws-only ports filter must be refused, got {st}"
+    assert "pause_at" in resp["error"] and str(ws_port) in resp["error"]
+
+
+def test_a_pause_scoped_to_an_http_port_is_accepted():
+    """The positive control. Without it, a bug refusing EVERY pause-plus-ports
+    combination would pass the test above and break a legitimate use."""
+    api = _api()
+    _, providers = api.get_providers({})
+    eps = providers["providers"]["eth-sim:1"]["endpoints"]
+    http_port = next(e["port"] for e in eps if e["transport"] == "http")
+    st, resp = api.apply_scenario(
+        {"providers": {"eth-sim:1": {"pause_at": "mid_body", "pause_ms": 50, "ports": [http_port]}}}
+    )
+    assert st == 200, resp
+    assert resp["applied"]["eth-sim:1"]["ports"] == [http_port]
+
+
+def test_a_pause_armed_earlier_still_refuses_a_non_http_ports_filter_later():
+    """Read EFFECTIVELY, merged over what is stored, because a POST merges rather
+    than replaces. A pause armed in one call and a ws-only ports filter set in the
+    next would otherwise slip past a check that looked at one request only."""
+    api = _api()
+    _, providers = api.get_providers({})
+    eps = providers["providers"]["eth-sim:1"]["endpoints"]
+    ws_port = next(e["port"] for e in eps if e["transport"] == "ws")
+    st, _ = api.apply_scenario({"providers": {"eth-sim:1": {"pause_at": "mid_body", "pause_ms": 50}}})
+    assert st == 200, "a pause with no filter at all is fine"
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"ports": [ws_port]}}})
+    assert st == 400, f"the stored pause must still be considered, got {st}"
+    assert "pause_at" in resp["error"]

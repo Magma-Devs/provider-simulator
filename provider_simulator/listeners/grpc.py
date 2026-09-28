@@ -179,5 +179,11 @@ class GrpcListener:
         )
 
     def _targeted(self, scenario: dict) -> bool:
-        transports = scenario.get("transports")
-        return transports is None or self.endpoint.transport in transports
+        """Whether a scenario block applies to this endpoint.
+
+        Delegates to fault_policy rather than repeating the rule. It used to
+        repeat it, reading ``transports`` alone, so when ``ports`` was added
+        every fault mode on this listener honoured it EXCEPT corruption — five
+        one way and one the other, inside a single listener.
+        """
+        return fault_policy.targets(scenario, self.endpoint)
