@@ -661,29 +661,58 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
     # Scenario 19: a node taking part in a cross-check answers after the per-
     # attempt mark and must still be counted.
     #
-    # NO GROUP LABEL, and the empty string here is a decision rather than an
-    # omission. An earlier version of these rows put the three providers in
-    # voting-group-1, -2 and -3, mirroring eth-cv-sim at smaller scale. That was
-    # wrong for two reasons, both found by trying it:
+    # ONE GROUP PER PROVIDER, added together with the router's cross-validation
+    # policy. The labels were deliberately empty until that policy existed: a
+    # group names a voting bloc, and with no policy for this pool nothing counts
+    # the bloc. Labels first and policy later is the order that fails, so both
+    # landed in one change across every copy that carries this pool.
     #
-    # 1. No router deploys a cross_validation_policies block for this pool, so a
-    #    group here names a bloc nothing counts. That is the same reason the
-    #    other nine failover pools carry none, and the reason the two cache pools
-    #    and eth-resp-sim carry none.
-    # 2. A group label has to agree across FIVE files - this table, the
-    #    automation repository's config/values_sim.yml, smart-router-standalone's
-    #    values/simulator/values_sim.yml, this repository's own config file, and
-    #    the deploy server's hand-edited copy. Two guards compare them. The
-    #    standalone copy does not carry this pool at all, because these ten
-    #    routers do not run on the shared cluster, so a label here cannot agree
-    #    with it and the drift guard goes red.
+    # Three groups of one, not two groups across three providers, and the test
+    # decides that rather than taste. Scenario 19 makes one provider answer
+    # after the per-attempt mark and leaves the other two fast. The policy asks
+    # all three, needs two to agree, and requires those two to span two groups.
+    # With one group per provider ANY two satisfy that, so the two fast
+    # providers reach a quorum without the straggler and the router can reply
+    # while the late answer is still in flight -- which is the regime the
+    # scenario exists to test. Put two providers in one group and the pair that
+    # agrees might share it, the quorum would not form, and the router would
+    # wait for the straggler instead.
     #
-    # Whoever gives this router a cross-validation policy adds the labels in the
-    # same change, in every copy at once. Labels first and policy later is the
-    # order that fails.
-    ("eth-failover-cv-sim", "eth", "1", "EthFailoverCvPrimaryProvider1", False, "", (("jsonrpc", "http", 18643),)),
-    ("eth-failover-cv-sim", "eth", "2", "EthFailoverCvPrimaryProvider2", False, "", (("jsonrpc", "http", 18644),)),
-    ("eth-failover-cv-sim", "eth", "3", "EthFailoverCvPrimaryProvider3", False, "", (("jsonrpc", "http", 18645),)),
+    # Three files carry this, not the five a pool on the shared cluster needs:
+    # this table, and the automation repository's config/values_sim.yml and
+    # tools/local-cluster/routers.yml. Counted rather than assumed --
+    # smart-router-standalone's values file and this repository's own
+    # config/values_sim.yml both hold ZERO occurrences of eth-failover-cv-sim,
+    # against a control of eth-cv-sim appearing in all three. These ten routers
+    # run only on the local k3d cluster, so the two shared-cluster copies never
+    # gained them.
+    (
+        "eth-failover-cv-sim",
+        "eth",
+        "1",
+        "EthFailoverCvPrimaryProvider1",
+        False,
+        "voting-group-1",
+        (("jsonrpc", "http", 18643),),
+    ),
+    (
+        "eth-failover-cv-sim",
+        "eth",
+        "2",
+        "EthFailoverCvPrimaryProvider2",
+        False,
+        "voting-group-2",
+        (("jsonrpc", "http", 18644),),
+    ),
+    (
+        "eth-failover-cv-sim",
+        "eth",
+        "3",
+        "EthFailoverCvPrimaryProvider3",
+        False,
+        "voting-group-3",
+        (("jsonrpc", "http", 18645),),
+    ),
     # eth-failover-archive-sim: ports 18646-18651.
     # The archive baseline: every provider carries the archive addon, so the
     # filter never fires and retry, tier fallback and recovery are visible
