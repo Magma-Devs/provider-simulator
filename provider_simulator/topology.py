@@ -686,9 +686,33 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
     # against a control of eth-cv-sim appearing in all three. These ten routers
     # run only on the local k3d cluster, so the two shared-cluster copies never
     # gained them.
-    ("eth-failover-cv-sim", "eth", "1", "EthFailoverCvPrimaryProvider1", False, "voting-group-1", (("jsonrpc", "http", 18643),)),
-    ("eth-failover-cv-sim", "eth", "2", "EthFailoverCvPrimaryProvider2", False, "voting-group-2", (("jsonrpc", "http", 18644),)),
-    ("eth-failover-cv-sim", "eth", "3", "EthFailoverCvPrimaryProvider3", False, "voting-group-3", (("jsonrpc", "http", 18645),)),
+    (
+        "eth-failover-cv-sim",
+        "eth",
+        "1",
+        "EthFailoverCvPrimaryProvider1",
+        False,
+        "voting-group-1",
+        (("jsonrpc", "http", 18643),),
+    ),
+    (
+        "eth-failover-cv-sim",
+        "eth",
+        "2",
+        "EthFailoverCvPrimaryProvider2",
+        False,
+        "voting-group-2",
+        (("jsonrpc", "http", 18644),),
+    ),
+    (
+        "eth-failover-cv-sim",
+        "eth",
+        "3",
+        "EthFailoverCvPrimaryProvider3",
+        False,
+        "voting-group-3",
+        (("jsonrpc", "http", 18645),),
+    ),
     # eth-failover-archive-sim: ports 18646-18651.
     # The archive baseline: every provider carries the archive addon, so the
     # filter never fires and retry, tier fallback and recovery are visible
