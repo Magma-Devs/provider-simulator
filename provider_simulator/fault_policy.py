@@ -8,12 +8,17 @@ change to the fault rules happens once.
 
 Two rules the ladder folds in:
 
-- **transports filter.** A scenario block's ``transports`` list scopes its effect
-  to specific endpoints of the provider. If set and this endpoint's transport is
-  not in it, no fault applies — the endpoint serves success. ``None`` = every
-  endpoint. Because provider state is per-provider (never shared across chains),
+- **transports and ports filters.** A scenario block's ``transports`` list scopes
+  its effect to specific wires of the provider, and its ``ports`` list to specific
+  ADDRESSES. If set and this endpoint does not match, no fault applies — the
+  endpoint serves success. ``None`` = every endpoint, for either. They AND
+  together. Because provider state is per-provider (never shared across chains),
   a provider-wide ``down`` is just "no filter" — there is no universal-down
   special case to carry.
+
+  ``ports`` is what makes a provider serving one interface and one transport at
+  two addresses separable: ``transports`` cannot tell those two apart, so before
+  this field a fault on such a provider always reached both.
 
 - **fail_first_n sequence.** When set, the first N requests on a targeted
   endpoint get the fault ``mode``; every request after switches to ``then_mode``
@@ -63,7 +68,10 @@ def resolve_mode(scenario: dict, endpoint: Endpoint, provider: Provider) -> tupl
     window — its effective mode is always ``success``.
     """
     transports = scenario.get("transports")
-    targeted = transports is None or endpoint.transport in transports
+    ports = scenario.get("ports")
+    # Both filters AND together. Either one None means "no opinion", so a block
+    # with neither targets every endpoint, exactly as before this field existed.
+    targeted = (transports is None or endpoint.transport in transports) and (ports is None or endpoint.port in ports)
 
     mode = scenario.get("mode", "success")
     fail_first_n = scenario.get("fail_first_n", 0)

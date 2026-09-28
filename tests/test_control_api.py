@@ -651,3 +651,66 @@ def test_a_reset_rewinds_the_new_heads_too():
     assert {c: api.advance({"chain": c})[1]["heads"]["default"] for c in ("btc", "solana")} != start
     api.reset()
     assert {c: api.advance({"chain": c})[1]["heads"]["default"] for c in ("btc", "solana")} == start
+
+
+# ── the ports filter, checked against the provider's own endpoints ────────────
+
+
+def test_a_ports_filter_the_provider_does_not_serve_is_400():
+    """The half ScenarioConfig cannot do: it holds no endpoints, so only here can
+    a port the provider does not serve be caught.
+
+    Refused rather than ignored because a filter matching no endpoint applies no
+    fault. The provider then answers normally, and a test that mistyped a port
+    reads a healthy provider and concludes the router recovered."""
+    api = _api()
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down", "ports": [19999]}}})
+    assert st == 400
+    assert "19999" in resp["error"]
+    # The message names what the provider DOES serve, because the mistake is
+    # nearly always a neighbour's port.
+    assert "serves" in resp["error"]
+    # Nothing was applied — the whole request is refused, not part of it.
+    _, scen = api.get_scenario()
+    assert scen["providers"]["eth-sim:1"]["mode"] == "success"
+
+
+def test_a_ports_filter_the_provider_does_serve_is_accepted():
+    """The positive control for the test above. Without it, a bug that refused
+    EVERY ports filter would pass that test and break the feature."""
+    api = _api()
+    _, providers = api.get_providers({})
+    served = sorted(ep["port"] for ep in providers["providers"]["eth-sim:1"]["endpoints"])
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down", "ports": [served[0]]}}})
+    assert st == 200, resp
+    assert resp["applied"]["eth-sim:1"]["ports"] == [served[0]]
+
+
+def test_one_bad_port_among_good_ones_refuses_the_whole_block():
+    api = _api()
+    _, providers = api.get_providers({})
+    served = sorted(ep["port"] for ep in providers["providers"]["eth-sim:1"]["endpoints"])
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down", "ports": [served[0], 19999]}}})
+    assert st == 400
+    assert "19999" in resp["error"]
+    assert str(served[0]) not in resp["error"].split("are not served")[0]
+
+
+def test_a_port_belonging_to_another_provider_is_still_refused():
+    """The mistake this is most likely to catch: a port that exists in the
+    topology, just not on this provider. A check that only asked "is this a real
+    port anywhere" would accept it, and the fault would silently apply to
+    nothing."""
+    api = _api()
+    _, providers = api.get_providers({})
+    mine = {ep["port"] for ep in providers["providers"]["eth-sim:1"]["endpoints"]}
+    neighbour = next(
+        ep["port"]
+        for key, v in providers["providers"].items()
+        if key != "eth-sim:1"
+        for ep in v["endpoints"]
+        if ep["port"] not in mine
+    )
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down", "ports": [neighbour]}}})
+    assert st == 400
+    assert str(neighbour) in resp["error"]

@@ -6,11 +6,23 @@ Chain-specific knobs (Solana slot math, ETH logs-lag) live in Quirks instead —
 sending one of those here is rejected, so a typo or a wrong-chain knob fails
 loudly rather than being silently ignored.
 
-The `transports` field, when set, scopes the block's effect to specific
-endpoints of the provider (e.g. only its ws wire). None means every endpoint.
-Values are validated against the closed TRANSPORTS vocabulary — "grpc" is an
-interface, not a transport, and accepting it here would make a fault silently
-match zero endpoints.
+Two fields scope a block to SOME of a provider's endpoints rather than all of
+them, and both default to None, meaning every endpoint.
+
+`transports` names wires — "only its ws endpoint". Values are validated against
+the closed TRANSPORTS vocabulary, because "grpc" is an interface rather than a
+transport and accepting it here would make a fault silently match zero endpoints.
+
+`ports` names ADDRESSES. It exists for the provider that serves the same
+interface and the same transport at two different ports, where `transports`
+cannot tell the two apart: a test silences one address and requires the traffic
+to move to the other. A port the provider does not serve is refused, for the same
+reason an unknown transport is — a filter that matches no endpoint means no fault
+at all, and a provider answering normally looks exactly like a provider that was
+never faulted.
+
+When both are set they AND together: an endpoint must match the transport list
+AND the port list to be targeted.
 """
 
 from dataclasses import dataclass, field
@@ -51,6 +63,9 @@ class ScenarioConfig(IntrospectiveConfig):
     pause_at: str | None = None  # None | after_headers | mid_body
     pause_ms: int = 0
     transports: list[str] | None = None  # endpoint filter; None = all endpoints
+    # Address filter, ANDed with transports. The field that makes a provider
+    # serving one interface and one transport at two ports separable at all.
+    ports: list[int] | None = None  # endpoint filter; None = all endpoints
 
     # Modes that answer, or refuse to answer, before the write path a pause acts
     # on is ever reached. ``down`` returns a bodiless 503 pre-parse, ``hang``
@@ -61,6 +76,7 @@ class ScenarioConfig(IntrospectiveConfig):
 
     def _validate(self, cfg: dict) -> None:
         self._validate_transports(cfg)
+        self._validate_ports(cfg)
         self._validate_pause(cfg)
 
     def _validate_transports(self, cfg: dict) -> None:
@@ -74,6 +90,35 @@ class ScenarioConfig(IntrospectiveConfig):
                 "(interfaces like 'grpc'/'rest' are not transports — gRPC runs over "
                 "'http2', REST over 'http')"
             )
+
+    def _validate_ports(self, cfg: dict) -> None:
+        """Refuse a ports list that could not target anything.
+
+        This class cannot tell whether the provider serves a given port — it holds
+        no endpoints. So it checks only the shape, and the control API checks the
+        ports against the provider's own endpoints, where they are known. Both
+        halves matter: a wrong TYPE is caught here even when the API is bypassed,
+        and a wrong PORT is caught there, where it can be.
+
+        An empty list is refused rather than read as "no filter". Written down
+        because the two readings are opposite — "target nothing" and "target
+        everything" — and a caller that built the list from a filter that matched
+        nothing would get the second when it meant the first.
+        """
+        ports = cfg.get("ports")
+        if ports is None:
+            return
+        if not isinstance(ports, (list, tuple)):
+            raise ValueError(f"ports must be a list of integers or None, got {ports!r}")
+        if not ports:
+            raise ValueError(
+                "ports must not be empty; use None for 'every endpoint'. An empty list "
+                "would target no endpoint, so no fault would apply and the provider "
+                "would answer normally"
+            )
+        bad = [p for p in ports if isinstance(p, bool) or not isinstance(p, int) or not 1 <= p <= 65535]
+        if bad:
+            raise ValueError(f"ports must be integers in [1, 65535], got {bad!r}")
 
     def _validate_pause(self, cfg: dict) -> None:
         """Refuse a pause that could not possibly happen.

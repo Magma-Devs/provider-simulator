@@ -58,12 +58,45 @@ def _bad_number(field_name: str, value: object) -> str:
     if field_name == "error_probability":
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0:
             return f"error_probability must be a number in [0.0, 1.0], got {value!r}"
+    if field_name == "ports":
+        # The list's own shape is ScenarioConfig's to judge and its contents are
+        # _ports_the_provider_does_not_serve's. Named here so a reader does not
+        # add a third, contradictory rule.
+        return ""
     if field_name in ("latency_ms", "pause_ms", "fail_first_n", "blocks"):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             return f"{field_name} must be a non-negative integer, got {value!r}"
     if field_name == "per_second":
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
             return f"per_second must be a non-negative number, got {value!r}"
+    return ""
+
+
+def _ports_the_provider_does_not_serve(provider: object, scenario_updates: dict) -> str:
+    """Refuse a ``ports`` filter naming an address this provider does not serve.
+
+    ScenarioConfig checks the SHAPE of the list and cannot check its contents: it
+    holds no endpoints. Here the provider is in hand, so a port it does not serve
+    is caught, and this is the only place it can be.
+
+    Why it is refused rather than ignored: a filter matching no endpoint means no
+    fault applies, so the provider answers normally. A test that mistyped a port
+    would read a healthy provider and conclude the router recovered, which is the
+    wrong conclusion drawn from a correct-looking run. The message lists the ports
+    the provider does serve, because the mistake is nearly always a port belonging
+    to its neighbour.
+    """
+    ports = scenario_updates.get("ports")
+    if not ports:
+        return ""
+    served = [ep.port for ep in provider.endpoints]  # type: ignore[attr-defined]
+    unknown = [p for p in ports if p not in served]
+    if unknown:
+        return (
+            f"ports {unknown} are not served by this provider; it serves {sorted(served)}. "
+            "A filter that matches no endpoint applies no fault, so the provider would "
+            "answer normally and the request would look like it had worked"
+        )
     return ""
 
 
@@ -192,6 +225,9 @@ class ControlApi:
                             "transports filter)"
                         )
                     }
+            err = _ports_the_provider_does_not_serve(provider, scenario_updates)
+            if err:
+                return 400, {"error": f"{key}: {err}"}
             staged.append((provider, scenario_updates, quirks_updates))
 
         applied = {}
