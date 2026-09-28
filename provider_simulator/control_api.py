@@ -58,12 +58,98 @@ def _bad_number(field_name: str, value: object) -> str:
     if field_name == "error_probability":
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0:
             return f"error_probability must be a number in [0.0, 1.0], got {value!r}"
+    if field_name == "ports":
+        # The list's own shape is ScenarioConfig's to judge and its contents are
+        # _ports_the_provider_does_not_serve's. Named here so a reader does not
+        # add a third, contradictory rule.
+        return ""
     if field_name in ("latency_ms", "pause_ms", "fail_first_n", "blocks"):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             return f"{field_name} must be a non-negative integer, got {value!r}"
     if field_name == "per_second":
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
             return f"per_second must be a non-negative number, got {value!r}"
+    return ""
+
+
+def _ports_the_provider_does_not_serve(provider: object, scenario_updates: dict) -> str:
+    """Refuse a ``ports`` filter naming an address this provider does not serve.
+
+    ScenarioConfig checks the SHAPE of the list and cannot check its contents: it
+    holds no endpoints. Here the provider is in hand, so a port it does not serve
+    is caught, and this is the only place it can be.
+
+    Why it is refused rather than ignored: a filter matching no endpoint means no
+    fault applies, so the provider answers normally. A test that mistyped a port
+    would read a healthy provider and conclude the router recovered, which is the
+    wrong conclusion drawn from a correct-looking run. The message lists the ports
+    the provider does serve, because the mistake is nearly always a port belonging
+    to its neighbour.
+    """
+    ports = scenario_updates.get("ports")
+    if not ports:
+        return ""
+    if not isinstance(ports, (list, tuple)):
+        # Shape is ScenarioConfig's to judge, and it runs a few lines below this,
+        # inside the try/except that turns a ValueError into a 400. So DEFER —
+        # returning "" here is not "this is fine", it is "not my question".
+        #
+        # Iterating it instead was a real bug and a REGRESSION. A bare int raised
+        # TypeError from the comprehension below, which is not a ValueError, so
+        # the try/except never saw it: it escaped do_POST and the client's
+        # connection was dropped with no answer at all. That is precisely the
+        # failure PR #125 measured and fixed for the transports rule, and the
+        # comment further down this function's caller describes it. A string was
+        # worse than a crash — iterable, so "18545" became ['1','8','5','4','5']
+        # and the refusal named five single-character ports.
+        return ""
+    served = [ep.port for ep in provider.endpoints]  # type: ignore[attr-defined]
+    unknown = [p for p in ports if p not in served]
+    if unknown:
+        return (
+            f"ports {unknown} are not served by this provider; it serves {sorted(served)}. "
+            "A filter that matches no endpoint applies no fault, so the provider would "
+            "answer normally and the request would look like it had worked"
+        )
+    return ""
+
+
+def _a_pause_no_named_port_can_serve(provider: object, scenario_updates: dict) -> str:
+    """Refuse a pause whose ``ports`` filter names no address that could serve it.
+
+    ``ScenarioConfig._validate_pause`` already refuses a pause paired with
+    ``transports`` that lacks "http", because only the HTTP write path performs
+    one. It cannot make the same check for ``ports``: a port's transport is a fact
+    about the provider, and that class holds no endpoints.
+
+    So the same intent had two spellings and opposite answers. Measured on
+    eth-sim:1, whose ws endpoint is 18557:
+
+        transports=["ws"]  + pause_at=mid_body  ->  400 refused
+        ports=[18557]      + pause_at=mid_body  ->  200 accepted, and inert
+
+    The accepted one stored a pause on an endpoint with no pause branch at all.
+    That is the outcome scenario.py names as the worst of the three, and for the
+    reason it gives: a paused reply is a CORRECT reply, so a test whose pause
+    never armed reads a fast valid answer and concludes the router was fast.
+
+    Both fields are read EFFECTIVELY, merged over what is already stored, because
+    a POST merges rather than replaces — a pause armed in one call and a ports
+    filter set in the next would otherwise slip past a check that only looked at
+    one request.
+    """
+    stored = provider.scenario.snapshot()  # type: ignore[attr-defined]
+    pause_at = scenario_updates.get("pause_at", stored.get("pause_at"))
+    ports = scenario_updates.get("ports", stored.get("ports"))
+    if not pause_at or not ports or not isinstance(ports, (list, tuple)):
+        return ""
+    http_ports = {ep.port for ep in provider.endpoints if ep.transport == "http"}  # type: ignore[attr-defined]
+    if not http_ports & set(ports):
+        return (
+            f"pause_at={pause_at!r} cannot apply with ports={list(ports)!r}: a pause is "
+            f"performed only on the HTTP write path, and none of those ports is an http "
+            f"endpoint of this provider. Its http ports are {sorted(http_ports)}"
+        )
     return ""
 
 
@@ -192,6 +278,11 @@ class ControlApi:
                             "transports filter)"
                         )
                     }
+            err = _ports_the_provider_does_not_serve(provider, scenario_updates) or _a_pause_no_named_port_can_serve(
+                provider, scenario_updates
+            )
+            if err:
+                return 400, {"error": f"{key}: {err}"}
             staged.append((provider, scenario_updates, quirks_updates))
 
         applied = {}

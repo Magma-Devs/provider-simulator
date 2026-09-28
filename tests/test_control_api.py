@@ -651,3 +651,150 @@ def test_a_reset_rewinds_the_new_heads_too():
     assert {c: api.advance({"chain": c})[1]["heads"]["default"] for c in ("btc", "solana")} != start
     api.reset()
     assert {c: api.advance({"chain": c})[1]["heads"]["default"] for c in ("btc", "solana")} == start
+
+
+# ── the ports filter, checked against the provider's own endpoints ────────────
+
+
+def test_a_ports_filter_the_provider_does_not_serve_is_400():
+    """The half ScenarioConfig cannot do: it holds no endpoints, so only here can
+    a port the provider does not serve be caught.
+
+    Refused rather than ignored because a filter matching no endpoint applies no
+    fault. The provider then answers normally, and a test that mistyped a port
+    reads a healthy provider and concludes the router recovered."""
+    api = _api()
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down", "ports": [19999]}}})
+    assert st == 400
+    assert "19999" in resp["error"]
+    # The message names what the provider DOES serve, because the mistake is
+    # nearly always a neighbour's port.
+    assert "serves" in resp["error"]
+    # Nothing was applied — the whole request is refused, not part of it.
+    _, scen = api.get_scenario()
+    assert scen["providers"]["eth-sim:1"]["mode"] == "success"
+
+
+def test_a_ports_filter_the_provider_does_serve_is_accepted():
+    """The positive control for the test above. Without it, a bug that refused
+    EVERY ports filter would pass that test and break the feature."""
+    api = _api()
+    _, providers = api.get_providers({})
+    served = sorted(ep["port"] for ep in providers["providers"]["eth-sim:1"]["endpoints"])
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down", "ports": [served[0]]}}})
+    assert st == 200, resp
+    assert resp["applied"]["eth-sim:1"]["ports"] == [served[0]]
+
+
+def test_one_bad_port_among_good_ones_refuses_the_whole_block():
+    api = _api()
+    _, providers = api.get_providers({})
+    served = sorted(ep["port"] for ep in providers["providers"]["eth-sim:1"]["endpoints"])
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down", "ports": [served[0], 19999]}}})
+    assert st == 400
+    assert "19999" in resp["error"]
+    assert str(served[0]) not in resp["error"].split("are not served")[0]
+
+
+def test_a_port_belonging_to_another_provider_is_still_refused():
+    """The mistake this is most likely to catch: a port that exists in the
+    topology, just not on this provider. A check that only asked "is this a real
+    port anywhere" would accept it, and the fault would silently apply to
+    nothing."""
+    api = _api()
+    _, providers = api.get_providers({})
+    mine = {ep["port"] for ep in providers["providers"]["eth-sim:1"]["endpoints"]}
+    neighbour = next(
+        ep["port"]
+        for key, v in providers["providers"].items()
+        if key != "eth-sim:1"
+        for ep in v["endpoints"]
+        if ep["port"] not in mine
+    )
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down", "ports": [neighbour]}}})
+    assert st == 400
+    assert str(neighbour) in resp["error"]
+
+
+# ── a mis-shaped ports value must be ANSWERED, never dropped ─────────────────
+
+
+def test_a_scalar_ports_value_is_400_and_not_a_crash():
+    """The regression this guards is not a wrong answer, it is NO answer.
+
+    _ports_the_provider_does_not_serve used to iterate ``ports`` before anything
+    had judged its shape. A bare int is not iterable, so the comprehension raised
+    TypeError — which is not a ValueError, so the handler's guard never saw it, it
+    escaped do_POST and the client's connection was dropped. A dropped connection
+    reads as a broken simulator rather than a refused caller, which is exactly the
+    failure PR #125 measured and fixed for the transports rule.
+    """
+    for bad in (18545, True, "18545"):
+        api = _api()
+        st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down", "ports": bad}}})
+        assert st == 400, f"ports={bad!r} gave {st}"
+        assert "ports must be a list" in resp["error"], f"ports={bad!r} gave {resp['error']!r}"
+
+
+def test_a_string_ports_value_is_not_read_as_five_ports():
+    """A string is iterable, so it was the worst of the three: it did not crash,
+    it produced a refusal naming ['1', '8', '5', '4', '5'] as unserved ports."""
+    api = _api()
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down", "ports": "18545"}}})
+    assert st == 400
+    assert "'1'" not in resp["error"], f"the string was iterated: {resp['error']!r}"
+
+
+# ── a pause that no named address could perform ──────────────────────────────
+
+
+def test_a_pause_scoped_to_a_non_http_port_is_refused():
+    """The same intent had two spellings and opposite answers.
+
+    _validate_pause refuses a pause paired with transports lacking http, because
+    only the HTTP write path performs one. It cannot make that check for ``ports``
+    — a port's transport is a fact about the provider — so a pause scoped to a ws
+    port was accepted, stored, echoed back, and did nothing.
+
+    scenario.py names that as the worst outcome, and gives the reason: a paused
+    reply is a CORRECT reply, so a test whose pause never armed reads a fast valid
+    answer and concludes the router was fast.
+    """
+    api = _api()
+    _, providers = api.get_providers({})
+    eps = providers["providers"]["eth-sim:1"]["endpoints"]
+    ws_port = next(e["port"] for e in eps if e["transport"] == "ws")
+    st, resp = api.apply_scenario(
+        {"providers": {"eth-sim:1": {"pause_at": "mid_body", "pause_ms": 50, "ports": [ws_port]}}}
+    )
+    assert st == 400, f"a pause on a ws-only ports filter must be refused, got {st}"
+    assert "pause_at" in resp["error"] and str(ws_port) in resp["error"]
+
+
+def test_a_pause_scoped_to_an_http_port_is_accepted():
+    """The positive control. Without it, a bug refusing EVERY pause-plus-ports
+    combination would pass the test above and break a legitimate use."""
+    api = _api()
+    _, providers = api.get_providers({})
+    eps = providers["providers"]["eth-sim:1"]["endpoints"]
+    http_port = next(e["port"] for e in eps if e["transport"] == "http")
+    st, resp = api.apply_scenario(
+        {"providers": {"eth-sim:1": {"pause_at": "mid_body", "pause_ms": 50, "ports": [http_port]}}}
+    )
+    assert st == 200, resp
+    assert resp["applied"]["eth-sim:1"]["ports"] == [http_port]
+
+
+def test_a_pause_armed_earlier_still_refuses_a_non_http_ports_filter_later():
+    """Read EFFECTIVELY, merged over what is stored, because a POST merges rather
+    than replaces. A pause armed in one call and a ws-only ports filter set in the
+    next would otherwise slip past a check that looked at one request only."""
+    api = _api()
+    _, providers = api.get_providers({})
+    eps = providers["providers"]["eth-sim:1"]["endpoints"]
+    ws_port = next(e["port"] for e in eps if e["transport"] == "ws")
+    st, _ = api.apply_scenario({"providers": {"eth-sim:1": {"pause_at": "mid_body", "pause_ms": 50}}})
+    assert st == 200, "a pause with no filter at all is fine"
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"ports": [ws_port]}}})
+    assert st == 400, f"the stored pause must still be considered, got {st}"
+    assert "pause_at" in resp["error"]
