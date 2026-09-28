@@ -443,8 +443,17 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
     ("lava-sim-tm", "lava", "4", "LavaTmBackupProvider4", True, "", (("tendermintrpc", "http", 18569),)),
     ("lava-sim-tm", "lava", "5", "LavaTmBackupProvider5", True, "", (("tendermintrpc", "http", 18570),)),
     ("lava-sim-tm", "lava", "6", "LavaTmBackupProvider6", True, "", (("tendermintrpc", "http", 18571),)),
-    # eth-best-sim / eth-priority-sim / eth-precedence-sim: three primaries each,
-    # no backup tier and no cross-validation group. Each is reserved for a router
+    # eth-best-sim / eth-priority-sim / eth-precedence-sim: THREE, THREE and TWO
+    # primaries, no backup tier and no cross-validation group.
+    #
+    # This said "three primaries each" until 2026-09-28. eth-precedence-sim has
+    # always had two, so the one comment written to answer "is a row missing here"
+    # gave the wrong answer. Two is correct: that pool's router exists to prove a
+    # hand-set weight beats a weight preset, and the evidence is the four weight
+    # values read back from /debug/runtime-config, which needs no third provider.
+    # The other two need three because their subject is which provider gets PICKED,
+    # and the interesting case is an exact tie between equal nodes, which two
+    # cannot show. Each is reserved for a router
     # that boots with a different upstream-selection setting. Dedicated listeners,
     # so a fault set on one never reaches another pool.
     ("eth-best-sim", "eth", "1", "EthBestProvider1", False, "", (("jsonrpc", "http", 18588),)),
