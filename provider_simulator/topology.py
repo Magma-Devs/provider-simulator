@@ -651,12 +651,41 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
         "",
         (("jsonrpc", "http", 18638), ("jsonrpc", "http", 18639)),
     ),
-    # eth-failover-real-sim: ports 18640-18642.
+    # eth-failover-real-sim: ports 18640-18642 http, 18670-18672 ws.
     # The timing pool with one thing changed: the router's real limits, for
     # the two scenarios where the real number is the claim.
-    ("eth-failover-real-sim", "eth", "1", "EthFailoverRealPrimaryProvider1", False, "", (("jsonrpc", "http", 18640),)),
-    ("eth-failover-real-sim", "eth", "2", "EthFailoverRealPrimaryProvider2", False, "", (("jsonrpc", "http", 18641),)),
-    ("eth-failover-real-sim", "eth", "3", "EthFailoverRealPrimaryProvider3", False, "", (("jsonrpc", "http", 18642),)),
+    #
+    # It also carries the only WebSocket door outside eth-sim. A caller that
+    # hangs up cannot be reproduced over plain HTTP, and the score that must
+    # not move when it happens is a failover behaviour. Real limits are what
+    # make a score measured here the score a customer sees.
+    (
+        "eth-failover-real-sim",
+        "eth",
+        "1",
+        "EthFailoverRealPrimaryProvider1",
+        False,
+        "",
+        (("jsonrpc", "http", 18640), ("jsonrpc", "ws", 18670)),
+    ),
+    (
+        "eth-failover-real-sim",
+        "eth",
+        "2",
+        "EthFailoverRealPrimaryProvider2",
+        False,
+        "",
+        (("jsonrpc", "http", 18641), ("jsonrpc", "ws", 18671)),
+    ),
+    (
+        "eth-failover-real-sim",
+        "eth",
+        "3",
+        "EthFailoverRealPrimaryProvider3",
+        False,
+        "",
+        (("jsonrpc", "http", 18642), ("jsonrpc", "ws", 18672)),
+    ),
     # eth-failover-cv-sim: ports 18643-18645.
     # Scenario 19: a node taking part in a cross-check answers after the per-
     # attempt mark and must still be counted.
