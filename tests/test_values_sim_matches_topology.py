@@ -405,6 +405,13 @@ POOLS_WITH_NO_ROUTER_HERE = {
     "eth-failover-excluded-sim",
     "eth-failover-ineligible-sim",
     "eth-failover-noarchive-sim",
+    # eth-failover-benchafter-sim, added after the ten above. Same
+    # reason: its router runs --bench-after=5 on the local k3d cluster and the
+    # throwaway CI clusters, declared in smart_router_automation's
+    # tools/local-cluster/routers.yml plus its own config/values_sim.yml. The
+    # shared cluster does not run it, so a router entry in THIS file would
+    # claim a deployment nobody makes.
+    "eth-failover-benchafter-sim",
 }
 
 

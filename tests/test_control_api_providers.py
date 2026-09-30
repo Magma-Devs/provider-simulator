@@ -33,7 +33,7 @@ def test_every_provider_in_the_topology_is_served():
     """One entry per provider, keyed the way stats and scenario already key
     theirs: the pool name, a colon, then the pool slot."""
     providers = _providers()
-    assert len(providers) == 118, sorted(providers)
+    assert len(providers) == 121, sorted(providers)
     assert "eth-sim:1" in providers
     assert "lava-sim-tm:6" in providers
 
@@ -106,9 +106,11 @@ def test_a_provider_with_no_label_reports_an_empty_string():
     # cross-validation policy — the two land together, because a label without
     # a policy names a bloc nothing counts and a policy without labels cannot
     # satisfy a min-groups bound. The topology records why beside those rows.
+    # eth-failover-benchafter-sim adds 3 more unlabelled for the
+    # same reason as the nine: its router carries no cross-validation policy.
     # Update both numbers together when a router gains or loses a label.
     assert len(labelled) == 33, f"expected 33 labelled, got {len(labelled)}"
-    assert len(unlabelled) == 85, f"expected 85 unlabelled, got {len(unlabelled)}"
+    assert len(unlabelled) == 88, f"expected 88 unlabelled, got {len(unlabelled)}"
 
 
 # ── Filters ───────────────────────────────────────────────────────────────────
