@@ -958,6 +958,38 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
         "",
         (("jsonrpc", "http", 18669),),
     ),
+    # eth-failover-benchafter-sim: ports 18673-18675.
+    # Its router runs --bench-after=5, so a test switches an endpoint off with
+    # 5 failures in a row instead of the default 50. No backup tier on purpose:
+    # the tests measure one endpoint's failure counter, and a backup tier adds
+    # nothing to that. Used by the automation tests that check --bench-after.
+    (
+        "eth-failover-benchafter-sim",
+        "eth",
+        "1",
+        "EthFailoverBenchafterPrimaryProvider1",
+        False,
+        "",
+        (("jsonrpc", "http", 18673),),
+    ),
+    (
+        "eth-failover-benchafter-sim",
+        "eth",
+        "2",
+        "EthFailoverBenchafterPrimaryProvider2",
+        False,
+        "",
+        (("jsonrpc", "http", 18674),),
+    ),
+    (
+        "eth-failover-benchafter-sim",
+        "eth",
+        "3",
+        "EthFailoverBenchafterPrimaryProvider3",
+        False,
+        "",
+        (("jsonrpc", "http", 18675),),
+    ),
 )
 
 

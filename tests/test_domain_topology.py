@@ -41,6 +41,7 @@ EXPECTED_POOLS = {
     "eth-failover-excluded-sim",
     "eth-failover-ineligible-sim",
     "eth-failover-noarchive-sim",
+    "eth-failover-benchafter-sim",
 }
 
 
@@ -590,6 +591,9 @@ AGREED_NAMES = {
     ("eth-failover-noarchive-sim", "2"): "EthFailoverNoarchivePrimaryProvider2",
     ("eth-failover-noarchive-sim", "3"): "EthFailoverNoarchiveBackupProvider3",
     ("eth-failover-noarchive-sim", "4"): "EthFailoverNoarchiveBackupProvider4",
+    ("eth-failover-benchafter-sim", "1"): "EthFailoverBenchafterPrimaryProvider1",
+    ("eth-failover-benchafter-sim", "2"): "EthFailoverBenchafterPrimaryProvider2",
+    ("eth-failover-benchafter-sim", "3"): "EthFailoverBenchafterPrimaryProvider3",
 }
 
 # The pools that HAVE a backup tier, and which of their slots it is. The router
@@ -636,9 +640,10 @@ _FOUR_PROVIDER_POOLS_WITH_A_BACKUP_TIER = (
 # ordinary primaries. eth-failover-cv-sim is absent for the same reason, and it
 # holds three providers rather than six.
 #
-# Three more failover pools are absent because they have no second tier at all:
-# eth-failover-timing-sim and eth-failover-real-sim are three primaries each, and
-# eth-failover-twoaddr-sim is a single provider serving two addresses.
+# Four more failover pools are absent because they have no second tier at all:
+# eth-failover-timing-sim, eth-failover-real-sim and eth-failover-benchafter-sim
+# are three primaries each, and eth-failover-twoaddr-sim is a single provider
+# serving two addresses.
 AGREED_BACKUPS = {(pool, pid) for pool in _SIX_PROVIDER_POOLS_WITH_A_BACKUP_TIER for pid in ("4", "5", "6")} | {
     (pool, pid) for pool in _FOUR_PROVIDER_POOLS_WITH_A_BACKUP_TIER for pid in ("3", "4")
 }
