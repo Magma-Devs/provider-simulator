@@ -80,6 +80,43 @@ def test_eth_sim_provider_1_has_http_and_ws():
     assert (("jsonrpc", "http", 18545) in eps) and (("jsonrpc", "ws", 18557) in eps)
 
 
+def test_eth_failover_real_sim_has_a_websocket_door_on_every_provider():
+    """A caller that hangs up mid-request cannot be reproduced over plain HTTP.
+    The behaviour that needs it is a failover one: a healthy node must not lose
+    score because the caller disconnected. So one failover pool carries a
+    WebSocket door beside its HTTP one, and this is that pool.
+
+    The WebSocket ports must belong to this pool alone. A fault addressed at
+    one of these slots must never reach another router's provider.
+    """
+    rows = {r[2]: r for r in TOPOLOGY if r[0] == "eth-failover-real-sim"}
+    assert set(rows) == {"1", "2", "3"}
+    assert rows["1"][6] == (("jsonrpc", "http", 18640), ("jsonrpc", "ws", 18670))
+    assert rows["2"][6] == (("jsonrpc", "http", 18641), ("jsonrpc", "ws", 18671))
+    assert rows["3"][6] == (("jsonrpc", "http", 18642), ("jsonrpc", "ws", 18672))
+
+    ws_ports = {port for r in rows.values() for (_i, transport, port) in r[6] if transport == "ws"}
+    other_ports = {
+        port
+        for pool, _c, _pid, _n, _b, _group, eps in TOPOLOGY
+        if pool != "eth-failover-real-sim"
+        for (_i, _t, port) in eps
+    }
+    assert ws_ports.isdisjoint(other_ports), "the new WebSocket ports must belong to this pool alone"
+
+
+def test_port_of_still_separates_the_two_doors_of_the_failover_real_pool():
+    """Adding a WebSocket door must not break an HTTP lookup. port_of raises
+    only when ONE interface and transport sits at two addresses; a second
+    transport is a different question, so every existing HTTP lookup on this
+    pool keeps exactly one answer.
+    """
+    assert port_of("eth-failover-real-sim", "1") == 18640
+    assert port_of("eth-failover-real-sim", "2") == 18641
+    assert port_of("eth-failover-real-sim", "3") == 18642
+    assert port_of("eth-failover-real-sim", "1", transport="ws") == 18670
+
+
 def test_eth_duo_sim_has_two_dedicated_providers():
     """Regression guard: eth-duo-sim used to have no row of its own and
     pointed its two upstreams straight at eth-sim's pid 1/2 listeners
