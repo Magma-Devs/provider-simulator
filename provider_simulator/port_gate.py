@@ -9,19 +9,19 @@ recorded in the provider's history.
 Three parties meet here, and each owns one thing:
 
 - **The scenario says what is wanted.** ``wants_closed()`` reads it through
-  ``fault_policy.port_closed``. Nothing else stores the wish, so a change that
-  never passed through the control API (the scenario time-to-live sweep) is
-  seen like any other.
+  ``fault_policy.port_closed``. Nothing else stores the wish, so a change by
+  any writer (a control call, a reset, the scenario time-to-live sweep) is seen
+  the same way.
 - **The serve loop owns the server.** It runs on the port's own thread and
   event loop (``_run_grpc_in_thread`` in server.py) and is the only code that
   stops or starts the server. It works in passes: read the wish, act, report.
   It runs a pass when it is woken and also on a short poll, which is what
-  reopens the port after the time-to-live sweep.
-- **The control API waits.** ``settle()`` asks for a pass and blocks until a
-  pass that STARTED after the ask has finished. A report from an older pass is
-  not accepted: it describes the port before the scenario changed, and a
-  caller that trusted it would be told the port had closed while it was still
-  open.
+  tries a failed bind again.
+- **The control API waits.** ``ask()`` asks for a pass and ``wait()`` blocks
+  until a pass that STARTED after the ask has finished. A report from an older
+  pass is not accepted: it describes the port before the scenario changed, and
+  a caller that trusted it would be told the port had closed while it was
+  still open.
 
 No grpc import here on purpose: the control API imports this module and has to
 stay importable on a machine without grpcio.

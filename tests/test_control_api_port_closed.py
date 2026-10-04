@@ -68,6 +68,26 @@ def test_one_refused_provider_refuses_the_whole_request():
     assert api.registry.provider("btc-sim", "1").scenario.snapshot()["mode"] == "success"
 
 
+@pytest.mark.parametrize(
+    "refused_block",
+    [
+        {"mode": "down", "transports": ["grpc"]},
+        {"mode": "down", "ports": []},
+        {"mode": "down", "pause_at": "mid_body"},
+    ],
+)
+def test_a_block_the_scenario_itself_refuses_refuses_the_whole_request_too(refused_block):
+    """These three are refused by ScenarioConfig, the rules the write applies,
+    and not by a rule of the control API. Every block is checked against them
+    before any block is written, so the healthy block before the refused one
+    is not applied either."""
+    api = _api()
+    st, resp = api.apply_scenario({"providers": {"btc-sim:1": {"mode": "down"}, "eth-sim:1": refused_block}})
+    assert st == 400
+    assert resp["error"].startswith("eth-sim:1: "), "the refusal must name the provider it refused"
+    assert api.registry.provider("btc-sim", "1").scenario.snapshot()["mode"] == "success"
+
+
 def test_a_listener_that_never_acts_is_an_error_naming_pool_provider_and_port(monkeypatch):
     monkeypatch.setattr(control_api, "_PORT_SETTLE_S", 0.2)
     api, port = _api_with_a_gate_nothing_serves()

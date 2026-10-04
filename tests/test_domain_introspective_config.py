@@ -32,6 +32,22 @@ def test_update_rejects_unknown_key_and_applies_nothing():
     assert t.a == 1
 
 
+def test_check_raises_what_update_would_and_writes_nothing():
+    t = _Toy()
+    with pytest.raises(ValueError, match="nope"):
+        t.check({"a": 5, "nope": 1})
+    assert t.snapshot() == {"a": 1, "b": "x", "items": []}
+
+
+def test_check_of_a_valid_config_writes_nothing_either():
+    t = _Toy()
+    t.update({"a": 2})
+    stamp = t.last_write_at
+    t.check({"a": 5, "b": "y"})
+    assert t.snapshot() == {"a": 2, "b": "x", "items": []}
+    assert t.last_write_at == stamp, "a check is not a write, so it must not restart the scenario time-to-live"
+
+
 def test_reset_restores_defaults_including_factory():
     t = _Toy()
     t.update({"a": 9})

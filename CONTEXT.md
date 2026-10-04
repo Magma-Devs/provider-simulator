@@ -249,8 +249,8 @@ override, `then_mode`, and together with `fail_first_n`, `error_probability`,
 endpoint that is not gRPC, because no other listener can stop listening.
 
 The control call returns after the port has changed, in both directions. The
-scenario time-to-live reopens the port too, about 0.2 seconds after the sweep
-reverts the scenario, with no caller waiting.
+scenario time-to-live reopens the port too: the sweep that reverts the scenario
+waits for the port, as a control call does.
 _Avoid_: unreachable, dead, offline, connection refused (that is what the client
 sees, not the name of the mode)
 

@@ -11,6 +11,7 @@ key (a bare pid, or a block carrying ``chain_family``) gets a 400 that names the
 new format — a stale client fails loudly, never silently.
 """
 
+import threading
 import time
 from dataclasses import fields
 
@@ -339,9 +340,20 @@ class ControlApi:
         # API built without sockets holds none and refuses mode="port_closed"
         # instead of storing a fault nothing performs.
         self.port_gates: dict[int, PortGate] = {}
+        # One writer at a time through everything that can move a gRPC port:
+        # POST /scenario, the two scenario resets and the scenario time-to-live
+        # sweep. Each holds it from its first check until its ports have
+        # settled, so the state a caller waits for is the state its own write
+        # asked for, and no second writer can change it meanwhile. /ready takes
+        # it for its read, so it never probes a port part way through a change.
+        self.port_lock = threading.Lock()
 
     # ── POST /scenario ──────────────────────────────────────────────────────
     def apply_scenario(self, body: object) -> tuple[int, dict]:
+        with self.port_lock:
+            return self._apply_scenario(body)
+
+    def _apply_scenario(self, body: object) -> tuple[int, dict]:
         if not isinstance(body, dict):
             return 400, {"error": "request body must be a JSON object"}
         providers = body.get("providers")
@@ -402,6 +414,16 @@ class ControlApi:
             status, err = _a_port_closed_that_cannot_happen(provider, scenario_updates, self.port_gates)
             if err:
                 return status, {"error": f"{key}: {err}"}
+            # The rules the configs hold themselves (ScenarioConfig._validate) are
+            # asked here, with nothing written yet. Every block of the request is
+            # checked before any block is written, so a request that answers 400
+            # has changed no provider. Asked last, after the rules above, which
+            # give the more exact reason when both apply.
+            try:
+                provider.scenario.check(scenario_updates)
+                provider.quirks.check(quirks_updates)
+            except ValueError as exc:
+                return 400, {"error": f"{provider.key}: {exc}"}
             staged.append((provider, scenario_updates, quirks_updates))
 
         applied = {}
@@ -416,6 +438,10 @@ class ControlApi:
             # simulator being broken rather than as the caller being refused.
             # Measured on the shipped transports rule: transports=["grpc"] gave
             # RemoteDisconnected, while an ordinary per-field error gave 400.
+            #
+            # The loop above asked the same rules for every block, so this guard
+            # is the last line and not the place a request is refused: a refusal
+            # here would leave the providers written before it changed.
             try:
                 provider.scenario.update(scenario_updates)
                 if quirks_updates:
@@ -440,10 +466,10 @@ class ControlApi:
     def _port_wishes(self, provider: object) -> list:
         """``(gate, want_open)`` for each gRPC port of one provider.
 
-        Read straight after this call's own write, so the state waited for is
-        the one THIS call asked for. A second caller that changes the scenario
-        a moment later makes this one time out and answer an error, which is
-        the truth: the port did not end where this call put it.
+        Read straight after this call's own write, with ``port_lock`` held, so
+        the state waited for is the one THIS call asked for. No second caller
+        can change the scenario before this one has settled: it waits for the
+        lock, and is then answered for its own write.
         """
         wishes = []
         for endpoint in provider.endpoints:  # type: ignore[attr-defined]
@@ -479,6 +505,18 @@ class ControlApi:
             "The gRPC listener did not reach the state the scenario asks for, so do not trust "
             "the port to be in it"
         )
+
+    def settle_ports_of(self, providers: list) -> str:
+        """Wait for every gRPC port of these providers; "" when each is where its
+        scenario puts it.
+
+        For a writer outside this class, which holds ``port_lock`` around its
+        write and this call: the scenario time-to-live sweep.
+        """
+        wishes: list = []
+        for provider in providers:
+            wishes.extend(self._port_wishes(provider))
+        return self._settle_ports(wishes)
 
     def ports_closed_by_scenario(self) -> list[int]:
         """Every port a scenario closes at the time of the call (``mode="port_closed"``).
@@ -516,13 +554,15 @@ class ControlApi:
     # prevent: the test still runs, still passes, and measures the previous
     # test's leftovers.
     def reset(self, pool: str | None = None) -> tuple[int, dict]:
-        return self._perform_reset(pool, scenario=True, history=False, status="scenario reset")
+        with self.port_lock:
+            return self._perform_reset(pool, scenario=True, history=False, status="scenario reset")
 
     def clear_history(self, pool: str | None = None) -> tuple[int, dict]:
         return self._perform_reset(pool, scenario=False, history=True, status="history cleared")
 
     def reset_all(self, pool: str | None = None) -> tuple[int, dict]:
-        return self._perform_reset(pool, scenario=True, history=True, status="scenario reset and history cleared")
+        with self.port_lock:
+            return self._perform_reset(pool, scenario=True, history=True, status="scenario reset and history cleared")
 
     def _perform_reset(self, pool: str | None, *, scenario: bool, history: bool, status: str) -> tuple[int, dict]:
         """Clear the requested state over the requested scope.

@@ -15,8 +15,9 @@ no sleep, because the control API promises the port has already changed:
   - neither: a refused block leaves the port open and stores nothing.
 
 Runs against the shared in-process simulator (see conftest.py) and the real
-lava-sim-grpc pool. One test builds a second simulator, because no shipped
-provider serves two gRPC ports or a gRPC port beside an HTTP one.
+lava-sim-grpc pool. The filter tests build a second simulator, because no shipped
+provider serves two gRPC ports or a gRPC port beside an HTTP one. The test of a
+port that cannot bind runs on it too.
 
 Run with:
   pytest tests/test_simulator_grpc_port_closed.py -v
@@ -361,23 +362,19 @@ class TestThePortOpensAgain:
         assert status == 200, reply
         assert _connect(_PORT["1"]) == errno.ECONNREFUSED
 
-    def test_the_time_to_live_sweep_reopens_it(self, sim):
-        """The sweep changes the scenario without any control call, so nothing
-        wakes the listener: it finds out on its own poll.
+    def test_the_time_to_live_sweep_reopens_it_on_the_line_after_the_pass(self, sim):
+        """The sweep is a control write like a reset: it waits for the port.
 
         ``_revert_stale_scenarios`` is the pass the sweep daemon runs, called
-        here with a clock one second past the time-to-live. No caller waits on
-        this path, so this is the one place the test waits for the port.
+        here with a clock one second past the time-to-live. The port accepts
+        when the pass returns, with no sleep.
         """
         self._close(sim)
         ttl_s = 900
-        server_module._revert_stale_scenarios(sim["registry"], ttl_s, time.time() + ttl_s + 1)
+        server_module._revert_stale_scenarios(sim["server"].control, ttl_s, time.time() + ttl_s + 1)
+        accepted = _connect(_PORT["1"])
         assert _mode(sim["control"], f"{POOL}:1") == "success", "the sweep must have reverted the scenario"
-
-        deadline = time.monotonic() + 5.0
-        while _connect(_PORT["1"]) != 0 and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert _connect(_PORT["1"]) == 0, "the port must reopen after the time-to-live sweep"
+        assert accepted == 0, f"the port must accept once the sweep pass has returned, connect_ex gave {accepted}"
         with _fresh_channel(_PORT["1"]) as channel:
             assert _latest_block(channel).block.header.chain_id == "lava-sim"
 
@@ -385,7 +382,7 @@ class TestThePortOpensAgain:
         """The control for the test above: the sweep reopens the port because the
         scenario was stale, not because any sweep does."""
         self._close(sim)
-        server_module._revert_stale_scenarios(sim["registry"], 900, time.time())
+        server_module._revert_stale_scenarios(sim["server"].control, 900, time.time())
         time.sleep(3 * server_module._GRPC_PORT_POLL_S)
         assert _mode(sim["control"], f"{POOL}:1") == "port_closed"
         assert _connect(_PORT["1"]) == errno.ECONNREFUSED
@@ -565,6 +562,206 @@ def test_a_port_that_does_not_close_in_time_is_an_error_naming_it(sim, monkeypat
     assert _connect(_PORT["1"]) == 0, "the port is still open, which is what the error says"
 
 
+# ── a request that answers 400 changes no provider ───────────────────────────
+
+# A block that passes every per-field rule and is refused by a rule the scenario
+# holds itself (ScenarioConfig._validate). It is the SECOND block of each request
+# below; the first block is valid and must not be written.
+_REFUSED_BY_THE_SCENARIO = [
+    pytest.param({"mode": "down", "transports": ["grpc"]}, "unknown transport(s)", id="transports-grpc"),
+    pytest.param({"mode": "port_closed", "ports": []}, "ports must not be empty", id="ports-empty"),
+    pytest.param({"mode": "down", "pause_at": "mid_body"}, "cannot apply with mode='down'", id="pause-with-down"),
+]
+
+
+def _scenario_of(control: str, key: str) -> dict:
+    _, body = _get(f"{control}/scenario")
+    return body["providers"][key]
+
+
+class TestARefusedRequestChangesNoProvider:
+    @pytest.mark.parametrize("second_block, reason", _REFUSED_BY_THE_SCENARIO)
+    def test_a_port_closed_block_before_a_refused_block_closes_no_port(self, sim, second_block, reason):
+        """The port is read twice: right after the answer, and one second later,
+        because a scenario stored by a refused request closes the port on the
+        listener's next poll and not at once."""
+        control, first, second = sim["control"], f"{POOL}:1", f"{POOL}:2"
+        before = {key: _scenario_of(control, key) for key in (first, second)}
+        assert before[first]["mode"] == "success", "the fixture reset every provider"
+
+        status, body = _post(
+            f"{control}/scenario", {"providers": {first: {"mode": "port_closed"}, second: second_block}}
+        )
+        at_once = _connect(_PORT["1"])
+        stored = {key: _scenario_of(control, key) for key in (first, second)}
+        time.sleep(1.0)
+        later = _connect(_PORT["1"])
+
+        assert status == 400, f"{second_block} must be refused, got {status}: {body}"
+        assert reason in body["error"] and second in body["error"], body
+        assert (stored, at_once, later) == (before, 0, 0), (
+            f"a request answered 400 changed a provider: {first} is stored as mode "
+            f"{stored[first]['mode']!r}; a connection to port {_PORT['1']} gave {at_once} right after "
+            f"the answer and {later} one second later (0 is accepted)"
+        )
+        with _fresh_channel(_PORT["1"]) as channel:
+            assert _latest_block(channel).block.header.chain_id == "lava-sim"
+
+    def test_a_down_block_before_a_refused_block_is_not_stored(self, sim):
+        """The same rule for a mode that moves no port: the first provider stays
+        in `success` and answers."""
+        control, first, second = sim["control"], f"{POOL}:1", f"{POOL}:2"
+        status, body = _post(
+            f"{control}/scenario",
+            {"providers": {first: {"mode": "down"}, second: {"mode": "down", "transports": ["grpc"]}}},
+        )
+        assert status == 400, body
+        assert "unknown transport(s)" in body["error"] and second in body["error"], body
+        assert _mode(control, first) == "success", "the valid block beside a refused one was stored"
+        with _fresh_channel(_PORT["1"]) as channel:
+            assert _latest_block(channel).block.header.chain_id == "lava-sim"
+
+
+# ── two control writes on one provider at the same moment ────────────────────
+
+
+def _close(sim) -> tuple[int, dict]:
+    return _set(sim["control"], f"{POOL}:1", mode="port_closed")
+
+
+# Every control call that opens the port again, each next to the same closer.
+_OPENERS = {
+    "mode=success": lambda sim: _set(sim["control"], f"{POOL}:1", mode="success"),
+    "POST /reset": lambda sim: _post(f"{sim['control']}/reset", {"pool": POOL}),
+    "POST /reset/all": lambda sim: _post(f"{sim['control']}/reset/all", {"pool": POOL}),
+}
+
+
+@pytest.mark.parametrize("opener", list(_OPENERS))
+def test_closing_and_opening_one_provider_at_the_same_moment_never_answers_500(sim, opener):
+    """One caller closes the port and one opens it, started together, 20 times.
+
+    Each is answered for its own write, so both get 200. After each round the
+    port is where the stored scenario puts it, whichever caller came last.
+    """
+    control, key, port = sim["control"], f"{POOL}:1", _PORT["1"]
+    writes = {"close": _close, opener: _OPENERS[opener]}
+    for round_number in range(20):
+        replies = {}
+        together = threading.Barrier(2)
+
+        def call(name: str) -> None:
+            together.wait(timeout=10)
+            replies[name] = writes[name](sim)
+
+        callers = [threading.Thread(target=call, args=(name,)) for name in writes]
+        for caller in callers:
+            caller.start()
+        for caller in callers:
+            caller.join()
+
+        assert sorted(replies) == sorted(writes), f"round {round_number}: a caller got no answer"
+        for name, (status, body) in replies.items():
+            assert status == 200, f"round {round_number}: the caller of {name!r} got {status}: {body}"
+        stored = _mode(control, key)
+        accepted = _connect(port) == 0
+        assert accepted == (stored != "port_closed"), (
+            f"round {round_number}: the stored mode is {stored!r} and the port "
+            f"{'accepts' if accepted else 'refuses'} a connection"
+        )
+
+
+def test_the_time_to_live_sweep_waits_for_a_control_write_in_progress(sim):
+    """The sweep pass is the fourth writer that moves a port, and it answers
+    nobody, so the test above cannot see it lose. Here the lock is held as a
+    control call holds it between its write and its settle: the pass must leave
+    the scenario alone until the lock is free, and then revert it and wait for
+    the port.
+    """
+    control, api, key = sim["control"], sim["server"].control, f"{POOL}:1"
+    status, body = _close(sim)
+    assert status == 200, body
+    sweeper = threading.Thread(
+        target=server_module._revert_stale_scenarios, args=(api, 900, time.time() + 901), daemon=True
+    )
+    with api.port_lock:
+        sweeper.start()
+        sweeper.join(timeout=0.5)
+        waiting, stored_meanwhile = sweeper.is_alive(), _mode(control, key)
+    sweeper.join(timeout=10)
+    assert (waiting, stored_meanwhile) == (
+        True,
+        "port_closed",
+    ), "the sweep reverted a scenario while another control write held the port lock"
+    assert not sweeper.is_alive()
+    assert (_mode(control, key), _connect(_PORT["1"])) == ("success", 0)
+
+
+# ── /ready while the simulator itself reopens a port ─────────────────────────
+
+
+def test_ready_is_200_right_after_the_time_to_live_reopens_a_port(sim):
+    """/ready is read on the line after the sweep pass, 20 times. The pass has
+    waited for the port, so the reply never names it as missing."""
+    control, api = sim["control"], sim["server"].control
+    _, baseline = _get(f"{control}/ready")
+    not_ready = []
+    for round_number in range(20):
+        status, body = _set(control, f"{POOL}:1", mode="port_closed")
+        assert status == 200, body
+        server_module._revert_stale_scenarios(api, 900, time.time() + 901)
+        ready_status, ready = _get(f"{control}/ready")
+        if (ready_status, ready.get("expected"), ready.get("closed_by_scenario")) != (200, baseline["expected"], []):
+            not_ready.append((round_number, ready_status, ready))
+    assert not not_ready, f"/ready was not 200 in {len(not_ready)} of 20 rounds; first: {not_ready[0]}"
+
+
+def test_ready_asked_part_way_through_a_reopen_waits_for_it(sim, monkeypatch):
+    """/ready is asked BETWEEN the write that reverts the scenario and the port
+    accepting again, which is where a sweep pass on its own thread leaves it.
+
+    The test plays the pass step by step, holding the lock the pass holds:
+    revert the scenario, ask /ready from another thread, then wait for the
+    port and let go. /ready must wait for the lock and then answer 200.
+
+    The listener's own poll is slowed first, so the port moves only when it is
+    asked to and stays closed for as long as the test needs it closed.
+    """
+    control, api = sim["control"], sim["server"].control
+    provider = sim["registry"].provider(POOL, "1")
+    monkeypatch.setattr(server_module, "_GRPC_PORT_POLL_S", 30.0)
+    status, body = _set(control, f"{POOL}:1", mode="port_closed")  # wakes the listener: its next wait is the slow one
+    assert status == 200, body
+    answer = {}
+
+    def ask_ready() -> None:
+        answer["ready"] = _get(f"{control}/ready")
+
+    asker = threading.Thread(target=ask_ready)
+    with api.port_lock:
+        provider.scenario.reset()  # the wish says open; the port is still closed
+        assert _connect(_PORT["1"]) == errno.ECONNREFUSED, "the port must still be closed when /ready is asked"
+        asker.start()
+        time.sleep(0.2)  # /ready has arrived and is waiting for the lock, or has answered without it
+        assert api.settle_ports_of([provider]) == ""
+    asker.join(timeout=10)
+    ready_status, ready = answer["ready"]
+    assert ready_status == 200, f"/ready named a port the simulator was reopening: {ready}"
+    assert ready["closed_by_scenario"] == []
+
+
+# ── wait_ready ───────────────────────────────────────────────────────────────
+
+
+def test_wait_ready_leaves_out_a_port_a_scenario_closed(sim):
+    """wait_ready raises for a port that does not accept. A port closed on
+    purpose is not one of those, as in /ready."""
+    status, body = _set(sim["control"], f"{POOL}:1", mode="port_closed")
+    assert status == 200, body
+    assert _connect(_PORT["1"]) == errno.ECONNREFUSED
+    sim["server"].wait_ready(timeout_s=1.0)
+
+
 # ── filters, on a provider with more than one port ───────────────────────────
 
 _MIXED_CONTROL = 29711
@@ -664,3 +861,69 @@ class TestFiltersOnAProviderWithSeveralPorts:
         assert "only a gRPC endpoint can close its port" in body["error"]
         assert _connect(_MIXED_GRPC_A) == errno.ECONNREFUSED, "the stored fault must still hold"
         assert _rest_answers(_MIXED_REST)
+
+
+# ── a port that cannot bind ──────────────────────────────────────────────────
+
+
+def test_a_port_that_cannot_bind_is_an_error_and_not_ready_until_it_can(mixed, monkeypatch):
+    """Another socket holds the port while the scenario asks for it open.
+
+    The other socket is bound and does not listen, so a connection to the port
+    is still refused. The listener's bind fails on every pass, and each pass
+    tries it again. A port in that state is broken, not closed on purpose:
+
+      - the control call that asked for it open answers 500 and names it;
+      - /ready answers 503 and names it, while that call is still waiting (the
+        probe does not hang on a control call that cannot finish) and after;
+      - once the other socket is gone the listener binds by itself, and the
+        next control call answers 200.
+
+    On the second simulator: its provider 2 has had no connection closed from
+    the server's side, so nothing else stops the other socket from binding.
+    """
+    key, port = "mixed-sim:2", _MIXED_OTHER
+    monkeypatch.setattr(control_api, "_PORT_SETTLE_S", 2.0)
+    monkeypatch.setattr(server_module, "_READY_LOCK_WAIT_S", 0.3)
+    _post(f"{mixed}/reset/all", {})
+    status, body = _set(mixed, key, mode="port_closed")
+    assert status == 200, body
+
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        holder.bind(("127.0.0.1", port))
+        reply = {}
+        caller = threading.Thread(target=lambda: reply.update(answer=_set(mixed, key, mode="success")))
+        caller.start()
+        deadline = time.monotonic() + 2.0
+        while _mode(mixed, key) != "success" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        asked = time.monotonic()
+        during_status, during = _get(f"{mixed}/ready")  # the control call is waiting for the port
+        waited = time.monotonic() - asked
+        caller.join(timeout=10)
+        status, body = reply["answer"]
+        after_status, after = _get(f"{mixed}/ready")
+
+        assert status == 500, f"a port that could not bind must not answer {status}: {body}"
+        for named in ("pool 'mixed-sim'", "provider '2'", f"port {port}", "is not accepting connections"):
+            assert named in body["error"], f"the error must name {named}; got {body['error']!r}"
+        assert _mode(mixed, key) == "success", "the scenario is stored, as the error says"
+        for when, ready_status, ready in (("during", during_status, during), ("after", after_status, after)):
+            assert ready_status == 503, f"/ready {when} the control call must be 503, got {ready_status}: {ready}"
+            assert ready["missing_ports"] == [port], (when, ready)
+            assert ready["closed_by_scenario"] == [], (when, ready)
+        assert waited < 1.5, f"/ready waited {waited:.2f}s on a control call that could not finish"
+    finally:
+        holder.close()
+
+    deadline = time.monotonic() + 5.0
+    while _connect(port) != 0 and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert _connect(port) == 0, "the listener must bind by itself once the port is free"
+    status, body = _set(mixed, key, mode="success")
+    assert status == 200, body
+    ready_status, ready = _get(f"{mixed}/ready")
+    assert (ready_status, ready.get("closed_by_scenario")) == (200, []), ready
+    with _fresh_channel(port) as channel:
+        assert _latest_block(channel).block.header.chain_id == "lava-sim"

@@ -139,9 +139,9 @@ nc -z localhost 18548   # refused, on the very next line
   port does not get there within 5 seconds the call answers HTTP 500 and names
   the pool, the provider and the port. It never answers 200 for a state it did
   not reach.
-- **The scenario time-to-live reopens it too.** The gRPC listener re-reads its
-  scenario every 0.2 seconds, so the port accepts again about that long after
-  the sweep reverts the scenario. No caller waits on that path.
+- **The scenario time-to-live reopens it too.** The sweep that reverts the
+  scenario waits for the port, as a control call does, so the port accepts when
+  the sweep pass ends.
 - **It obeys `transports` and `ports`** like every other mode. The other ports of
   the provider and the other providers are untouched.
 - **`GET /ready` stays 200.** A port closed by a scenario is left out of the
