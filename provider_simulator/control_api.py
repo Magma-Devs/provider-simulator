@@ -11,17 +11,35 @@ key (a bare pid, or a block carrying ``chain_family``) gets a 400 that names the
 new format — a stale client fails loudly, never silently.
 """
 
+import time
 from dataclasses import fields
 
+from provider_simulator import fault_policy
 from provider_simulator.build_info import build_info
 from provider_simulator.cache_sim import DEFAULT_MODE as DEFAULT_CACHE_MODE
 from provider_simulator.cache_sim import CacheEntry, CacheSimRegistry, UnknownMode
 from provider_simulator.chains import CHAINS
 from provider_simulator.domain.registry import Registry
 from provider_simulator.listeners.ws import WsSubscriptions
+from provider_simulator.port_gate import PortGate
 from provider_simulator.resp_proxy import RespProxyRegistry
 
-_MODES = {"success", "error", "rate_limit", "down", "hang", "drop_connection"}
+_MODES = {"success", "error", "rate_limit", "down", "hang", "drop_connection", "port_closed"}
+# How long a call that closes or reopens a gRPC port waits for the port to
+# change before it answers with an error instead of a 200.
+_PORT_SETTLE_S = 5.0
+# What "port_closed" cannot be combined with: the fields that act on one request,
+# or on the reply to it, at an endpoint the block targets. Each is read only
+# while such a request is being served (fault_policy.resolve_mode and ladder,
+# Listener.serve, GrpcListener.plan), and a closed port serves none.
+#   field -> (the value that means "not set", what the field does)
+_NEEDS_A_REQUEST = {
+    "fail_first_n": (0, "counts the requests that arrive"),
+    "error_probability": (0.0, "is rolled once for each request that arrives"),
+    "latency_ms": (0, "delays the reply to a request"),
+    "corruption_mode": (None, "breaks the body of a reply"),
+    "pause_at": (None, "holds a reply part way through"),
+}
 _CORRUPTION_MODES = {
     "truncated",
     "missing_field",
@@ -153,6 +171,95 @@ def _a_pause_no_named_port_can_serve(provider: object, scenario_updates: dict) -
     return ""
 
 
+def _a_port_closed_that_cannot_happen(
+    provider: object, scenario_updates: dict, port_gates: "dict[int, PortGate]"
+) -> tuple[int, str]:
+    """Refuse ``mode="port_closed"`` wherever the port would not really close.
+
+    Returns ``(http_status, message)``; an empty message means the block is
+    fine. Everything is read EFFECTIVELY, merged over what is already stored,
+    for the reason ``_a_pause_no_named_port_can_serve`` gives: a POST merges, so
+    a rule that looked only at this request would miss a ``port_closed`` set in
+    one call and a filter moved onto another endpoint in the next.
+
+    Three ways the port would stay open, each refused rather than accepted:
+
+    - The block targets an endpoint that is not gRPC. Only the gRPC listener can
+      stop its own server; the HTTP and WebSocket listeners have no such path.
+    - The block targets no endpoint at all.
+    - The block targets a gRPC endpoint this process runs no listener for.
+
+    An accepted fault that does nothing is the worst outcome of the three
+    possible ones, and the reason is the same every time in this module: the
+    provider answers normally, and a test reads a healthy provider as a router
+    that recovered.
+
+    The fourth refusal is a different kind. ``port_closed`` is a state of the
+    port and not an answer to a request, so it cannot be combined with a field
+    that acts on a request (``_NEEDS_A_REQUEST``).
+    """
+    stored = provider.scenario.snapshot()  # type: ignore[attr-defined]
+    effective = {**stored, **scenario_updates}
+    if effective.get("mode") != "port_closed":
+        return 200, ""
+    for filter_name in ("transports", "ports"):
+        value = effective.get(filter_name)
+        if value is not None and not isinstance(value, (list, tuple)):
+            # A malformed filter is ScenarioConfig's to refuse, a few lines
+            # below the caller. DEFER, as _ports_the_provider_does_not_serve does.
+            return 200, ""
+    if effective.get("ports") is not None and not effective["ports"]:
+        # An empty ports list is refused by ScenarioConfig too, whatever the
+        # mode, with the reason that fits every mode. Leave it that one answer.
+        return 200, ""
+
+    endpoints = list(provider.endpoints)  # type: ignore[attr-defined]
+    serves = ", ".join(f"{ep.interface}/{ep.transport} :{ep.port}" for ep in endpoints)
+    targeted = [ep for ep in endpoints if fault_policy.targets(effective, ep)]
+    if not targeted:
+        return 400, (
+            f"mode 'port_closed' targets no endpoint of this provider with "
+            f"transports={effective.get('transports')!r} and ports={effective.get('ports')!r}; "
+            f"it serves {serves}. A fault that closes nothing leaves the provider answering "
+            "normally and the request would look like it had worked"
+        )
+    not_grpc = [ep for ep in targeted if ep.interface != "grpc"]
+    if not_grpc:
+        names = ", ".join(f"{ep.interface}/{ep.transport} :{ep.port}" for ep in not_grpc)
+        return 400, (
+            f"mode 'port_closed' would target {names}, and only a gRPC endpoint can close its "
+            "port: the gRPC listener stops its own server, and no other listener has a way to "
+            "stop listening. Accepting it would close nothing, the provider would answer "
+            "normally, and a test would read that as a router that recovered. Use mode 'down' "
+            "or 'drop_connection' for that endpoint, or narrow the block to a gRPC endpoint "
+            f"with 'transports' or 'ports'. This provider serves {serves}"
+        )
+    no_listener = sorted(ep.port for ep in targeted if ep.port not in port_gates)
+    if no_listener:
+        return 409, (
+            f"mode 'port_closed' cannot close port(s) {no_listener}: this simulator runs no gRPC "
+            "listener there (grpcio is not installed, or the listeners were never started), so "
+            "there is no server to stop"
+        )
+    for field_name, (unset, does) in _NEEDS_A_REQUEST.items():
+        value = effective.get(field_name, unset)
+        if value != unset:
+            return 400, (
+                f"{field_name}={value!r} cannot apply with mode 'port_closed': {field_name} {does}, "
+                "and a closed port receives no request. port_closed is a state of the port, not a "
+                f"fault on a request. Set {field_name} back to {unset!r}, or use a mode that answers"
+            )
+    return 200, ""
+
+
+def _port_closed_per_method(method_name: object) -> str:
+    return (
+        f"per-method mode='port_closed' not allowed (method={method_name!r}): an override "
+        "answers one method of a request that already arrived, and a closed port receives none. "
+        "Set mode 'port_closed' on the provider itself"
+    )
+
+
 def _normalise_responses(responses: object) -> object:
     """Normalise the ``responses`` override into the stored form.
 
@@ -171,6 +278,8 @@ def _normalise_responses(responses: object) -> object:
                 raise ValueError("REST response key must be [verb, template]")
             if isinstance(cfg, dict) and cfg.get("mode") == "error":
                 raise ValueError("per-method mode='error' not allowed; use error_stub or error")
+            if isinstance(cfg, dict) and cfg.get("mode") == "port_closed":
+                raise ValueError(_port_closed_per_method(list(key)))
             out[(key[0], key[1])] = cfg
         return out
     if isinstance(responses, dict):
@@ -179,6 +288,8 @@ def _normalise_responses(responses: object) -> object:
                 continue
             if cfg.get("mode") == "error":
                 raise ValueError("per-method mode='error' not allowed; use error_stub or error")
+            if cfg.get("mode") == "port_closed":
+                raise ValueError(_port_closed_per_method(method_name))
             # Canned {status, body} success override (JSON-RPC method entries
             # only — REST re-tupled entries own their body+status semantics).
             # The body must be a JSON object, must not combine with a fault
@@ -223,6 +334,11 @@ class ControlApi:
         # per-process state exactly like a staged cache entry, and it outlives a
         # test that dies before its teardown. See _perform_reset.
         self.resp_proxies = resp_proxies if resp_proxies is not None else RespProxyRegistry()
+        # One gate per gRPC port that has a running listener, keyed by port.
+        # The socket adapter fills it when it starts the gRPC threads, so an
+        # API built without sockets holds none and refuses mode="port_closed"
+        # instead of storing a fault nothing performs.
+        self.port_gates: dict[int, PortGate] = {}
 
     # ── POST /scenario ──────────────────────────────────────────────────────
     def apply_scenario(self, body: object) -> tuple[int, dict]:
@@ -283,9 +399,13 @@ class ControlApi:
             )
             if err:
                 return 400, {"error": f"{key}: {err}"}
+            status, err = _a_port_closed_that_cannot_happen(provider, scenario_updates, self.port_gates)
+            if err:
+                return status, {"error": f"{key}: {err}"}
             staged.append((provider, scenario_updates, quirks_updates))
 
         applied = {}
+        wishes: list = []
         for provider, scenario_updates, quirks_updates in staged:
             # A fresh fail_first_n restarts the sequence counter.
             if "fail_first_n" in scenario_updates:
@@ -302,13 +422,71 @@ class ControlApi:
                     provider.quirks.update(quirks_updates)
             except ValueError as exc:
                 return 400, {"error": f"{provider.key}: {exc}"}
+            wishes.extend(self._port_wishes(provider))
             # `responses` is write-only on the wire (REST entries re-tuple to
             # (verb, template) keys, which JSON cannot carry) — echo every
             # other resolved field.
             applied[provider.key] = {
                 k: v for k, v in {**scenario_updates, **quirks_updates}.items() if k != "responses"
             }
+        # Answer only once every gRPC port is where its scenario put it, so the
+        # caller's next line can connect, or be refused, without a sleep.
+        err = self._settle_ports(wishes)
+        if err:
+            return 500, {"error": err, "applied": applied}
         return 200, {"status": "ok", "applied": applied}
+
+    # ── gRPC ports a scenario closes ─────────────────────────────────────────
+    def _port_wishes(self, provider: object) -> list:
+        """``(gate, want_open)`` for each gRPC port of one provider.
+
+        Read straight after this call's own write, so the state waited for is
+        the one THIS call asked for. A second caller that changes the scenario
+        a moment later makes this one time out and answer an error, which is
+        the truth: the port did not end where this call put it.
+        """
+        wishes = []
+        for endpoint in provider.endpoints:  # type: ignore[attr-defined]
+            gate = self.port_gates.get(endpoint.port)
+            if gate is not None:
+                wishes.append((gate, not gate.wants_closed()))
+        return wishes
+
+    def _settle_ports(self, wishes: list) -> str:
+        """Wait until each port is in the state wished for; "" when all are.
+
+        Every gate is asked first and waited on second, so the ports change
+        side by side and the whole call is bounded by one ``_PORT_SETTLE_S``.
+        A port that does not get there is named, with its pool and provider:
+        a 200 for a state that was not reached would let a test connect to a
+        port it believes closed.
+        """
+        asked = [(gate, want_open, gate.ask()) for gate, want_open in wishes]
+        deadline = time.monotonic() + _PORT_SETTLE_S
+        stuck = []
+        for gate, want_open, ticket in asked:
+            if gate.wait(ticket, want_open, max(deadline - time.monotonic(), 0.0)):
+                continue
+            provider, port = gate.provider, gate.endpoint.port
+            stuck.append(
+                f"pool {provider.pool.name!r} provider {provider.pid!r} port {port} is not "
+                f"{'accepting connections' if want_open else 'closed'}"
+            )
+        if not stuck:
+            return ""
+        return (
+            f"the scenario is stored, but after {_PORT_SETTLE_S:g}s " + "; ".join(stuck) + ". "
+            "The gRPC listener did not reach the state the scenario asks for, so do not trust "
+            "the port to be in it"
+        )
+
+    def ports_closed_by_scenario(self) -> list[int]:
+        """Every port a scenario closes at the time of the call (``mode="port_closed"``).
+
+        The readiness check reads this: a port closed on purpose is not a
+        listener that failed to bind.
+        """
+        return sorted(port for port, gate in self.port_gates.items() if gate.wants_closed())
 
     # ── resets ──────────────────────────────────────────────────────────────
     # Every reset takes an optional ``pool``. Without one it clears everything,
@@ -369,11 +547,13 @@ class ControlApi:
                 # advance into the next.
                 for _name, head in chain.iter_heads():
                     head.reset()
+        wishes: list = []
         for provider in providers:
             if scenario:
                 provider.scenario.reset()
                 provider.quirks.reset()
                 provider.reset_fail()
+                wishes.extend(self._port_wishes(provider))
             if history:
                 provider.log.clear()
         # Cache-sims reset with everything else. A staged entry that survived
@@ -416,6 +596,12 @@ class ControlApi:
         # store it cannot reach, which its own checks catch, while a latency
         # left set only makes a later test slow — nothing reports that.
         self.resp_proxies.clear_latency_all()
+        # Last, so everything else is already cleared whatever the ports do. A
+        # reset is how a port closed by mode="port_closed" opens again, and the
+        # caller's next line must be able to connect.
+        err = self._settle_ports(wishes)
+        if err:
+            return 500, {"error": err}
         return 200, {
             "status": status,
             "pool": pool,
@@ -958,6 +1144,15 @@ def _bad_enum(field_name: str, value: object) -> str:
             "pause_at 'before_headers' is not accepted: latency_ms already delays the "
             "first byte. Use latency_ms for the delay before the reply starts, and "
             "pause_at 'after_headers' or 'mid_body' to hold a reply part way through"
+        )
+    # then_mode="port_closed" is a mode name the caller got right and a place it
+    # cannot go, so it gets its reason rather than the generic list.
+    if field_name == "then_mode" and value == "port_closed":
+        return (
+            "then_mode 'port_closed' is not accepted: then_mode is what a provider switches to "
+            "after fail_first_n requests have arrived, and port_closed is a state of the port, "
+            "not an answer to a request. Set mode 'port_closed' in a later call when the port "
+            "has to close"
         )
     allowed = _ENUMS.get(field_name)
     if allowed is not None and value is not None and value not in allowed:

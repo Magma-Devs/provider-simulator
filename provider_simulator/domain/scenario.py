@@ -6,6 +6,11 @@ Chain-specific knobs (Solana slot math, ETH logs-lag) live in Quirks instead —
 sending one of those here is rejected, so a typo or a wrong-chain knob fails
 loudly rather than being silently ignored.
 
+One mode does not apply to every chain: ``port_closed`` closes the port of a gRPC
+endpoint, and only a gRPC endpoint can perform it. This class cannot tell which
+endpoints a provider has, so the control API refuses the mode for every other
+endpoint, where the endpoints are known.
+
 Two fields scope a block to SOME of a provider's endpoints rather than all of
 them, and both default to None, meaning every endpoint.
 
@@ -33,7 +38,7 @@ from provider_simulator.domain.introspective_config import IntrospectiveConfig
 
 @dataclass
 class ScenarioConfig(IntrospectiveConfig):
-    mode: str = "success"  # success | error | rate_limit | down | drop_connection | hang
+    mode: str = "success"  # success | error | rate_limit | down | drop_connection | hang | port_closed
     latency_ms: int = 0
     error_probability: float = 0.0
     error_code: int = -32000
@@ -70,9 +75,10 @@ class ScenarioConfig(IntrospectiveConfig):
     # Modes that answer, or refuse to answer, before the write path a pause acts
     # on is ever reached. ``down`` returns a bodiless 503 pre-parse, ``hang``
     # sleeps out the caller's deadline and closes, and ``drop_connection`` hands
-    # off to the adapter's drop path. A pause set with any of them is accepted,
-    # stored, echoed back by GET /scenario — and does nothing.
-    _MODES_THAT_NEVER_REACH_A_PAUSE = ("down", "hang", "drop_connection")
+    # off to the adapter's drop path. ``port_closed`` receives no request at all.
+    # A pause set with any of them is accepted, stored, echoed back by
+    # GET /scenario — and does nothing.
+    _MODES_THAT_NEVER_REACH_A_PAUSE = ("down", "hang", "drop_connection", "port_closed")
 
     def _validate(self, cfg: dict) -> None:
         self._validate_transports(cfg)

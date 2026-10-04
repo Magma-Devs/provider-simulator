@@ -220,7 +220,8 @@ _Avoid_: provider info, provider details, the /topology reply
 **Scenario**:
 The fault settings that every provider understands, whatever its chain: outage,
 latency, errors, rate limits, corruption, dropped connections, and the
-fail-first-N sequence.
+fail-first-N sequence. One setting is not for every provider: a closed port,
+which only a gRPC endpoint can perform.
 _Avoid_: config, state, fault config
 
 **Quirks**:
@@ -230,8 +231,28 @@ _Avoid_: chain config, extras, options
 
 **Mode**:
 The one fault shape a provider is in. Exactly one applies at a time: `success`,
-`error`, `rate_limit`, `down`, `drop_connection` or `hang`.
+`error`, `rate_limit`, `down`, `drop_connection`, `hang` or `port_closed`.
 _Avoid_: state, status, behaviour
+
+**Port closed**:
+The mode in which a gRPC endpoint's port is really closed. In every other mode
+the provider receives the request, and on gRPC it also answers it: `down` and
+`drop_connection` both answer with the status `UNAVAILABLE`. With `port_closed`
+the endpoint's gRPC server is stopped, so the listening socket and every open
+connection are closed, a new TCP connection is refused, and nothing reaches the
+provider. Its history stays empty.
+
+It is a state of the port and not a fault on a request. That is why the control
+API refuses it in every place that needs a request to arrive: a per-method
+override, `then_mode`, and together with `fail_first_n`, `error_probability`,
+`latency_ms`, `corruption_mode` or `pause_at`. It is also refused for any
+endpoint that is not gRPC, because no other listener can stop listening.
+
+The control call returns after the port has changed, in both directions. The
+scenario time-to-live reopens the port too, about 0.2 seconds after the sweep
+reverts the scenario, with no caller waiting.
+_Avoid_: unreachable, dead, offline, connection refused (that is what the client
+sees, not the name of the mode)
 
 **Orthogonal field**:
 A setting that composes with whichever mode is active, because it changes the

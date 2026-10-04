@@ -169,6 +169,16 @@ The 6 primitives below apply to every provider regardless of `chain_family`. The
 
 The fault ladder is evaluated in the order above (first match wins). Only `latency_ms` does not short-circuit — it sleeps and then continues to the next branch.
 
+### `mode=port_closed` is not in that table
+
+It is not a reply, so it has no rung on the ladder, and it is not parallel across chain families: only a gRPC endpoint can perform it.
+
+| | JSON-RPC, REST, Tendermint-RPC, WebSocket | gRPC |
+|---|---|---|
+| `mode=port_closed` | **refused with HTTP 400.** None of these listeners can stop listening | the endpoint's gRPC server is stopped: the listening socket and every open connection are closed, and a new TCP connection is refused. No status is sent and nothing is recorded in the history |
+
+On gRPC, `mode=down` and `mode=drop_connection` both answer `UNAVAILABLE`, so a router always gets an answer from them. `port_closed` is the mode to use when the router must get none. The control call returns after the port has changed, in both directions, so no sleep is needed after it. The full list of what is refused is in the README, under `port_closed`.
+
 ## Common recipes
 
 ### Failover — one provider down
