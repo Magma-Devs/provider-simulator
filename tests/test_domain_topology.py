@@ -42,6 +42,11 @@ EXPECTED_POOLS = {
     "eth-failover-ineligible-sim",
     "eth-failover-noarchive-sim",
     "eth-failover-benchafter-sim",
+    # The two lava failover pools. Their routers run the router's own default
+    # retry limit, so the failover tests on REST and gRPC do not share a
+    # router with the retry tests.
+    "lava-failover-rest-sim",
+    "lava-failover-grpc-sim",
 }
 
 
@@ -594,6 +599,18 @@ AGREED_NAMES = {
     ("eth-failover-benchafter-sim", "1"): "EthFailoverBenchafterPrimaryProvider1",
     ("eth-failover-benchafter-sim", "2"): "EthFailoverBenchafterPrimaryProvider2",
     ("eth-failover-benchafter-sim", "3"): "EthFailoverBenchafterPrimaryProvider3",
+    ("lava-failover-rest-sim", "1"): "LavaFailoverRestPrimaryProvider1",
+    ("lava-failover-rest-sim", "2"): "LavaFailoverRestPrimaryProvider2",
+    ("lava-failover-rest-sim", "3"): "LavaFailoverRestPrimaryProvider3",
+    ("lava-failover-rest-sim", "4"): "LavaFailoverRestBackupProvider4",
+    ("lava-failover-rest-sim", "5"): "LavaFailoverRestBackupProvider5",
+    ("lava-failover-rest-sim", "6"): "LavaFailoverRestBackupProvider6",
+    ("lava-failover-grpc-sim", "1"): "LavaFailoverGrpcPrimaryProvider1",
+    ("lava-failover-grpc-sim", "2"): "LavaFailoverGrpcPrimaryProvider2",
+    ("lava-failover-grpc-sim", "3"): "LavaFailoverGrpcPrimaryProvider3",
+    ("lava-failover-grpc-sim", "4"): "LavaFailoverGrpcBackupProvider4",
+    ("lava-failover-grpc-sim", "5"): "LavaFailoverGrpcBackupProvider5",
+    ("lava-failover-grpc-sim", "6"): "LavaFailoverGrpcBackupProvider6",
 }
 
 # The pools that HAVE a backup tier, and which of their slots it is. The router
@@ -617,6 +634,10 @@ _SIX_PROVIDER_POOLS_WITH_A_BACKUP_TIER = (
     "eth-failover-prodlimits-sim",
     "eth-failover-archive-sim",
     "eth-failover-mixed-sim",
+    # The two lava failover pools: three primaries, then three backups, the
+    # shape of lava-sim-rest and lava-sim-grpc.
+    "lava-failover-rest-sim",
+    "lava-failover-grpc-sim",
 )
 
 # Four-provider failover pools (MAG-3916): two primaries, then two backups. Two
