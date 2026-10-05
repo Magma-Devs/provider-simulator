@@ -990,6 +990,27 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
         "",
         (("jsonrpc", "http", 18675),),
     ),
+    # lava-failover-rest-sim: ports 18676-18681. Pids 1-3 primary, 4-6 backup.
+    # The same shape as lava-sim-rest, for the failover tests on REST. Its
+    # router runs the router's own default retry limit, 2, and
+    # lava-sim-rest-router runs 5. It is a pool of its own so that a fault a
+    # failover test sets cannot reach the providers of lava-sim-rest, which
+    # other tests use. No group labels: no test on this pool cross-validates.
+    ("lava-failover-rest-sim", "lava", "1", "LavaFailoverRestPrimaryProvider1", False, "", (("rest", "http", 18676),)),
+    ("lava-failover-rest-sim", "lava", "2", "LavaFailoverRestPrimaryProvider2", False, "", (("rest", "http", 18677),)),
+    ("lava-failover-rest-sim", "lava", "3", "LavaFailoverRestPrimaryProvider3", False, "", (("rest", "http", 18678),)),
+    ("lava-failover-rest-sim", "lava", "4", "LavaFailoverRestBackupProvider4", True, "", (("rest", "http", 18679),)),
+    ("lava-failover-rest-sim", "lava", "5", "LavaFailoverRestBackupProvider5", True, "", (("rest", "http", 18680),)),
+    ("lava-failover-rest-sim", "lava", "6", "LavaFailoverRestBackupProvider6", True, "", (("rest", "http", 18681),)),
+    # lava-failover-grpc-sim: ports 18682-18687. Pids 1-3 primary, 4-6 backup.
+    # The same shape as lava-sim-grpc, for the failover tests on gRPC, with the
+    # same reasons as lava-failover-rest-sim above.
+    ("lava-failover-grpc-sim", "lava", "1", "LavaFailoverGrpcPrimaryProvider1", False, "", (("grpc", "http2", 18682),)),
+    ("lava-failover-grpc-sim", "lava", "2", "LavaFailoverGrpcPrimaryProvider2", False, "", (("grpc", "http2", 18683),)),
+    ("lava-failover-grpc-sim", "lava", "3", "LavaFailoverGrpcPrimaryProvider3", False, "", (("grpc", "http2", 18684),)),
+    ("lava-failover-grpc-sim", "lava", "4", "LavaFailoverGrpcBackupProvider4", True, "", (("grpc", "http2", 18685),)),
+    ("lava-failover-grpc-sim", "lava", "5", "LavaFailoverGrpcBackupProvider5", True, "", (("grpc", "http2", 18686),)),
+    ("lava-failover-grpc-sim", "lava", "6", "LavaFailoverGrpcBackupProvider6", True, "", (("grpc", "http2", 18687),)),
 )
 
 
