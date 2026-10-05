@@ -53,6 +53,8 @@ EXPECTED_POOLS = {
     "eth-failover-sim",
     "eth-failover-solo-sim",
     "btc-failover-sim",
+    # The failover copy of solana-sim, for the failover tests on the Solana router.
+    "solana-failover-sim",
 }
 
 
@@ -627,6 +629,9 @@ AGREED_NAMES = {
     ("btc-failover-sim", "1"): "BtcFailoverPrimaryProvider1",
     ("btc-failover-sim", "2"): "BtcFailoverPrimaryProvider2",
     ("btc-failover-sim", "3"): "BtcFailoverPrimaryProvider3",
+    ("solana-failover-sim", "1"): "SolanaFailoverPrimaryProvider1",
+    ("solana-failover-sim", "2"): "SolanaFailoverPrimaryProvider2",
+    ("solana-failover-sim", "3"): "SolanaFailoverPrimaryProvider3",
 }
 
 # The pools that HAVE a backup tier, and which of their slots it is. The router
@@ -685,7 +690,8 @@ _FOUR_PROVIDER_POOLS_WITH_A_BACKUP_TIER = (
 # serving two addresses.
 #
 # Two more are absent for the same reason: eth-failover-solo-sim is a single
-# provider, and btc-failover-sim is three primaries.
+# provider, and btc-failover-sim is three primaries. solana-failover-sim is three
+# primaries too.
 AGREED_BACKUPS = {(pool, pid) for pool in _SIX_PROVIDER_POOLS_WITH_A_BACKUP_TIER for pid in ("4", "5", "6")} | {
     (pool, pid) for pool in _FOUR_PROVIDER_POOLS_WITH_A_BACKUP_TIER for pid in ("3", "4")
 }

@@ -428,6 +428,8 @@ POOLS_WITH_NO_ROUTER_HERE = {
     "eth-failover-sim",
     "eth-failover-solo-sim",
     "btc-failover-sim",
+    # solana-failover-sim, for the same reason.
+    "solana-failover-sim",
 }
 
 
