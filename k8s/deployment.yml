@@ -566,7 +566,8 @@ spec:
               cpu: "500m"
               memory: "256Mi"
           # Readiness uses /ready (not /health): /ready confirms every listener
-          # port is actually bound and accepting connections, so kube-proxy
+          # port is actually bound and accepting connections, except a gRPC port
+          # that a scenario closed on purpose (mode "port_closed"), so kube-proxy
           # won't send Service traffic to a pod that is still binding ports. A
           # router relaying to a half-bound sim gets connection-refused, which
           # its classifier turns into a 503, and the providers land on the

@@ -106,7 +106,7 @@ Pick one `mode`; combine it with the orthogonal fields.
 
 | Field | Values | Effect |
 |---|---|---|
-| `mode` | `success` \| `error` \| `rate_limit` \| `down` \| `hang` \| `drop_connection` | Primary behaviour |
+| `mode` | `success` \| `error` \| `rate_limit` \| `down` \| `hang` \| `drop_connection` \| `port_closed` | Primary behaviour. `port_closed` is gRPC only, see below |
 | `latency_ms` | int | Sleep N ms before responding |
 | `error_probability` | 0.0–1.0 | Random error on top of `success` |
 | `error_code` / `error_message` / `http_status` | int / str / int | Customise the error returned |
@@ -119,6 +119,49 @@ Pick one `mode`; combine it with the orthogonal fields.
 | `fail_first_n` / `then_mode` | int / mode | Fail the first N calls, then switch to `then_mode` |
 | `transports` | list of `http` / `http2` / `ws` | Scope the block to specific endpoints (omit = all) |
 
+### `port_closed`: a gRPC provider whose port is really closed
+
+In every other mode the provider receives the request. On gRPC it also answers
+it: `down` and `drop_connection` both answer with the status `UNAVAILABLE`, so
+the router always gets an answer. `port_closed` is the mode where it gets none:
+the gRPC server of the endpoint is stopped, the listening socket is closed,
+every open connection is closed, and a new TCP connection is refused. The
+provider receives nothing, so it records nothing in `/history`.
+
+```bash
+curl -s -X POST localhost:19000/scenario -d '{"providers":{"lava-sim-grpc:1":{"mode":"port_closed"}}}'
+nc -z localhost 18548   # refused, on the very next line
+```
+
+- **The control call returns after the port has changed.** Closed after a call
+  that sets the mode; accepting connections after a call that removes it
+  (another mode, `POST /reset`, `POST /reset/all`). No sleep is needed. When the
+  port does not get there within 5 seconds the call answers HTTP 500 and names
+  the pool, the provider and the port. It never answers 200 for a state it did
+  not reach.
+- **The scenario time-to-live reopens it too.** The sweep that reverts the
+  scenario waits for the port, as a control call does, so the port accepts when
+  the sweep pass ends.
+- **It obeys `transports` and `ports`** like every other mode. The other ports of
+  the provider and the other providers are untouched.
+- **`GET /ready` stays 200.** A port closed by a scenario is left out of the
+  readiness check and listed under `closed_by_scenario`.
+- **A gRPC client reconnects with its own back-off.** The port accepts at once
+  when it reopens; a client that was refused a moment earlier waits out its
+  reconnect delay before its next call succeeds. Measured with the Python
+  client over six runs: 0.8 to 1.2 seconds.
+
+It is refused, never accepted and ignored:
+
+| Request | Answer |
+|---|---|
+| It would target an endpoint that is not gRPC (any JSON-RPC, REST, Tendermint-RPC or WebSocket endpoint) | 400. Only the gRPC listener can stop its own server |
+| It would target no endpoint at all (a `transports` filter the provider has no endpoint for) | 400 |
+| The simulator runs no gRPC listener for the port (`grpcio` is not installed) | 409 |
+| Inside a per-method `responses` override | 400. An override answers a request that already arrived |
+| As a `then_mode` | 400. `then_mode` follows `fail_first_n` requests, and a closed port receives none |
+| Together with `fail_first_n` > 0, `error_probability` > 0, `latency_ms` > 0, `corruption_mode` or `pause_at` | 400. Each acts on a request or on the reply to it |
+
 ## Control API (port 19000)
 
 | Route | Purpose |
@@ -130,7 +173,7 @@ Pick one `mode`; combine it with the orthogonal fields.
 | `POST /advance` | Move a chain's simulated head (default `eth`; sync-freshness tests) |
 | `POST /ws/emit` | Push a WebSocket event to a live subscription |
 | `GET /version` | Which build this simulator is: see below |
-| `GET /health` · `/ready` · `/scenario` · `/stats` · `/topology` · `/history` · `/ws/subscriptions` | Health / readiness (all listener ports bound) / config / counters / read-only provider/port topology per pool / call log / live subscriptions |
+| `GET /health` · `/ready` · `/scenario` · `/stats` · `/topology` · `/history` · `/ws/subscriptions` | Health / readiness (all listener ports bound, except a port a `port_closed` scenario closed) / config / counters / read-only provider/port topology per pool / call log / live subscriptions |
 
 ### Cache-sims (a simulated read-only secondary cache)
 

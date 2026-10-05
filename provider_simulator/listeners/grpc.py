@@ -22,6 +22,14 @@ gRPC-specific rules preserved from the flat handler:
   wrong_type aborts INTERNAL; invalid_proto / empty_response / truncated /
   null_body abort
   UNKNOWN.
+
+One mode is not planned here at all. ``port_closed`` is not a reply to a call:
+the endpoint's server is stopped, so no call arrives and ``plan`` never runs.
+``down`` and ``drop`` above are replies: both answer UNAVAILABLE with this
+module's own message, over a connection that stays open. The serve loop in
+server.py performs ``port_closed`` (see ``provider_simulator/port_gate.py``); a
+call that reaches ``plan`` while the mode is set arrived before the port closed
+and is planned like a call on an open port.
 """
 
 from dataclasses import dataclass, field

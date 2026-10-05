@@ -32,6 +32,11 @@ maps a mode to a Verdict (the pure half). ``decide`` composes them.
 
 Latency is NOT a Verdict — it modifies timing on both success and fault paths, so
 the listener applies it, not the policy.
+
+``mode="port_closed"`` is NOT a Verdict either, for a different reason: a Verdict
+answers a request, and a closed port receives none. ``port_closed(scenario,
+endpoint)`` is the decision for it, read by the gRPC serve loop rather than per
+request. It goes through ``targets`` like everything else here.
 """
 
 import random
@@ -75,6 +80,23 @@ def targets(scenario: dict, endpoint: Endpoint) -> bool:
     transports = scenario.get("transports")
     ports = scenario.get("ports")
     return (transports is None or endpoint.transport in transports) and (ports is None or endpoint.port in ports)
+
+
+def port_closed(scenario: dict, endpoint: Endpoint) -> bool:
+    """Does this scenario block close this endpoint's port?
+
+    ``port_closed`` is the one mode that is not a Verdict. A Verdict says what
+    to answer a request that arrived, and a closed port receives none: the gRPC
+    serve loop reads this function and stops the endpoint's server instead (see
+    ``provider_simulator/port_gate.py``). It honours the same ``transports`` and
+    ``ports`` filters as every other mode, through ``targets``.
+
+    ``ladder`` has no branch for the mode on purpose. A request can still reach
+    a targeted endpoint in the moment between the scenario being written and the
+    server stopping. That request arrived at a port that was still open, so it
+    is answered as an open port answers.
+    """
+    return scenario.get("mode") == "port_closed" and targets(scenario, endpoint)
 
 
 def resolve_mode(scenario: dict, endpoint: Endpoint, provider: Provider) -> tuple[bool, str]:

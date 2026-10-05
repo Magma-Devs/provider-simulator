@@ -1,8 +1,9 @@
 """Shared update/snapshot/reset for dataclass-based config objects.
 
-A config object exposes exactly three operations:
+A config object exposes exactly four operations:
 
   update(cfg)  — apply a partial dict of field -> value; unknown keys raise.
+  check(cfg)   — raise what update(cfg) would raise, and write nothing.
   snapshot()   — return a copy of every field's current value. Mutable values
                  are copied ONE level deep (a deep copy would serialize every
                  request behind the config lock): replacing keys/items in the
@@ -71,16 +72,23 @@ class IntrospectiveConfig:
         """Hook for subclasses to reject bad VALUES (bad keys are handled here).
         Runs before any write; raise ValueError to abort the whole update."""
 
-    def update(self, cfg: dict) -> None:
-        """Apply only the keys present in cfg. Validate every key and value
-        first so a bad entry aborts the whole update instead of half-applying
-        it. Mutable values are copied in, so later mutation of the caller's
-        dict/list cannot silently rewrite live config."""
+    def check(self, cfg: dict) -> None:
+        """Raise what ``update(cfg)`` would raise, and write nothing.
+
+        For a caller that writes several configs in one request: it checks every
+        one first, so a refused config leaves the ones beside it unwritten."""
         names = self._field_names()
         unknown = [k for k in cfg if k not in names]
         if unknown:
             raise ValueError(f"unknown config field(s) {unknown}; valid fields are {sorted(names)}")
         self._validate(cfg)
+
+    def update(self, cfg: dict) -> None:
+        """Apply only the keys present in cfg. Validate every key and value
+        first so a bad entry aborts the whole update instead of half-applying
+        it. Mutable values are copied in, so later mutation of the caller's
+        dict/list cannot silently rewrite live config."""
+        self.check(cfg)
         with self._lock:
             for key, value in cfg.items():
                 setattr(self, key, copy.copy(value))

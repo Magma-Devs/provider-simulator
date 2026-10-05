@@ -11,7 +11,10 @@ the registry and PERFORMS each listener's plan:
   ``Listener.serve()``, and turns the returned ``ServeResult`` into wire bytes
   (via ``listeners.wire.serialize``), a hang, or a connection drop.
 - gRPC endpoints run an async servicer that performs ``GrpcListener.plan()``:
-  abort with a status code, or build the protobuf from the plan's data.
+  abort with a status code, or build the protobuf from the plan's data. The same
+  thread also performs ``mode="port_closed"``, the one fault that is not a
+  reply: it stops the endpoint's gRPC server, which closes the port, and starts
+  a new one when the mode is gone.
 - WebSocket endpoints do the RFC 6455 handshake (refusing the upgrade when the
   fault policy says so), then serve each TEXT frame through the provider's
   ``JsonRpcListener``; the subscription lifecycle (eth_subscribe / emit /
@@ -65,6 +68,7 @@ from provider_simulator.listeners import (
 )
 from provider_simulator.listeners.rest import allowed_verbs
 from provider_simulator.listeners.ws import WsSubscriptions
+from provider_simulator.port_gate import PortGate
 from provider_simulator.resp_control import RespControlApi
 from provider_simulator.resp_proxy import RespProxy
 
@@ -751,6 +755,12 @@ def _dispatch_cache_get(control: ControlApi, path: str) -> tuple[int, dict]:
     return 404, {"error": f"unknown cache-sim action {action!r}", "actions": ["calls", "(none, for the cache itself)"]}
 
 
+# How long /ready waits for a control write that is moving a gRPC port. A port
+# changes in a few milliseconds; a write that takes longer than this is waiting
+# on a port that does not change, and /ready answers without it.
+_READY_LOCK_WAIT_S = 1.0
+
+
 class _ControlHandler(BaseHTTPRequestHandler):
     """HTTP surface for the ControlApi routes. Parsing and route dispatch only —
     every decision lives in ControlApi; /ready is the exception because probing
@@ -826,6 +836,27 @@ class _ControlHandler(BaseHTTPRequestHandler):
         self._reply(status, payload)
 
     def _ready(self) -> tuple[int, dict]:
+        """``_read_ready`` with the control API's port lock held.
+
+        A control call, a reset and the scenario time-to-live sweep each hold
+        that lock from their write until the ports have followed it. Read
+        without it, a port whose scenario was just reverted is expected to
+        accept while its listener is still coming back, and is reported
+        missing.
+
+        The wait for the lock is bounded. A listener that cannot reach its
+        state keeps a writer waiting for the whole settle time, and the probe
+        must still be answered: it then reads without the lock and names that
+        port as missing, which is what it is."""
+        lock = self.server.control.port_lock
+        held = lock.acquire(timeout=_READY_LOCK_WAIT_S)
+        try:
+            return self._read_ready()
+        finally:
+            if held:
+                lock.release()
+
+    def _read_ready(self) -> tuple[int, dict]:
         """Real readiness: every registry port accepts a TCP connection — not
         just "the python process started". Wired to the chart's readinessProbe
         so the router's earliest relays can't race the listener binds (a
@@ -837,8 +868,17 @@ class _ControlHandler(BaseHTTPRequestHandler):
         reports ready while either of them is unbound or has died.
 
         The cache-sim port is deliberately still absent. It needs grpcio, which
-        is optional here, so a cluster without it would never become ready."""
-        ports = sorted(set(self.server.registry.ports()) | set(getattr(self.server, "extra_ready_ports", ())))
+        is optional here, so a cluster without it would never become ready.
+
+        A port that a scenario closed (``mode="port_closed"``) is not expected
+        to accept, so it is left out of the check and named in the reply
+        instead. Counting it as missing would fail the readiness probe, the pod
+        would leave its Service, and one closed provider would take every
+        provider of every pool away from every router."""
+        closed = set(self.server.control.ports_closed_by_scenario())
+        ports = sorted(
+            (set(self.server.registry.ports()) | set(getattr(self.server, "extra_ready_ports", ()))) - closed
+        )
         missing = []
         for port in ports:
             probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -854,8 +894,14 @@ class _ControlHandler(BaseHTTPRequestHandler):
                 "listening": len(ports) - len(missing),
                 "expected": len(ports),
                 "missing_ports": missing,
+                "closed_by_scenario": sorted(closed),
             }
-        return 200, {"status": "ready", "listening": len(ports), "expected": len(ports)}
+        return 200, {
+            "status": "ready",
+            "listening": len(ports),
+            "expected": len(ports),
+            "closed_by_scenario": sorted(closed),
+        }
 
     def _reply(self, status: int, data: dict) -> None:
         body = json.dumps(data).encode()
@@ -1044,10 +1090,19 @@ class _RespControlServer(_SimThreadingHTTPServer):
 
 # ── gRPC adapter ──────────────────────────────────────────────────────────────
 
+# How often a gRPC serve loop runs a pass when nobody woke it. Every control
+# write wakes the loop, the scenario time-to-live sweep included, so this bounds
+# only what no write announces: a bind that failed is tried again.
+_GRPC_PORT_POLL_S = 0.2
 
-def _run_grpc_in_thread(grpc_listener, port: int, host: str) -> None:
+
+def _run_grpc_in_thread(grpc_listener, port: int, host: str, gate: PortGate) -> None:
     """Run one gRPC endpoint: an asyncio event loop on this (daemon) thread
     hosting an async servicer that performs the listener's GrpcPlan.
+
+    ``gate`` is how the port is closed and opened again by a scenario
+    (``mode="port_closed"``): the loop below stops and starts the server on this
+    thread's own event loop and reports each change to it.
 
     All gRPC imports are local so a missing grpcio never breaks the HTTP-only
     simulator (the caller downgraded gRPC to a warning at bootstrap).
@@ -1139,7 +1194,9 @@ def _run_grpc_in_thread(grpc_listener, port: int, host: str) -> None:
                 await asyncio.sleep(plan.latency_ms / 1000.0)
             return response
 
-    async def _serve() -> None:
+    bind = f"[::]:{port}" if host == "0.0.0.0" else f"{host}:{port}"
+
+    def _new_server():
         server = grpc.aio.server()
         query_pb2_grpc.add_ServiceServicer_to_server(_Servicer(), server)
         # Server reflection lets grpcurl discover services without a proto
@@ -1149,11 +1206,57 @@ def _run_grpc_in_thread(grpc_listener, port: int, host: str) -> None:
             reflection.SERVICE_NAME,
         )
         reflection.enable_server_reflection(service_names, server)
-        bind = f"[::]:{port}" if host == "0.0.0.0" else f"{host}:{port}"
         server.add_insecure_port(bind)
-        _log.info("grpc provider bound on %s", bind)
-        await server.start()
-        await server.wait_for_termination()
+        return server
+
+    async def _serve() -> None:
+        """Keep the port in the state the scenario asks for.
+
+        One pass: read whether the scenario closes this port, stop or start the
+        server to match, report to the gate. A pass runs when a control write
+        wakes the loop and also every ``_GRPC_PORT_POLL_S``, which is what
+        tries a failed bind again.
+
+        ``mode="port_closed"`` is performed by ``server.stop(grace=None)``: it
+        closes the listening socket and every open connection, and aborts the
+        calls in flight. Only that closes the socket. A new server on the same
+        port is what opens it again; a stopped ``grpc.aio`` server cannot be
+        started a second time.
+        """
+        loop = asyncio.get_running_loop()
+        wake = asyncio.Event()
+        gate.attach(lambda: loop.call_soon_threadsafe(wake.set))
+        server = None
+        last_error = ""
+        while True:
+            # The ask counter is read BEFORE the scenario. See PortGate.begin_pass.
+            seen = gate.begin_pass()
+            try:
+                if gate.wants_closed():
+                    if server is not None:
+                        await server.stop(grace=None)
+                        server = None
+                        _log.info("grpc provider port closed by scenario on %s", bind)
+                elif server is None:
+                    candidate = _new_server()
+                    await candidate.start()
+                    server = candidate
+                    _log.info("grpc provider bound on %s", bind)
+                last_error = ""
+            except Exception as exc:
+                # A bind that fails is tried again on the next pass. The gate
+                # reports what is true meanwhile, so a caller waiting for the
+                # port is answered with an error instead of told it worked.
+                # Logged once per distinct error, not once per pass.
+                if str(exc) != last_error:
+                    last_error = str(exc)
+                    _log.warning("grpc provider on %s could not change its port state: %s", bind, exc)
+            gate.end_pass(seen, is_open=server is not None)
+            try:
+                await asyncio.wait_for(wake.wait(), timeout=_GRPC_PORT_POLL_S)
+            except asyncio.TimeoutError:
+                pass
+            wake.clear()
 
     asyncio.run(_serve())
 
@@ -1161,7 +1264,7 @@ def _run_grpc_in_thread(grpc_listener, port: int, host: str) -> None:
 # ── Scenario TTL sweep ────────────────────────────────────────────────────────
 
 
-def _scenario_ttl_sweep(registry: Registry, ttl_s: int, interval_s: float = 120.0) -> None:
+def _scenario_ttl_sweep(control: ControlApi, ttl_s: int, interval_s: float = 120.0) -> None:
     """Background daemon: revert any provider whose scenario hasn't been
     written to in > ttl_s seconds back to defaults. Prevents stale state
     (e.g. a leftover mode=hang from a prior test session) from surviving into
@@ -1169,15 +1272,35 @@ def _scenario_ttl_sweep(registry: Registry, ttl_s: int, interval_s: float = 120.
     in mode='success' are skipped."""
     while True:
         time.sleep(interval_s)
-        now = time.time()
-        for provider in registry.all_providers():
+        _revert_stale_scenarios(control, ttl_s, time.time())
+
+
+def _revert_stale_scenarios(control: ControlApi, ttl_s: int, now: float) -> None:
+    """One pass of the sweep above, with the clock handed in.
+
+    Split out so a test can run the pass the daemon runs without waiting out
+    the interval, and can say what time it is instead of sleeping until then.
+
+    A reverted ``mode="port_closed"`` has reopened its port when this returns.
+    The pass is a control write like ``POST /reset``: it holds the control API's
+    port lock and waits for the ports of every provider it reverted. /ready
+    takes the same lock, so it never reads a port between the revert and the
+    listener returning.
+    """
+    reverted = []
+    with control.port_lock:
+        for provider in control.registry.all_providers():
             age = now - provider.scenario.last_write_at
             if age <= ttl_s:
                 continue
             if provider.scenario.snapshot().get("mode") == "success":
                 continue
             provider.scenario.reset()
+            reverted.append(provider)
             _log.info(f"[ttl-sweep] reverted provider {provider.key} (idle {age:.0f}s > {ttl_s}s TTL)")
+        err = control.settle_ports_of(reverted)
+    if err:
+        _log.warning(f"[ttl-sweep] {err}")
 
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
@@ -1194,7 +1317,9 @@ class SimulatorServer:
     """The whole simulator as one object: registry + one bound socket per
     endpoint + the control API. ``start()`` binds and serves on daemon
     threads; ``stop()`` shuts the HTTP servers down (gRPC loops and the TTL
-    sweep are daemon threads that die with the process).
+    sweep are daemon threads that die with the process). A gRPC loop closes its
+    own port while a scenario sets ``mode="port_closed"`` on it; that is a fault
+    a test asked for, not a shutdown.
 
     Tests construct this directly (with ``host="127.0.0.1"`` and the TTL sweep
     disabled) to run the real server in-process on the real ports.
@@ -1314,11 +1439,19 @@ class SimulatorServer:
             try:
                 from provider_simulator.listeners.grpc import GrpcListener
 
+                probe_host = "127.0.0.1" if self.host == "0.0.0.0" else self.host
                 for provider, endpoint in grpc_endpoints:
+                    # One gate per gRPC port, shared by the serve loop that
+                    # closes the port and the control API that waits for it.
+                    # Registered only here, after the grpcio import worked: a
+                    # port with no gate is a port nothing can close, and the
+                    # control API refuses mode="port_closed" for it.
+                    gate = PortGate(provider, endpoint, probe_host)
+                    self.control.port_gates[endpoint.port] = gate
                     self._threads.append(
                         threading.Thread(
                             target=_run_grpc_in_thread,
-                            args=(GrpcListener(provider, endpoint), endpoint.port, self.host),
+                            args=(GrpcListener(provider, endpoint), endpoint.port, self.host, gate),
                             daemon=True,
                             name=f"grpc-{provider.key}",
                         )
@@ -1351,7 +1484,7 @@ class SimulatorServer:
             self._threads.append(
                 threading.Thread(
                     target=_scenario_ttl_sweep,
-                    args=(self.registry, self.scenario_ttl_s),
+                    args=(self.control, self.scenario_ttl_s),
                     daemon=True,
                     name="scenario-ttl-sweep",
                 )
@@ -1371,13 +1504,17 @@ class SimulatorServer:
             stopper.join()
 
     def wait_ready(self, timeout_s: float = 10.0) -> None:
-        """Block until every registry port accepts a TCP connection (or raise).
-        Callers that race the bind (tests, scripted boots) use this instead of
-        a sleep."""
+        """Block until every registry port accepts a TCP connection (or raise),
+        except a port a scenario closes (``mode="port_closed"``), which /ready
+        leaves out too. Callers that race the bind (tests, scripted boots) use
+        this instead of a sleep."""
         deadline = time.monotonic() + timeout_s
         pending = set(self.registry.ports()) | set(self.extra_ready_ports)
         probe_host = "127.0.0.1" if self.host == "0.0.0.0" else self.host
         while pending:
+            # A port closed on purpose is not expected to accept, so it is not
+            # waited for.
+            pending -= set(self.control.ports_closed_by_scenario())
             for port in sorted(pending):
                 probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 probe.settimeout(0.2)
