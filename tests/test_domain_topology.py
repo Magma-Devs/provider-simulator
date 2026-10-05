@@ -47,6 +47,12 @@ EXPECTED_POOLS = {
     # router with the retry tests.
     "lava-failover-rest-sim",
     "lava-failover-grpc-sim",
+    # Three more failover pools, for the failover tests that run on eth-sim,
+    # eth-solo-sim and btc-sim. Their routers start with the router's own
+    # default retry limit.
+    "eth-failover-sim",
+    "eth-failover-solo-sim",
+    "btc-failover-sim",
 }
 
 
@@ -611,6 +617,16 @@ AGREED_NAMES = {
     ("lava-failover-grpc-sim", "4"): "LavaFailoverGrpcBackupProvider4",
     ("lava-failover-grpc-sim", "5"): "LavaFailoverGrpcBackupProvider5",
     ("lava-failover-grpc-sim", "6"): "LavaFailoverGrpcBackupProvider6",
+    ("eth-failover-sim", "1"): "EthFailoverPrimaryProvider1",
+    ("eth-failover-sim", "2"): "EthFailoverPrimaryProvider2",
+    ("eth-failover-sim", "3"): "EthFailoverPrimaryProvider3",
+    ("eth-failover-sim", "4"): "EthFailoverBackupProvider4",
+    ("eth-failover-sim", "5"): "EthFailoverBackupProvider5",
+    ("eth-failover-sim", "6"): "EthFailoverBackupProvider6",
+    ("eth-failover-solo-sim", "1"): "EthFailoverSoloProvider1",
+    ("btc-failover-sim", "1"): "BtcFailoverPrimaryProvider1",
+    ("btc-failover-sim", "2"): "BtcFailoverPrimaryProvider2",
+    ("btc-failover-sim", "3"): "BtcFailoverPrimaryProvider3",
 }
 
 # The pools that HAVE a backup tier, and which of their slots it is. The router
@@ -638,6 +654,8 @@ _SIX_PROVIDER_POOLS_WITH_A_BACKUP_TIER = (
     # shape of lava-sim-rest and lava-sim-grpc.
     "lava-failover-rest-sim",
     "lava-failover-grpc-sim",
+    # The failover copy of eth-sim: three primaries, then three backups.
+    "eth-failover-sim",
 )
 
 # Four-provider failover pools (MAG-3916): two primaries, then two backups. Two
@@ -665,6 +683,9 @@ _FOUR_PROVIDER_POOLS_WITH_A_BACKUP_TIER = (
 # eth-failover-timing-sim, eth-failover-real-sim and eth-failover-benchafter-sim
 # are three primaries each, and eth-failover-twoaddr-sim is a single provider
 # serving two addresses.
+#
+# Two more are absent for the same reason: eth-failover-solo-sim is a single
+# provider, and btc-failover-sim is three primaries.
 AGREED_BACKUPS = {(pool, pid) for pool in _SIX_PROVIDER_POOLS_WITH_A_BACKUP_TIER for pid in ("4", "5", "6")} | {
     (pool, pid) for pool in _FOUR_PROVIDER_POOLS_WITH_A_BACKUP_TIER for pid in ("3", "4")
 }

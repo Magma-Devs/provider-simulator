@@ -1011,6 +1011,27 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
     ("lava-failover-grpc-sim", "lava", "4", "LavaFailoverGrpcBackupProvider4", True, "", (("grpc", "http2", 18685),)),
     ("lava-failover-grpc-sim", "lava", "5", "LavaFailoverGrpcBackupProvider5", True, "", (("grpc", "http2", 18686),)),
     ("lava-failover-grpc-sim", "lava", "6", "LavaFailoverGrpcBackupProvider6", True, "", (("grpc", "http2", 18687),)),
+    # eth-failover-sim: ports 18688-18693. Pids 1-3 primary, 4-6 backup. The
+    # shape of eth-sim over HTTP, for the failover tests that run on eth-sim.
+    # Its router starts with the router's own default retry limit, so those
+    # tests do not share a router with the retry tests. No group labels: its
+    # router carries no cross-validation policy.
+    ("eth-failover-sim", "eth", "1", "EthFailoverPrimaryProvider1", False, "", (("jsonrpc", "http", 18688),)),
+    ("eth-failover-sim", "eth", "2", "EthFailoverPrimaryProvider2", False, "", (("jsonrpc", "http", 18689),)),
+    ("eth-failover-sim", "eth", "3", "EthFailoverPrimaryProvider3", False, "", (("jsonrpc", "http", 18690),)),
+    ("eth-failover-sim", "eth", "4", "EthFailoverBackupProvider4", True, "", (("jsonrpc", "http", 18691),)),
+    ("eth-failover-sim", "eth", "5", "EthFailoverBackupProvider5", True, "", (("jsonrpc", "http", 18692),)),
+    ("eth-failover-sim", "eth", "6", "EthFailoverBackupProvider6", True, "", (("jsonrpc", "http", 18693),)),
+    # eth-failover-solo-sim: port 18694. One provider and no backup, the shape
+    # of eth-solo-sim, for the failover tests on the solo router. Its router
+    # starts with the router's own default retry limit too.
+    ("eth-failover-solo-sim", "eth", "1", "EthFailoverSoloProvider1", False, "", (("jsonrpc", "http", 18694),)),
+    # btc-failover-sim: ports 18695-18697. Three primaries and no backup, the
+    # shape of btc-sim, for the failover test on the BTC router. Its router
+    # starts with the router's own default retry limit too.
+    ("btc-failover-sim", "btc", "1", "BtcFailoverPrimaryProvider1", False, "", (("jsonrpc", "http", 18695),)),
+    ("btc-failover-sim", "btc", "2", "BtcFailoverPrimaryProvider2", False, "", (("jsonrpc", "http", 18696),)),
+    ("btc-failover-sim", "btc", "3", "BtcFailoverPrimaryProvider3", False, "", (("jsonrpc", "http", 18697),)),
 )
 
 

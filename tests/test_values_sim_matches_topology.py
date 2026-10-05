@@ -420,6 +420,14 @@ POOLS_WITH_NO_ROUTER_HERE = {
     # claim a deployment nobody makes.
     "lava-failover-rest-sim",
     "lava-failover-grpc-sim",
+    # eth-failover-sim, eth-failover-solo-sim and btc-failover-sim, added after
+    # those. Same reason: their routers run on the local k3d cluster, declared
+    # in smart_router_automation's tools/local-cluster/routers.yml plus its own
+    # config/values_sim.yml. The shared cluster does not run them, so a router
+    # entry in THIS file would claim a deployment nobody makes.
+    "eth-failover-sim",
+    "eth-failover-solo-sim",
+    "btc-failover-sim",
 }
 
 
