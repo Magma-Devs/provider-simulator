@@ -696,3 +696,83 @@ spec:
       port: 18689
       targetPort: 18689
       protocol: TCP
+    - name: spare-18690
+      port: 18690
+      targetPort: 18690
+      protocol: TCP
+    - name: spare-18691
+      port: 18691
+      targetPort: 18691
+      protocol: TCP
+    - name: spare-18692
+      port: 18692
+      targetPort: 18692
+      protocol: TCP
+    - name: spare-18693
+      port: 18693
+      targetPort: 18693
+      protocol: TCP
+    - name: spare-18694
+      port: 18694
+      targetPort: 18694
+      protocol: TCP
+    - name: spare-18695
+      port: 18695
+      targetPort: 18695
+      protocol: TCP
+    - name: spare-18696
+      port: 18696
+      targetPort: 18696
+      protocol: TCP
+    - name: spare-18697
+      port: 18697
+      targetPort: 18697
+      protocol: TCP
+    - name: spare-18698
+      port: 18698
+      targetPort: 18698
+      protocol: TCP
+    - name: spare-18699
+      port: 18699
+      targetPort: 18699
+      protocol: TCP
+    - name: spare-18700
+      port: 18700
+      targetPort: 18700
+      protocol: TCP
+    - name: spare-18701
+      port: 18701
+      targetPort: 18701
+      protocol: TCP
+    - name: spare-18702
+      port: 18702
+      targetPort: 18702
+      protocol: TCP
+    - name: spare-18703
+      port: 18703
+      targetPort: 18703
+      protocol: TCP
+    - name: spare-18704
+      port: 18704
+      targetPort: 18704
+      protocol: TCP
+    - name: spare-18705
+      port: 18705
+      targetPort: 18705
+      protocol: TCP
+    - name: spare-18706
+      port: 18706
+      targetPort: 18706
+      protocol: TCP
+    - name: spare-18707
+      port: 18707
+      targetPort: 18707
+      protocol: TCP
+    - name: spare-18708
+      port: 18708
+      targetPort: 18708
+      protocol: TCP
+    - name: spare-18709
+      port: 18709
+      targetPort: 18709
+      protocol: TCP
