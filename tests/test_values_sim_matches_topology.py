@@ -412,6 +412,14 @@ POOLS_WITH_NO_ROUTER_HERE = {
     # shared cluster does not run it, so a router entry in THIS file would
     # claim a deployment nobody makes.
     "eth-failover-benchafter-sim",
+    # lava-failover-rest-sim and lava-failover-grpc-sim, added after those.
+    # Same reason: their routers run on the local k3d cluster, declared in
+    # smart_router_automation's tools/local-cluster/routers.yml plus its own
+    # config/values_sim.yml, which is where their backup tier comes from. The
+    # shared cluster does not run them, so a router entry in THIS file would
+    # claim a deployment nobody makes.
+    "lava-failover-rest-sim",
+    "lava-failover-grpc-sim",
 }
 
 
