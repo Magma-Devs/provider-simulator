@@ -1032,6 +1032,12 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
     ("btc-failover-sim", "btc", "1", "BtcFailoverPrimaryProvider1", False, "", (("jsonrpc", "http", 18695),)),
     ("btc-failover-sim", "btc", "2", "BtcFailoverPrimaryProvider2", False, "", (("jsonrpc", "http", 18696),)),
     ("btc-failover-sim", "btc", "3", "BtcFailoverPrimaryProvider3", False, "", (("jsonrpc", "http", 18697),)),
+    # solana-failover-sim: ports 18698-18700. Three primaries and no backup, the
+    # shape of solana-sim, for the failover tests on the Solana router. Its
+    # router starts with the router's own default retry limit too.
+    ("solana-failover-sim", "solana", "1", "SolanaFailoverPrimaryProvider1", False, "", (("jsonrpc", "http", 18698),)),
+    ("solana-failover-sim", "solana", "2", "SolanaFailoverPrimaryProvider2", False, "", (("jsonrpc", "http", 18699),)),
+    ("solana-failover-sim", "solana", "3", "SolanaFailoverPrimaryProvider3", False, "", (("jsonrpc", "http", 18700),)),
 )
 
 
