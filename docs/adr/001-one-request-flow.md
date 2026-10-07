@@ -18,7 +18,7 @@ Victoria asks that a new ability is easy to add on every interface (her comment 
 2. An interface is a subclass of `Listener` that fills hooks. It has no order of steps of its own.
 3. Only code in `provider_simulator/listeners/` writes a history row or decides the fault of a request. A socket adapter in `server.py` performs a `ServeResult`. It answers four protocol cases itself, with no listener and no history row: OPTIONS on REST, a wrong WebSocket path, a bad upgrade request, and a WebSocket frame that is not JSON.
 4. The WebSocket upgrade is not a request. It stays a second, smaller decision, in one method of the WebSocket listener.
-5. A difference between interfaces that a test can see stays as it is. A hook with a default keeps it. A change of such a difference is its own decision. Section 9.3 of the design document names the twelve differences.
+5. A difference between interfaces that a test can see stays as it is. A hook with a default keeps it. A change of such a difference is its own decision. Section 9.3 of the design document names the twelve differences. Decision 6 holds the one such change that is decided: pull request 2c makes differences 1, 2, 5 and 6 uniform, and the other eight stay.
 6. Tests pin today's behaviour before the code moves. The work has three steps and six pull requests: 1, 2a, 2b, 2c, 3a and 3b. Victoria chose three steps on 2026-10-06. Pull request 2c makes four differences of the gRPC rows uniform, after the move of 2b. It is part of the plan of section 10.5 of the design document, which Victoria accepted on 2026-10-07 with the words "so this is a plan, we will do it, add it ti the plan".
 7. The design must give a real down. Victoria said so on 2026-10-07: "so you need to fix it in design". Its form is the mode that the failover work built and tested for gRPC, `mode="port_closed"` (pull request #133 of the simulator). Her words on 2026-10-07: "we already tested it and learned how to do it in failover". The design extends that mode to the `http` and `ws` endpoints, as step 4 with the pull requests 4a and 4b (section 14.5 of the design document). The mode `down` does not change: it stays an HTTP 503 reply on an open connection.
 
@@ -54,7 +54,7 @@ Victoria asks that a new ability is easy to add on every interface (her comment 
 - The tests of 2a and 3a pin behaviour that no test pins today.
 
 **Negative**:
-- `Listener` gets five new hooks and one new method: `early_identity`, `build_down`, `unpaid_latency`, `corrupt`, `build_content`, and the method `arrive`. The base class is wider.
+- `Listener` gets five new hooks and one new method: `early_identity`, `build_down`, `unpaid_latency`, `corrupt`, `build_content`, and the method `arrive`. The base class is wider. Pull request 2c removes `unpaid_latency` again, because the difference that it keeps is made uniform; four new hooks stay.
 - A reader of the gRPC listener must know the flow of the base class.
 - Four pull requests, 2a, 2b, 3a and 3b, bring no new feature that a test asked for.
 - Twelve differences between interfaces stay. The hooks make them visible, and they do not remove them.
