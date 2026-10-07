@@ -54,7 +54,7 @@ Victoria asks that a new ability is easy to add on every interface (her comment 
 - The tests of 2a and 3a pin behaviour that no test pins today.
 
 **Negative**:
-- `Listener` gets five new hooks and one new method: `early_identity`, `build_down`, `unpaid_latency`, `corrupt`, `build_content`, and the method `arrive`. The base class is wider. Pull request 2c removes `unpaid_latency` again, because the difference that it keeps is made uniform; four new hooks stay.
+- `Listener` gets five new hooks and one new method: `early_identity`, `build_down`, `unpaid_latency`, `corrupt`, `build_content`, and the method `arrive`. The base class is wider. Pull request 2c removes `unpaid_latency` and `early_identity` again, because the two differences that they keep are made uniform. Three new hooks stay: `build_down`, `corrupt` and `build_content`.
 - A reader of the gRPC listener must know the flow of the base class.
 - Four pull requests, 2a, 2b, 3a and 3b, bring no new feature that a test asked for.
 - Twelve differences between interfaces stay. The hooks make them visible, and they do not remove them.
