@@ -43,8 +43,7 @@ from google.protobuf import descriptor_pool
 
 from provider_simulator import fault_policy
 from provider_simulator.chains import chain_for
-from provider_simulator.domain.endpoint import Endpoint
-from provider_simulator.domain.provider import Provider
+from provider_simulator.listeners.base import Listener, RawRequest, ServeResult
 
 _STATUS_BY_NAME = {sc.name: sc for sc in grpc.StatusCode}
 _STATUS_BY_VALUE = {sc.value[0]: sc for sc in grpc.StatusCode}
@@ -66,11 +65,36 @@ class GrpcPlan:
     missing_field: str | None = None
 
 
+@dataclass
+class GrpcStatus:
+    """A reply that is a status: the name of a ``grpc.StatusCode`` and its text."""
+
+    code: str
+    text: str
+
+
+@dataclass
+class GrpcReply:
+    """A reply that is a message: the served method and the data of the chain.
+    The protobuf message is built from it after the history row is finished."""
+
+    method: str
+    data: dict
+
+
 def _status_name(error_message: str, error_code: int) -> str:
     """Resolve the abort status name: the status named in error_message wins,
     then error_code as an integer status, else UNKNOWN."""
     sc = _STATUS_BY_NAME.get(error_message) or _STATUS_BY_VALUE.get(error_code)
     return (sc or grpc.StatusCode.UNKNOWN).name
+
+
+def _status_of(code: object) -> str:
+    """The status that a per-method error names: the name of a status, or the
+    number of a status. Each other value gives UNKNOWN."""
+    by_name = _STATUS_BY_NAME.get(code if isinstance(code, str) else "")
+    by_number = _STATUS_BY_VALUE.get(code if isinstance(code, int) else -1)
+    return (by_name or by_number or grpc.StatusCode.UNKNOWN).name
 
 
 # The gRPC methods that this simulator serves. Each row holds the full name of
@@ -174,10 +198,82 @@ def _request_id(method: str, request: object | None) -> str | None:
     return str(value) if value else None
 
 
-class GrpcListener:
-    def __init__(self, provider: Provider, endpoint: Endpoint) -> None:
-        self.provider = provider
-        self.endpoint = endpoint
+class GrpcListener(Listener):
+    """gRPC in the request flow of ``Listener.serve``. This class has no order
+    of steps of its own. It fills the hooks, and each hook holds one place where
+    gRPC differs from the HTTP interfaces."""
+
+    def parse_request(self, request: RawRequest) -> dict:
+        # The gRPC library parsed the call before the adapter saw it. The
+        # adapter passes the method name in ``path`` and the request message in
+        # ``message``.
+        return {"method": request.path, "message": request.message}
+
+    def early_identity(self, request: RawRequest) -> "tuple[str, int | str | None]":
+        # The method of a gRPC call is known with no parse. A dead node does
+        # not read the request, so the row has no request id.
+        return request.path, None
+
+    def build_down(self) -> ServeResult:
+        return ServeResult(action="respond", body=GrpcStatus("UNAVAILABLE", "provider down"))
+
+    def unpaid_latency(self, latency_ms: int) -> int:
+        # A down row and a hang row record 0: the provider did not wait.
+        return 0
+
+    def method_key(self, request: dict) -> object:
+        # gRPC does not merge the fault keys of a per-method override. The
+        # chain reads the content keys of the override.
+        return None
+
+    def build_fault(self, verdict: fault_policy.Verdict, request: dict) -> ServeResult:
+        if verdict.kind == "hang":
+            return ServeResult(action="hang", body=GrpcStatus("CANCELLED", "hang timeout"))
+        if verdict.kind == "drop":
+            status = GrpcStatus("UNAVAILABLE", "connection dropped")
+            return ServeResult(action="drop", drop_at=verdict.drop_at, body=status)
+        if verdict.kind == "rate_limit":
+            # The verdict also carries an HTTP status and a body text. gRPC has
+            # no place for them.
+            return ServeResult(action="respond", body=GrpcStatus("RESOURCE_EXHAUSTED", "Too many requests"))
+        status = GrpcStatus(_status_name(verdict.error_message, verdict.error_code), verdict.error_message)
+        return ServeResult(action="respond", body=status)
+
+    def build_success(self, status: int, body: object) -> ServeResult:
+        data = body if isinstance(body, dict) else {}
+        error = data.get("error")
+        if error is not None:
+            # A per-method error of the chain is a status.
+            return ServeResult(action="respond", body=GrpcStatus(_status_of(error.get("code")), error.get("message")))
+        return ServeResult(action="respond", body=GrpcReply(str(data.get("grpc_method", "")), data))
+
+    def corrupt(self, result: ServeResult, status_label: str, scenario: dict) -> str:
+        if not isinstance(result.body, GrpcReply):
+            # A corruption acts on a reply message only. A status stays as it is.
+            return status_label
+        corruption = scenario.get("corruption_mode")
+        # wrong_type is a status by design: proto3 fields are typed, so a value
+        # of a wrong type cannot be put into the reply message the way a JSON
+        # body can carry one. INTERNAL is the closest thing that a caller can
+        # read for "the provider answered with garbage types".
+        if corruption == "wrong_type":
+            field_name = scenario.get("missing_field") or "response"
+            result.body = GrpcStatus("INTERNAL", f"wrong_type corruption on {field_name}")
+            return "error"
+        if corruption in ("invalid_proto", "empty_response", "truncated", "null_body"):
+            result.body = GrpcStatus("UNKNOWN", f"corruption: {corruption}")
+            return "error"
+        if corruption == "missing_field":
+            result.corruption_mode = "missing_field"
+            result.missing_field = scenario.get("missing_field")
+        # invalid_json does nothing on gRPC.
+        return status_label
+
+    def request_id(self, request: dict):
+        return _request_id(request.get("method", ""), request.get("message"))
+
+    def response_id(self, body: object):
+        return None  # the data of the chain carries no request id
 
     def plan(self, method: str, lava_headers: dict | None = None, request: object | None = None) -> GrpcPlan:
         entry = self.provider.log.record_arrival(

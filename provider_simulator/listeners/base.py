@@ -29,6 +29,12 @@ REST: the (verb, template) route pair; transports that resolve overrides inside
 the chain return None). The transports filter scopes per-method overrides the
 same way it scopes everything else in the block.
 
+Four more hooks have a default that is right for the HTTP interfaces, and gRPC
+overrides each one: ``early_identity`` (what a provider-wide down row records
+with no parse), ``build_down`` (the reply of a down provider),
+``unpaid_latency`` (the latency of a down row and of a hang row) and
+``corrupt`` (how the interface corrupts a reply, and the label of its row).
+
 serve() returns a ServeResult describing WHAT to put on the wire — including the
 latency to wait first and any corruption to apply when serializing a ``respond``
 body (success OR a rate_limit / error fault, matching the flat handlers). The
@@ -102,9 +108,10 @@ class DirectResponse(Exception):
 class RawRequest:
     """The transport-agnostic request the socket adapter hands to serve().
 
-    JSON-RPC and gRPC read ``body``; REST and Tendermint's GET form read
-    ``verb`` / ``path`` / ``query``. Every field defaults empty, so a
-    POST-body transport can pass just ``body`` (and ``headers``).
+    JSON-RPC reads ``body``; REST and Tendermint's GET form read ``verb`` /
+    ``path`` / ``query``; gRPC reads ``path``, which holds the method name, and
+    ``message``. Every field defaults empty, so a POST-body transport can pass
+    just ``body`` (and ``headers``).
     """
 
     body: bytes = b""
@@ -112,6 +119,8 @@ class RawRequest:
     verb: str = ""
     path: str = ""
     query: dict = field(default_factory=dict)
+    # gRPC only: the request message of the call, as the gRPC library parsed it.
+    message: object = None
 
 
 @dataclass
@@ -167,11 +176,19 @@ class Listener(ABC):
         targeted, mode = fault_policy.resolve_mode(scenario, self.endpoint, self.provider)
         latency = scenario.get("latency_ms", 0) if targeted else 0
 
-        # Provider-wide down is pre-parse: no body is read, so method="*" /
-        # request_id=None, and no latency is paid (a dead node answers nothing).
+        # Provider-wide down is pre-parse: no body is read, so the row records
+        # what ``early_identity`` knows with no parse (by default method="*" and
+        # no request id), and the provider does not wait for the latency.
         if targeted and mode == "down":
-            self.provider.log.finalize(entry, method="*", status="down", latency_ms=latency)
-            return ServeResult(action="no_body", status=503)
+            method, request_id = self.early_identity(request)
+            self.provider.log.finalize(
+                entry,
+                method=method,
+                status="down",
+                latency_ms=self.unpaid_latency(latency),
+                request_id=request_id,
+            )
+            return self.build_down()
 
         try:
             parsed = self.parse_request(request)
@@ -207,6 +224,7 @@ class Listener(ABC):
             mode = merged["mode"]
             latency = merged.get("latency_ms", 0)
 
+        waited = True  # False for a hang: the provider does not wait for the latency
         override = self.build_body_override(method_cfg) if method_cfg else None
         if override is not None:
             result = override
@@ -229,6 +247,7 @@ class Listener(ABC):
                 result = self.build_fault(verdict, parsed)
                 status_label = _STATUS_LABEL[verdict.kind]
                 request_id = self.request_id(parsed)
+                waited = verdict.kind != "hang"
             else:
                 chain = chain_for(self.provider.pool.chain)
                 status, body = chain.build_success(
@@ -244,8 +263,7 @@ class Listener(ABC):
         # rate_limit / error fault), scoped by the same transports filter the
         # fault ladder uses.
         if result.action == "respond" and targeted:
-            result.corruption_mode = scenario.get("corruption_mode")
-            result.missing_field = scenario.get("missing_field")
+            status_label = self.corrupt(result, status_label, scenario)
             # A pause composes the same way and for the same reason: it changes
             # how a body reaches the wire, not what the body says.
             result.pause_at = scenario.get("pause_at")
@@ -255,7 +273,7 @@ class Listener(ABC):
             entry,
             method=self.request_method(parsed),
             status=status_label,
-            latency_ms=latency,
+            latency_ms=latency if waited else self.unpaid_latency(latency),
             request_id=request_id,
         )
         return result
@@ -268,6 +286,31 @@ class Listener(ABC):
 
     @abstractmethod
     def build_success(self, status: int, body: object) -> ServeResult: ...
+
+    def early_identity(self, request: RawRequest) -> "tuple[str, int | str | None]":
+        """The method and the request id that a provider-wide ``down`` row
+        records. The request is not parsed at that point. Default: ``"*"`` and
+        no id, because a dead node does not read the request."""
+        return "*", None
+
+    def build_down(self) -> ServeResult:
+        """The reply of a provider in the mode ``down``. Default: HTTP 503 with
+        no body."""
+        return ServeResult(action="no_body", status=503)
+
+    def unpaid_latency(self, latency_ms: int) -> int:
+        """The ``latency_ms`` that a row records when the provider did not wait
+        for it: a provider-wide ``down`` row and a ``hang`` row. Default: the
+        configured value."""
+        return latency_ms
+
+    def corrupt(self, result: ServeResult, status_label: str, scenario: dict) -> str:
+        """Apply the corruption of the scenario to a reply of this endpoint, and
+        return the status label of the history row. Default: mark the reply, and
+        the socket adapter corrupts the bytes. The label stays."""
+        result.corruption_mode = scenario.get("corruption_mode")
+        result.missing_field = scenario.get("missing_field")
+        return status_label
 
     def build_parse_error(self, exc: ParseError) -> ServeResult:
         """Response for malformed input. Default is the JSON-RPC -32700 envelope

@@ -5,7 +5,7 @@ import pytest
 
 from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.provider import Pool
-from provider_simulator.listeners import RawRequest, RestListener
+from provider_simulator.listeners import RawRequest, RestListener, ServeResult
 
 REST = Endpoint("rest", "http", 18551)
 _BLOCKS_LATEST = "/cosmos/base/tendermint/v1beta1/blocks/latest"
@@ -387,3 +387,69 @@ def test_a_provider_wide_down_row_has_no_request_id():
     listener.serve(_with_query(_VALIDATORS, {"request_id": ["never-read"]}))
     row = _only_row(provider)
     assert (row["status"], row["method"], row["request_id"]) == ("down", "*", None)
+
+
+# ── The hooks of the request flow ────────────────────────────────────────────
+# The flow asks four hooks in the places where the interfaces differ. Their
+# defaults are what JSON-RPC, REST and Tendermint RPC do, and the tests above
+# hold those. These tests show that the flow asks the hooks.
+
+
+class _ProbeListener(RestListener):
+    def early_identity(self, request):
+        return "probe-method", "probe-id"
+
+    def build_down(self):
+        return ServeResult(action="respond", status=418, body={"probe": "down"})
+
+    def unpaid_latency(self, latency_ms):
+        return 7
+
+    def corrupt(self, result, status_label, scenario):
+        result.body = {"probe": "corrupted"}
+        return "probe-label"
+
+
+def _probe():
+    provider = Pool(name="lava-sim-rest", chain="lava").add_provider("1", [REST])
+    return _ProbeListener(provider, REST), provider
+
+
+def test_the_flow_asks_the_hooks_for_the_row_and_the_reply_of_a_down_provider():
+    listener, provider = _probe()
+    provider.scenario.update({"mode": "down", "latency_ms": 250})
+    res = listener.serve(_get(_BLOCKS_LATEST))
+    assert (res.action, res.status, res.body) == ("respond", 418, {"probe": "down"})
+    row = provider.log.get_history()[0]
+    assert (row["method"], row["status"], row["latency_ms"], row["request_id"]) == (
+        "probe-method",
+        "down",
+        7,
+        "probe-id",
+    )
+
+
+def test_the_flow_asks_the_hook_for_the_latency_of_a_hang_row_and_of_no_other_row():
+    listener, provider = _probe()
+    provider.scenario.update({"mode": "hang", "latency_ms": 250})
+    assert listener.serve(_get(_BLOCKS_LATEST)).action == "hang"
+    provider.scenario.update({"mode": "rate_limit", "latency_ms": 250})
+    listener.serve(_get(_BLOCKS_LATEST))
+    assert [row["latency_ms"] for row in provider.log.get_history()] == [7, 250]
+
+
+def test_the_flow_asks_the_hook_to_corrupt_a_reply_and_takes_its_row_label():
+    listener, provider = _probe()
+    provider.scenario.update({"corruption_mode": "truncated"})
+    res = listener.serve(_get(_BLOCKS_LATEST))
+    assert res.body == {"probe": "corrupted"}
+    assert res.corruption_mode is None
+    assert provider.log.get_history()[0]["status"] == "probe-label"
+
+
+def test_the_flow_does_not_ask_the_hook_to_corrupt_when_the_filter_does_not_name_the_endpoint():
+    listener, provider = _probe()
+    provider.scenario.update({"corruption_mode": "truncated", "transports": ["ws"]})
+    res = listener.serve(_get(_BLOCKS_LATEST))
+    assert res.body != {"probe": "corrupted"}
+    assert provider.log.get_history()[0]["status"] == "success"

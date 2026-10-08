@@ -1,5 +1,6 @@
-"""GrpcListener — the pure decision core (plan()) an async servicer glue performs.
-No running gRPC server needed: plan() returns a GrpcPlan we assert on directly."""
+"""GrpcListener — gRPC in the request flow of Listener.serve.
+No running gRPC server is needed: serve() returns a ServeResult, and its body is
+a GrpcStatus or a GrpcReply."""
 
 from typing import NamedTuple
 
@@ -14,7 +15,8 @@ from cosmos.base.tendermint.v1beta1 import query_pb2  # isort: skip
 
 from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.provider import Pool
-from provider_simulator.listeners.grpc import GrpcListener, check_servicers, request_id_fields
+from provider_simulator.listeners import Listener, RawRequest
+from provider_simulator.listeners.grpc import GrpcListener, GrpcReply, GrpcStatus, check_servicers, request_id_fields
 
 GRPC = Endpoint("grpc", "http2", 18548)
 
@@ -28,13 +30,19 @@ def _upd(listener, cfg):
     listener.provider.scenario.update(cfg)
 
 
-def test_success_plan_carries_latest_block_data():
+def _serve(listener, method="GetLatestBlock", request=None, lava_headers=None):
+    """One call through the request flow, as the gRPC adapter makes it."""
+    return listener.serve(RawRequest(path=method, headers=lava_headers or {}, message=request))
+
+
+def test_success_carries_the_data_of_the_latest_block():
     listener, provider = _listener()
-    plan = listener.plan("GetLatestBlock")
-    assert plan.action == "respond"
-    assert plan.grpc_method == "GetLatestBlock"
-    assert plan.data["height"] == 25_000_000
-    assert plan.data["chain_id"] == "lava-sim"
+    result = _serve(listener, "GetLatestBlock")
+    assert result.action == "respond"
+    assert isinstance(result.body, GrpcReply)
+    assert result.body.method == "GetLatestBlock"
+    assert result.body.data["height"] == 25_000_000
+    assert result.body.data["chain_id"] == "lava-sim"
     hist = provider.log.get_history()[0]
     assert hist["status"] == "success"
     assert hist["method"] == "GetLatestBlock"
@@ -42,90 +50,88 @@ def test_success_plan_carries_latest_block_data():
 
 def test_node_info_success():
     listener, _ = _listener()
-    plan = listener.plan("GetNodeInfo")
-    assert plan.action == "respond"
-    assert plan.data["network"] == "lava-sim"
+    result = _serve(listener, "GetNodeInfo")
+    assert result.action == "respond"
+    assert result.body.data["network"] == "lava-sim"
 
 
 def test_blocks_behind_shifts_head():
     listener, _ = _listener()
     _upd(listener, {"blocks_behind": 7})
-    plan = listener.plan("GetLatestBlock")
-    assert plan.data["height"] == 25_000_000 - 7
+    assert _serve(listener, "GetLatestBlock").body.data["height"] == 25_000_000 - 7
 
 
-def test_down_aborts_unavailable_and_records_method_not_star():
+def test_down_is_unavailable_and_records_method_not_star():
     listener, provider = _listener()
     _upd(listener, {"mode": "down"})
-    plan = listener.plan("GetLatestBlock")
-    assert plan.action == "abort"
-    assert plan.status_code == "UNAVAILABLE"
+    result = _serve(listener, "GetLatestBlock")
+    assert result.body == GrpcStatus("UNAVAILABLE", "provider down")
     hist = provider.log.get_history()[0]
     assert hist["status"] == "down"
     assert hist["method"] == "GetLatestBlock"  # gRPC always knows the method
 
 
-def test_hang_aborts_cancelled_with_hang_flag():
+def test_hang_is_cancelled_with_the_action_hang():
     listener, _ = _listener()
     _upd(listener, {"mode": "hang"})
-    plan = listener.plan("GetNodeInfo")
-    assert plan.status_code == "CANCELLED"
-    assert plan.hang is True
+    result = _serve(listener, "GetNodeInfo")
+    assert result.body.code == "CANCELLED"
+    assert result.action == "hang"
 
 
 def test_rate_limit_resource_exhausted():
     listener, _ = _listener()
     _upd(listener, {"mode": "rate_limit"})
-    assert listener.plan("GetLatestBlock").status_code == "RESOURCE_EXHAUSTED"
+    assert _serve(listener, "GetLatestBlock").body.code == "RESOURCE_EXHAUSTED"
 
 
 def test_error_maps_status_name_from_message():
     listener, _ = _listener()
     _upd(listener, {"mode": "error", "error_message": "NOT_FOUND"})
-    assert listener.plan("GetLatestBlock").status_code == "NOT_FOUND"
+    assert _serve(listener, "GetLatestBlock").body.code == "NOT_FOUND"
 
 
 def test_error_defaults_to_unknown():
     listener, _ = _listener()
     _upd(listener, {"mode": "error", "error_message": "not a status", "error_code": -1})
-    assert listener.plan("GetLatestBlock").status_code == "UNKNOWN"
+    assert _serve(listener, "GetLatestBlock").body.code == "UNKNOWN"
 
 
-def test_per_method_error_stub_aborts():
+def test_per_method_error_stub_is_a_status():
     listener, _ = _listener()
     _upd(listener, {"responses": {"GetLatestBlock": {"error_stub": "NOT_FOUND"}}})
-    plan = listener.plan("GetLatestBlock")
-    assert plan.action == "abort"
-    assert plan.status_code == "NOT_FOUND"
+    result = _serve(listener, "GetLatestBlock")
+    assert isinstance(result.body, GrpcStatus)
+    assert result.body.code == "NOT_FOUND"
 
 
-def test_wrong_type_corruption_internal_abort():
+def test_wrong_type_corruption_is_internal():
     listener, _ = _listener()
     _upd(listener, {"corruption_mode": "wrong_type"})
-    assert listener.plan("GetLatestBlock").status_code == "INTERNAL"
+    assert _serve(listener, "GetLatestBlock").body.code == "INTERNAL"
 
 
-def test_invalid_proto_corruption_unknown_abort():
+def test_invalid_proto_corruption_is_unknown():
     listener, _ = _listener()
     _upd(listener, {"corruption_mode": "invalid_proto"})
-    assert listener.plan("GetLatestBlock").status_code == "UNKNOWN"
+    assert _serve(listener, "GetLatestBlock").body.code == "UNKNOWN"
 
 
-def test_null_body_corruption_unknown_abort():
+def test_null_body_corruption_is_unknown():
     # A whole-body JSON null has no gRPC shape; falling through to a clean
     # success would be a fault that arms with a 200 and does nothing.
     listener, _ = _listener()
     _upd(listener, {"corruption_mode": "null_body"})
-    assert listener.plan("GetLatestBlock").status_code == "UNKNOWN"
+    assert _serve(listener, "GetLatestBlock").body.code == "UNKNOWN"
 
 
-def test_missing_field_corruption_stays_respond():
+def test_missing_field_corruption_stays_a_reply():
     listener, _ = _listener()
     _upd(listener, {"corruption_mode": "missing_field", "missing_field": "block"})
-    plan = listener.plan("GetLatestBlock")
-    assert plan.action == "respond"
-    assert plan.corruption_mode == "missing_field"
-    assert plan.missing_field == "block"
+    result = _serve(listener, "GetLatestBlock")
+    assert isinstance(result.body, GrpcReply)
+    assert result.corruption_mode == "missing_field"
+    assert result.missing_field == "block"
 
 
 # --- The request id ---------------------------------------------------------
@@ -139,10 +145,10 @@ def _all_balances(address=""):
 
 def test_all_balances_row_holds_the_address_as_the_request_id():
     listener, provider = _listener()
-    plan = listener.plan("AllBalances", request=_all_balances("lava1-probe-a"))
-    assert plan.action == "respond"
-    assert plan.grpc_method == "AllBalances"
-    assert plan.data["balances"] == [{"denom": "ulava", "amount": "1000000"}]
+    result = _serve(listener, "AllBalances", _all_balances("lava1-probe-a"))
+    assert result.action == "respond"
+    assert result.body.method == "AllBalances"
+    assert result.body.data["balances"] == [{"denom": "ulava", "amount": "1000000"}]
     hist = provider.log.get_history()[0]
     assert hist["method"] == "AllBalances"
     assert hist["status"] == "success"
@@ -151,20 +157,20 @@ def test_all_balances_row_holds_the_address_as_the_request_id():
 
 def test_get_latest_block_row_holds_no_request_id():
     listener, provider = _listener()
-    listener.plan("GetLatestBlock", request=query_pb2.GetLatestBlockRequest())
+    _serve(listener, "GetLatestBlock", query_pb2.GetLatestBlockRequest())
     assert provider.log.get_history()[0]["request_id"] is None
 
 
 def test_an_empty_address_is_no_request_id():
     listener, provider = _listener()
-    listener.plan("AllBalances", request=_all_balances(""))
+    _serve(listener, "AllBalances", _all_balances(""))
     assert provider.log.get_history()[0]["request_id"] is None
 
 
 def test_a_call_with_no_request_message_has_no_request_id():
-    # plan() keeps working for a caller that passes the method name only.
+    # serve() keeps working for a caller that passes the method name only.
     listener, provider = _listener()
-    listener.plan("AllBalances")
+    _serve(listener, "AllBalances")
     assert provider.log.get_history()[0]["request_id"] is None
 
 
@@ -184,8 +190,8 @@ def test_a_call_with_no_request_message_has_no_request_id():
 def test_a_fault_row_of_all_balances_keeps_the_request_id(scenario, status):
     listener, provider = _listener()
     _upd(listener, scenario)
-    plan = listener.plan("AllBalances", request=_all_balances("lava1-probe-f"))
-    assert plan.action == "abort"
+    result = _serve(listener, "AllBalances", _all_balances("lava1-probe-f"))
+    assert isinstance(result.body, GrpcStatus)
     hist = provider.log.get_history()[0]
     assert (hist["status"], hist["request_id"]) == (status, "lava1-probe-f")
 
@@ -196,7 +202,7 @@ def test_a_provider_wide_down_row_has_no_request_id():
     # Tendermint RPC.
     listener, provider = _listener()
     _upd(listener, {"mode": "down"})
-    listener.plan("AllBalances", request=_all_balances("never-read"))
+    _serve(listener, "AllBalances", _all_balances("never-read"))
     hist = provider.log.get_history()[0]
     assert (hist["status"], hist["method"], hist["request_id"]) == ("down", "AllBalances", None)
 
@@ -288,21 +294,20 @@ def test_a_request_id_row_of_a_service_with_no_loaded_stubs_is_refused():
         check_servicers({"no.such.Service": Other}, served=(("no.such.Service", "Ping", "id"),))
 
 
-# --- The grid: what plan() decides today ------------------------------------
-# A gRPC call is answered through GrpcListener.plan. The tables below record
-# what plan() decides for each mode, each corruption mode and each per-method
+# --- The grid: what serve() decides -----------------------------------------
+# A gRPC call is answered through Listener.serve. The tables below record
+# what serve() decides for each mode, each corruption mode and each per-method
 # override: the status that the caller gets, the text of that status, and the
 # history row of the call. Each expected value is written out by hand.
 #
-# ``_decide`` is the one function of this block that calls plan() and reads a
-# GrpcPlan. A change of the listener that keeps its behaviour changes
-# ``_decide``, and it changes no expected value.
+# ``_decide`` is the one function of this block that calls serve() and reads a
+# ServeResult. Before gRPC moved into Listener.serve, it called plan() and read
+# a GrpcPlan, and the move changed no expected value of the two tables.
 #
-# The content of a reply message is not in these tables. plan() holds it as a
-# dictionary that only the adapter reads, and a caller reads the message that
-# the adapter builds from it. tests/test_simulator_grpc.py holds that content,
-# read by a real client: TestGrpcHappy, TestGrpcAllBalances and
-# TestGrpcReplyFields.
+# The content of a reply message is not in these tables. A caller reads the
+# message that the adapter builds from the data of the chain.
+# tests/test_simulator_grpc.py holds that content, read by a real client:
+# TestGrpcHappy, TestGrpcAllBalances and TestGrpcReplyFields.
 
 # GRPC, the endpoint of ``_listener``, is at port 18548. This port is not its port.
 _ANOTHER_PORT = 18549
@@ -318,12 +323,13 @@ class _Decision(NamedTuple):
 
 
 def _decide(listener, method="GetLatestBlock", request=None, lava_headers=None):
-    plan = listener.plan(method, lava_headers, request)
-    if plan.action == "abort":
-        return _Decision(plan.status_code, plan.message, plan.latency_ms, plan.hang, plan.drop_at, None)
-    assert plan.action == "respond", plan.action
-    clears = plan.missing_field if plan.corruption_mode == "missing_field" else None
-    return _Decision("OK", "", plan.latency_ms, False, None, clears)
+    result = _serve(listener, method, request, lava_headers)
+    if isinstance(result.body, GrpcStatus):
+        drop_at = result.drop_at if result.action == "drop" else None
+        return _Decision(result.body.code, result.body.text, result.latency_ms, result.action == "hang", drop_at, None)
+    assert isinstance(result.body, GrpcReply), result.body
+    clears = result.missing_field if result.corruption_mode == "missing_field" else None
+    return _Decision("OK", "", result.latency_ms, False, None, clears)
 
 
 def _status(code, text, *, hangs=False, drop_at=None):
@@ -683,7 +689,7 @@ def _row(provider):
         ),
     ],
 )
-def test_what_plan_decides_for_one_call(scenario, want, want_row_status):
+def test_what_serve_decides_for_one_call(scenario, want, want_row_status):
     listener, provider = _listener()
     _upd(listener, scenario)
     assert _decide(listener) == want
@@ -722,20 +728,34 @@ def test_which_calls_wait_for_latency_ms(scenario, want_wait_ms, want_row_latenc
     assert _row(provider)[2] == want_row_latency_ms
 
 
-def test_latency_ms_is_paid_today_under_a_filter_that_does_not_name_the_endpoint():
-    # Today gRPC reads ``latency_ms`` with no look at the filters. JSON-RPC, REST
-    # and Tendermint RPC do not delay an endpoint that the filter does not name.
-    # The design "One request flow for every interface" changes gRPC to the same
-    # rule on purpose (its section 9.2, row 2). The pull request that moves gRPC
-    # into Listener.serve edits the two expected values of this test, to 0.
+@pytest.mark.parametrize(
+    "filters, want_ms",
+    [
+        pytest.param({}, 250, id="no-filter"),
+        pytest.param({"ports": [18548]}, 250, id="a-ports-filter-that-names-the-endpoint"),
+        pytest.param({"transports": ["http2"]}, 250, id="a-transports-filter-that-names-the-endpoint"),
+        pytest.param({"ports": [_ANOTHER_PORT]}, 0, id="a-ports-filter-that-does-not-name-it"),
+        pytest.param({"transports": ["ws"]}, 0, id="a-transports-filter-that-does-not-name-it"),
+    ],
+)
+def test_on_grpc_latency_ms_obeys_the_filters(filters, want_ms):
+    # A filter that does not name the endpoint holds the latency back, as on
+    # JSON-RPC, REST and Tendermint RPC. Before gRPC moved into Listener.serve
+    # it read ``latency_ms`` with no look at the filters, and the two cases
+    # with 0 held 250. The design "One request flow for every interface"
+    # changed that on purpose (its section 9.2, row 2).
     listener, provider = _listener()
-    _upd(listener, {"latency_ms": 250, "ports": [_ANOTHER_PORT]})
-    assert _decide(listener).wait_ms == 250
-    assert _row(provider) == ("GetLatestBlock", "success", 250, None)
+    _upd(listener, {"latency_ms": 250, **filters})
+    assert _decide(listener).wait_ms == want_ms
+    assert _row(provider) == ("GetLatestBlock", "success", want_ms, None)
 
 
-def test_the_row_is_complete_when_plan_returns():
-    # The adapter waits for the latency after plan() returns. So a reader of the
+def test_the_grpc_listener_has_no_request_flow_of_its_own():
+    assert GrpcListener.serve is Listener.serve
+
+
+def test_the_row_is_complete_when_serve_returns():
+    # The adapter waits for the latency after serve() returns. So a reader of the
     # history finds the method, the status and the latency of a call that the
     # provider still holds.
     listener, provider = _listener()
