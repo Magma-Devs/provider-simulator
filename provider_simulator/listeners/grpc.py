@@ -39,6 +39,7 @@ and is planned like a call on an open port.
 from dataclasses import dataclass, field
 
 import grpc
+from google.protobuf import descriptor_pool
 
 from provider_simulator import fault_policy
 from provider_simulator.chains import chain_for
@@ -122,11 +123,13 @@ def check_servicers(
     the gRPC adapter registers for it. A class serves the public methods that
     it defines itself: a method that it only inherits from the generated base
     answers UNIMPLEMENTED. The gRPC adapter calls this before it starts a
-    server. So each method that the classes of ``servicers`` serve has a row in
-    ``SERVED_METHODS``, and the refusal of two methods of one name sees each of
-    them. The check reads the classes that the caller passes, and no other
-    class. It does not compare the request-id field of a row with the request
-    message.
+    server, with the list of servicers that it then registers. So each served
+    method has a row in ``SERVED_METHODS``, and the refusal of two methods of
+    one name sees each served method.
+
+    Raises ValueError also when a row names a request-id field that the request
+    message of its method does not have. Such a row would lose the request id
+    of each call, with no error.
     """
     table = SERVED_METHODS if served is None else served
     in_code = {
@@ -143,6 +146,21 @@ def check_servicers(
             "the gRPC servicers and the table SERVED_METHODS name different methods. "
             f"Served with no row: {with_no_row}. Row with no servicer method: {with_no_servicer}."
         )
+    for service, method, id_field in table:
+        if id_field is None:
+            continue
+        try:
+            message = descriptor_pool.Default().FindServiceByName(service).methods_by_name[method].input_type
+        except KeyError as exc:
+            raise ValueError(
+                f"the request message of {service}/{method} is not loaded, so its request-id field "
+                f"{id_field!r} cannot be compared with it. Import the stubs of the service first."
+            ) from exc
+        if id_field not in message.fields_by_name:
+            raise ValueError(
+                f"the row of {service}/{method} names the request-id field {id_field!r}, and the request "
+                f"message {message.full_name} has no such field. Its fields: {sorted(message.fields_by_name)}."
+            )
 
 
 def _request_id(method: str, request: object | None) -> str | None:

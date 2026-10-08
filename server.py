@@ -1160,10 +1160,20 @@ def _run_grpc_in_thread(grpc_listener, port: int, host: str, gate: PortGate) -> 
         return resp
 
     def build_all_balances(data: dict):
+        # A `result` override is free JSON, and the history row of the call is
+        # written before this reply is built. So this builder raises for no
+        # shape: each item that is an object is a coin, with its denom and its
+        # amount as text, and each other item is skipped. An error here would
+        # leave a row that says success for a call that got no reply.
+        def _text(value) -> str:
+            return "" if value is None else str(value)
+
         merged = _merged(data)
         resp = bank_query_pb2.QueryAllBalancesResponse()
-        for coin in merged.get("balances", []):
-            resp.balances.add(denom=coin["denom"], amount=coin["amount"])
+        balances = merged.get("balances", [])
+        for coin in balances if isinstance(balances, list) else []:
+            if isinstance(coin, dict):
+                resp.balances.add(denom=_text(coin.get("denom")), amount=_text(coin.get("amount")))
         return resp
 
     class _Servicer(query_pb2_grpc.ServiceServicer):
@@ -1216,33 +1226,41 @@ def _run_grpc_in_thread(grpc_listener, port: int, host: str, gate: PortGate) -> 
         async def AllBalances(self, request, context):
             return await self._perform("AllBalances", context, build_all_balances, request)
 
+    # One list gives the check, the registration and the reflection list their
+    # servicers, so a servicer is not registered with no check. Each row: the
+    # full name of the service, the servicer class, and the generated function
+    # that registers it.
+    servicers = (
+        (
+            query_pb2.DESCRIPTOR.services_by_name["Service"].full_name,
+            _Servicer,
+            query_pb2_grpc.add_ServiceServicer_to_server,
+        ),
+        (
+            bank_query_pb2.DESCRIPTOR.services_by_name["Query"].full_name,
+            _BankServicer,
+            bank_query_pb2_grpc.add_QueryServicer_to_server,
+        ),
+    )
+
     # The servicers above and the table of the listener must name the same
     # methods. A served method with no row would record no request id, and the
     # refusal of two methods of one name reads the table. So this endpoint does
     # not start when the two differ.
-    check_servicers(
-        {
-            query_pb2.DESCRIPTOR.services_by_name["Service"].full_name: _Servicer,
-            bank_query_pb2.DESCRIPTOR.services_by_name["Query"].full_name: _BankServicer,
-        }
-    )
+    check_servicers({service: servicer for service, servicer, _ in servicers})
 
     bind = f"[::]:{port}" if host == "0.0.0.0" else f"{host}:{port}"
 
     def _new_server():
         server = grpc.aio.server()
-        query_pb2_grpc.add_ServiceServicer_to_server(_Servicer(), server)
-        bank_query_pb2_grpc.add_QueryServicer_to_server(_BankServicer(), server)
+        for _, servicer, add_to_server in servicers:
+            add_to_server(servicer(), server)
         # Server reflection lets grpcurl discover services without a proto
         # bundle — a dev/test convenience worth the negligible surface. The
         # smart-router does not read this list: it asks reflection for the
         # symbol of a service, which is found because the stubs are imported
         # above. The list is what ``grpcurl list`` prints.
-        service_names = (
-            query_pb2.DESCRIPTOR.services_by_name["Service"].full_name,
-            bank_query_pb2.DESCRIPTOR.services_by_name["Query"].full_name,
-            reflection.SERVICE_NAME,
-        )
+        service_names = (*(service for service, _, _ in servicers), reflection.SERVICE_NAME)
         reflection.enable_server_reflection(service_names, server)
         server.add_insecure_port(bind)
         return server

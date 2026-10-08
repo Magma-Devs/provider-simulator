@@ -263,3 +263,24 @@ def test_a_row_with_no_servicer_method_is_refused():
 
     with pytest.raises(ValueError, match=r"Row with no servicer method: \['cosmos.bank.v1beta1.Query/AllBalances'\]"):
         check_servicers({_BANK: Bank}, served=((_BANK, "AllBalances", "address"),))
+
+
+def test_a_row_whose_request_id_field_is_not_in_the_request_message_is_refused():
+    # ``adress`` is a slip for ``address``. Without this check the endpoint
+    # starts, and each AllBalances row has no request id, with no error.
+    class Bank(_GeneratedBankBase):
+        async def AllBalances(self, request, context):
+            return None
+
+    with pytest.raises(ValueError, match=r"'adress'.*cosmos\.bank\.v1beta1\.QueryAllBalancesRequest"):
+        check_servicers({_BANK: Bank}, served=((_BANK, "AllBalances", "adress"),))
+
+
+def test_a_request_id_row_of_a_service_with_no_loaded_stubs_is_refused():
+    # The field cannot be compared with a request message that is not loaded.
+    class Other:
+        async def Ping(self, request, context):
+            return None
+
+    with pytest.raises(ValueError, match=r"no\.such\.Service/Ping"):
+        check_servicers({"no.such.Service": Other}, served=(("no.such.Service", "Ping", "id"),))

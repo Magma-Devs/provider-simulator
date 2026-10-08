@@ -714,6 +714,31 @@ class TestGrpcAllBalances:
         resp = _call_all_balances(_GRPC_ADDRS["1"], "lava1-grpc-f")
         assert [(coin.denom, coin.amount) for coin in resp.balances] == [("uatom", "5")]
 
+    def test_result_override_with_a_number_amount_gives_the_amount_as_text(self, sim):
+        """A JSON number for the amount is an easy slip. The reply holds it as
+        text, and the row says success because the caller got a reply."""
+        _set_grpc(sim, "1", responses={"AllBalances": {"result": {"balances": [{"denom": "uatom", "amount": 5}]}}})
+        resp = _call_all_balances(_GRPC_ADDRS["1"], "lava1-grpc-g")
+        assert [(coin.denom, coin.amount) for coin in resp.balances] == [("uatom", "5")]
+        _, hist = _get(_ctrl(sim, "/history?request_id=lava1-grpc-g&pool=lava-sim-grpc"))
+        assert [e["status"] for e in hist["history"]] == ["success"]
+
+    @pytest.mark.parametrize(
+        "balances, expected",
+        [
+            pytest.param("oops", [], id="balances-is-no-list"),
+            pytest.param([5, "x"], [], id="an-item-is-no-object"),
+            pytest.param([{"denom": "uatom"}], [("uatom", "")], id="a-coin-has-no-amount"),
+        ],
+    )
+    def test_result_override_that_is_no_list_of_coins_still_gets_a_reply(self, sim, balances, expected):
+        """The history row is written before the reply is built. So a
+        ``result`` that is no list of coins must not end the call with an
+        error: the row would say success while the caller got no reply."""
+        _set_grpc(sim, "1", responses={"AllBalances": {"result": {"balances": balances}}})
+        resp = _call_all_balances(_GRPC_ADDRS["1"], "lava1-grpc-h")
+        assert [(coin.denom, coin.amount) for coin in resp.balances] == expected
+
     def test_other_bank_methods_answer_unimplemented(self, sim):
         """The simulator serves one method of the bank service. Each other
         method keeps the generated default. A service that is not registered
