@@ -264,7 +264,7 @@ def test_grpc_per_method_result_override():
     assert body["result"] == {"custom": 1}
 
 
-def test_grpc_all_balances_has_the_content_of_the_rest_balances_route():
+def test_grpc_all_balances_has_the_balances_of_the_rest_route():
     st, body = _chain().build_success({"method": "AllBalances"}, _sc(), {}, "grpc")
     _, rest_body = _chain().build_success(_rest(_BALANCES, path_params={"address": "lava1abc"}), _sc(), {}, "rest")
     assert st == 200

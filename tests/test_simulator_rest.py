@@ -953,7 +953,9 @@ class TestRestHistory:
         assert all(e["method"] == method for e in hist["history"])
 
     def test_x_request_id_correlates_into_history(self, sim):
-        """X-Request-Id from the router is preserved on the history entry."""
+        """The header X-Request-Id of a direct caller is kept on the history
+        row. The smart-router does not pass this header on: through the router
+        the query parameter ``request_id`` is the place for the id."""
         _get(
             _REST_URLS["1"] + "/cosmos/staking/v1beta1/validators",
             headers={"X-Request-Id": "test-trace-42"},

@@ -325,7 +325,7 @@ class LavaChain(Chain):
             return 200, {"grpc_method": method, "result": method_cfg["result"]}
 
         if method == "AllBalances":
-            # The content of the REST route for the same query. One stub holds
+            # The balances of the REST route for the same query. One stub holds
             # the coin, so the two interfaces cannot give different balances.
             rest_stub = REST_METHOD_DEFAULTS[("GET", "/cosmos/bank/v1beta1/balances/{address}")]
             return 200, {"grpc_method": method, "balances": deepcopy(rest_stub["balances"])}

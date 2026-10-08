@@ -651,8 +651,9 @@ class TestGrpcHistoryTracking:
         assert hist["history"][-1]["method"] == "GetLatestBlock"
 
     def test_grpc_request_id_is_none(self, sim):
-        """gRPC has no JSON-RPC id equivalent — history entries record
-        request_id=None for every gRPC request."""
+        """A gRPC method with an empty request has no request id: the row of
+        GetLatestBlock records request_id=None. AllBalances is the method that
+        carries one, in its ``address``."""
         _call_get_latest_block(_GRPC_ADDRS["1"])
         _, hist = _get(_ctrl(sim, "/history?pool=lava-sim-grpc&pid=1"))
         assert hist["history"][-1]["request_id"] is None
