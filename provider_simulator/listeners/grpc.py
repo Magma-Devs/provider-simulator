@@ -210,11 +210,6 @@ class GrpcListener(Listener):
         # ``message``.
         return {"method": request.path, "message": request.message}
 
-    def early_identity(self, request: RawRequest) -> "tuple[str, int | str | None]":
-        # The method of a gRPC call is known with no parse. A dead node does
-        # not read the request, so the row has no request id.
-        return request.path, None
-
     def build_down(self) -> ServeResult:
         return ServeResult(action="respond", body=GrpcStatus("UNAVAILABLE", "provider down"))
 

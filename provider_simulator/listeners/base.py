@@ -177,17 +177,10 @@ class Listener(ABC):
         latency = scenario.get("latency_ms", 0) if targeted else 0
 
         # Provider-wide down is pre-parse: no body is read, so the row records
-        # what ``early_identity`` knows with no parse (by default method="*" and
-        # no request id), and the provider does not wait for the latency.
+        # method="*" and no request id, on every interface. The provider does
+        # not wait for the latency.
         if targeted and mode == "down":
-            method, request_id = self.early_identity(request)
-            self.provider.log.finalize(
-                entry,
-                method=method,
-                status="down",
-                latency_ms=self.unpaid_latency(latency),
-                request_id=request_id,
-            )
+            self.provider.log.finalize(entry, method="*", status="down", latency_ms=self.unpaid_latency(latency))
             return self.build_down()
 
         try:
@@ -286,12 +279,6 @@ class Listener(ABC):
 
     @abstractmethod
     def build_success(self, status: int, body: object) -> ServeResult: ...
-
-    def early_identity(self, request: RawRequest) -> "tuple[str, int | str | None]":
-        """The method and the request id that a provider-wide ``down`` row
-        records. The request is not parsed at that point. Default: ``"*"`` and
-        no id, because a dead node does not read the request."""
-        return "*", None
 
     def build_down(self) -> ServeResult:
         """The reply of a provider in the mode ``down``. Default: HTTP 503 with

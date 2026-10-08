@@ -61,14 +61,14 @@ def test_blocks_behind_shifts_head():
     assert _serve(listener, "GetLatestBlock").body.data["height"] == 25_000_000 - 7
 
 
-def test_down_is_unavailable_and_records_method_not_star():
+def test_down_is_unavailable_and_its_row_names_no_method():
     listener, provider = _listener()
     _upd(listener, {"mode": "down"})
     result = _serve(listener, "GetLatestBlock")
     assert result.body == GrpcStatus("UNAVAILABLE", "provider down")
     hist = provider.log.get_history()[0]
     assert hist["status"] == "down"
-    assert hist["method"] == "GetLatestBlock"  # gRPC always knows the method
+    assert hist["method"] == "*"  # a dead node does not read the request
 
 
 def test_hang_is_cancelled_with_the_action_hang():
@@ -197,14 +197,13 @@ def test_a_fault_row_of_all_balances_keeps_the_request_id(scenario, status):
 
 
 def test_a_provider_wide_down_row_has_no_request_id():
-    # A dead node does not read the request. The row keeps the method, as every
-    # gRPC row does, and it has no request id, as on JSON-RPC, REST and
-    # Tendermint RPC.
+    # A dead node does not read the request. The row has the method "*" and no
+    # request id, as on JSON-RPC, REST and Tendermint RPC.
     listener, provider = _listener()
     _upd(listener, {"mode": "down"})
     _serve(listener, "AllBalances", _all_balances("never-read"))
     hist = provider.log.get_history()[0]
-    assert (hist["status"], hist["method"], hist["request_id"]) == ("down", "AllBalances", None)
+    assert (hist["status"], hist["method"], hist["request_id"]) == ("down", "*", None)
 
 
 def test_the_served_methods_and_their_request_id_fields():
@@ -693,7 +692,11 @@ def test_what_serve_decides_for_one_call(scenario, want, want_row_status):
     listener, provider = _listener()
     _upd(listener, scenario)
     assert _decide(listener) == want
-    assert _row(provider) == ("GetLatestBlock", want_row_status, 0, None)
+    # A down provider does not read the request, so its row has the method "*",
+    # as on JSON-RPC, REST and Tendermint RPC. Each down row of this table is
+    # the row of a provider-wide down.
+    want_method = "*" if want_row_status == "down" else "GetLatestBlock"
+    assert _row(provider) == (want_method, want_row_status, 0, None)
 
 
 def test_the_row_of_get_node_info_names_its_method():

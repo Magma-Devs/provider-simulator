@@ -868,7 +868,7 @@ class TestGrpcAllBalances:
         _, by_status = _get(_ctrl(sim, "/history?pool=lava-sim-grpc&pid=1&status=down"))
         assert by_id["count"] == 0
         assert by_status["count"] == 1
-        assert by_status["history"][0]["method"] == "AllBalances"
+        assert by_status["history"][0]["method"] == "*"
 
     def test_missing_field_corruption_clears_the_balances(self, sim):
         _set_grpc(sim, "1", corruption_mode="missing_field", missing_field="balances")

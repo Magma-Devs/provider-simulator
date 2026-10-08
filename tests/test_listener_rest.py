@@ -401,15 +401,12 @@ def test_latency_ms_of_the_row_of_a_call_that_the_provider_did_not_wait_for(mode
 
 
 # ── The hooks of the request flow ────────────────────────────────────────────
-# The flow asks four hooks in the places where the interfaces differ. Their
+# The flow asks three hooks in the places where the interfaces differ. Their
 # defaults are what JSON-RPC, REST and Tendermint RPC do, and the tests above
 # hold those. These tests show that the flow asks the hooks.
 
 
 class _ProbeListener(RestListener):
-    def early_identity(self, request):
-        return "probe-method", "probe-id"
-
     def build_down(self):
         return ServeResult(action="respond", status=418, body={"probe": "down"})
 
@@ -432,12 +429,7 @@ def test_the_flow_asks_the_hooks_for_the_row_and_the_reply_of_a_down_provider():
     res = listener.serve(_get(_BLOCKS_LATEST))
     assert (res.action, res.status, res.body) == ("respond", 418, {"probe": "down"})
     row = provider.log.get_history()[0]
-    assert (row["method"], row["status"], row["latency_ms"], row["request_id"]) == (
-        "probe-method",
-        "down",
-        7,
-        "probe-id",
-    )
+    assert (row["method"], row["status"], row["latency_ms"], row["request_id"]) == ("*", "down", 7, None)
 
 
 def test_the_flow_asks_the_hook_for_the_latency_of_a_hang_row_and_of_no_other_row():
