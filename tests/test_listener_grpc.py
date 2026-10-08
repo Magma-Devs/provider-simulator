@@ -539,8 +539,10 @@ def _row(provider):
             id="drop-comes-before-a-result-override",
         ),
         # Each corruption mode. Five of them turn the reply message into a
-        # status, and the row then says error. One clears a field. One does
-        # nothing on gRPC.
+        # status, and the row then says error. One clears a field. One,
+        # invalid_json, does nothing on gRPC: the control API refuses it for a
+        # provider that has only gRPC endpoints, and this table writes the
+        # scenario with no control API.
         pytest.param(
             {"corruption_mode": "wrong_type"},
             _status("INTERNAL", "wrong_type corruption on response"),

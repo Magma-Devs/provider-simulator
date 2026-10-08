@@ -2,6 +2,8 @@
 scenario apply (staged, old-format 400, quirk routing, responses normalization),
 resets, stats/history filters, advance, and ws/emit."""
 
+import pytest
+
 from provider_simulator.chains import CHAINS
 from provider_simulator.control_api import ControlApi
 from provider_simulator.domain.registry import build_registry
@@ -798,3 +800,77 @@ def test_a_pause_armed_earlier_still_refuses_a_non_http_ports_filter_later():
     st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"ports": [ws_port]}}})
     assert st == 400, f"the stored pause must still be considered, got {st}"
     assert "pause_at" in resp["error"]
+
+
+# ── invalid_json on a provider that has only gRPC endpoints ───────────────────
+
+
+def test_invalid_json_on_a_provider_with_only_grpc_endpoints_is_400():
+    """``invalid_json`` breaks the bytes of a JSON body, and a gRPC reply has
+    none. Before this rule the value was stored, and it did nothing: each call
+    got a clean reply. The message names the mode that a gRPC provider can
+    apply."""
+    api = _api()
+    st, resp = api.apply_scenario({"providers": {"lava-sim-grpc:1": {"corruption_mode": "invalid_json"}}})
+    assert st == 400
+    assert "lava-sim-grpc:1" in resp["error"]
+    assert "'invalid_json' cannot apply" in resp["error"]
+    assert "only gRPC endpoints" in resp["error"]
+    assert "'invalid_proto'" in resp["error"]
+    _, scen = api.get_scenario()
+    assert scen["providers"]["lava-sim-grpc:1"]["corruption_mode"] is None
+
+
+@pytest.mark.parametrize("key", ["eth-sim:1", "lava-sim-rest:1", "lava-sim-tm:1"])
+def test_invalid_json_on_a_provider_with_a_json_endpoint_is_accepted(key):
+    """The positive control for the test above. Without it, a rule that refused
+    ``invalid_json`` for each provider would pass that test."""
+    api = _api()
+    st, resp = api.apply_scenario({"providers": {key: {"corruption_mode": "invalid_json"}}})
+    assert st == 200, resp
+    assert resp["applied"][key]["corruption_mode"] == "invalid_json"
+
+
+@pytest.mark.parametrize(
+    "mode", ["truncated", "missing_field", "empty_response", "wrong_type", "null_body", "invalid_proto"]
+)
+def test_each_other_corruption_mode_is_accepted_on_a_grpc_provider(mode):
+    """The gRPC listener applies each of the six: the rule refuses one mode."""
+    api = _api()
+    st, resp = api.apply_scenario({"providers": {"lava-sim-grpc:1": {"corruption_mode": mode}}})
+    assert st == 200, resp
+    assert resp["applied"]["lava-sim-grpc:1"]["corruption_mode"] == mode
+
+
+def test_an_invalid_json_refusal_writes_no_provider_of_the_request():
+    api = _api()
+    blocks = {
+        "eth-sim:1": {"mode": "down"},
+        "lava-sim-grpc:1": {"mode": "rate_limit", "corruption_mode": "invalid_json"},
+    }
+    st, resp = api.apply_scenario({"providers": blocks})
+    assert st == 400, resp
+    _, scen = api.get_scenario()
+    assert scen["providers"]["eth-sim:1"]["mode"] == "success"
+    assert scen["providers"]["lava-sim-grpc:1"]["mode"] == "success"
+
+
+def test_invalid_json_on_a_grpc_provider_is_refused_with_a_filter_too():
+    """The rule reads the endpoints of the provider and no filter. A filter can
+    only name fewer endpoints, and each endpoint of this provider is gRPC."""
+    api = _api()
+    block = {"corruption_mode": "invalid_json", "transports": ["http2"]}
+    st, resp = api.apply_scenario({"providers": {"lava-sim-grpc:1": block}})
+    assert st == 400
+    assert "only gRPC endpoints" in resp["error"]
+
+
+def test_invalid_json_is_accepted_when_one_endpoint_of_the_provider_is_not_grpc():
+    """No provider of the topology has a gRPC endpoint and an endpoint of
+    another interface. This provider has both, and its REST endpoint can apply
+    the corruption."""
+    endpoints = (("grpc", "http2", 40001), ("rest", "http", 40002))
+    rows = (("lava-mixed-sim", "lava", "1", "LavaMixedProvider1", False, "", endpoints),)
+    api = ControlApi(build_registry(rows), WsSubscriptions())
+    st, resp = api.apply_scenario({"providers": {"lava-mixed-sim:1": {"corruption_mode": "invalid_json"}}})
+    assert st == 200, resp

@@ -1146,9 +1146,13 @@ class TestGrpcStatusTexts:
         assert _status_of(_call_get_latest_block, _GRPC_ADDRS["1"]) == (want_code, want_text)
         assert [(row["method"], row["status"]) for row in _rows(sim)] == [("GetLatestBlock", want_row_status)]
 
-    def test_invalid_json_corruption_does_nothing_on_grpc(self, sim):
+    def test_invalid_json_corruption_is_refused_for_a_grpc_provider(self, sim):
+        """``invalid_json`` breaks the bytes of a JSON body, and a gRPC reply
+        has none. The control API refuses it, and the provider answers as
+        before."""
         status, body = _set_grpc(sim, "1", corruption_mode="invalid_json")
-        assert status == 200, body
+        assert status == 400, body
+        assert "only gRPC endpoints" in body["error"]
         resp = _call_get_latest_block(_GRPC_ADDRS["1"])
         assert (resp.block.header.height, resp.block.header.chain_id) == (GRPC_LATEST_BLOCK, "lava-sim")
         assert [row["status"] for row in _rows(sim)] == ["success"]

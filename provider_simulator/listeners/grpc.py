@@ -258,7 +258,8 @@ class GrpcListener(Listener):
         if corruption == "missing_field":
             result.corruption_mode = "missing_field"
             result.missing_field = scenario.get("missing_field")
-        # invalid_json does nothing on gRPC.
+        # invalid_json does nothing here. The control API refuses it for a
+        # provider that has only gRPC endpoints.
         return status_label
 
     def request_id(self, request: dict):

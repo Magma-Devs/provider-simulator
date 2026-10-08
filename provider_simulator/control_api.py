@@ -172,6 +172,34 @@ def _a_pause_no_named_port_can_serve(provider: object, scenario_updates: dict) -
     return ""
 
 
+def _an_invalid_json_no_endpoint_can_apply(provider: object, scenario_updates: dict) -> str:
+    """Refuse ``corruption_mode="invalid_json"`` for a provider that has only
+    gRPC endpoints.
+
+    ``invalid_json`` breaks the bytes of a JSON body. A gRPC reply is a protobuf
+    message or a status, so the gRPC listener has nothing to apply it to. Before
+    this rule the value was stored, ``GET /scenario`` echoed it, and each call
+    got a clean reply. That is the outcome this module refuses each time: a
+    fault that is accepted and does nothing reads as a router that recovered.
+
+    The rule reads the endpoints of the provider and no filter. A provider with
+    one endpoint of another interface can apply the corruption there, so its
+    block is accepted.
+    """
+    if scenario_updates.get("corruption_mode") != "invalid_json":
+        return ""
+    endpoints = list(provider.endpoints)  # type: ignore[attr-defined]
+    if endpoints and all(ep.interface == "grpc" for ep in endpoints):
+        return (
+            "corruption_mode 'invalid_json' cannot apply: it breaks the bytes of a JSON body, and "
+            "this provider has only gRPC endpoints, whose replies are protobuf messages. Accepting "
+            "it would corrupt nothing, the provider would answer normally, and a test would read "
+            "that as a router that recovered. Use 'invalid_proto' on a gRPC provider: it ends the "
+            "call with the status UNKNOWN"
+        )
+    return ""
+
+
 def _a_port_closed_that_cannot_happen(
     provider: object, scenario_updates: dict, port_gates: "dict[int, PortGate]"
 ) -> tuple[int, str]:
@@ -406,8 +434,10 @@ class ControlApi:
                             "transports filter)"
                         )
                     }
-            err = _ports_the_provider_does_not_serve(provider, scenario_updates) or _a_pause_no_named_port_can_serve(
-                provider, scenario_updates
+            err = (
+                _ports_the_provider_does_not_serve(provider, scenario_updates)
+                or _a_pause_no_named_port_can_serve(provider, scenario_updates)
+                or _an_invalid_json_no_endpoint_can_apply(provider, scenario_updates)
             )
             if err:
                 return 400, {"error": f"{key}: {err}"}
