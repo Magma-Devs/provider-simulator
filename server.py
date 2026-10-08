@@ -10,8 +10,9 @@ the registry and PERFORMS each listener's plan:
   ``BaseHTTPRequestHandler`` that builds a ``RawRequest``, calls
   ``Listener.serve()``, and turns the returned ``ServeResult`` into wire bytes
   (via ``listeners.wire.serialize``), a hang, or a connection drop.
-- gRPC endpoints run an async servicer that performs ``GrpcListener.plan()``:
-  abort with a status code, or build the protobuf from the plan's data. The same
+- gRPC endpoints run the servicers of the gRPC listener module. Each call goes
+  through ``Listener.serve()``, and the adapter ends the call with a status or
+  returns the reply message that the listener module builds. The same
   thread also performs ``mode="port_closed"``, the one fault that is not a
   reply: it stops the endpoint's gRPC server, which closes the port, and starts
   a new one when the mode is gone.

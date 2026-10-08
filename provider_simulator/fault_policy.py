@@ -71,11 +71,11 @@ def targets(scenario: dict, endpoint: Endpoint) -> bool:
     endpoint exactly as it did before ``ports`` existed.
 
     Exported rather than inlined into ``resolve_mode`` because it is not the only
-    caller: ``GrpcListener`` gates ``corruption_mode`` on the same question, and
-    when it asked it separately the two answers drifted — it read ``transports``
-    and never learned about ``ports``. Five fault modes honoured the new filter
-    and corruption did not. One function is what makes this module's promise —
-    "a change to the fault rules happens once" — true rather than aspirational.
+    caller: the control API asks it which endpoints a block names. The gRPC
+    listener once asked it a second time for ``corruption_mode``, with a copy of
+    the rule that read ``transports`` and never learned about ``ports``. Since
+    gRPC went into ``Listener.serve``, one answer of ``resolve_mode`` gates the
+    mode, the latency and the corruption of every interface.
     """
     transports = scenario.get("transports")
     ports = scenario.get("ports")
