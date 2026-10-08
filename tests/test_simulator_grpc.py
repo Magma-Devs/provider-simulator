@@ -499,6 +499,10 @@ class TestGrpcMetadataCapture:
         _, hist = _get(_ctrl(sim, "/history?lava_header_lava-guid=match-me"))
         assert hist["count"] == 1
 
+    def test_a_lava_header_that_comes_two_times_keeps_its_last_value(self, sim):
+        _call_get_latest_block(_GRPC_ADDRS["1"], metadata=(("lava-guid", "first"), ("lava-guid", "last")))
+        assert [row["lava_headers"] for row in _rows(sim)] == [{"lava-guid": "last"}]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Fault: hang
@@ -1340,6 +1344,35 @@ class TestGrpcPerMethodErrors:
         assert status == 200, body
         assert _status_of(_call_get_latest_block, _GRPC_ADDRS["1"]) == (want_code, want_text)
         assert [row["status"] for row in _rows(sim)] == ["error"]
+
+    def test_an_error_stub_that_is_a_number_gives_unknown_with_the_number_as_the_text(self, sim):
+        """An ``error_stub`` is the name of a status. A number is no name, so the
+        caller gets UNKNOWN. The per-method ``error`` override is the key that
+        reads a number."""
+        status, body = _set_grpc(sim, "1", responses={"GetLatestBlock": {"error_stub": 5}})
+        assert status == 200, body
+        assert _status_of(_call_get_latest_block, _GRPC_ADDRS["1"]) == (grpc.StatusCode.UNKNOWN, "5")
+        assert [row["status"] for row in _rows(sim)] == ["error"]
+
+    def test_a_per_method_error_that_is_no_object_ends_the_call_and_leaves_the_row_in_flight(self, sim):
+        """A fault of today, recorded as it is. The ``error`` override must be
+        an object. With a text in its place the simulator fails before it
+        finishes the row: the caller gets UNKNOWN, and the row stays in_flight."""
+        status, body = _set_grpc(sim, "1", responses={"GetLatestBlock": {"error": "NOT_FOUND"}})
+        assert status == 200, body
+        code, text = _status_of(_call_get_latest_block, _GRPC_ADDRS["1"])
+        assert code == grpc.StatusCode.UNKNOWN
+        assert "AttributeError" in text
+        assert [(row["method"], row["status"]) for row in _rows(sim)] == [("*", "in_flight")]
+
+    def test_an_error_stub_applies_when_a_filter_does_not_name_the_endpoint(self, sim):
+        """A per-method override is not a fault of the endpoint, so a filter
+        does not hold it back. The endpoint is ``http2``, and the filter names
+        ``http``."""
+        override = {"GetLatestBlock": {"error_stub": "NOT_FOUND"}}
+        status, body = _set_grpc(sim, "1", transports=["http"], responses=override)
+        assert status == 200, body
+        assert _status_of(_call_get_latest_block, _GRPC_ADDRS["1"]) == (grpc.StatusCode.NOT_FOUND, "NOT_FOUND")
 
 
 class TestGrpcReplyFields:

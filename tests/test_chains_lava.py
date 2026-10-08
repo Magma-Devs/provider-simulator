@@ -290,6 +290,54 @@ def test_grpc_all_balances_per_method_result_override():
     assert body["result"] == {"balances": []}
 
 
+def _grpc_error(responses, method="GetLatestBlock"):
+    _, body = _chain().build_success({"method": method}, _sc(responses=responses), {}, "grpc")
+    return body
+
+
+def test_grpc_error_stub_is_returned_as_data_with_its_name_as_the_text():
+    body = _grpc_error({"GetLatestBlock": {"error_stub": "NOT_FOUND"}})
+    assert body == {"grpc_method": "GetLatestBlock", "error": {"code": "NOT_FOUND", "message": "NOT_FOUND"}}
+
+
+def test_grpc_error_stub_takes_its_text_from_the_key_message():
+    body = _grpc_error({"GetLatestBlock": {"error_stub": "NOT_FOUND", "message": "the block is gone"}})
+    assert body["error"] == {"code": "NOT_FOUND", "message": "the block is gone"}
+
+
+def test_grpc_error_stub_with_a_name_that_is_no_status_does_not_raise():
+    # The REST lookup of an error stub raises for an unknown name. The gRPC
+    # lookup has a fallback in the listener, so the chain passes the name on.
+    assert _grpc_error({"GetLatestBlock": {"error_stub": "revert"}})["error"] == {"code": "revert", "message": "revert"}
+
+
+def test_grpc_error_stub_that_is_a_number_has_no_code():
+    assert _grpc_error({"GetLatestBlock": {"error_stub": 5}})["error"] == {"code": "", "message": "5"}
+
+
+def test_grpc_error_override_is_returned_as_data():
+    body = _grpc_error({"GetLatestBlock": {"error": {"code": 7, "message": "by number"}}})
+    assert body["error"] == {"code": 7, "message": "by number"}
+
+
+def test_grpc_error_override_that_is_empty_has_the_default_text():
+    assert _grpc_error({"GetLatestBlock": {"error": {}}})["error"] == {"code": "", "message": "override"}
+
+
+def test_grpc_error_in_the_default_entry_reaches_each_method():
+    body = _grpc_error({"default": {"error_stub": "ABORTED"}}, method="GetNodeInfo")
+    assert body == {"grpc_method": "GetNodeInfo", "error": {"code": "ABORTED", "message": "ABORTED"}}
+
+
+def test_grpc_error_stub_comes_before_the_error_override_and_the_result_override():
+    entry = {"error_stub": "NOT_FOUND", "error": {"code": "ABORTED"}, "result": {"height": 7}}
+    assert _grpc_error({"GetLatestBlock": entry})["error"]["code"] == "NOT_FOUND"
+    del entry["error_stub"]
+    assert _grpc_error({"GetLatestBlock": entry})["error"]["code"] == "ABORTED"
+    del entry["error"]
+    assert _grpc_error({"GetLatestBlock": entry}) == {"grpc_method": "GetLatestBlock", "result": {"height": 7}}
+
+
 # ── the three heads ─────────────────────────────────────────────────────────
 # Lava serves a different height on each protocol, so it owns one head per
 # interface rather than the single ``head`` a one-protocol chain has.

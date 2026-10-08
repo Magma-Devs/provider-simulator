@@ -32,7 +32,7 @@ _PORT_SETTLE_S = 5.0
 # What "port_closed" cannot be combined with: the fields that act on one request,
 # or on the reply to it, at an endpoint the block targets. Each is read only
 # while such a request is being served (fault_policy.resolve_mode and ladder,
-# Listener.serve, GrpcListener.plan), and a closed port serves none.
+# Listener.serve), and a closed port serves none.
 #   field -> (the value that means "not set", what the field does)
 _NEEDS_A_REQUEST = {
     "fail_first_n": (0, "counts the requests that arrive"),

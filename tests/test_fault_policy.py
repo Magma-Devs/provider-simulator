@@ -206,23 +206,3 @@ def test_targets_is_the_predicate_and_it_reads_both_filters():
     assert fault_policy.targets({"ports": [18638]}, ADDR_B) is False
     assert fault_policy.targets({"transports": ["ws"]}, ADDR_A) is False
     assert fault_policy.targets({"transports": ["http"], "ports": [18639]}, ADDR_A) is False
-
-
-def test_the_grpc_listener_asks_the_same_predicate_rather_than_its_own():
-    """GrpcListener._targeted gates corruption_mode. It used to repeat the rule,
-    reading transports alone, so when ports was added five fault modes on that
-    listener honoured it and corruption did not — a disagreement inside one
-    listener.
-
-    Asserted on the function the listener calls, not on its source text: a
-    docstring saying it delegates is not evidence that it does.
-    """
-    from unittest.mock import patch
-
-    from provider_simulator.listeners.grpc import GrpcListener
-
-    with patch.object(fault_policy, "targets", return_value=False) as spy:
-        listener = GrpcListener.__new__(GrpcListener)
-        object.__setattr__(listener, "endpoint", ADDR_A)
-        assert listener._targeted({"ports": [18638]}) is False
-        assert spy.called, "the listener must ask fault_policy.targets, not reimplement it"

@@ -315,14 +315,37 @@ class LavaChain(Chain):
     # Returns plain success-DATA the gRPC listener serializes into a protobuf
     # message. request = {method}. Three unary methods are covered: the two
     # that the router uses for its own polls (GetLatestBlock / GetNodeInfo) and
-    # AllBalances, which carries a request id. Per-method `responses` result
-    # overrides win. gRPC faults (errors, corruption) are the listener's job.
+    # AllBalances, which carries a request id.
+    # A per-method ``responses`` entry wins: an ``error_stub`` or an ``error``
+    # is returned as data under the key ``error``, and the listener turns it
+    # into a status; a ``result`` replaces the data. A provider-wide fault and
+    # a corruption are the listener's job.
     def _build_grpc(self, request: dict, scenario: dict) -> tuple[int, dict]:
         method = request.get("method", "unknown")
         responses = scenario.get("responses") or {}
         method_cfg = responses.get(method) or responses.get("default", {})
-        if isinstance(method_cfg, dict) and "result" in method_cfg:
-            return 200, {"grpc_method": method, "result": method_cfg["result"]}
+        if isinstance(method_cfg, dict):
+            # An ``error_stub`` is the name of a gRPC status. The listener has
+            # the fallback for a name that is no status, so this lookup does
+            # not use the table of the REST error stubs, which raises for an
+            # unknown name.
+            if "error_stub" in method_cfg:
+                name = method_cfg["error_stub"]
+                return 200, {
+                    "grpc_method": method,
+                    "error": {
+                        "code": name if isinstance(name, str) else "",
+                        "message": str(method_cfg.get("message", name)),
+                    },
+                }
+            if "error" in method_cfg:
+                err = method_cfg["error"]
+                return 200, {
+                    "grpc_method": method,
+                    "error": {"code": err.get("code", ""), "message": err.get("message", "override")},
+                }
+            if "result" in method_cfg:
+                return 200, {"grpc_method": method, "result": method_cfg["result"]}
 
         if method == "AllBalances":
             # The balances of the REST route for the same query. One stub holds

@@ -10,8 +10,9 @@ the registry and PERFORMS each listener's plan:
   ``BaseHTTPRequestHandler`` that builds a ``RawRequest``, calls
   ``Listener.serve()``, and turns the returned ``ServeResult`` into wire bytes
   (via ``listeners.wire.serialize``), a hang, or a connection drop.
-- gRPC endpoints run an async servicer that performs ``GrpcListener.plan()``:
-  abort with a status code, or build the protobuf from the plan's data. The same
+- gRPC endpoints run the servicers of the gRPC listener module. Each call goes
+  through ``Listener.serve()``, and the adapter ends the call with a status or
+  returns the reply message that the listener module builds. The same
   thread also performs ``mode="port_closed"``, the one fault that is not a
   reply: it stops the endpoint's gRPC server, which closes the port, and starts
   a new one when the mode is gone.
@@ -1098,170 +1099,71 @@ _GRPC_PORT_POLL_S = 0.2
 
 def _run_grpc_in_thread(grpc_listener, port: int, host: str, gate: PortGate) -> None:
     """Run one gRPC endpoint: an asyncio event loop on this (daemon) thread
-    hosting an async servicer that performs the listener's GrpcPlan.
+    hosting the servicers of the gRPC listener module. Each call goes through
+    ``Listener.serve``, and ``_perform`` below performs its ServeResult.
 
     ``gate`` is how the port is closed and opened again by a scenario
     (``mode="port_closed"``): the loop below stops and starts the server on this
     thread's own event loop and reports each change to it.
 
     All gRPC imports are local so a missing grpcio never breaks the HTTP-only
-    simulator (the caller downgraded gRPC to a warning at bootstrap).
+    simulator (the caller downgraded gRPC to a warning at bootstrap). This
+    function names no protobuf class: the listener module owns them.
     """
     import asyncio
-    import datetime
 
     import grpc
-    from grpc_reflection.v1alpha import reflection
 
-    # Importing the package splices cosmos_pb2/ onto sys.path so the generated
-    # stubs' absolute imports resolve; it must run before the `from cosmos...`
-    # imports below.
-    import cosmos_pb2  # noqa: F401  isort: split
+    from provider_simulator.listeners import grpc as grpc_wire
 
-    from cosmos.bank.v1beta1 import query_pb2 as bank_query_pb2  # isort: skip
-    from cosmos.bank.v1beta1 import query_pb2_grpc as bank_query_pb2_grpc  # isort: skip
-    from cosmos.base.tendermint.v1beta1 import query_pb2, query_pb2_grpc  # isort: skip
-    from tendermint.types import block_pb2, types_pb2  # isort: skip
+    async def _perform(method: str, request, context):
+        metadata = context.invocation_metadata() or []
+        # The flow keeps the lava-* headers for the history row. The listener
+        # gets the request message: it knows which field of which method
+        # carries the request id.
+        headers = {k: v for (k, v) in metadata}
+        result = grpc_listener.serve(RawRequest(path=method, headers=headers, message=request))
 
-    from provider_simulator.chains.lava import GRPC_LATEST_BLOCK, LAVA_SIM_CHAIN_ID
-    from provider_simulator.listeners.grpc import check_servicers
+        status = result.body
+        if isinstance(status, grpc_wire.GrpcStatus):
+            if result.action == "hang":
+                # Long enough for the client deadline to fire, finite so
+                # the asyncio task doesn't leak.
+                await asyncio.sleep(30)
+            elif result.latency_ms > 0:
+                await asyncio.sleep(result.latency_ms / 1000.0)
+            if result.action == "drop" and result.drop_at in ("after_headers", "mid_body"):
+                # Half-open response: metadata out, then the status. Unary
+                # RPCs can't stream mid-body, so both variants collapse here.
+                try:
+                    await context.send_initial_metadata([])
+                except Exception:
+                    pass
+            await context.abort(grpc.StatusCode[status.code], status.text)
+            return None  # unreachable — abort raises
 
-    def _merged(data: dict) -> dict:
-        # A per-method `responses` result override arrives as {"result": {...}};
-        # its keys shadow the plan's defaults.
-        merged = dict(data)
-        result = merged.pop("result", None)
-        if isinstance(result, dict):
-            merged.update(result)
-        return merged
-
-    def build_latest_block(data: dict):
-        merged = _merged(data)
-        now = datetime.datetime.now(datetime.timezone.utc)
-        header = types_pb2.Header(
-            chain_id=merged.get("chain_id", LAVA_SIM_CHAIN_ID),
-            height=merged.get("height", GRPC_LATEST_BLOCK),
-        )
-        header.time.seconds = int(now.timestamp())
-        header.time.nanos = now.microsecond * 1000
-        block = block_pb2.Block(header=header)
-        block_id = types_pb2.BlockID(hash=b"\xab" * 32)
-        return query_pb2.GetLatestBlockResponse(block_id=block_id, block=block)
-
-    def build_node_info(data: dict):
-        merged = _merged(data)
-        resp = query_pb2.GetNodeInfoResponse()
-        resp.default_node_info.network = merged.get("network", LAVA_SIM_CHAIN_ID)
-        resp.default_node_info.moniker = merged.get("moniker", "lava-sim-grpc-provider")
-        resp.default_node_info.version = merged.get("version", "sim-1.0")
-        resp.application_version.name = "lava-sim"
-        resp.application_version.app_name = merged.get("app_name", "lava-sim-app")
-        resp.application_version.version = merged.get("app_version", "sim-1.0")
-        return resp
-
-    def build_all_balances(data: dict):
-        # A `result` override is free JSON, and the history row of the call is
-        # written before this reply is built. So this builder raises for no
-        # shape: each item that is an object is a coin, with its denom and its
-        # amount as text, and each other item is skipped. An error here would
-        # leave a row that says success for a call that got no reply.
-        def _text(value) -> str:
-            return "" if value is None else str(value)
-
-        merged = _merged(data)
-        resp = bank_query_pb2.QueryAllBalancesResponse()
-        balances = merged.get("balances", [])
-        for coin in balances if isinstance(balances, list) else []:
-            if isinstance(coin, dict):
-                resp.balances.add(denom=_text(coin.get("denom")), amount=_text(coin.get("amount")))
-        return resp
-
-    class _Servicer(query_pb2_grpc.ServiceServicer):
-        async def GetLatestBlock(self, request, context):
-            return await self._perform("GetLatestBlock", context, build_latest_block, request)
-
-        async def GetNodeInfo(self, request, context):
-            return await self._perform("GetNodeInfo", context, build_node_info, request)
-
-        async def _perform(self, method: str, context, build_fn, request=None):
-            metadata = context.invocation_metadata() or []
-            lava = {k: v for (k, v) in metadata if k.lower().startswith("lava-")}
-            # The listener gets the request message: it knows which field of
-            # which method carries the request id.
-            plan = grpc_listener.plan(method, lava, request)
-
-            if plan.action == "abort":
-                if plan.hang:
-                    # Long enough for the client deadline to fire, finite so
-                    # the asyncio task doesn't leak.
-                    await asyncio.sleep(30)
-                elif plan.latency_ms > 0:
-                    await asyncio.sleep(plan.latency_ms / 1000.0)
-                if plan.drop_at in ("after_headers", "mid_body"):
-                    # Half-open response: metadata out, then the abort. Unary
-                    # RPCs can't stream mid-body, so both variants collapse here.
-                    try:
-                        await context.send_initial_metadata([])
-                    except Exception:
-                        pass
-                await context.abort(grpc.StatusCode[plan.status_code], plan.message)
-                return None  # unreachable — abort raises
-
-            response = build_fn(plan.data)
-            if plan.corruption_mode == "missing_field" and plan.missing_field:
-                # proto3 fields are clearable; the receiver sees the field unset.
-                if response.DESCRIPTOR.fields_by_name.get(plan.missing_field):
-                    response.ClearField(plan.missing_field)
-            if plan.latency_ms > 0:
-                await asyncio.sleep(plan.latency_ms / 1000.0)
-            return response
-
-    class _BankServicer(bank_query_pb2_grpc.QueryServicer):
-        """One method of the bank service: AllBalances, whose ``address`` is
-        the request id of the call. Each other method keeps the generated
-        default, which answers UNIMPLEMENTED."""
-
-        _perform = _Servicer._perform
-
-        async def AllBalances(self, request, context):
-            return await self._perform("AllBalances", context, build_all_balances, request)
+        # The history row of the call is finished. A reply that cannot be built
+        # ends the call here, with the row as it is.
+        response = grpc_wire.message_of(result)
+        if result.latency_ms > 0:
+            await asyncio.sleep(result.latency_ms / 1000.0)
+        return response
 
     # One list gives the check, the registration and the reflection list their
-    # servicers, so a servicer is not registered with no check. Each row: the
-    # full name of the service, the servicer class, and the generated function
-    # that registers it.
-    servicers = (
-        (
-            query_pb2.DESCRIPTOR.services_by_name["Service"].full_name,
-            _Servicer,
-            query_pb2_grpc.add_ServiceServicer_to_server,
-        ),
-        (
-            bank_query_pb2.DESCRIPTOR.services_by_name["Query"].full_name,
-            _BankServicer,
-            bank_query_pb2_grpc.add_QueryServicer_to_server,
-        ),
-    )
+    # servicers, so a servicer is not registered with no check.
+    servicers = grpc_wire.servicers(_perform)
 
     # The servicers above and the table of the listener must name the same
     # methods. A served method with no row would record no request id, and the
     # refusal of two methods of one name reads the table. So this endpoint does
     # not start when the two differ.
-    check_servicers({service: servicer for service, servicer, _ in servicers})
+    grpc_wire.check_servicers({service: servicer for service, servicer, _ in servicers})
 
     bind = f"[::]:{port}" if host == "0.0.0.0" else f"{host}:{port}"
 
     def _new_server():
         server = grpc.aio.server()
-        for _, servicer, add_to_server in servicers:
-            add_to_server(servicer(), server)
-        # Server reflection lets grpcurl discover services without a proto
-        # bundle — a dev/test convenience worth the negligible surface. The
-        # smart-router does not read this list: it asks reflection for the
-        # symbol of a service, which is found because the stubs are imported
-        # above. The list is what ``grpcurl list`` prints.
-        service_names = (*(service for service, _, _ in servicers), reflection.SERVICE_NAME)
-        reflection.enable_server_reflection(service_names, server)
+        grpc_wire.register(server, servicers)
         server.add_insecure_port(bind)
         return server
 
