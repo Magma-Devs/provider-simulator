@@ -297,16 +297,13 @@ def test_a_request_id_row_of_a_service_with_no_loaded_stubs_is_refused():
 # ``_decide`` is the one function of this block that calls plan() and reads a
 # GrpcPlan. A change of the listener that keeps its behaviour changes
 # ``_decide``, and it changes no expected value.
+#
+# The content of a reply message is not in these tables. plan() holds it as a
+# dictionary that only the adapter reads, and a caller reads the message that
+# the adapter builds from it. tests/test_simulator_grpc.py holds that content,
+# read by a real client: TestGrpcHappy, TestGrpcAllBalances and
+# TestGrpcReplyFields.
 
-_LATEST_BLOCK = {"grpc_method": "GetLatestBlock", "height": 25_000_000, "chain_id": "lava-sim"}
-_NODE_INFO = {
-    "grpc_method": "GetNodeInfo",
-    "network": "lava-sim",
-    "moniker": "lava-sim-grpc-provider",
-    "version": "sim-1.0",
-    "app_name": "lava-sim-app",
-    "app_version": "sim-1.0",
-}
 # GRPC, the endpoint of ``_listener``, is at port 18548. This port is not its port.
 _ANOTHER_PORT = 18549
 
@@ -317,27 +314,26 @@ class _Decision(NamedTuple):
     wait_ms: int  # how long the adapter waits before it answers
     hangs: bool  # the adapter waits 30 seconds, and not wait_ms
     drop_at: str | None  # set when the status stands for a dropped connection
-    reply: dict | None  # the data of the reply message; None with a status
     clears: str | None  # the field that the adapter clears in the reply message
 
 
 def _decide(listener, method="GetLatestBlock", request=None, lava_headers=None):
     plan = listener.plan(method, lava_headers, request)
     if plan.action == "abort":
-        return _Decision(plan.status_code, plan.message, plan.latency_ms, plan.hang, plan.drop_at, None, None)
+        return _Decision(plan.status_code, plan.message, plan.latency_ms, plan.hang, plan.drop_at, None)
     assert plan.action == "respond", plan.action
     clears = plan.missing_field if plan.corruption_mode == "missing_field" else None
-    return _Decision("OK", "", plan.latency_ms, False, None, plan.data, clears)
+    return _Decision("OK", "", plan.latency_ms, False, None, clears)
 
 
 def _status(code, text, *, hangs=False, drop_at=None):
     """The caller gets a status, with no wait."""
-    return _Decision(code, text, 0, hangs, drop_at, None, None)
+    return _Decision(code, text, 0, hangs, drop_at, None)
 
 
-def _reply(data, *, clears=None):
+def _reply(*, clears=None):
     """The caller gets a reply message, with no wait."""
-    return _Decision("OK", "", 0, False, None, data, clears)
+    return _Decision("OK", "", 0, False, None, clears)
 
 
 def _override(cfg, method="GetLatestBlock"):
@@ -355,7 +351,7 @@ def _row(provider):
     "scenario, want, want_row_status",
     [
         # Each mode. A fault is a status, and each status has its own text.
-        pytest.param({}, _reply(_LATEST_BLOCK), "success", id="success"),
+        pytest.param({}, _reply(), "success", id="success"),
         pytest.param({"mode": "down"}, _status("UNAVAILABLE", "provider down"), "down", id="down"),
         pytest.param({"mode": "hang"}, _status("CANCELLED", "hang timeout", hangs=True), "hang", id="hang"),
         pytest.param(
@@ -417,8 +413,8 @@ def _row(provider):
             id="http-status-does-not-change-the-status",
         ),
         pytest.param({"error_probability": 1.0}, _status("UNKNOWN", "Internal error"), "error", id="error-probability"),
-        # Each per-method override. An error override is a status, and a result
-        # override is the data of the reply message.
+        # Each per-method override. An error override is a status. With a
+        # result override the caller still gets a reply message.
         pytest.param(
             _override({"error_stub": "NOT_FOUND"}), _status("NOT_FOUND", "NOT_FOUND"), "error", id="error-stub"
         ),
@@ -448,7 +444,7 @@ def _row(provider):
         ),
         pytest.param(
             _override({"error_stub": "ABORTED"}, method="GetNodeInfo"),
-            _reply(_LATEST_BLOCK),
+            _reply(),
             "success",
             id="an-override-of-another-method-does-not-apply",
         ),
@@ -487,32 +483,28 @@ def _row(provider):
         ),
         pytest.param(
             _override({"result": {"height": 7}}),
-            _reply({"grpc_method": "GetLatestBlock", "result": {"height": 7}}),
+            _reply(),
             "success",
             id="result-override",
         ),
         pytest.param(
             {"responses": {"default": {"result": {"height": 9}}}},
-            _reply({"grpc_method": "GetLatestBlock", "result": {"height": 9}}),
+            _reply(),
             "success",
             id="result-override-in-the-default-entry",
         ),
         # A fault key in a per-method override is not read on gRPC.
-        pytest.param(
-            _override({"mode": "down"}), _reply(_LATEST_BLOCK), "success", id="per-method-mode-down-is-not-read"
-        ),
+        pytest.param(_override({"mode": "down"}), _reply(), "success", id="per-method-mode-down-is-not-read"),
         pytest.param(
             _override({"mode": "rate_limit"}),
-            _reply(_LATEST_BLOCK),
+            _reply(),
             "success",
             id="per-method-mode-rate-limit-is-not-read",
         ),
-        pytest.param(
-            _override({"latency_ms": 700}), _reply(_LATEST_BLOCK), "success", id="per-method-latency-is-not-read"
-        ),
+        pytest.param(_override({"latency_ms": 700}), _reply(), "success", id="per-method-latency-is-not-read"),
         pytest.param(
             _override({"error_probability": 1.0}),
-            _reply(_LATEST_BLOCK),
+            _reply(),
             "success",
             id="per-method-error-probability-is-not-read",
         ),
@@ -521,6 +513,25 @@ def _row(provider):
             _status("UNAVAILABLE", "provider down"),
             "down",
             id="per-method-mode-success-does-not-lift-a-down",
+        ),
+        # A fault of the provider comes before a per-method override.
+        pytest.param(
+            {"mode": "rate_limit", **_override({"error_stub": "NOT_FOUND"})},
+            _status("RESOURCE_EXHAUSTED", "Too many requests"),
+            "rate_limit",
+            id="rate-limit-comes-before-an-error-stub",
+        ),
+        pytest.param(
+            {"mode": "error", "error_message": "ABORTED", **_override({"error": {"code": "NOT_FOUND"}})},
+            _status("ABORTED", "ABORTED"),
+            "error",
+            id="error-comes-before-an-error-override",
+        ),
+        pytest.param(
+            {"mode": "drop_connection", **_override({"result": {"height": 7}})},
+            _status("UNAVAILABLE", "connection dropped", drop_at="before_headers"),
+            "drop_connection",
+            id="drop-comes-before-a-result-override",
         ),
         # Each corruption mode. Five of them turn the reply message into a
         # status, and the row then says error. One clears a field. One does
@@ -557,25 +568,23 @@ def _row(provider):
         ),
         pytest.param(
             {"corruption_mode": "missing_field", "missing_field": "block"},
-            _reply(_LATEST_BLOCK, clears="block"),
+            _reply(clears="block"),
             "success",
             id="missing-field-clears-the-field",
         ),
         pytest.param(
             {"corruption_mode": "missing_field"},
-            _reply(_LATEST_BLOCK),
+            _reply(),
             "success",
             id="missing-field-with-no-field-clears-nothing",
         ),
         pytest.param(
             {"missing_field": "block"},
-            _reply(_LATEST_BLOCK),
+            _reply(),
             "success",
             id="a-field-with-no-corruption-mode-clears-nothing",
         ),
-        pytest.param(
-            {"corruption_mode": "invalid_json"}, _reply(_LATEST_BLOCK), "success", id="invalid-json-does-nothing"
-        ),
+        pytest.param({"corruption_mode": "invalid_json"}, _reply(), "success", id="invalid-json-does-nothing"),
         # A fault with a corruption. A corruption acts on a reply message only,
         # so a status stays as it is.
         pytest.param(
@@ -618,7 +627,7 @@ def _row(provider):
         ),
         pytest.param(
             {"mode": "down", "transports": ["ws"]},
-            _reply(_LATEST_BLOCK),
+            _reply(),
             "success",
             id="mode-with-a-transports-filter-that-does-not-name-it",
         ),
@@ -630,31 +639,31 @@ def _row(provider):
         ),
         pytest.param(
             {"mode": "down", "ports": [_ANOTHER_PORT]},
-            _reply(_LATEST_BLOCK),
+            _reply(),
             "success",
             id="mode-with-a-ports-filter-that-does-not-name-it",
         ),
         pytest.param(
             {"mode": "rate_limit", "transports": ["http2"], "ports": [_ANOTHER_PORT]},
-            _reply(_LATEST_BLOCK),
+            _reply(),
             "success",
             id="mode-with-one-filter-that-names-the-endpoint-and-one-that-does-not",
         ),
         pytest.param(
             {"corruption_mode": "wrong_type", "transports": ["http"]},
-            _reply(_LATEST_BLOCK),
+            _reply(),
             "success",
             id="corruption-with-a-transports-filter-that-does-not-name-it",
         ),
         pytest.param(
             {"corruption_mode": "wrong_type", "ports": [_ANOTHER_PORT]},
-            _reply(_LATEST_BLOCK),
+            _reply(),
             "success",
             id="corruption-with-a-ports-filter-that-does-not-name-it",
         ),
         pytest.param(
             {"corruption_mode": "missing_field", "missing_field": "block", "transports": ["ws"]},
-            _reply(_LATEST_BLOCK),
+            _reply(),
             "success",
             id="missing-field-with-a-filter-that-does-not-name-it-clears-nothing",
         ),
@@ -668,7 +677,7 @@ def _row(provider):
         ),
         pytest.param(
             {**_override({"result": {"height": 7}}), "ports": [_ANOTHER_PORT]},
-            _reply({"grpc_method": "GetLatestBlock", "result": {"height": 7}}),
+            _reply(),
             "success",
             id="result-override-with-a-filter-that-does-not-name-the-endpoint",
         ),
@@ -681,9 +690,9 @@ def test_what_plan_decides_for_one_call(scenario, want, want_row_status):
     assert _row(provider) == ("GetLatestBlock", want_row_status, 0, None)
 
 
-def test_get_node_info_has_its_own_reply_and_its_own_row():
+def test_the_row_of_get_node_info_names_its_method():
     listener, provider = _listener()
-    assert _decide(listener, "GetNodeInfo") == _reply(_NODE_INFO)
+    assert _decide(listener, "GetNodeInfo") == _reply()
     assert _row(provider) == ("GetNodeInfo", "success", 0, None)
 
 
@@ -711,6 +720,18 @@ def test_which_calls_wait_for_latency_ms(scenario, want_wait_ms, want_row_latenc
     _upd(listener, {**scenario, "latency_ms": 250})
     assert _decide(listener).wait_ms == want_wait_ms
     assert _row(provider)[2] == want_row_latency_ms
+
+
+def test_latency_ms_is_paid_today_under_a_filter_that_does_not_name_the_endpoint():
+    # Today gRPC reads ``latency_ms`` with no look at the filters. JSON-RPC, REST
+    # and Tendermint RPC do not delay an endpoint that the filter does not name.
+    # The design "One request flow for every interface" changes gRPC to the same
+    # rule on purpose (its section 9.2, row 2). The pull request that moves gRPC
+    # into Listener.serve edits the two expected values of this test, to 0.
+    listener, provider = _listener()
+    _upd(listener, {"latency_ms": 250, "ports": [_ANOTHER_PORT]})
+    assert _decide(listener).wait_ms == 250
+    assert _row(provider) == ("GetLatestBlock", "success", 250, None)
 
 
 def test_the_row_is_complete_when_plan_returns():
@@ -748,6 +769,13 @@ def test_then_mode_is_the_mode_after_the_first_calls():
 
 
 def test_a_filter_that_does_not_name_the_endpoint_does_not_use_up_fail_first_n():
-    listener, provider = _listener()
-    _upd(listener, {"mode": "down", "fail_first_n": 1, "then_mode": "rate_limit", "transports": ["ws"]})
-    assert [_decide(listener).code for _ in range(3)] == ["OK", "OK", "OK"]
+    # One provider with two gRPC endpoints. The filter names the second one only.
+    other = Endpoint("grpc", "http2", _ANOTHER_PORT)
+    provider = Pool(name="lava-sim-grpc", chain="lava").add_provider("1", [GRPC, other])
+    not_named, named = GrpcListener(provider, GRPC), GrpcListener(provider, other)
+    provider.scenario.update({"mode": "down", "fail_first_n": 1, "then_mode": "rate_limit", "ports": [_ANOTHER_PORT]})
+    # The endpoint that the filter does not name gets no mode and no then_mode.
+    assert [_decide(not_named).code for _ in range(3)] == ["OK", "OK", "OK"]
+    # Those three calls did not use up the window: the named endpoint still gets
+    # the mode for its first call, and the then_mode after it.
+    assert [_decide(named).code for _ in range(3)] == ["UNAVAILABLE", "RESOURCE_EXHAUSTED", "RESOURCE_EXHAUSTED"]

@@ -21,6 +21,18 @@ Coverage:
   Request id                  — AllBalances records its ``address`` as the
                                 request id of its history row.
   Reflection                  — a served service is found by its symbol.
+  Status texts                — the status and the text that a caller reads
+                                for each fault, with the history row.
+  Waits                       — which statuses wait for latency_ms.
+  Per-method errors           — error_stub with each status name, and the
+                                per-method error override.
+  Reply fields                — the fields of the replies, with a result
+                                override and with none.
+  Calls with no listener      — a method that is not served, a service that
+                                is not registered, a request that is no
+                                message.
+  Drop points                 — the status and the HTTP/2 frames of each
+                                drop point.
 
 Run with:
   pytest tests/test_simulator_grpc.py -v
@@ -1156,8 +1168,9 @@ class TestGrpcStatusTexts:
 
 
 class TestGrpcWhichCallsWait:
-    """``latency_ms`` delays a reply message and each status but one. A down
-    provider answers at once, and its row records 0."""
+    """``latency_ms`` delays a reply message and each status but two. A down
+    provider answers at once, and a hung call waits its own 30 seconds. The row
+    of each of the two records 0."""
 
     @pytest.mark.parametrize(
         "scenario, want_code, min_s, max_s, want_row_latency_ms",
@@ -1361,6 +1374,61 @@ class TestGrpcReplyFields:
         assert status == 200, body
         assert _call_get_latest_block(_GRPC_ADDRS["1"]).block.header.height == 9
 
+    @pytest.mark.parametrize(
+        "result, want_height, want_chain_id",
+        [
+            pytest.param({"height": 7}, 7, "lava-sim", id="only-the-height"),
+            pytest.param({"chain_id": "another-chain"}, GRPC_LATEST_BLOCK, "another-chain", id="only-the-chain-id"),
+            pytest.param({}, GRPC_LATEST_BLOCK, "lava-sim", id="an-empty-object"),
+            pytest.param("not an object", GRPC_LATEST_BLOCK, "lava-sim", id="no-object"),
+        ],
+    )
+    def test_a_field_that_a_result_override_does_not_set_has_the_default_of_get_latest_block(
+        self, sim, result, want_height, want_chain_id
+    ):
+        """A ``result`` override replaces the data of the chain. The builder of
+        the reply then gives its own default to each field that the override
+        does not set. A ``result`` that is no object sets no field."""
+        status, body = _set_grpc(sim, "1", responses={"GetLatestBlock": {"result": result}})
+        assert status == 200, body
+        resp = _call_get_latest_block(_GRPC_ADDRS["1"])
+        assert (resp.block.header.height, resp.block.header.chain_id) == (want_height, want_chain_id)
+        assert [row["status"] for row in _rows(sim)] == ["success"]
+
+    @pytest.mark.parametrize(
+        "result, want_network",
+        [
+            pytest.param({"network": "n-1"}, "n-1", id="only-the-network"),
+            pytest.param("not an object", "lava-sim", id="no-object"),
+        ],
+    )
+    def test_a_field_that_a_result_override_does_not_set_has_the_default_of_get_node_info(
+        self, sim, result, want_network
+    ):
+        status, body = _set_grpc(sim, "1", responses={"GetNodeInfo": {"result": result}})
+        assert status == 200, body
+        resp = _call_get_node_info(_GRPC_ADDRS["1"])
+        node, application = resp.default_node_info, resp.application_version
+        assert (node.network, node.moniker, node.version) == (want_network, "lava-sim-grpc-provider", "sim-1.0")
+        assert (application.name, application.app_name, application.version) == ("lava-sim", "lava-sim-app", "sim-1.0")
+
+    def test_a_result_override_applies_when_a_filter_does_not_name_the_endpoint(self, sim):
+        """A per-method override is not a fault of the endpoint, so a filter
+        does not hold it back. The endpoint is ``http2``, and the filter names
+        ``http``."""
+        override = {"GetLatestBlock": {"result": {"height": 7}}}
+        status, body = _set_grpc(sim, "1", transports=["http"], responses=override)
+        assert status == 200, body
+        assert _call_get_latest_block(_GRPC_ADDRS["1"]).block.header.height == 7
+
+    def test_a_missing_field_that_names_no_field_of_the_reply_leaves_the_reply_whole(self, sim):
+        status, body = _set_grpc(sim, "1", corruption_mode="missing_field", missing_field="no_such_field")
+        assert status == 200, body
+        resp = _call_get_latest_block(_GRPC_ADDRS["1"])
+        assert (resp.block.header.height, resp.block.header.chain_id) == (GRPC_LATEST_BLOCK, "lava-sim")
+        assert len(resp.block_id.hash) == 32
+        assert [row["status"] for row in _rows(sim)] == ["success"]
+
     def test_a_result_override_of_a_wrong_type_ends_the_call_after_the_row_says_success(self, sim):
         """A known fault, recorded as it is today. The row of a call is written
         before the reply message is built. A ``height`` that is no number makes
@@ -1434,6 +1502,15 @@ class TestGrpcDropPoint:
     so each drop point ends the call with UNAVAILABLE and "connection dropped".
     The drop points differ in one thing: for ``after_headers`` and ``mid_body``
     the provider sends the initial metadata first, and the status after it."""
+
+    @pytest.mark.parametrize("drop_at", ["before_headers", "after_headers", "mid_body"])
+    def test_a_grpc_client_reads_the_same_status_for_each_drop_point(self, sim, drop_at):
+        """A client cannot tell the drop points apart. That is why the tests
+        below read the frames."""
+        status, body = _set_grpc(sim, "1", mode="drop_connection", drop_at=drop_at)
+        assert status == 200, body
+        want = (grpc.StatusCode.UNAVAILABLE, "connection dropped")
+        assert _status_of(_call_get_latest_block, _GRPC_ADDRS["1"]) == want
 
     def test_a_reply_message_comes_as_headers_then_data_then_trailers(self, sim):
         """The control for the tests below. It shows that ``_frames_of_one_call``

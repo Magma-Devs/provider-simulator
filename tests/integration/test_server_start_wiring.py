@@ -1,14 +1,22 @@
-"""What ``SimulatorServer.start()`` wires, for three parts that no other test starts.
+"""What ``SimulatorServer.start()`` wires: three things that no other test shows.
 
-``start()`` gives each provider endpoint its listener. It also starts three
-parts that are not provider endpoints: the listener of the cache simulator, the
-RESP proxy with the store that it forwards to, and the gRPC half, which it
-leaves out when ``grpcio`` is not installed.
+``start()`` gives each provider endpoint its listener. It also starts parts
+that are not provider endpoints: the listener of the cache simulator, the RESP
+proxy with the store that it forwards to, and the gRPC half, which it leaves
+out when ``grpcio`` is not installed.
 
-Every other test of the cache simulator and of the RESP proxy builds its piece
-by hand. That proves the piece, and it proves nothing about the bootstrap that a
-deployment runs. A change of ``start()`` must not take one of these three parts
-away, and each test below fails when it does.
+Three things about these parts had no test:
+
+- The gRPC port of the cache simulator serves what the control routes stage.
+  The other tests of the cache simulator build their piece by hand.
+- The RESP proxy forwards a command to its store. ``tests/test_resp_wiring.py``
+  shows that ``start()`` binds the two RESP listeners of the shared simulator
+  and wires the control listener. That simulator has no store behind it, so
+  the file cannot show a command that goes through.
+- The simulator starts with no ``grpcio``.
+
+A change of ``start()`` must not take one of the three away, and each test below
+fails when it does.
 
 Ports: the cache test uses the shared simulator of the session. The two other
 tests start a simulator of their own, on this file's own block of ports. The
@@ -75,7 +83,11 @@ def _post(url: str, body: dict) -> tuple[int, dict]:
 
 def _get_relay(grpc, port: int) -> dict:
     """One lookup against a cache simulator, with raw JSON bytes, as the
-    smart-router sends it. Returns the decoded reply."""
+    smart-router sends it. Returns the decoded reply.
+
+    The call waits until the channel is ready: ``wait_ready()`` of the
+    simulator does not wait for the cache port, and the thread of the cache
+    simulator starts last."""
     lookup = {
         "request_hash": base64.b64encode(bytes.fromhex("deadbeef")).decode(),
         "block_hash": None,
@@ -92,7 +104,7 @@ def _get_relay(grpc, port: int) -> dict:
             request_serializer=lambda raw: raw,
             response_deserializer=lambda raw: raw,
         )
-        return json.loads(rpc(json.dumps(lookup).encode(), timeout=5))
+        return json.loads(rpc(json.dumps(lookup).encode(), timeout=5, wait_for_ready=True))
 
 
 def test_start_serves_the_cache_simulator_that_the_control_routes_stage(sim_server):
@@ -103,6 +115,8 @@ def test_start_serves_the_cache_simulator_that_the_control_routes_stage(sim_serv
     grpc = pytest.importorskip("grpc", reason="the cache simulator speaks gRPC")
     control = f"http://127.0.0.1:{CONTROL_PORT}"
     assert sim_server.cache_sims_enabled is True
+    # The count below is the count of this test alone.
+    _post(control + "/cache/secondary/reset", {})
     try:
         status, staged = _post(control + "/cache/secondary/entry", {"mode": "hit", "entry": {"result": "0xfeed"}})
         assert status == 200, staged
@@ -240,6 +254,9 @@ def test_the_simulator_starts_with_no_grpcio_and_serves_its_http_endpoints():
     the gRPC endpoints and the cache simulator, and it still serves each HTTP
     endpoint and the control API. /ready then answers 503 and names the gRPC
     port that did not open: the simulator serves, and it does not report ready.
+
+    This test records that answer of /ready as it is today. It does not say
+    that 503 is the right answer for a simulator that serves HTTP only.
 
     The simulator runs in a process of its own, because this process has
     ``grpcio`` loaded already."""
