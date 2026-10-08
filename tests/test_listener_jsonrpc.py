@@ -126,12 +126,12 @@ def test_latency_is_carried_on_the_serve_result():
 @pytest.mark.parametrize("mode", ["down", "hang"])
 def test_latency_ms_of_the_row_of_a_call_that_the_provider_did_not_wait_for(mode):
     # A down provider answers at once, and a hung call waits its own 30
-    # seconds: the adapter does not wait for latency_ms. Today the row records
-    # the configured value all the same. Pull request 2c makes it 0.
+    # seconds: the adapter does not wait for latency_ms. So the row records 0,
+    # as on gRPC.
     listener, provider = _listener()
     provider.scenario.update({"mode": mode, "latency_ms": 250})
     assert _serve(listener, "eth_blockNumber").latency_ms == 0
-    assert [(row["status"], row["latency_ms"]) for row in provider.log.get_history()] == [(mode, 250)]
+    assert [(row["status"], row["latency_ms"]) for row in provider.log.get_history()] == [(mode, 0)]
 
 
 def test_a_rate_limit_row_records_the_latency_that_the_provider_waited():

@@ -213,10 +213,6 @@ class GrpcListener(Listener):
     def build_down(self) -> ServeResult:
         return ServeResult(action="respond", body=GrpcStatus("UNAVAILABLE", "provider down"))
 
-    def unpaid_latency(self, latency_ms: int) -> int:
-        # A down row and a hang row record 0: the provider did not wait.
-        return 0
-
     def method_key(self, request: dict) -> object:
         # gRPC does not merge the fault keys of a per-method override. The
         # chain reads the content keys of the override.

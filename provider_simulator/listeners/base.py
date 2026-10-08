@@ -178,9 +178,9 @@ class Listener(ABC):
 
         # Provider-wide down is pre-parse: no body is read, so the row records
         # method="*" and no request id, on every interface. The provider does
-        # not wait for the latency.
+        # not wait for the latency, so the row records 0.
         if targeted and mode == "down":
-            self.provider.log.finalize(entry, method="*", status="down", latency_ms=self.unpaid_latency(latency))
+            self.provider.log.finalize(entry, method="*", status="down", latency_ms=0)
             return self.build_down()
 
         try:
@@ -217,7 +217,7 @@ class Listener(ABC):
             mode = merged["mode"]
             latency = merged.get("latency_ms", 0)
 
-        waited = True  # False for a hang: the provider does not wait for the latency
+        waited = True  # False for a hang: the provider does not wait, and the row records 0
         override = self.build_body_override(method_cfg) if method_cfg else None
         if override is not None:
             result = override
@@ -266,7 +266,7 @@ class Listener(ABC):
             entry,
             method=self.request_method(parsed),
             status=status_label,
-            latency_ms=latency if waited else self.unpaid_latency(latency),
+            latency_ms=latency if waited else 0,
             request_id=request_id,
         )
         return result
@@ -284,12 +284,6 @@ class Listener(ABC):
         """The reply of a provider in the mode ``down``. Default: HTTP 503 with
         no body."""
         return ServeResult(action="no_body", status=503)
-
-    def unpaid_latency(self, latency_ms: int) -> int:
-        """The ``latency_ms`` that a row records when the provider did not wait
-        for it: a provider-wide ``down`` row and a ``hang`` row. Default: the
-        configured value."""
-        return latency_ms
 
     def corrupt(self, result: ServeResult, status_label: str, scenario: dict) -> str:
         """Apply the corruption of the scenario to a reply of this endpoint, and

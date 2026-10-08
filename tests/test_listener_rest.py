@@ -392,26 +392,23 @@ def test_a_provider_wide_down_row_has_no_request_id():
 @pytest.mark.parametrize("mode", ["down", "hang"])
 def test_latency_ms_of_the_row_of_a_call_that_the_provider_did_not_wait_for(mode):
     # A down provider answers at once, and a hung call waits its own 30
-    # seconds: the adapter does not wait for latency_ms. Today the row records
-    # the configured value all the same. Pull request 2c makes it 0.
+    # seconds: the adapter does not wait for latency_ms. So the row records 0,
+    # as on gRPC.
     listener, provider = _listener()
     provider.scenario.update({"mode": mode, "latency_ms": 250})
     assert listener.serve(_get(_BLOCKS_LATEST)).latency_ms == 0
-    assert [(row["status"], row["latency_ms"]) for row in provider.log.get_history()] == [(mode, 250)]
+    assert [(row["status"], row["latency_ms"]) for row in provider.log.get_history()] == [(mode, 0)]
 
 
 # ── The hooks of the request flow ────────────────────────────────────────────
-# The flow asks three hooks in the places where the interfaces differ. Their
-# defaults are what JSON-RPC, REST and Tendermint RPC do, and the tests above
-# hold those. These tests show that the flow asks the hooks.
+# The flow asks two hooks in the places where gRPC differs from the HTTP
+# interfaces. Their defaults are what JSON-RPC, REST and Tendermint RPC do, and
+# the tests above hold those. These tests show that the flow asks the hooks.
 
 
 class _ProbeListener(RestListener):
     def build_down(self):
         return ServeResult(action="respond", status=418, body={"probe": "down"})
-
-    def unpaid_latency(self, latency_ms):
-        return 7
 
     def corrupt(self, result, status_label, scenario):
         result.body = {"probe": "corrupted"}
@@ -423,22 +420,13 @@ def _probe():
     return _ProbeListener(provider, REST), provider
 
 
-def test_the_flow_asks_the_hooks_for_the_row_and_the_reply_of_a_down_provider():
+def test_the_flow_asks_the_hook_for_the_reply_of_a_down_provider():
     listener, provider = _probe()
     provider.scenario.update({"mode": "down", "latency_ms": 250})
     res = listener.serve(_get(_BLOCKS_LATEST))
-    assert (res.action, res.status, res.body) == ("respond", 418, {"probe": "down"})
+    assert (res.action, res.status, res.body, res.latency_ms) == ("respond", 418, {"probe": "down"}, 0)
     row = provider.log.get_history()[0]
-    assert (row["method"], row["status"], row["latency_ms"], row["request_id"]) == ("*", "down", 7, None)
-
-
-def test_the_flow_asks_the_hook_for_the_latency_of_a_hang_row_and_of_no_other_row():
-    listener, provider = _probe()
-    provider.scenario.update({"mode": "hang", "latency_ms": 250})
-    assert listener.serve(_get(_BLOCKS_LATEST)).action == "hang"
-    provider.scenario.update({"mode": "rate_limit", "latency_ms": 250})
-    listener.serve(_get(_BLOCKS_LATEST))
-    assert [row["latency_ms"] for row in provider.log.get_history()] == [7, 250]
+    assert (row["method"], row["status"], row["latency_ms"], row["request_id"]) == ("*", "down", 0, None)
 
 
 def test_the_flow_asks_the_hook_to_corrupt_a_reply_and_takes_its_row_label():
