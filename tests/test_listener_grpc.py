@@ -12,7 +12,7 @@ from cosmos.base.tendermint.v1beta1 import query_pb2  # isort: skip
 
 from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.provider import Pool
-from provider_simulator.listeners.grpc import GrpcListener, request_id_fields
+from provider_simulator.listeners.grpc import GrpcListener, check_servicers, request_id_fields
 
 GRPC = Endpoint("grpc", "http2", 18548)
 
@@ -190,7 +190,8 @@ def test_a_fault_row_of_all_balances_keeps_the_request_id(scenario, status):
 
 def test_a_provider_wide_down_row_has_no_request_id():
     # A dead node does not read the request. The row keeps the method, as every
-    # gRPC row does, and it has no request id, as on every other interface.
+    # gRPC row does, and it has no request id, as on JSON-RPC, REST and
+    # Tendermint RPC.
     listener, provider = _listener()
     _upd(listener, {"mode": "down"})
     listener.plan("AllBalances", request=_all_balances("never-read"))
@@ -211,3 +212,54 @@ def test_two_served_methods_of_one_name_are_refused():
     )
     with pytest.raises(ValueError, match="cosmos.auth.v1beta1.Query/Params.*cosmos.bank.v1beta1.Query/Params"):
         request_id_fields(served)
+
+
+# --- The table and the servicers --------------------------------------------
+# The gRPC adapter in server.py writes its servicer classes by hand. The check
+# below ties them to the table of served methods: a method that a servicer
+# serves must have a row, and a row must have a servicer method. Without the
+# check, a served method with no row records no request id, and the refusal of
+# two methods of one name does not see it.
+
+_BANK = "cosmos.bank.v1beta1.Query"
+
+
+class _GeneratedBankBase:
+    """Stands for the generated servicer base: each method answers UNIMPLEMENTED."""
+
+    def AllBalances(self, request, context):
+        raise NotImplementedError
+
+    def Params(self, request, context):
+        raise NotImplementedError
+
+
+def test_servicers_that_match_the_table_are_accepted():
+    class Bank(_GeneratedBankBase):
+        def _perform(self):  # a private helper is not a served method
+            return None
+
+        async def AllBalances(self, request, context):
+            return None
+
+    check_servicers({_BANK: Bank}, served=((_BANK, "AllBalances", "address"),))
+
+
+def test_a_servicer_method_with_no_row_is_refused():
+    class Bank(_GeneratedBankBase):
+        async def AllBalances(self, request, context):
+            return None
+
+        async def Params(self, request, context):
+            return None
+
+    with pytest.raises(ValueError, match=r"Served with no row: \['cosmos.bank.v1beta1.Query/Params'\]"):
+        check_servicers({_BANK: Bank}, served=((_BANK, "AllBalances", "address"),))
+
+
+def test_a_row_with_no_servicer_method_is_refused():
+    class Bank(_GeneratedBankBase):
+        pass
+
+    with pytest.raises(ValueError, match=r"Row with no servicer method: \['cosmos.bank.v1beta1.Query/AllBalances'\]"):
+        check_servicers({_BANK: Bank}, served=((_BANK, "AllBalances", "address"),))

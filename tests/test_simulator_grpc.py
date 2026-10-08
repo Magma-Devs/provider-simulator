@@ -34,6 +34,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -52,7 +53,13 @@ from cosmos.bank.v1beta1 import query_pb2 as bank_query_pb2  # isort: skip
 from cosmos.bank.v1beta1 import query_pb2_grpc as bank_query_pb2_grpc  # isort: skip
 from cosmos.base.tendermint.v1beta1 import query_pb2, query_pb2_grpc  # isort: skip
 
+import server as server_module
 from provider_simulator.chains.lava import GRPC_LATEST_BLOCK
+from provider_simulator.domain.endpoint import Endpoint
+from provider_simulator.domain.provider import Pool
+from provider_simulator.listeners import grpc as grpc_listener
+from provider_simulator.listeners.grpc import SERVED_METHODS, GrpcListener
+from provider_simulator.port_gate import PortGate
 from provider_simulator.topology import port_of
 
 # Primary tier only — pids 4-6 of each pool are the backup listeners, covered
@@ -211,6 +218,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # the lookup must find the bank service because the SERVER loaded it.
 _REFLECTION_PROBE = """
 import asyncio
+import os
 import sys
 import threading
 import time
@@ -244,12 +252,15 @@ async def lookup(symbol):
     async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
         stub = reflection_pb2_grpc.ServerReflectionStub(channel)
         request = reflection_pb2.ServerReflectionRequest(file_containing_symbol=symbol)
-        reply = await stub.ServerReflectionInfo(iter([request])).read()
+        reply = await asyncio.wait_for(stub.ServerReflectionInfo(iter([request])).read(), timeout=10)
         return reply.WhichOneof("message_response")
 
 
 for symbol in sys.argv[2:]:
     print(symbol, asyncio.run(lookup(symbol)), flush=True)
+# Leave at once. A grpc.aio server still runs on a daemon thread, and the
+# teardown of the interpreter must not wait for it.
+os._exit(0)
 """
 
 
@@ -761,6 +772,34 @@ class TestGrpcReflection:
             "cosmos.base.tendermint.v1beta1.Service file_descriptor_response",
             "cosmos.staking.v1beta1.Query error_response",
         ]
+
+
+class TestGrpcServedMethods:
+    """The gRPC adapter writes its servicers by hand, and the listener holds
+    the table of the served methods. The adapter compares the two before it
+    starts a server."""
+
+    def test_the_adapter_refuses_to_start_when_a_served_method_has_no_row(self, sim, monkeypatch):
+        without_all_balances = tuple(row for row in SERVED_METHODS if row[1] != "AllBalances")
+        monkeypatch.setattr(grpc_listener, "SERVED_METHODS", without_all_balances)
+        port = _free_port()
+        endpoint = Endpoint("grpc", "http2", port)
+        provider = Pool(name="lava-sim-grpc", chain="lava").add_provider("1", [endpoint])
+        errors: list[str] = []
+
+        def _run():
+            try:
+                server_module._run_grpc_in_thread(
+                    GrpcListener(provider, endpoint), port, "127.0.0.1", PortGate(provider, endpoint)
+                )
+            except ValueError as exc:
+                errors.append(str(exc))
+
+        thread = threading.Thread(target=_run, daemon=True)
+        thread.start()
+        thread.join(timeout=10)
+        assert errors, "the adapter started a gRPC server with a served method that has no row"
+        assert "Served with no row: ['cosmos.bank.v1beta1.Query/AllBalances']" in errors[0]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

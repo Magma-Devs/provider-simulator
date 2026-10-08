@@ -112,6 +112,36 @@ def request_id_fields(
 _REQUEST_ID_FIELD = request_id_fields()
 
 
+def check_servicers(
+    servicers: dict[str, type],
+    served: tuple[tuple[str, str, str | None], ...] | None = None,
+) -> None:
+    """Raise ValueError when the servicer classes and the table differ.
+
+    ``servicers`` maps the full name of a service to the servicer class that
+    the gRPC adapter registers for it. A class serves the public methods that
+    it defines itself: a method that it only inherits from the generated base
+    answers UNIMPLEMENTED. The gRPC adapter calls this before it starts a
+    server, so a served method always has a row in ``SERVED_METHODS``, and the
+    refusal of two methods of one name sees every served method.
+    """
+    table = SERVED_METHODS if served is None else served
+    in_code = {
+        (service, name)
+        for service, servicer in servicers.items()
+        for name, member in vars(servicer).items()
+        if not name.startswith("_") and callable(member)
+    }
+    in_table = {(service, method) for service, method, _ in table}
+    if in_code != in_table:
+        with_no_row = sorted(f"{service}/{method}" for service, method in in_code - in_table)
+        with_no_servicer = sorted(f"{service}/{method}" for service, method in in_table - in_code)
+        raise ValueError(
+            "the gRPC servicers and the table SERVED_METHODS name different methods. "
+            f"Served with no row: {with_no_row}. Row with no servicer method: {with_no_servicer}."
+        )
+
+
 def _request_id(method: str, request: object | None) -> str | None:
     """The request id of one call: the value of the field that the method
     names. None when the method names no field, when the caller passed no
@@ -152,7 +182,7 @@ class GrpcListener:
         # ── Provider-wide fault verdicts → status aborts ──
         if verdict.kind == "down":
             # A dead node does not read the request, so its row has no request
-            # id. That is the rule of every interface.
+            # id. JSON-RPC, REST and Tendermint RPC have the same rule.
             _finalize("down", 0, with_request_id=False)
             return GrpcPlan(action="abort", status_code="UNAVAILABLE", message="provider down")
         if verdict.kind == "hang":

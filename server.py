@@ -1124,6 +1124,7 @@ def _run_grpc_in_thread(grpc_listener, port: int, host: str, gate: PortGate) -> 
     from tendermint.types import block_pb2, types_pb2  # isort: skip
 
     from provider_simulator.chains.lava import GRPC_LATEST_BLOCK, LAVA_SIM_CHAIN_ID
+    from provider_simulator.listeners.grpc import check_servicers
 
     def _merged(data: dict) -> dict:
         # A per-method `responses` result override arrives as {"result": {...}};
@@ -1214,6 +1215,17 @@ def _run_grpc_in_thread(grpc_listener, port: int, host: str, gate: PortGate) -> 
 
         async def AllBalances(self, request, context):
             return await self._perform("AllBalances", context, build_all_balances, request)
+
+    # The servicers above and the table of the listener must name the same
+    # methods. A served method with no row would record no request id, and the
+    # refusal of two methods of one name reads the table. So this endpoint does
+    # not start when the two differ.
+    check_servicers(
+        {
+            query_pb2.DESCRIPTOR.services_by_name["Service"].full_name: _Servicer,
+            bank_query_pb2.DESCRIPTOR.services_by_name["Query"].full_name: _BankServicer,
+        }
+    )
 
     bind = f"[::]:{port}" if host == "0.0.0.0" else f"{host}:{port}"
 
