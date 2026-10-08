@@ -1176,9 +1176,10 @@ class TestGrpcStatusTexts:
 
 
 class TestGrpcWhichCallsWait:
-    """``latency_ms`` delays a reply message and each status but two. A down
-    provider answers at once, and a hung call waits its own 30 seconds. The row
-    of each of the two records 0."""
+    """``latency_ms`` delays a reply message and each status but two. A
+    provider-wide ``down`` answers at once, and a hung call waits its own 30
+    seconds. The row of each of the two records 0. A per-method ``down`` is
+    different: it waits for the latency of its entry, and its row records it."""
 
     @pytest.mark.parametrize(
         "scenario, want_code, min_s, max_s, want_row_latency_ms",
@@ -1376,9 +1377,9 @@ class TestGrpcPerMethodErrors:
         assert [(row["method"], row["status"]) for row in _rows(sim)] == [("*", "in_flight")]
 
     def test_an_error_stub_applies_when_a_filter_does_not_name_the_endpoint(self, sim):
-        """A per-method override is not a fault of the endpoint, so a filter
-        does not hold it back. The endpoint is ``http2``, and the filter names
-        ``http``."""
+        """An ``error_stub`` of a per-method override is not a fault of the
+        endpoint, so a filter does not hold it back. The endpoint is ``http2``,
+        and the filter names ``http``."""
         override = {"GetLatestBlock": {"error_stub": "NOT_FOUND"}}
         status, body = _set_grpc(sim, "1", transports=["http"], responses=override)
         assert status == 200, body
@@ -1467,9 +1468,9 @@ class TestGrpcReplyFields:
         assert (application.name, application.app_name, application.version) == ("lava-sim", "lava-sim-app", "sim-1.0")
 
     def test_a_result_override_applies_when_a_filter_does_not_name_the_endpoint(self, sim):
-        """A per-method override is not a fault of the endpoint, so a filter
-        does not hold it back. The endpoint is ``http2``, and the filter names
-        ``http``."""
+        """A ``result`` of a per-method override is not a fault of the endpoint,
+        so a filter does not hold it back. The endpoint is ``http2``, and the
+        filter names ``http``."""
         override = {"GetLatestBlock": {"result": {"height": 7}}}
         status, body = _set_grpc(sim, "1", transports=["http"], responses=override)
         assert status == 200, body

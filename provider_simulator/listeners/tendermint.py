@@ -5,6 +5,11 @@ A client can ask via GET (``/<method>?<params>``) or POST (a JSON-RPC body).
 input raises ParseError, which the base turns into a JSON-RPC -32700. LavaChain
 builds the JSON-RPC ``result`` envelope; a rate_limit / error fault becomes a
 JSON-RPC ``error`` envelope — both matching the flat TendermintHandler.
+
+A per-method ``responses`` entry has two kinds of keys. The request flow merges
+its fault keys (``mode``, ``latency_ms`` and the others) with the method name as
+the key, as on JSON-RPC. LavaChain reads its content keys (``error_stub``,
+``error``, ``body``) in the success path.
 """
 
 import json

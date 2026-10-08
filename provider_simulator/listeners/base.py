@@ -16,23 +16,23 @@ label like REST's 404 → ``not_found``).
 
 ``down`` is evaluated and emitted BEFORE the body is parsed (a dead node never
 reads the request), so a down call's history carries method ``"*"`` and
-``request_id`` None — matching the long-standing contract other code relies on.
+``request_id`` None on every interface — matching the long-standing contract
+other code relies on. The provider does not wait for the latency, so the row
+records ``latency_ms`` 0. A ``hang`` row records 0 for the same reason.
 The exception is a per-method ``responses`` override with ``mode="down"``: the
 method had to be parsed to find the override, so that entry carries the real
-method, request id, and the configured latency.
+method, request id, and the configured latency, which the adapter waits for.
 
 Per-method ``responses`` overrides can shadow the fault keys (mode, latency_ms,
 error probability/code/message, http_status, drop_at) for one method — the
 merged config inherits every provider-wide key the override doesn't set. The
-override key is the transport's ``method_key`` (JSON-RPC: the method name;
-REST: the (verb, template) route pair; transports that resolve overrides inside
-the chain return None). The transports filter scopes per-method overrides the
-same way it scopes everything else in the block.
+override key is the transport's ``method_key`` (JSON-RPC, Tendermint RPC and
+gRPC: the method name; REST: the (verb, template) route pair). The transports
+filter scopes per-method overrides the same way it scopes everything else in
+the block.
 
-Four more hooks have a default that is right for the HTTP interfaces, and gRPC
-overrides each one: ``early_identity`` (what a provider-wide down row records
-with no parse), ``build_down`` (the reply of a down provider),
-``unpaid_latency`` (the latency of a down row and of a hang row) and
+Two more hooks have a default that is right for the HTTP interfaces, and gRPC
+overrides each one: ``build_down`` (the reply of a down provider) and
 ``corrupt`` (how the interface corrupts a reply, and the label of its row).
 
 serve() returns a ServeResult describing WHAT to put on the wire — including the

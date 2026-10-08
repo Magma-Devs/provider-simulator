@@ -95,10 +95,11 @@ grpcurl -plaintext -d '{}' localhost:18548 cosmos.base.tendermint.v1beta1.Servic
 | `mode=rate_limit` | yes | aborts `RESOURCE_EXHAUSTED` |
 | `mode=error` | yes | symbolic `error_message` (e.g. `RESOURCE_EXHAUSTED`) wins over integer `error_code`; unrecognised values fall back to `UNKNOWN` |
 | `latency_ms` / `error_probability` | yes | identical semantics |
+| a fault key in a per-method `responses` entry: `mode`, `latency_ms`, `error_probability`, `error_code`, `error_message`, `drop_at` | yes | the key of the entry is the bare method name, for example `GetLatestBlock`. The entry reaches the calls of that method only, and its fault comes before an `error_stub` of the same entry. The control API refuses a per-method `mode=error` and a per-method `mode=port_closed`, as on every interface |
 | `corruption_mode="missing_field"` | yes | clears the named proto field via `ClearField` |
 | `corruption_mode="wrong_type"` | partial | proto runtime won't accept the type swap, so the request aborts `INTERNAL` instead of returning a malformed message |
 | `corruption_mode="truncated"` / `corruption_mode="empty_response"` / `corruption_mode="invalid_proto"` | yes | all abort `UNKNOWN` (the gRPC client sees a parse-failure surface) |
-| `corruption_mode="invalid_json"` | no | JSON-only — not meaningful on gRPC |
+| `corruption_mode="invalid_json"` | no | JSON-only. The control API answers HTTP 400 for a provider that has only gRPC endpoints: the value would be stored and do nothing |
 | `corruption_mode="null_body"` | yes | aborts `UNKNOWN` — a whole-body JSON null has no gRPC shape, so it joins the parse-failure family instead of silently no-opping |
 | `blocks_behind` | yes | decrements `block.header.height` in `GetLatestBlockResponse` |
 

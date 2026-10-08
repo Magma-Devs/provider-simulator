@@ -14,24 +14,28 @@ servicer classes, their registration with the server and with reflection, the
 table of the served methods, and the builders of the reply messages.
 
 The rules that are special to gRPC, and the hook that holds each one:
-- The method of a call is known with no parse, so a provider-wide ``down`` row
-  records it, and not ``"*"`` (``early_identity``).
 - A served method can name one field of its request message as the request id
   (``SERVED_METHODS``). For AllBalances that field is ``address``. A method that
-  names no field records no request id, and so does a provider-wide ``down``
-  row: a dead node does not read the request.
+  names no field records no request id (``request_id``).
 - A fault is a status: down -> UNAVAILABLE (``build_down``); hang -> CANCELLED
   after 30 seconds, drop -> UNAVAILABLE, rate_limit -> RESOURCE_EXHAUSTED,
   error -> the status that error_message names, or error_code as a number,
   else UNKNOWN (``build_fault``).
-- A down row and a hang row record latency 0, because the provider did not wait
-  (``unpaid_latency``).
 - A per-method error_stub or error override is a status, not a body. The chain
   returns it as data (``build_success``).
-- gRPC does not merge the fault keys of a per-method override (``method_key``).
 - A corruption acts on a reply message only: missing_field clears a field;
   wrong_type gives INTERNAL; invalid_proto, empty_response, truncated and
-  null_body give UNKNOWN; invalid_json does nothing (``corrupt``).
+  null_body give UNKNOWN (``corrupt``). invalid_json has no meaning for a
+  protobuf message: the control API refuses it for a provider that has only
+  gRPC endpoints, and this listener does nothing with it.
+
+Three rules are the same as on the HTTP interfaces, and the flow holds them:
+- The row of a provider-wide ``down`` has the method ``"*"`` and no request id:
+  a dead node does not read the request.
+- A provider-wide ``down`` row and a ``hang`` row record latency 0, because the
+  provider did not wait.
+- The fault keys of a per-method override are merged into the scenario. The key
+  of the entry is the bare method name.
 
 One mode is not served here at all. ``port_closed`` is not a reply to a call:
 the endpoint's server is stopped, so no call arrives. ``down`` and ``drop``

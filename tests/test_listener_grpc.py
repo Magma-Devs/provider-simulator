@@ -662,8 +662,9 @@ def _row(provider):
             "success",
             id="missing-field-with-a-filter-that-does-not-name-it-clears-nothing",
         ),
-        # A per-method override is not a fault of the endpoint: the filters do
-        # not hold it back.
+        # The content keys of a per-method override (error_stub, error, result)
+        # are not a fault of the endpoint: the filters do not hold them back.
+        # The filters do hold its fault keys back: the table below has them.
         pytest.param(
             {**_override({"error_stub": "NOT_FOUND"}), "transports": ["ws"]},
             _status("NOT_FOUND", "NOT_FOUND"),
