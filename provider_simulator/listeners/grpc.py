@@ -2,16 +2,20 @@
 
 gRPC does not fit the serve()/ServeResult template: it is an async servicer that
 faults by ``await context.abort(status, message)`` and answers with a protobuf
-message, not an HTTP body. So this listener exposes ``plan(method, lava_headers)``
-— a pure decision that reuses the shared fault policy and LavaChain's success
-DATA and returns a GrpcPlan the async servicer glue performs (abort with a
-status, or build + return the proto). That glue (protobuf + abort) lands with the
-server cut-over; keeping the decision here makes it unit-testable without a
-running gRPC server.
+message, not an HTTP body. So this listener exposes
+``plan(method, lava_headers, request)`` — a pure decision that reuses the shared
+fault policy and LavaChain's success DATA and returns a GrpcPlan the async
+servicer glue performs (abort with a status, or build + return the proto). That
+glue (protobuf + abort) lands with the server cut-over; keeping the decision here
+makes it unit-testable without a running gRPC server.
 
 gRPC-specific rules preserved from the flat handler:
 - The RPC method is always known, so even a ``down`` call records that method
   (not ``"*"`` like the pre-body-parse HTTP down).
+- A served method can name one field of its request message as the request id
+  (``SERVED_METHODS``). For AllBalances that field is ``address``. A method that
+  names no field records no request id, and so does a provider-wide ``down``
+  row: a dead node does not read the request.
 - Faults map to status codes: down -> UNAVAILABLE, hang -> CANCELLED (after a
   30s sleep), drop -> UNAVAILABLE, rate_limit -> RESOURCE_EXHAUSTED, error -> the
   status named in error_message (or error_code as an int), else UNKNOWN.
@@ -68,12 +72,63 @@ def _status_name(error_message: str, error_code: int) -> str:
     return (sc or grpc.StatusCode.UNKNOWN).name
 
 
+# The gRPC methods that this simulator serves. Each row holds the full name of
+# the service, the bare name of the method, and the field of the request message
+# that carries the request id. None means that the method has no such field.
+#
+# The bare name is the key of a history row and of a ``responses`` override, so
+# two served methods must not share one. ``Params`` is a method of three
+# compiled services, so a new row can break that rule.
+SERVED_METHODS: tuple[tuple[str, str, str | None], ...] = (
+    ("cosmos.base.tendermint.v1beta1.Service", "GetLatestBlock", None),
+    ("cosmos.base.tendermint.v1beta1.Service", "GetNodeInfo", None),
+    ("cosmos.bank.v1beta1.Query", "AllBalances", "address"),
+)
+
+
+def request_id_fields(
+    served: tuple[tuple[str, str, str | None], ...] = SERVED_METHODS,
+) -> dict[str, str | None]:
+    """Map the bare name of each served method to its request-id field.
+
+    Raises ValueError when two served methods have the same bare name. This
+    module calls it at import, so the simulator does not start with such a
+    table.
+    """
+    fields: dict[str, str | None] = {}
+    services: dict[str, str] = {}
+    for service, method, id_field in served:
+        if method in fields:
+            raise ValueError(
+                f"two served gRPC methods have the name {method!r}: {services[method]}/{method} and "
+                f"{service}/{method}. The bare method name is the key of a history row and of a "
+                "responses override, so it must be unique."
+            )
+        fields[method] = id_field
+        services[method] = service
+    return fields
+
+
+_REQUEST_ID_FIELD = request_id_fields()
+
+
+def _request_id(method: str, request: object | None) -> str | None:
+    """The request id of one call: the value of the field that the method
+    names. None when the method names no field, when the caller passed no
+    request message, or when the value is empty."""
+    id_field = _REQUEST_ID_FIELD.get(method)
+    if id_field is None or request is None:
+        return None
+    value = getattr(request, id_field, None)
+    return str(value) if value else None
+
+
 class GrpcListener:
     def __init__(self, provider: Provider, endpoint: Endpoint) -> None:
         self.provider = provider
         self.endpoint = endpoint
 
-    def plan(self, method: str, lava_headers: dict | None = None) -> GrpcPlan:
+    def plan(self, method: str, lava_headers: dict | None = None, request: object | None = None) -> GrpcPlan:
         entry = self.provider.log.record_arrival(
             self.endpoint.interface,
             self.endpoint.transport,
@@ -83,13 +138,22 @@ class GrpcListener:
         scenario = self.provider.scenario.snapshot()
         verdict = fault_policy.decide(scenario, self.endpoint, self.provider)
         latency = scenario.get("latency_ms", 0)
+        request_id = _request_id(method, request)
 
-        def _finalize(status: str, latency_ms: int) -> None:
-            self.provider.log.finalize(entry, method=method, status=status, latency_ms=latency_ms)
+        def _finalize(status: str, latency_ms: int, with_request_id: bool = True) -> None:
+            self.provider.log.finalize(
+                entry,
+                method=method,
+                status=status,
+                latency_ms=latency_ms,
+                request_id=request_id if with_request_id else None,
+            )
 
         # ── Provider-wide fault verdicts → status aborts ──
         if verdict.kind == "down":
-            _finalize("down", 0)
+            # A dead node does not read the request, so its row has no request
+            # id. That is the rule of every interface.
+            _finalize("down", 0, with_request_id=False)
             return GrpcPlan(action="abort", status_code="UNAVAILABLE", message="provider down")
         if verdict.kind == "hang":
             _finalize("hang", 0)

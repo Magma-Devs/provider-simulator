@@ -1,9 +1,18 @@
 """GrpcListener — the pure decision core (plan()) an async servicer glue performs.
 No running gRPC server needed: plan() returns a GrpcPlan we assert on directly."""
 
+import pytest
+
+# Splice cosmos_pb2 onto sys.path so the generated stubs resolve. It must run
+# before the ``from cosmos...`` imports below, so isort must not reorder them.
+import cosmos_pb2  # noqa: F401  isort: split
+
+from cosmos.bank.v1beta1 import query_pb2 as bank_query_pb2  # isort: skip
+from cosmos.base.tendermint.v1beta1 import query_pb2  # isort: skip
+
 from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.provider import Pool
-from provider_simulator.listeners.grpc import GrpcListener
+from provider_simulator.listeners.grpc import GrpcListener, request_id_fields
 
 GRPC = Endpoint("grpc", "http2", 18548)
 
@@ -115,3 +124,90 @@ def test_missing_field_corruption_stays_respond():
     assert plan.action == "respond"
     assert plan.corruption_mode == "missing_field"
     assert plan.missing_field == "block"
+
+
+# --- The request id ---------------------------------------------------------
+# gRPC has no id of its own. A served method can name one field of its request
+# message as the request id. For AllBalances that field is ``address``.
+
+
+def _all_balances(address=""):
+    return bank_query_pb2.QueryAllBalancesRequest(address=address)
+
+
+def test_all_balances_row_holds_the_address_as_the_request_id():
+    listener, provider = _listener()
+    plan = listener.plan("AllBalances", request=_all_balances("lava1-probe-a"))
+    assert plan.action == "respond"
+    assert plan.grpc_method == "AllBalances"
+    assert plan.data["balances"] == [{"denom": "ulava", "amount": "1000000"}]
+    hist = provider.log.get_history()[0]
+    assert hist["method"] == "AllBalances"
+    assert hist["status"] == "success"
+    assert hist["request_id"] == "lava1-probe-a"
+
+
+def test_get_latest_block_row_holds_no_request_id():
+    listener, provider = _listener()
+    listener.plan("GetLatestBlock", request=query_pb2.GetLatestBlockRequest())
+    assert provider.log.get_history()[0]["request_id"] is None
+
+
+def test_an_empty_address_is_no_request_id():
+    listener, provider = _listener()
+    listener.plan("AllBalances", request=_all_balances(""))
+    assert provider.log.get_history()[0]["request_id"] is None
+
+
+def test_a_call_with_no_request_message_has_no_request_id():
+    # plan() keeps working for a caller that passes the method name only.
+    listener, provider = _listener()
+    listener.plan("AllBalances")
+    assert provider.log.get_history()[0]["request_id"] is None
+
+
+@pytest.mark.parametrize(
+    "scenario, status",
+    [
+        ({"mode": "error", "error_message": "NOT_FOUND"}, "error"),
+        ({"mode": "rate_limit"}, "rate_limit"),
+        ({"mode": "hang"}, "hang"),
+        ({"mode": "drop_connection"}, "drop_connection"),
+        ({"responses": {"AllBalances": {"error_stub": "NOT_FOUND"}}}, "error"),
+        ({"responses": {"AllBalances": {"error": {"code": "NOT_FOUND", "message": "gone"}}}}, "error"),
+        ({"corruption_mode": "wrong_type"}, "error"),
+        ({"corruption_mode": "invalid_proto"}, "error"),
+    ],
+)
+def test_a_fault_row_of_all_balances_keeps_the_request_id(scenario, status):
+    listener, provider = _listener()
+    _upd(listener, scenario)
+    plan = listener.plan("AllBalances", request=_all_balances("lava1-probe-f"))
+    assert plan.action == "abort"
+    hist = provider.log.get_history()[0]
+    assert (hist["status"], hist["request_id"]) == (status, "lava1-probe-f")
+
+
+def test_a_provider_wide_down_row_has_no_request_id():
+    # A dead node does not read the request. The row keeps the method, as every
+    # gRPC row does, and it has no request id, as on every other interface.
+    listener, provider = _listener()
+    _upd(listener, {"mode": "down"})
+    listener.plan("AllBalances", request=_all_balances("never-read"))
+    hist = provider.log.get_history()[0]
+    assert (hist["status"], hist["method"], hist["request_id"]) == ("down", "AllBalances", None)
+
+
+def test_the_served_methods_and_their_request_id_fields():
+    assert request_id_fields() == {"GetLatestBlock": None, "GetNodeInfo": None, "AllBalances": "address"}
+
+
+def test_two_served_methods_of_one_name_are_refused():
+    # ``Params`` is a method of three compiled services. The bare name is the
+    # key of a history row and of a ``responses`` override, so it must be unique.
+    served = (
+        ("cosmos.auth.v1beta1.Query", "Params", None),
+        ("cosmos.bank.v1beta1.Query", "Params", None),
+    )
+    with pytest.raises(ValueError, match="cosmos.auth.v1beta1.Query/Params.*cosmos.bank.v1beta1.Query/Params"):
+        request_id_fields(served)
