@@ -3,6 +3,8 @@ wire forms and checks the envelope + history."""
 
 import json
 
+import pytest
+
 from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.provider import Pool
 from provider_simulator.listeners import RawRequest, TendermintListener
@@ -90,3 +92,68 @@ def test_error_fault_is_jsonrpc_error_envelope():
     assert res.body["id"] == 9
     assert res.body["error"] == {"code": -32001, "message": "boom"}
     assert provider.log.get_history()[0]["status"] == "error"
+
+
+@pytest.mark.parametrize("mode", ["down", "hang"])
+def test_latency_ms_of_the_row_of_a_call_that_the_provider_did_not_wait_for(mode):
+    # A down provider answers at once, and a hung call waits its own 30
+    # seconds: the adapter does not wait for latency_ms. Today the row records
+    # the configured value all the same. Pull request 2c makes it 0.
+    listener, provider = _listener()
+    provider.scenario.update({"mode": mode, "latency_ms": 250})
+    assert listener.serve(_post("status")).latency_ms == 0
+    assert [(row["status"], row["latency_ms"]) for row in provider.log.get_history()] == [(mode, 250)]
+
+
+# --- A fault key in a per-method override -------------------------------------
+# Today Tendermint RPC does not read the fault keys of a per-method override:
+# mode, latency_ms, error_probability, error_code, error_message, http_status
+# and drop_at. Pull request 2c makes the flow merge them, as on JSON-RPC and
+# REST.
+
+
+def _row(provider):
+    rows = provider.log.get_history()
+    assert len(rows) == 1, f"expected one history row, got {len(rows)}"
+    return rows[0]["method"], rows[0]["status"], rows[0]["latency_ms"], rows[0]["request_id"]
+
+
+@pytest.mark.parametrize(
+    "scenario, want_reply, want_row",
+    [
+        # want_reply: the action, the HTTP status, the wait in milliseconds, and
+        # the key of the JSON-RPC body ("result" or "error"; None with no body).
+        # want_row: the method, the status, latency_ms and the request id.
+        pytest.param(
+            {"responses": {"status": {"mode": "down"}}},
+            ("respond", 200, 0, "result"),
+            ("status", "success", 0, 5),
+            id="mode-down",
+        ),
+        pytest.param(
+            {"responses": {"status": {"mode": "rate_limit"}}},
+            ("respond", 200, 0, "result"),
+            ("status", "success", 0, 5),
+            id="mode-rate-limit",
+        ),
+        pytest.param(
+            {"responses": {"status": {"latency_ms": 700}}},
+            ("respond", 200, 0, "result"),
+            ("status", "success", 0, 5),
+            id="latency",
+        ),
+        pytest.param(
+            {"responses": {"status": {"error_probability": 1.0}}},
+            ("respond", 200, 0, "result"),
+            ("status", "success", 0, 5),
+            id="error-probability",
+        ),
+    ],
+)
+def test_what_a_fault_key_in_a_per_method_override_does(scenario, want_reply, want_row):
+    listener, provider = _listener()
+    provider.scenario.update(scenario)
+    res = listener.serve(_post("status", req_id=5))
+    body_key = next((key for key in ("result", "error") if isinstance(res.body, dict) and key in res.body), None)
+    assert (res.action, res.status, res.latency_ms, body_key) == want_reply
+    assert _row(provider) == want_row

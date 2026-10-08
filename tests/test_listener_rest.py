@@ -389,6 +389,17 @@ def test_a_provider_wide_down_row_has_no_request_id():
     assert (row["status"], row["method"], row["request_id"]) == ("down", "*", None)
 
 
+@pytest.mark.parametrize("mode", ["down", "hang"])
+def test_latency_ms_of_the_row_of_a_call_that_the_provider_did_not_wait_for(mode):
+    # A down provider answers at once, and a hung call waits its own 30
+    # seconds: the adapter does not wait for latency_ms. Today the row records
+    # the configured value all the same. Pull request 2c makes it 0.
+    listener, provider = _listener()
+    provider.scenario.update({"mode": mode, "latency_ms": 250})
+    assert listener.serve(_get(_BLOCKS_LATEST)).latency_ms == 0
+    assert [(row["status"], row["latency_ms"]) for row in provider.log.get_history()] == [(mode, 250)]
+
+
 # ── The hooks of the request flow ────────────────────────────────────────────
 # The flow asks four hooks in the places where the interfaces differ. Their
 # defaults are what JSON-RPC, REST and Tendermint RPC do, and the tests above

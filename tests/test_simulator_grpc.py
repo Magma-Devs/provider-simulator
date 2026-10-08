@@ -967,9 +967,9 @@ class TestGrpcReflection:
 
 
 class TestGrpcServedMethods:
-    """The gRPC adapter writes its servicers by hand, and the listener holds
-    the table of the served methods. The adapter compares the two before it
-    starts a server."""
+    """The gRPC listener module writes its servicers by hand and holds the
+    table of the served methods. The adapter compares the two before it starts
+    a server."""
 
     def test_the_adapter_refuses_to_start_when_a_served_method_has_no_row(self, sim, monkeypatch):
         without_all_balances = tuple(row for row in SERVED_METHODS if row[1] != "AllBalances")
@@ -1373,6 +1373,17 @@ class TestGrpcPerMethodErrors:
         status, body = _set_grpc(sim, "1", transports=["http"], responses=override)
         assert status == 200, body
         assert _status_of(_call_get_latest_block, _GRPC_ADDRS["1"]) == (grpc.StatusCode.NOT_FOUND, "NOT_FOUND")
+
+    def test_an_error_stub_that_is_an_object_gives_unknown_with_the_object_as_the_text(self, sim):
+        """The shape of the ``error`` override, given to ``error_stub`` by
+        mistake. The control API stores it. The caller gets UNKNOWN, the text
+        is the object as text, and the row says error."""
+        override = {"GetLatestBlock": {"error_stub": {"code": "NOT_FOUND"}}}
+        status, body = _set_grpc(sim, "1", responses=override)
+        assert status == 200, body
+        answer = _status_of(_call_get_latest_block, _GRPC_ADDRS["1"])
+        assert answer == (grpc.StatusCode.UNKNOWN, "{'code': 'NOT_FOUND'}")
+        assert [(row["method"], row["status"]) for row in _rows(sim)] == [("GetLatestBlock", "error")]
 
 
 class TestGrpcReplyFields:

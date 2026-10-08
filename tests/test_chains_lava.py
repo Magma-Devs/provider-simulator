@@ -315,6 +315,20 @@ def test_grpc_error_stub_that_is_a_number_has_no_code():
     assert _grpc_error({"GetLatestBlock": {"error_stub": 5}})["error"] == {"code": "", "message": "5"}
 
 
+@pytest.mark.parametrize(
+    "value, want_text",
+    [
+        pytest.param(["NOT_FOUND"], "['NOT_FOUND']", id="a-list"),
+        pytest.param({"code": "NOT_FOUND"}, "{'code': 'NOT_FOUND'}", id="an-object"),
+    ],
+)
+def test_grpc_error_stub_that_is_a_list_or_an_object_has_no_code(value, want_text):
+    # The shape of the ``error`` override, given to ``error_stub`` by mistake.
+    # The chain does not raise: the listener gives UNKNOWN, with the value as
+    # the text.
+    assert _grpc_error({"GetLatestBlock": {"error_stub": value}})["error"] == {"code": "", "message": want_text}
+
+
 def test_grpc_error_override_is_returned_as_data():
     body = _grpc_error({"GetLatestBlock": {"error": {"code": 7, "message": "by number"}}})
     assert body["error"] == {"code": 7, "message": "by number"}

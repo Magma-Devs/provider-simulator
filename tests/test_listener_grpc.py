@@ -223,7 +223,7 @@ def test_two_served_methods_of_one_name_are_refused():
 
 
 # --- The table and the servicers --------------------------------------------
-# The gRPC adapter in server.py writes its servicer classes by hand. The check
+# The gRPC listener module writes its servicer classes by hand. The check
 # below ties them to the table of served methods: a method that a servicer
 # serves must have a row, and a row must have a servicer method. Without the
 # check, a served method with no row records no request id, and the refusal of
@@ -799,3 +799,91 @@ def test_a_filter_that_does_not_name_the_endpoint_does_not_use_up_fail_first_n()
     # Those three calls did not use up the window: the named endpoint still gets
     # the mode for its first call, and the then_mode after it.
     assert [_decide(named).code for _ in range(3)] == ["UNAVAILABLE", "RESOURCE_EXHAUSTED", "RESOURCE_EXHAUSTED"]
+
+
+# --- A scenario value of a wrong JSON type ------------------------------------
+# The control API stores each JSON type for ``error_stub``, ``error_message``,
+# ``error_code`` and ``blocks_behind``. These tests record what a call gets
+# then. Three of the answers changed when gRPC moved into Listener.serve: the
+# row of an error_stub that is a list or an object, the row of an error whose
+# message or code is a list or an object, and the answer for a blocks_behind
+# that is no number under a corruption.
+
+
+@pytest.mark.parametrize(
+    "override, want_text",
+    [
+        pytest.param({"error_stub": ["NOT_FOUND"]}, "['NOT_FOUND']", id="a-list"),
+        pytest.param({"error_stub": {"code": "NOT_FOUND"}}, "{'code': 'NOT_FOUND'}", id="an-object"),
+        pytest.param({"error_stub": ["NOT_FOUND"], "message": "gone"}, "gone", id="a-list-with-the-key-message"),
+    ],
+)
+def test_an_error_stub_that_is_a_list_or_an_object_gives_unknown_and_an_error_row(override, want_text):
+    listener, provider = _listener()
+    _upd(listener, _override(override))
+    assert _decide(listener) == _status("UNKNOWN", want_text)
+    assert _row(provider) == ("GetLatestBlock", "error", 0, None)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        pytest.param({"mode": "error", "error_message": ["NOT_FOUND"]}, id="error-message-is-a-list"),
+        pytest.param({"mode": "error", "error_message": {"name": "NOT_FOUND"}}, id="error-message-is-an-object"),
+        pytest.param({"mode": "error", "error_code": [5]}, id="error-code-is-a-list"),
+        pytest.param({"error_probability": 1.0, "error_code": {"code": 5}}, id="error-code-is-an-object"),
+    ],
+)
+def test_an_error_whose_message_or_code_is_a_list_or_an_object_leaves_the_row_in_flight(scenario):
+    # A fault of today, recorded as it is. The lookup of the status fails
+    # before the flow finishes the row. The gRPC library then ends the call
+    # with UNKNOWN: tests/test_simulator_grpc.py holds that for the same kind
+    # of fault, in test_a_per_method_error_that_is_no_object_...
+    listener, provider = _listener()
+    _upd(listener, scenario)
+    with pytest.raises(TypeError, match="unhashable type"):
+        _serve(listener)
+    assert _row(provider) == ("*", "in_flight", 0, None)
+
+
+def test_an_error_code_that_is_a_list_is_not_read_when_error_message_names_a_status():
+    listener, provider = _listener()
+    _upd(listener, {"mode": "error", "error_message": "NOT_FOUND", "error_code": [5]})
+    assert _decide(listener) == _status("NOT_FOUND", "NOT_FOUND")
+    assert _row(provider) == ("GetLatestBlock", "error", 0, None)
+
+
+@pytest.mark.parametrize("corruption", ["wrong_type", "invalid_proto", "empty_response", "truncated", "null_body"])
+def test_a_blocks_behind_that_is_no_number_ends_the_call_before_the_corruption(corruption):
+    # The flow asks the chain for the content before it corrupts the reply, as
+    # on JSON-RPC, REST and Tendermint RPC. So the fault of the chain comes
+    # first, and the row stays in_flight.
+    listener, provider = _listener()
+    _upd(listener, {"blocks_behind": "abc", "corruption_mode": corruption})
+    with pytest.raises(TypeError, match="unsupported operand"):
+        _serve(listener)
+    assert _row(provider) == ("*", "in_flight", 0, None)
+
+
+def test_get_node_info_does_not_read_blocks_behind():
+    listener, provider = _listener()
+    _upd(listener, {"blocks_behind": "abc", "corruption_mode": "wrong_type"})
+    assert _decide(listener, "GetNodeInfo") == _status("INTERNAL", "wrong_type corruption on response")
+    assert _row(provider) == ("GetNodeInfo", "error", 0, None)
+
+
+@pytest.mark.parametrize(
+    "filters, want_ms",
+    [
+        pytest.param({"transports": ["http2"]}, 250, id="a-filter-that-names-the-endpoint"),
+        pytest.param({"transports": ["ws"]}, 0, id="a-filter-that-does-not-name-it"),
+    ],
+)
+def test_on_grpc_a_status_waits_for_latency_ms_only_when_the_filters_name_the_endpoint(filters, want_ms):
+    # An error_stub is a status that no filter holds back. The latency of the
+    # scenario is held back by a filter that does not name the endpoint.
+    listener, provider = _listener()
+    _upd(listener, {"latency_ms": 250, **_override({"error_stub": "NOT_FOUND"}), **filters})
+    decision = _decide(listener)
+    assert (decision.code, decision.wait_ms) == ("NOT_FOUND", want_ms)
+    assert _row(provider) == ("GetLatestBlock", "error", want_ms, None)

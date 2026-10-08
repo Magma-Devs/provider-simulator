@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.provider import Pool
 from provider_simulator.listeners import JsonRpcListener, RawRequest
@@ -119,6 +121,25 @@ def test_latency_is_carried_on_the_serve_result():
     provider.scenario.update({"latency_ms": 250})
     res = _serve(listener, "eth_blockNumber")
     assert res.latency_ms == 250
+
+
+@pytest.mark.parametrize("mode", ["down", "hang"])
+def test_latency_ms_of_the_row_of_a_call_that_the_provider_did_not_wait_for(mode):
+    # A down provider answers at once, and a hung call waits its own 30
+    # seconds: the adapter does not wait for latency_ms. Today the row records
+    # the configured value all the same. Pull request 2c makes it 0.
+    listener, provider = _listener()
+    provider.scenario.update({"mode": mode, "latency_ms": 250})
+    assert _serve(listener, "eth_blockNumber").latency_ms == 0
+    assert [(row["status"], row["latency_ms"]) for row in provider.log.get_history()] == [(mode, 250)]
+
+
+def test_a_rate_limit_row_records_the_latency_that_the_provider_waited():
+    # The control for the test above: a call that waits records its wait.
+    listener, provider = _listener()
+    provider.scenario.update({"mode": "rate_limit", "latency_ms": 250})
+    assert _serve(listener, "eth_blockNumber").latency_ms == 250
+    assert provider.log.get_history()[0]["latency_ms"] == 250
 
 
 def test_corruption_directive_carried_on_success():
