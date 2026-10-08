@@ -54,6 +54,7 @@ from cosmos.bank.v1beta1 import query_pb2_grpc as bank_query_pb2_grpc  # isort: 
 from cosmos.base.tendermint.v1beta1 import query_pb2, query_pb2_grpc  # isort: skip
 
 import server as server_module
+from provider_simulator import topology
 from provider_simulator.chains.lava import GRPC_LATEST_BLOCK
 from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.provider import Pool
@@ -67,6 +68,38 @@ from provider_simulator.topology import port_of
 _PRIMARY_PIDS = ("1", "2", "3")
 _GRPC_ADDRS = {pid: f"127.0.0.1:{port_of('lava-sim-grpc', pid, 'grpc', 'http2')}" for pid in _PRIMARY_PIDS}
 _ETH_URLS = {pid: f"http://127.0.0.1:{port_of('eth-sim', pid)}" for pid in _PRIMARY_PIDS}
+_GRPC_PORT_1 = port_of("lava-sim-grpc", "1", "grpc", "http2")
+_GET_LATEST_BLOCK_PATH = "/cosmos.base.tendermint.v1beta1.Service/GetLatestBlock"
+
+# A second simulator, for the one test that needs a gRPC endpoint that does not
+# start. Its ports are this file's own block, below the range that the kernel
+# gives to client sockets.
+_REFUSED_CONTROL = 29721
+_REFUSED_GRPC, _REFUSED_REST = 28721, 28722
+_REFUSED_ROWS = [
+    ("lava-refused-sim", "lava", "1", "LavaRefusedPrimaryProvider1", False, "", (("grpc", "http2", _REFUSED_GRPC),)),
+    ("lava-refused-sim", "lava", "2", "LavaRefusedPrimaryProvider2", False, "", (("rest", "http", _REFUSED_REST),)),
+]
+
+# Each gRPC status that is not OK, by its name.
+_ERROR_STATUS_NAMES = [
+    "CANCELLED",
+    "UNKNOWN",
+    "INVALID_ARGUMENT",
+    "DEADLINE_EXCEEDED",
+    "NOT_FOUND",
+    "ALREADY_EXISTS",
+    "PERMISSION_DENIED",
+    "RESOURCE_EXHAUSTED",
+    "FAILED_PRECONDITION",
+    "ABORTED",
+    "OUT_OF_RANGE",
+    "UNIMPLEMENTED",
+    "INTERNAL",
+    "UNAVAILABLE",
+    "DATA_LOSS",
+    "UNAUTHENTICATED",
+]
 
 
 # ── HTTP helpers for the control plane ──────────────────────────────────────
@@ -209,6 +242,123 @@ def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
+
+
+def _status_of(call, *args, **kwargs) -> tuple[grpc.StatusCode, str]:
+    """Run one of the ``_call_*`` helpers. Return the status that the caller
+    gets and the text of that status. A reply message gives ``(OK, "")``."""
+    try:
+        call(*args, **kwargs)
+    except grpc.RpcError as exc:
+        return exc.code(), exc.details() or ""
+    return grpc.StatusCode.OK, ""
+
+
+def _call_raw(address: str, path: str, payload: bytes = b"", timeout: float = 5.0) -> bytes:
+    """Call one gRPC method by its path, with request bytes that the test
+    chooses, and return the reply bytes. A generated stub cannot call a method
+    that it does not have, and it cannot send bytes that are no message."""
+
+    async def _do():
+        channel = grpc.aio.insecure_channel(address)
+        try:
+            rpc = channel.unary_unary(path, request_serializer=lambda raw: raw, response_deserializer=lambda raw: raw)
+            return await asyncio.wait_for(rpc(payload), timeout=timeout)
+        finally:
+            await channel.close()
+
+    return asyncio.run(_do())
+
+
+def _rows(sim, pid: str = "1", **filters: str) -> list[dict]:
+    """The history rows of one lava-sim-grpc provider, oldest first."""
+    query = "".join(f"&{name}={value}" for name, value in filters.items())
+    _, hist = _get(_ctrl(sim, f"/history?pool=lava-sim-grpc&pid={pid}{query}"))
+    assert isinstance(hist, dict), f"/history did not answer with a JSON object: {hist!r}"
+    return hist["history"]
+
+
+def _wait_until_accepting(port: int, timeout_s: float = 10.0) -> None:
+    """Poll a local port until it accepts a TCP connection."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.2)
+            if probe.connect_ex(("127.0.0.1", port)) == 0:
+                return
+        time.sleep(0.02)
+    raise AssertionError(f"port {port} did not accept a connection in {timeout_s} s")
+
+
+# ── One call as HTTP/2 frames ────────────────────────────────────────────────
+# A gRPC client reads the same thing for a status that came alone and for a
+# status that came after the initial metadata: the status, and no metadata. The
+# difference is in the frames that the server sends. So the tests of the drop
+# points write one call as HTTP/2 frames by hand, and they read the frames that
+# come back.
+
+_H2_DATA, _H2_HEADERS, _H2_RST_STREAM, _H2_SETTINGS = 0x0, 0x1, 0x3, 0x4
+_H2_END_STREAM, _H2_ACK, _H2_END_HEADERS = 0x1, 0x1, 0x4
+_H2_FRAME_NAMES = {_H2_DATA: "DATA", _H2_HEADERS: "HEADERS", _H2_RST_STREAM: "RST_STREAM"}
+
+
+def _h2_frame(kind: int, flags: int, stream: int, payload: bytes = b"") -> bytes:
+    return len(payload).to_bytes(3, "big") + bytes([kind, flags]) + stream.to_bytes(4, "big") + payload
+
+
+def _h2_header(name: bytes, value: bytes) -> bytes:
+    """One request header as an HPACK literal, with no indexing and no Huffman coding."""
+    assert len(name) < 127 and len(value) < 127, "this helper writes one-byte lengths only"
+    return b"\x00" + bytes([len(name)]) + name + bytes([len(value)]) + value
+
+
+def _frames_of_one_call(port: int, path: str, timeout: float = 5.0) -> list[str]:
+    """Send one unary gRPC call with an empty request message, as HTTP/2 frames.
+
+    Return the frames that the server sent for that call, in order: "HEADERS",
+    "DATA" or "RST_STREAM". The frame that ends the call has "+END_STREAM".
+    """
+    request_headers = b"".join(
+        _h2_header(name, value)
+        for name, value in (
+            (b":method", b"POST"),
+            (b":scheme", b"http"),
+            (b":path", path.encode()),
+            (b":authority", f"127.0.0.1:{port}".encode()),
+            (b"content-type", b"application/grpc"),
+            (b"te", b"trailers"),
+        )
+    )
+    frames: list[str] = []
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as sock:
+        sock.sendall(
+            b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+            + _h2_frame(_H2_SETTINGS, 0, 0)
+            + _h2_frame(_H2_HEADERS, _H2_END_HEADERS, 1, request_headers)
+            # One gRPC message of zero bytes: a flag byte and a four-byte length.
+            + _h2_frame(_H2_DATA, _H2_END_STREAM, 1, b"\x00\x00\x00\x00\x00")
+        )
+        buffer = b""
+        while True:
+            while len(buffer) < 9 or len(buffer) < 9 + int.from_bytes(buffer[:3], "big"):
+                chunk = sock.recv(65536)
+                if not chunk:
+                    return frames + ["CONNECTION CLOSED"]
+                buffer += chunk
+            length = int.from_bytes(buffer[:3], "big")
+            kind, flags = buffer[3], buffer[4]
+            stream = int.from_bytes(buffer[5:9], "big") & 0x7FFFFFFF
+            buffer = buffer[9 + length :]
+            if kind == _H2_SETTINGS and not flags & _H2_ACK:
+                sock.sendall(_h2_frame(_H2_SETTINGS, _H2_ACK, 0))
+            if stream != 1:
+                continue
+            name = _H2_FRAME_NAMES.get(kind, f"type {kind}")
+            if kind == _H2_RST_STREAM:
+                return frames + [name]
+            if kind in (_H2_DATA, _H2_HEADERS) and flags & _H2_END_STREAM:
+                return frames + [name + "+END_STREAM"]
+            frames.append(name)
 
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -826,6 +976,488 @@ class TestGrpcServedMethods:
         thread.join(timeout=10)
         assert errors, "the adapter started a gRPC server with a served method that has no row"
         assert "Served with no row: ['cosmos.bank.v1beta1.Query/AllBalances']" in errors[0]
+
+    def test_an_endpoint_that_is_refused_leaves_the_simulator_up_and_not_ready(self, monkeypatch):
+        """The check runs on the thread of one gRPC endpoint. When it refuses,
+        that thread ends and the port of the endpoint never opens. The process
+        stays up: the control API answers and each other endpoint serves.
+        /ready answers 503 and names the port, so a deployment of such a
+        simulator does not report ready."""
+        without_all_balances = tuple(row for row in SERVED_METHODS if row[1] != "AllBalances")
+        monkeypatch.setattr(grpc_listener, "SERVED_METHODS", without_all_balances)
+        thread_errors: list[str] = []
+        monkeypatch.setattr(threading, "excepthook", lambda args: thread_errors.append(str(args.exc_value)))
+        shipped = topology.TOPOLOGY
+        topology.TOPOLOGY = _REFUSED_ROWS
+        try:
+            second = server_module.SimulatorServer(
+                host="127.0.0.1", control_port=_REFUSED_CONTROL, scenario_ttl_s=0, cache_ports={}, resp_proxy_ports={}
+            )
+        finally:
+            topology.TOPOLOGY = shipped
+        second.start()
+        try:
+            _wait_until_accepting(_REFUSED_CONTROL)
+            _wait_until_accepting(_REFUSED_REST)
+            deadline = time.monotonic() + 10
+            while not thread_errors and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert len(thread_errors) == 1, thread_errors
+            assert "Served with no row: ['cosmos.bank.v1beta1.Query/AllBalances']" in thread_errors[0]
+
+            control = f"http://127.0.0.1:{_REFUSED_CONTROL}"
+            status, ready = _get(control + "/ready")
+            assert status == 503
+            assert (ready["status"], ready["missing_ports"]) == ("not_ready", [_REFUSED_GRPC])
+            assert _get(control + "/health")[0] == 200
+            rest_status, _ = _get(f"http://127.0.0.1:{_REFUSED_REST}/cosmos/base/tendermint/v1beta1/blocks/latest")
+            assert rest_status == 200
+        finally:
+            second.stop()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# What a caller reads today, fault by fault
+# ─────────────────────────────────────────────────────────────────────────────
+# The classes below record what a real gRPC client reads from the simulator
+# today: the status of each fault with its text, the history row of the call,
+# and the answers that the gRPC library gives before the listener sees a call.
+# A later change moves gRPC into the request flow of Listener.serve. These
+# tests then show that a caller reads the same thing after the move.
+
+
+class TestGrpcStatusTexts:
+    """Each fault reaches the caller as a status with a text, and it leaves one
+    history row. The texts "provider down" and "connection dropped" have their
+    tests in tests/test_simulator_grpc_port_closed.py."""
+
+    @pytest.mark.parametrize(
+        "scenario, want_code, want_text, want_row_status",
+        [
+            pytest.param(
+                {"mode": "rate_limit"},
+                grpc.StatusCode.RESOURCE_EXHAUSTED,
+                "Too many requests",
+                "rate_limit",
+                id="rate-limit",
+            ),
+            pytest.param(
+                {"mode": "rate_limit", "rate_limit_body": "slow down"},
+                grpc.StatusCode.RESOURCE_EXHAUSTED,
+                "Too many requests",
+                "rate_limit",
+                id="rate-limit-body-does-not-change-the-text",
+            ),
+            pytest.param(
+                {"mode": "error"}, grpc.StatusCode.UNKNOWN, "Internal error", "error", id="error-with-no-status-named"
+            ),
+            pytest.param(
+                {"mode": "error", "error_message": "NOT_FOUND"},
+                grpc.StatusCode.NOT_FOUND,
+                "NOT_FOUND",
+                "error",
+                id="error-message-names-the-status",
+            ),
+            pytest.param(
+                {"mode": "error", "error_message": "no status has this name", "error_code": 5},
+                grpc.StatusCode.NOT_FOUND,
+                "no status has this name",
+                "error",
+                id="error-code-is-the-number-of-the-status",
+            ),
+            pytest.param(
+                {"corruption_mode": "wrong_type"},
+                grpc.StatusCode.INTERNAL,
+                "wrong_type corruption on response",
+                "error",
+                id="wrong-type",
+            ),
+            pytest.param(
+                {"corruption_mode": "wrong_type", "missing_field": "block"},
+                grpc.StatusCode.INTERNAL,
+                "wrong_type corruption on block",
+                "error",
+                id="wrong-type-names-the-field",
+            ),
+            pytest.param(
+                {"corruption_mode": "invalid_proto"},
+                grpc.StatusCode.UNKNOWN,
+                "corruption: invalid_proto",
+                "error",
+                id="invalid-proto",
+            ),
+            pytest.param(
+                {"corruption_mode": "empty_response"},
+                grpc.StatusCode.UNKNOWN,
+                "corruption: empty_response",
+                "error",
+                id="empty-response",
+            ),
+            pytest.param(
+                {"corruption_mode": "truncated"},
+                grpc.StatusCode.UNKNOWN,
+                "corruption: truncated",
+                "error",
+                id="truncated",
+            ),
+            pytest.param(
+                {"corruption_mode": "null_body"},
+                grpc.StatusCode.UNKNOWN,
+                "corruption: null_body",
+                "error",
+                id="null-body",
+            ),
+            # A corruption acts on a reply message only, so a status stays as it is.
+            pytest.param(
+                {"mode": "rate_limit", "corruption_mode": "wrong_type"},
+                grpc.StatusCode.RESOURCE_EXHAUSTED,
+                "Too many requests",
+                "rate_limit",
+                id="rate-limit-with-a-corruption-stays-rate-limit",
+            ),
+            pytest.param(
+                {"mode": "error", "error_message": "NOT_FOUND", "corruption_mode": "invalid_proto"},
+                grpc.StatusCode.NOT_FOUND,
+                "NOT_FOUND",
+                "error",
+                id="error-with-a-corruption-stays-the-error",
+            ),
+        ],
+    )
+    def test_a_fault_is_a_status_with_a_text_and_one_row(self, sim, scenario, want_code, want_text, want_row_status):
+        status, body = _set_grpc(sim, "1", **scenario)
+        assert status == 200, body
+        assert _status_of(_call_get_latest_block, _GRPC_ADDRS["1"]) == (want_code, want_text)
+        assert [(row["method"], row["status"]) for row in _rows(sim)] == [("GetLatestBlock", want_row_status)]
+
+    def test_invalid_json_corruption_does_nothing_on_grpc(self, sim):
+        status, body = _set_grpc(sim, "1", corruption_mode="invalid_json")
+        assert status == 200, body
+        resp = _call_get_latest_block(_GRPC_ADDRS["1"])
+        assert (resp.block.header.height, resp.block.header.chain_id) == (GRPC_LATEST_BLOCK, "lava-sim")
+        assert [row["status"] for row in _rows(sim)] == ["success"]
+
+    @pytest.mark.timeout(60)
+    def test_a_hung_call_ends_after_30_seconds_with_cancelled_and_its_text(self, sim):
+        """The adapter holds a hung call for 30 seconds, and then it ends the
+        call with CANCELLED and the text "hang timeout". A caller with a shorter
+        deadline does not read that status, so this test waits for it. It is the
+        one slow test of this file: it takes 30 seconds.
+
+        The scenario also has a latency. The row of a hung call records 0."""
+        status, body = _set_grpc(sim, "1", mode="hang", latency_ms=700)
+        assert status == 200, body
+        started = time.monotonic()
+        answer = _status_of(_call_get_latest_block, _GRPC_ADDRS["1"], timeout=45.0)
+        elapsed = time.monotonic() - started
+        assert answer == (grpc.StatusCode.CANCELLED, "hang timeout")
+        assert 29.5 <= elapsed <= 40.0, f"a hung call must end after 30 s, and it ended after {elapsed:.1f} s"
+        assert [(row["status"], row["latency_ms"]) for row in _rows(sim)] == [("hang", 0)]
+
+
+class TestGrpcWhichCallsWait:
+    """``latency_ms`` delays a reply message and each status but one. A down
+    provider answers at once, and its row records 0."""
+
+    @pytest.mark.parametrize(
+        "scenario, want_code, min_s, max_s, want_row_latency_ms",
+        [
+            pytest.param({"mode": "down"}, grpc.StatusCode.UNAVAILABLE, 0.0, 0.5, 0, id="down-answers-at-once"),
+            pytest.param(
+                {"mode": "drop_connection"}, grpc.StatusCode.UNAVAILABLE, 0.55, 5.0, 600, id="drop-connection-waits"
+            ),
+            pytest.param(
+                {"mode": "rate_limit"}, grpc.StatusCode.RESOURCE_EXHAUSTED, 0.55, 5.0, 600, id="rate-limit-waits"
+            ),
+            pytest.param({"mode": "error"}, grpc.StatusCode.UNKNOWN, 0.55, 5.0, 600, id="error-waits"),
+            pytest.param(
+                {"corruption_mode": "wrong_type"}, grpc.StatusCode.INTERNAL, 0.55, 5.0, 600, id="wrong-type-waits"
+            ),
+            pytest.param(
+                {"responses": {"GetLatestBlock": {"error_stub": "NOT_FOUND"}}},
+                grpc.StatusCode.NOT_FOUND,
+                0.55,
+                5.0,
+                600,
+                id="error-stub-waits",
+            ),
+        ],
+    )
+    def test_which_statuses_wait_for_latency_ms(self, sim, scenario, want_code, min_s, max_s, want_row_latency_ms):
+        status, body = _set_grpc(sim, "1", latency_ms=600, **scenario)
+        assert status == 200, body
+        started = time.monotonic()
+        code, _ = _status_of(_call_get_latest_block, _GRPC_ADDRS["1"])
+        elapsed = time.monotonic() - started
+        assert code == want_code
+        assert min_s <= elapsed < max_s, f"the status came after {elapsed:.3f} s with latency_ms=600"
+        assert [row["latency_ms"] for row in _rows(sim)] == [want_row_latency_ms]
+
+    def test_the_row_of_a_call_is_complete_while_the_provider_still_waits(self, sim):
+        """A test of the smart-router reads the row of a call that the provider
+        still holds. So the row must have its method, its status, its latency
+        and its request id before the wait, and not after it."""
+        status, body = _set_grpc(sim, "1", latency_ms=2000)
+        assert status == 200, body
+        outcome: dict = {}
+
+        def _held_call():
+            started = time.monotonic()
+            resp = _call_all_balances(_GRPC_ADDRS["1"], "lava1-held-a")
+            outcome["elapsed"] = time.monotonic() - started
+            outcome["coins"] = [(coin.denom, coin.amount) for coin in resp.balances]
+
+        caller = threading.Thread(target=_held_call)
+        caller.start()
+        try:
+            rows: list[dict] = []
+            deadline = time.monotonic() + 1.5
+            while not rows and time.monotonic() < deadline:
+                rows = _rows(sim, request_id="lava1-held-a")
+                if not rows:
+                    time.sleep(0.02)
+            still_held = caller.is_alive()
+        finally:
+            caller.join(timeout=10)
+        assert rows, "the call left no row in its first 1.5 seconds, while the provider held it"
+        assert still_held, "the call had ended when the row was read, so the read proves nothing"
+        assert [(row["method"], row["status"], row["latency_ms"], row["request_id"]) for row in rows] == [
+            ("AllBalances", "success", 2000, "lava1-held-a")
+        ]
+        assert outcome["coins"] == [("ulava", "1000000")]
+        assert outcome["elapsed"] >= 1.9, f"the reply came after {outcome['elapsed']:.3f} s with latency_ms=2000"
+
+    def test_a_pause_does_not_delay_a_grpc_call(self, sim):
+        """The control API stores a pause for a gRPC provider, and the gRPC
+        adapter does not perform it: a pause belongs to the HTTP write path."""
+        status, body = _set_grpc(sim, "1", pause_at="mid_body", pause_ms=3000)
+        assert status == 200, body
+        started = time.monotonic()
+        resp = _call_get_latest_block(_GRPC_ADDRS["1"])
+        elapsed = time.monotonic() - started
+        assert resp.block.header.height == GRPC_LATEST_BLOCK
+        assert elapsed < 1.5, f"the reply came after {elapsed:.3f} s, so the pause of 3 s was not performed"
+
+    def test_a_fault_key_in_a_per_method_override_is_not_read(self, sim):
+        """gRPC reads ``error_stub``, ``error`` and ``result`` from a per-method
+        override. It does not read the fault keys, such as ``mode`` and
+        ``latency_ms``: the call below is answered, and at once."""
+        status, body = _set_grpc(sim, "1", responses={"GetLatestBlock": {"mode": "down", "latency_ms": 3000}})
+        assert status == 200, body
+        started = time.monotonic()
+        resp = _call_get_latest_block(_GRPC_ADDRS["1"])
+        elapsed = time.monotonic() - started
+        assert resp.block.header.height == GRPC_LATEST_BLOCK
+        assert elapsed < 1.5, f"the reply came after {elapsed:.3f} s, so the latency of the override was applied"
+        assert [(row["status"], row["latency_ms"]) for row in _rows(sim)] == [("success", 0)]
+
+    def test_fail_first_n_gives_exactly_that_many_down_rows(self, sim):
+        status, body = _set_grpc(sim, "1", mode="down", fail_first_n=3, then_mode="success")
+        assert status == 200, body
+        codes = [_status_of(_call_get_latest_block, _GRPC_ADDRS["1"])[0] for _ in range(5)]
+        unavailable, ok = grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.OK
+        assert codes == [unavailable, unavailable, unavailable, ok, ok]
+        assert [row["status"] for row in _rows(sim)] == ["down", "down", "down", "success", "success"]
+        assert len(_rows(sim, status="down")) == 3
+
+
+class TestGrpcPerMethodErrors:
+    """A per-method ``error_stub`` or ``error`` override reaches the caller as a
+    status. The smart-router has a rule for each status, and its tests set each
+    one with ``error_stub``."""
+
+    @pytest.mark.parametrize("name", _ERROR_STATUS_NAMES)
+    def test_an_error_stub_gives_the_status_of_its_name_with_the_name_as_the_text(self, sim, name):
+        status, body = _set_grpc(sim, "1", responses={"GetLatestBlock": {"error_stub": name}})
+        assert status == 200, body
+        code, text = _status_of(_call_get_latest_block, _GRPC_ADDRS["1"])
+        assert (code.name, text) == (name, name)
+        assert [(row["method"], row["status"]) for row in _rows(sim)] == [("GetLatestBlock", "error")]
+
+    def test_an_error_stub_takes_its_text_from_the_key_message(self, sim):
+        override = {"error_stub": "NOT_FOUND", "message": "the block is gone"}
+        status, body = _set_grpc(sim, "1", responses={"GetLatestBlock": override})
+        assert status == 200, body
+        want = (grpc.StatusCode.NOT_FOUND, "the block is gone")
+        assert _status_of(_call_get_latest_block, _GRPC_ADDRS["1"]) == want
+
+    def test_an_error_stub_whose_name_is_no_status_gives_unknown(self, sim):
+        """``revert`` is the name of an error stub of the eth chain. It names no
+        gRPC status, so the caller gets UNKNOWN, with the name as the text."""
+        status, body = _set_grpc(sim, "1", responses={"GetLatestBlock": {"error_stub": "revert"}})
+        assert status == 200, body
+        assert _status_of(_call_get_latest_block, _GRPC_ADDRS["1"]) == (grpc.StatusCode.UNKNOWN, "revert")
+
+    def test_an_error_stub_in_the_default_entry_reaches_each_method(self, sim):
+        status, body = _set_grpc(sim, "1", responses={"default": {"error_stub": "ABORTED"}})
+        assert status == 200, body
+        want = (grpc.StatusCode.ABORTED, "ABORTED")
+        assert _status_of(_call_get_latest_block, _GRPC_ADDRS["1"]) == want
+        assert _status_of(_call_get_node_info, _GRPC_ADDRS["1"]) == want
+        assert _status_of(_call_all_balances, _GRPC_ADDRS["1"], "lava1-default-a") == want
+
+    def test_an_error_stub_of_one_method_leaves_the_other_methods_alone(self, sim):
+        status, body = _set_grpc(sim, "1", responses={"GetLatestBlock": {"error_stub": "ABORTED"}})
+        assert status == 200, body
+        assert _status_of(_call_get_latest_block, _GRPC_ADDRS["1"]) == (grpc.StatusCode.ABORTED, "ABORTED")
+        assert _call_get_node_info(_GRPC_ADDRS["1"]).default_node_info.network == "lava-sim"
+
+    @pytest.mark.parametrize(
+        "error, want_code, want_text",
+        [
+            pytest.param(
+                {"code": "ABORTED", "message": "from the override"},
+                grpc.StatusCode.ABORTED,
+                "from the override",
+                id="the-name-of-a-status",
+            ),
+            pytest.param(
+                {"code": 7, "message": "by number"},
+                grpc.StatusCode.PERMISSION_DENIED,
+                "by number",
+                id="the-number-of-a-status",
+            ),
+            pytest.param(
+                {"code": "no status has this name"}, grpc.StatusCode.UNKNOWN, "override", id="a-code-that-is-no-status"
+            ),
+        ],
+    )
+    def test_an_error_override_gives_its_code_and_its_message(self, sim, error, want_code, want_text):
+        status, body = _set_grpc(sim, "1", responses={"GetLatestBlock": {"error": error}})
+        assert status == 200, body
+        assert _status_of(_call_get_latest_block, _GRPC_ADDRS["1"]) == (want_code, want_text)
+        assert [row["status"] for row in _rows(sim)] == ["error"]
+
+
+class TestGrpcReplyFields:
+    """The fields of the two reply messages of the tendermint service, with no
+    override and with a per-method ``result`` override."""
+
+    def test_get_node_info_has_these_fields(self, sim):
+        resp = _call_get_node_info(_GRPC_ADDRS["1"])
+        node, application = resp.default_node_info, resp.application_version
+        assert (node.network, node.moniker, node.version) == ("lava-sim", "lava-sim-grpc-provider", "sim-1.0")
+        assert (application.name, application.app_name, application.version) == ("lava-sim", "lava-sim-app", "sim-1.0")
+
+    def test_a_result_override_sets_the_fields_of_get_latest_block(self, sim):
+        result = {"height": 7, "chain_id": "another-chain"}
+        status, body = _set_grpc(sim, "1", responses={"GetLatestBlock": {"result": result}})
+        assert status == 200, body
+        resp = _call_get_latest_block(_GRPC_ADDRS["1"])
+        assert (resp.block.header.height, resp.block.header.chain_id) == (7, "another-chain")
+        assert len(resp.block_id.hash) == 32
+
+    def test_a_result_override_sets_the_fields_of_get_node_info(self, sim):
+        result = {"network": "n-1", "moniker": "m-1", "version": "v-1", "app_name": "a-1", "app_version": "av-1"}
+        status, body = _set_grpc(sim, "1", responses={"GetNodeInfo": {"result": result}})
+        assert status == 200, body
+        resp = _call_get_node_info(_GRPC_ADDRS["1"])
+        node, application = resp.default_node_info, resp.application_version
+        assert (node.network, node.moniker, node.version) == ("n-1", "m-1", "v-1")
+        assert (application.name, application.app_name, application.version) == ("lava-sim", "a-1", "av-1")
+
+    def test_a_result_override_in_the_default_entry_reaches_get_latest_block(self, sim):
+        status, body = _set_grpc(sim, "1", responses={"default": {"result": {"height": 9}}})
+        assert status == 200, body
+        assert _call_get_latest_block(_GRPC_ADDRS["1"]).block.header.height == 9
+
+    def test_a_result_override_of_a_wrong_type_ends_the_call_after_the_row_says_success(self, sim):
+        """A known fault, recorded as it is today. The row of a call is written
+        before the reply message is built. A ``height`` that is no number makes
+        the build of the reply fail: the caller gets UNKNOWN, and the row says
+        success. AllBalances does not have this fault: its reply is built for
+        each shape of an override."""
+        status, body = _set_grpc(sim, "1", responses={"GetLatestBlock": {"result": {"height": "not a number"}}})
+        assert status == 200, body
+        code, text = _status_of(_call_get_latest_block, _GRPC_ADDRS["1"])
+        assert code == grpc.StatusCode.UNKNOWN
+        assert "TypeError" in text
+        assert [row["status"] for row in _rows(sim)] == ["success"]
+
+
+class TestGrpcCallsThatReachNoListener:
+    """The gRPC library answers three kinds of call before the listener sees
+    them: a method of a served service that the simulator does not serve, a
+    method of a service that is not registered, and a request that is no
+    message. None of them writes a history row or a count."""
+
+    @pytest.mark.parametrize(
+        "method", ["GetSyncing", "GetBlockByHeight", "GetLatestValidatorSet", "GetValidatorSetByHeight", "ABCIQuery"]
+    )
+    def test_a_method_of_the_tendermint_service_that_is_not_served_answers_unimplemented(self, sim, method):
+        """The tendermint service has seven methods. The simulator serves
+        GetLatestBlock and GetNodeInfo, and these are the five others."""
+        code, text = _status_of(_call_raw, _GRPC_ADDRS["1"], f"/cosmos.base.tendermint.v1beta1.Service/{method}")
+        assert code == grpc.StatusCode.UNIMPLEMENTED
+        assert "Method not implemented!" in text
+
+    def test_a_method_of_a_service_that_is_not_registered_has_another_text(self, sim):
+        """The staking stubs are compiled, and the simulator does not register
+        the staking service. The text differs from the text of a method that a
+        registered service does not serve, so a test can tell the two apart."""
+        answer = _status_of(_call_raw, _GRPC_ADDRS["1"], "/cosmos.staking.v1beta1.Query/Params")
+        assert answer == (grpc.StatusCode.UNIMPLEMENTED, "Method not found!")
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            pytest.param("/cosmos.bank.v1beta1.Query/AllBalances", id="all-balances"),
+            pytest.param(_GET_LATEST_BLOCK_PATH, id="get-latest-block"),
+        ],
+    )
+    def test_a_request_that_is_no_message_answers_unknown(self, sim, path):
+        code, text = _status_of(_call_raw, _GRPC_ADDRS["1"], path, b"\xff\xff\xff")
+        assert code == grpc.StatusCode.UNKNOWN
+        assert "DecodeError" in text
+
+    def test_none_of_these_calls_writes_a_row_or_a_count(self, sim):
+        for path, payload in (
+            ("/cosmos.bank.v1beta1.Query/TotalSupply", b""),
+            ("/cosmos.base.tendermint.v1beta1.Service/GetSyncing", b""),
+            ("/cosmos.staking.v1beta1.Query/Params", b""),
+            ("/cosmos.bank.v1beta1.Query/AllBalances", b"\xff\xff\xff"),
+        ):
+            assert _status_of(_call_raw, _GRPC_ADDRS["1"], path, payload)[0] != grpc.StatusCode.OK
+        _, stats = _get(_ctrl(sim, "/stats"))
+        assert _rows(sim) == []
+        assert stats["providers"]["lava-sim-grpc:1"]["total_calls"] == 0
+
+        # The control: a call that the listener does see writes one row and one count.
+        _call_get_latest_block(_GRPC_ADDRS["1"])
+        _, stats = _get(_ctrl(sim, "/stats"))
+        assert len(_rows(sim)) == 1
+        assert stats["providers"]["lava-sim-grpc:1"]["total_calls"] == 1
+
+
+class TestGrpcDropPoint:
+    """``drop_at`` on gRPC. A gRPC handler cannot cut the connection part way,
+    so each drop point ends the call with UNAVAILABLE and "connection dropped".
+    The drop points differ in one thing: for ``after_headers`` and ``mid_body``
+    the provider sends the initial metadata first, and the status after it."""
+
+    def test_a_reply_message_comes_as_headers_then_data_then_trailers(self, sim):
+        """The control for the tests below. It shows that ``_frames_of_one_call``
+        reads the frames of a call."""
+        assert _frames_of_one_call(_GRPC_PORT_1, _GET_LATEST_BLOCK_PATH) == ["HEADERS", "DATA", "HEADERS+END_STREAM"]
+
+    def test_a_status_with_no_drop_point_comes_as_one_frame(self, sim):
+        status, body = _set_grpc(sim, "1", mode="down")
+        assert status == 200, body
+        assert _frames_of_one_call(_GRPC_PORT_1, _GET_LATEST_BLOCK_PATH) == ["HEADERS+END_STREAM"]
+
+    @pytest.mark.parametrize(
+        "drop_at, want_frames",
+        [
+            pytest.param("before_headers", ["HEADERS+END_STREAM"], id="before-headers-sends-the-status-alone"),
+            pytest.param("after_headers", ["HEADERS", "HEADERS+END_STREAM"], id="after-headers-sends-metadata-first"),
+            pytest.param("mid_body", ["HEADERS", "HEADERS+END_STREAM"], id="mid-body-sends-metadata-first"),
+        ],
+    )
+    def test_two_drop_points_send_the_initial_metadata_before_the_status(self, sim, drop_at, want_frames):
+        status, body = _set_grpc(sim, "1", mode="drop_connection", drop_at=drop_at)
+        assert status == 200, body
+        assert _frames_of_one_call(_GRPC_PORT_1, _GET_LATEST_BLOCK_PATH) == want_frames
+        assert [(row["method"], row["status"]) for row in _rows(sim)] == [("GetLatestBlock", "drop_connection")]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
