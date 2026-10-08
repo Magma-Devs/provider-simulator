@@ -4,7 +4,7 @@ Quickstart for the gRPC sim surface that landed in MAG-1780 with reflection enab
 
 ## What the gRPC sim is
 
-Three independent gRPC servers run inside the simulator pod on ports `18548` / `18549` / `18550`, alongside the existing JSON-RPC and control listeners. Each one implements `cosmos.base.tendermint.v1beta1.Service` (currently `GetLatestBlock` and `GetNodeInfo` — see `handlers_grpc.py` for the full list). Each gRPC server shares its `ProviderState` with the matching JSON-RPC port (`18548` ↔ `18545`, etc.), so one `POST /scenario` call reconfigures both transports for the same logical provider. gRPC reflection is registered (PR #16), so `grpcurl` can discover services without a local `.proto` bundle.
+Three independent gRPC servers run inside the simulator pod on ports `18548` / `18549` / `18550`, alongside the existing JSON-RPC and control listeners. Each one implements two methods of `cosmos.base.tendermint.v1beta1.Service` (`GetLatestBlock` and `GetNodeInfo`) and one method of `cosmos.bank.v1beta1.Query` (`AllBalances`). The table `SERVED_METHODS` in `provider_simulator/listeners/grpc.py` is the full list. Each gRPC server shares its `ProviderState` with the matching JSON-RPC port (`18548` ↔ `18545`, etc.), so one `POST /scenario` call reconfigures both transports for the same logical provider. gRPC reflection is registered (PR #16), so `grpcurl` can discover services without a local `.proto` bundle.
 
 ## Two ways to reach it
 
@@ -38,7 +38,8 @@ These are paste-ready. Replace the target the first time (`localhost:18548` or `
 ```bash
 # 1. Service catalogue — proves reflection is up
 grpcurl -plaintext localhost:18548 list
-# → cosmos.base.tendermint.v1beta1.Service
+# → cosmos.bank.v1beta1.Query
+#   cosmos.base.tendermint.v1beta1.Service
 #   grpc.reflection.v1alpha.ServerReflection
 
 # 2. Methods on the cosmos service
@@ -55,6 +56,14 @@ grpcurl -plaintext -d '{}' localhost:18548 cosmos.base.tendermint.v1beta1.Servic
 
 # 5. Real call — GetNodeInfo (version probe used during provider warmup)
 grpcurl -plaintext -d '{}' localhost:18548 cosmos.base.tendermint.v1beta1.Service/GetNodeInfo
+
+# 6. Real call — AllBalances returns one coin (ulava, 1000000). The `address`
+#    is the request id of the history row, so a test can read the rows of this
+#    one call. The bank service lists more methods, and the simulator serves
+#    this one only: each other method answers Unimplemented, and such a call
+#    writes no history row and no count.
+grpcurl -plaintext -d '{"address":"mytest-7f3a"}' localhost:18548 cosmos.bank.v1beta1.Query/AllBalances
+curl -s "https://sim-control.<BASE_DOMAIN>/history?request_id=mytest-7f3a&pool=lava-sim-grpc"
 ```
 
 Public-hostname equivalents — same commands, just swap `<BASE_DOMAIN>` for your server's actual domain (`config/base-domain.env`) and drop `-plaintext`:

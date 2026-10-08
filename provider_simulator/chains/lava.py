@@ -313,8 +313,9 @@ class LavaChain(Chain):
 
     # ── gRPC ────────────────────────────────────────────────────────────────
     # Returns plain success-DATA the gRPC listener serializes into a protobuf
-    # message. request = {method}. Only the two unary methods the router uses
-    # are covered (GetLatestBlock / GetNodeInfo). Per-method `responses` result
+    # message. request = {method}. Three unary methods are covered: the two
+    # that the router uses for its own polls (GetLatestBlock / GetNodeInfo) and
+    # AllBalances, which carries a request id. Per-method `responses` result
     # overrides win. gRPC faults (errors, corruption) are the listener's job.
     def _build_grpc(self, request: dict, scenario: dict) -> tuple[int, dict]:
         method = request.get("method", "unknown")
@@ -322,6 +323,12 @@ class LavaChain(Chain):
         method_cfg = responses.get(method) or responses.get("default", {})
         if isinstance(method_cfg, dict) and "result" in method_cfg:
             return 200, {"grpc_method": method, "result": method_cfg["result"]}
+
+        if method == "AllBalances":
+            # The balances of the REST route for the same query. One stub holds
+            # the coin, so the two interfaces cannot give different balances.
+            rest_stub = REST_METHOD_DEFAULTS[("GET", "/cosmos/bank/v1beta1/balances/{address}")]
+            return 200, {"grpc_method": method, "balances": deepcopy(rest_stub["balances"])}
 
         if method == "GetLatestBlock":
             head = max(self.heads["grpc"].current() - scenario.get("blocks_behind", 0), 0)

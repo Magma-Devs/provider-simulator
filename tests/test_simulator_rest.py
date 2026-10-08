@@ -22,13 +22,15 @@ Coverage:
                                format.
   Cross-pool isolation       — faults on eth-sim / btc-sim / lava-sim-grpc /
                                lava-sim-tm never leak onto the REST pool.
-  History tracking            — REST requests show up in /history with the
-                               X-Request-Id header correlated when present.
+  History tracking            — REST requests show up in /history under the
+                               request id of the query parameter
+                               ``request_id`` or of the X-Request-Id header.
 
 Run with:
   pytest tests/test_simulator_rest.py -v
 """
 
+import http.client
 import json
 import re
 import time
@@ -951,7 +953,9 @@ class TestRestHistory:
         assert all(e["method"] == method for e in hist["history"])
 
     def test_x_request_id_correlates_into_history(self, sim):
-        """X-Request-Id from the router is preserved on the history entry."""
+        """The header X-Request-Id of a direct caller is kept on the history
+        row. The smart-router does not pass this header on: through the router
+        the query parameter ``request_id`` is the place for the id."""
         _get(
             _REST_URLS["1"] + "/cosmos/staking/v1beta1/validators",
             headers={"X-Request-Id": "test-trace-42"},
@@ -972,6 +976,58 @@ class TestRestHistory:
             int(last["request_id"])
         except (TypeError, ValueError):
             pytest.fail(f"sim-side request_id should be numeric, got {last['request_id']!r}")
+
+    def test_query_request_id_selects_the_rows_of_one_request(self, sim):
+        """The query parameter ``request_id`` is the id that passes the
+        smart-router. One request that reached two providers gives two rows
+        under its id, and no row of another request."""
+        path = "/cosmos/bank/v1beta1/balances/lava1probe"
+        _get(_REST_URLS["1"] + path + "?request_id=mag3800-rest-a")
+        _get(_REST_URLS["2"] + path + "?request_id=mag3800-rest-a")
+        _get(_REST_URLS["1"] + path + "?request_id=mag3800-rest-b")
+        _get(_REST_URLS["1"] + path)
+        _, hist, _ = _get(_ctrl(sim, "/history?request_id=mag3800-rest-a&pool=lava-sim-rest"))
+        assert hist["count"] == 2
+        assert sorted(e["pid"] for e in hist["history"]) == ["1", "2"]
+        assert {e["request_id"] for e in hist["history"]} == {"mag3800-rest-a"}
+        assert {e["method"] for e in hist["history"]} == {"GET /cosmos/bank/v1beta1/balances/{address}"}
+
+    def test_query_request_id_does_not_change_the_reply(self, sim):
+        """The parameter is for the history row only. The reply is the reply
+        of the same request with no id, and the page cursor still arrives."""
+        url = _REST_URLS["1"] + "/cosmos/staking/v1beta1/validators"
+        _, plain, _ = _get(url + "?pagination.key=CURSOR1")
+        status, with_id, _ = _get(url + "?request_id=mag3800-rest-c&pagination.key=CURSOR1")
+        assert status == 200
+        assert with_id == plain
+        assert with_id["pagination"]["inbound_key"] == "CURSOR1"
+
+    def test_query_request_id_wins_over_the_header_through_a_socket(self, sim):
+        _get(
+            _REST_URLS["1"] + "/cosmos/staking/v1beta1/validators?request_id=mag3800-rest-d",
+            headers={"X-Request-Id": "from-header"},
+        )
+        _, by_query, _ = _get(_ctrl(sim, "/history?request_id=mag3800-rest-d&pool=lava-sim-rest"))
+        _, by_header, _ = _get(_ctrl(sim, "/history?request_id=from-header&pool=lava-sim-rest"))
+        assert by_query["count"] == 1
+        assert by_header["count"] == 0
+
+    def test_lower_case_header_is_read_through_a_socket(self, sim):
+        """urllib sends every header name in title case, so this test uses
+        http.client, which sends the name as it is written."""
+        conn = http.client.HTTPConnection("127.0.0.1", port_of("lava-sim-rest", "1", "rest"), timeout=5)
+        try:
+            conn.request("GET", "/cosmos/staking/v1beta1/validators", headers={"x-request-id": "lower-case-9"})
+            assert conn.getresponse().status == 200
+        finally:
+            conn.close()
+        _, hist, _ = _get(_ctrl(sim, "/history?request_id=lower-case-9&pool=lava-sim-rest"))
+        assert hist["count"] == 1
+
+    def test_empty_query_request_id_falls_back_to_the_counter(self, sim):
+        _get(_REST_URLS["1"] + "/cosmos/staking/v1beta1/validators?request_id=")
+        _, hist, _ = _get(_ctrl(sim, "/history?pool=lava-sim-rest&pid=1"))
+        assert isinstance(hist["history"][-1]["request_id"], int)
 
     def test_404_recorded_with_method_label(self, sim):
         """Unknown paths still appear in /history under a method label."""

@@ -1,6 +1,8 @@
 """RestListener — Cosmos REST over HTTP. Drives serve() with GET requests and
 checks the wire plan + history, one behaviour per test."""
 
+import pytest
+
 from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.provider import Pool
 from provider_simulator.listeners import RawRequest, RestListener
@@ -268,3 +270,120 @@ def test_allowed_verbs_answers_for_the_slashed_form_too():
 
     assert allowed_verbs(_BLOCKS_LATEST + "/") == allowed_verbs(_BLOCKS_LATEST)
     assert allowed_verbs(_BLOCKS_LATEST) != [], "control: the plain form has verbs"
+
+
+# --- The request id ---------------------------------------------------------
+# The caller chooses the request id, and a test reads the rows of one request
+# with it. The smart-router passes a query string on to the provider, and it
+# passes a header only when the chain spec declares that header. So the query
+# parameter ``request_id`` is the place that works through the router. The
+# header ``X-Request-Id`` stays for a caller that talks to the simulator
+# directly.
+
+_VALIDATORS = "/cosmos/staking/v1beta1/validators"
+
+
+def _with_query(path, query, headers=None, verb="GET"):
+    return RawRequest(verb=verb, path=path, query=query, headers=headers or {})
+
+
+def _only_row(provider):
+    rows = provider.log.get_history()
+    assert len(rows) == 1, f"expected one history row, got {len(rows)}"
+    return rows[0]
+
+
+def test_request_id_comes_from_the_query_parameter():
+    listener, provider = _listener()
+    listener.serve(_with_query(_VALIDATORS, {"request_id": ["probe-a1"]}))
+    assert _only_row(provider)["request_id"] == "probe-a1"
+
+
+def test_the_query_parameter_wins_over_the_header():
+    listener, provider = _listener()
+    listener.serve(_with_query(_VALIDATORS, {"request_id": ["from-query"]}, headers={"X-Request-Id": "from-header"}))
+    assert _only_row(provider)["request_id"] == "from-query"
+
+
+def test_the_first_value_counts_when_the_parameter_repeats():
+    listener, provider = _listener()
+    listener.serve(_with_query(_VALIDATORS, {"request_id": ["first", "second"]}))
+    assert _only_row(provider)["request_id"] == "first"
+
+
+def test_a_query_value_that_is_not_in_a_list_is_read_too():
+    # A live request goes through parse_qs, which puts each value in a list. A
+    # request that a test builds by hand can carry the bare value.
+    listener, provider = _listener()
+    listener.serve(_with_query(_VALIDATORS, {"request_id": "bare"}))
+    assert _only_row(provider)["request_id"] == "bare"
+
+
+@pytest.mark.parametrize("header_name", ["X-Request-Id", "x-request-id", "X-REQUEST-ID", "X-request-id"])
+def test_the_header_is_read_in_any_letter_case(header_name):
+    listener, provider = _listener()
+    listener.serve(_get(_VALIDATORS, headers={header_name: "trace-7"}))
+    assert _only_row(provider)["request_id"] == "trace-7"
+
+
+def test_an_empty_query_value_is_no_id_so_the_header_applies():
+    listener, provider = _listener()
+    listener.serve(_with_query(_VALIDATORS, {"request_id": [""]}, headers={"X-Request-Id": "from-header"}))
+    assert _only_row(provider)["request_id"] == "from-header"
+
+
+def test_an_empty_header_value_is_no_id_so_the_counter_applies():
+    listener, provider = _listener()
+    listener.serve(_get(_VALIDATORS, headers={"x-request-id": ""}))
+    assert isinstance(_only_row(provider)["request_id"], int)
+
+
+def test_with_no_id_the_counter_of_the_simulator_stays():
+    listener, provider = _listener()
+    listener.serve(_get(_VALIDATORS))
+    listener.serve(_get(_VALIDATORS))
+    ids = sorted(row["request_id"] for row in provider.log.get_history())
+    assert all(isinstance(request_id, int) for request_id in ids)
+    assert ids[1] == ids[0] + 1
+
+
+def test_a_plain_number_from_the_caller_is_kept_as_text():
+    # The counter gives numbers and the filter compares text, so a caller must
+    # not send a plain number. The simulator does not refuse one: the row holds
+    # the text that arrived.
+    listener, provider = _listener()
+    listener.serve(_with_query(_VALIDATORS, {"request_id": ["7"]}))
+    assert _only_row(provider)["request_id"] == "7"
+
+
+@pytest.mark.parametrize("verb", ["GET", "POST", "PUT", "DELETE", "HEAD"])
+def test_every_verb_that_reaches_the_listener_records_the_query_id(verb):
+    listener, provider = _listener()
+    listener.serve(_with_query(_VALIDATORS, {"request_id": [f"id-{verb}"]}, verb=verb))
+    assert _only_row(provider)["request_id"] == f"id-{verb}"
+
+
+def test_an_unknown_path_keeps_the_id_on_its_not_found_row():
+    listener, provider = _listener()
+    res = listener.serve(_with_query("/nope", {"request_id": ["lost-1"]}))
+    assert res.status == 404
+    row = _only_row(provider)
+    assert (row["status"], row["request_id"]) == ("not_found", "lost-1")
+
+
+def test_a_fault_row_keeps_the_id():
+    listener, provider = _listener()
+    provider.scenario.update({"mode": "error", "error_code": -1, "error_message": "boom"})
+    listener.serve(_with_query(_VALIDATORS, {"request_id": ["fault-1"]}))
+    row = _only_row(provider)
+    assert (row["status"], row["request_id"]) == ("error", "fault-1")
+
+
+def test_a_provider_wide_down_row_has_no_request_id():
+    # A dead node does not read the request, so the row has the method "*" and
+    # no request id. A test counts those calls with /stats.
+    listener, provider = _listener()
+    provider.scenario.update({"mode": "down"})
+    listener.serve(_with_query(_VALIDATORS, {"request_id": ["never-read"]}))
+    row = _only_row(provider)
+    assert (row["status"], row["method"], row["request_id"]) == ("down", "*", None)

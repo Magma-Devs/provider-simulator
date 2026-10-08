@@ -273,6 +273,23 @@ the scenario's `transports` list, and `down` obeys that list like every other
 mode. With no list set, `down` still reaches every endpoint the provider has.
 _Avoid_: chain, chain type
 
+## The request flow
+
+**Request flow**:
+The fixed order of steps that answers one request, from the first fault check to
+the history row.
+_Avoid_: pipeline, handler chain, request path
+
+**Listener**:
+The request flow of one endpoint. An endpoint is the door a provider listens on;
+a listener is what answers a request that comes through that door.
+_Avoid_: handler, servicer, endpoint (the endpoint is the door, not the flow)
+
+**Ability**:
+Something that a test can make an interface do or read. The request id is an
+ability.
+_Avoid_: feature, capability, option
+
 ## Telemetry
 
 **Call log**:
@@ -284,6 +301,15 @@ _Avoid_: log, telemetry, journal
 The recent calls from the ring buffer. Read it per request, filtered by request
 id.
 _Avoid_: log, trace, calls
+
+**History row**:
+One call in the history of a provider.
+_Avoid_: entry, record, log line
+
+**Request id**:
+The value that says which request a history row belongs to. The caller chooses
+it, and each interface names where the caller puts it.
+_Avoid_: correlation id, trace id, call id
 
 **Stats**:
 The counters that never reset, covering the whole session. The router's own
