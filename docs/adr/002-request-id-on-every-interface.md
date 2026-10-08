@@ -1,8 +1,8 @@
 # ADR-002: A request id on every interface
 
-**Status**: Proposed
+**Status**: Accepted. Victoria gave her go for the implementation on 2026-10-08: "you have my go". Pull request 138 of `provider-simulator` implements this record, and it is merged: commit `7b4ccf5` on `main`.
 
-**Date**: 2026-10-07 (version 2.2: after the review of the session `reviewer`, the runs on the local k3d cluster, and the review of the session `reviewer-2`)
+**Date**: 2026-10-07 (version 2.2: after the review of the session `reviewer`, the runs on the local k3d cluster, and the review of the session `reviewer-2`). Version 2.3: 2026-10-08, after the merge.
 
 **Deciders**: Victoria
 
@@ -82,16 +82,16 @@
 - gRPC: the servicer passes the request message to the listener. Today it passes the method name only (`server.py:1159-1169`).
 - The router reads the description of a method from the provider: it asks the provider's reflection for the symbol of the service (`protocol/chainlib/grpc.go:790-805` of smart-router). RAN on 2026-10-07: reflection finds the symbol `cosmos.bank.v1beta1.Query` when the bank stubs are loaded in the server process. The list of names given to `reflection.enable_server_reflection` feeds "list services" only. So the server must import the bank stubs and register the servicer, and the name is added to the list for `grpcurl`. The test asks reflection for the symbol.
 - VERIFIED BY A RUN on 2026-10-07 at 22:15 on the local k3d cluster, router build `v1.5.8-85-g4369814`, with a probe image: the router passes the REST query parameter `request_id` and the gRPC field `address` of `AllBalances` on to the provider. One history row came back for each id, two times on REST and two times on gRPC (section 11 of the design document, rows A1 and A2).
-- The content of `AllBalances` is the content of the REST route `/cosmos/bank/v1beta1/balances/{address}`: one coin, `ulava`, amount `1000000`.
+- The balances of `AllBalances` are the balances of the REST route `/cosmos/bank/v1beta1/balances/{address}`: one coin, `ulava`, amount `1000000`.
 - A row gets its request id before the provider waits. So a read by request id finds a request that a provider holds with `latency_ms` or `hang`.
-- Before the pull request merges: one request of `AllBalances` through `lava-sim-grpc-router` on the local k3d cluster, with the branch build, and one read of its row. The probe of 2026-10-07 already showed that the router sends the `address` field on, and that the chain spec lists the method: the reply carries `lava-user-request-type: cosmos.bank.v1beta1.Query/AllBalances` with no `Default-` in front, and a method that no spec lists carries `Default-` (a control run, saved in the evidence folder). The run with the branch build repeats it for the real code.
+- Before the pull request merges: one request of `AllBalances` through `lava-sim-grpc-router` on the local k3d cluster, with the branch build, and one read of its row. The probe of 2026-10-07 already showed that the router sends the `address` field on, and that the chain spec lists the method: the reply carries `lava-user-request-type: cosmos.bank.v1beta1.Query/AllBalances` with no `Default-` in front, and a method that no spec lists carries `Default-` (a control run, saved in the evidence folder). The run with the branch build repeats it for the real code. DONE on 2026-10-08 at commit `9a2c834` of the branch: `AllBalances` through `lava-sim-grpc-router` two times, and a REST request with `request_id` through `lava-sim-rest-router` two times. Each request gave one row under its id, and a REST request with no id gave a counter value.
 - **Migration path**: no test that exists must change. The simulator change merges first. Then the request helpers of the automation repository add the id on REST and call `AllBalances` on gRPC.
-- A test that requires zero rows first sends a control request and requires one row or more for its id. That proves that the id travels.
+- A test that requires zero rows first sends a control request and requires one row or more for its id. That proves that the id travels. The proof holds only while no provider of the pool is in the mode `down` (decision 5). Section 13 of the design document has the rule for a pool with a `down` provider.
 
 ## Success Metrics
 
 - Through the router on the local k3d cluster: one REST request with `?request_id=<id>` and one `AllBalances` request each give their rows under `GET /history?request_id=<id>&pool=<pool>`, and no row of another request.
-- The test at `tests/test_simulator_grpc.py:546-551` passes with no edit: a `GetLatestBlock` row has no request id.
+- The test at `tests/test_simulator_grpc.py:546-551` passes with no change of its assertion: a `GetLatestBlock` row has no request id.
 - The tests of MAG-3800 read rows by id on REST and on gRPC, with a control.
 
 ## Review Date
