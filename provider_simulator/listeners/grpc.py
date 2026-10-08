@@ -213,11 +213,6 @@ class GrpcListener(Listener):
     def build_down(self) -> ServeResult:
         return ServeResult(action="respond", body=GrpcStatus("UNAVAILABLE", "provider down"))
 
-    def method_key(self, request: dict) -> object:
-        # gRPC does not merge the fault keys of a per-method override. The
-        # chain reads the content keys of the override.
-        return None
-
     def build_fault(self, verdict: fault_policy.Verdict, request: dict) -> ServeResult:
         if verdict.kind == "hang":
             return ServeResult(action="hang", body=GrpcStatus("CANCELLED", "hang timeout"))

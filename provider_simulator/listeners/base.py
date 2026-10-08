@@ -235,7 +235,9 @@ class Listener(ABC):
                     latency_ms=latency,
                     request_id=self.request_id(parsed),
                 )
-                return ServeResult(action="no_body", status=503, latency_ms=latency)
+                result = self.build_down()
+                result.latency_ms = latency
+                return result
             if verdict.kind != "none":
                 result = self.build_fault(verdict, parsed)
                 status_label = _STATUS_LABEL[verdict.kind]
@@ -309,9 +311,9 @@ class Listener(ABC):
 
     def method_key(self, request: dict) -> object:
         """The ``responses`` key that selects this request's per-method fault
-        override. Default: the JSON-RPC method name. REST overrides to its
-        (verb, template) pair; transports whose overrides resolve inside the
-        chain (Tendermint) return None to skip the merge."""
+        override. Default: the method name of the request, which is the key on
+        JSON-RPC, Tendermint RPC and gRPC. REST overrides to its (verb,
+        template) pair."""
         return request.get("method") if isinstance(request, dict) else None
 
     def build_body_override(self, method_cfg: dict) -> "ServeResult | None":

@@ -429,6 +429,24 @@ def test_the_flow_asks_the_hook_for_the_reply_of_a_down_provider():
     assert (row["method"], row["status"], row["latency_ms"], row["request_id"]) == ("*", "down", 0, None)
 
 
+def test_the_flow_asks_the_hook_for_the_reply_of_a_per_method_down_and_gives_it_the_latency():
+    # The row of a per-method down names its method and its request id, and it
+    # records the latency: the request was read to find the entry, and the
+    # adapter waits before it answers.
+    listener, provider = _probe()
+    override = {("GET", _BLOCKS_LATEST): {"mode": "down", "latency_ms": 250}}
+    provider.scenario.update({"responses": override})
+    res = listener.serve(_with_query(_BLOCKS_LATEST, {"request_id": ["probe-id"]}))
+    assert (res.action, res.status, res.body, res.latency_ms) == ("respond", 418, {"probe": "down"}, 250)
+    row = provider.log.get_history()[0]
+    assert (row["method"], row["status"], row["latency_ms"], row["request_id"]) == (
+        f"GET {_BLOCKS_LATEST}",
+        "down",
+        250,
+        "probe-id",
+    )
+
+
 def test_the_flow_asks_the_hook_to_corrupt_a_reply_and_takes_its_row_label():
     listener, provider = _probe()
     provider.scenario.update({"corruption_mode": "truncated"})

@@ -1259,18 +1259,24 @@ class TestGrpcWhichCallsWait:
         assert resp.block.header.height == GRPC_LATEST_BLOCK
         assert elapsed < 1.5, f"the reply came after {elapsed:.3f} s, so the pause of 3 s was not performed"
 
-    def test_a_fault_key_in_a_per_method_override_is_not_read(self, sim):
-        """gRPC reads ``error_stub``, ``error`` and ``result`` from a per-method
-        override. It does not read the fault keys, such as ``mode`` and
-        ``latency_ms``: the call below is answered, and at once."""
-        status, body = _set_grpc(sim, "1", responses={"GetLatestBlock": {"mode": "down", "latency_ms": 3000}})
+    def test_a_fault_key_in_a_per_method_override_reaches_the_call_of_that_method(self, sim):
+        """The flow merges the fault keys of a per-method override, such as
+        ``mode`` and ``latency_ms``, as on JSON-RPC and REST. The call of the
+        named method waits for the latency of the entry, and then it gets the
+        status of a down provider. Its row names the method: the request was
+        read to find the entry. A call of another method is answered at once."""
+        status, body = _set_grpc(sim, "1", responses={"GetLatestBlock": {"mode": "down", "latency_ms": 600}})
         assert status == 200, body
         started = time.monotonic()
-        resp = _call_get_latest_block(_GRPC_ADDRS["1"])
+        answer = _status_of(_call_get_latest_block, _GRPC_ADDRS["1"])
         elapsed = time.monotonic() - started
-        assert resp.block.header.height == GRPC_LATEST_BLOCK
-        assert elapsed < 1.5, f"the reply came after {elapsed:.3f} s, so the latency of the override was applied"
-        assert [(row["status"], row["latency_ms"]) for row in _rows(sim)] == [("success", 0)]
+        assert answer == (grpc.StatusCode.UNAVAILABLE, "provider down")
+        assert 0.55 <= elapsed < 5.0, f"the status came after {elapsed:.3f} s with latency_ms=600 in the entry"
+        assert _call_get_node_info(_GRPC_ADDRS["1"]).default_node_info.network == "lava-sim"
+        assert [(row["method"], row["status"], row["latency_ms"]) for row in _rows(sim)] == [
+            ("GetLatestBlock", "down", 600),
+            ("GetNodeInfo", "success", 0),
+        ]
 
     def test_fail_first_n_gives_exactly_that_many_down_rows(self, sim):
         status, body = _set_grpc(sim, "1", mode="down", fail_first_n=3, then_mode="success")

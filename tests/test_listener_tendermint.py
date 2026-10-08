@@ -106,10 +106,10 @@ def test_latency_ms_of_the_row_of_a_call_that_the_provider_did_not_wait_for(mode
 
 
 # --- A fault key in a per-method override -------------------------------------
-# Today Tendermint RPC does not read the fault keys of a per-method override:
-# mode, latency_ms, error_probability, error_code, error_message, http_status
-# and drop_at. Pull request 2c makes the flow merge them, as on JSON-RPC and
-# REST.
+# The flow merges the seven fault keys of the entry of the called method into
+# the scenario, as on JSON-RPC and REST: mode, latency_ms, error_probability,
+# error_code, error_message, http_status and drop_at. The key of the entry is
+# the method name, for the POST form and for the GET form.
 
 
 def _row(provider):
@@ -126,27 +126,57 @@ def _row(provider):
         # want_row: the method, the status, latency_ms and the request id.
         pytest.param(
             {"responses": {"status": {"mode": "down"}}},
-            ("respond", 200, 0, "result"),
-            ("status", "success", 0, 5),
+            ("no_body", 503, 0, None),
+            ("status", "down", 0, 5),
             id="mode-down",
         ),
         pytest.param(
             {"responses": {"status": {"mode": "rate_limit"}}},
-            ("respond", 200, 0, "result"),
-            ("status", "success", 0, 5),
+            ("respond", 429, 0, "error"),
+            ("status", "rate_limit", 0, 5),
             id="mode-rate-limit",
         ),
         pytest.param(
             {"responses": {"status": {"latency_ms": 700}}},
-            ("respond", 200, 0, "result"),
-            ("status", "success", 0, 5),
+            ("respond", 200, 700, "result"),
+            ("status", "success", 700, 5),
             id="latency",
         ),
         pytest.param(
             {"responses": {"status": {"error_probability": 1.0}}},
+            ("respond", 200, 0, "error"),
+            ("status", "error", 0, 5),
+            id="error-probability",
+        ),
+        pytest.param(
+            {"responses": {"status": {"mode": "down", "latency_ms": 250}}},
+            ("no_body", 503, 250, None),
+            ("status", "down", 250, 5),
+            id="mode-down-waits-for-the-latency-of-the-entry",
+        ),
+        pytest.param(
+            {"mode": "rate_limit", "responses": {"status": {"mode": "success"}}},
             ("respond", 200, 0, "result"),
             ("status", "success", 0, 5),
-            id="error-probability",
+            id="mode-success-lifts-a-fault-of-the-provider-that-is-not-down",
+        ),
+        pytest.param(
+            {"responses": {"block": {"mode": "rate_limit"}}},
+            ("respond", 200, 0, "result"),
+            ("status", "success", 0, 5),
+            id="an-entry-of-another-method-does-not-apply",
+        ),
+        pytest.param(
+            {"responses": {"status": {"mode": "rate_limit"}}, "transports": ["ws"]},
+            ("respond", 200, 0, "result"),
+            ("status", "success", 0, 5),
+            id="a-filter-that-does-not-name-the-endpoint-holds-the-fault-key-back",
+        ),
+        pytest.param(
+            {"responses": {"status": {"latency_ms": 700}}, "transports": ["ws"]},
+            ("respond", 200, 0, "result"),
+            ("status", "success", 0, 5),
+            id="a-filter-that-does-not-name-the-endpoint-holds-the-latency-of-the-entry-back",
         ),
     ],
 )
@@ -157,3 +187,22 @@ def test_what_a_fault_key_in_a_per_method_override_does(scenario, want_reply, wa
     body_key = next((key for key in ("result", "error") if isinstance(res.body, dict) and key in res.body), None)
     assert (res.action, res.status, res.latency_ms, body_key) == want_reply
     assert _row(provider) == want_row
+
+
+def test_a_per_method_error_takes_its_code_its_message_and_its_http_status_from_the_entry():
+    listener, _ = _listener()
+    entry = {"error_probability": 1.0, "error_code": -32005, "error_message": "limit exceeded", "http_status": 500}
+    listener.provider.scenario.update({"responses": {"status": entry}})
+    res = listener.serve(_post("status", req_id=9))
+    assert (res.status, res.body["id"], res.body["error"]) == (500, 9, {"code": -32005, "message": "limit exceeded"})
+
+
+def test_the_get_form_uses_the_same_per_method_entry_as_the_post_form():
+    listener, provider = _listener()
+    provider.scenario.update({"responses": {"status": {"mode": "rate_limit"}}})
+    assert listener.serve(_get("/status")).status == 429
+    assert listener.serve(_get("/health")).status == 200
+    assert [(row["method"], row["status"]) for row in provider.log.get_history()] == [
+        ("status", "rate_limit"),
+        ("health", "success"),
+    ]

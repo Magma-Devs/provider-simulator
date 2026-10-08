@@ -331,14 +331,14 @@ def _decide(listener, method="GetLatestBlock", request=None, lava_headers=None):
     return _Decision("OK", "", result.latency_ms, False, None, clears)
 
 
-def _status(code, text, *, hangs=False, drop_at=None):
-    """The caller gets a status, with no wait."""
-    return _Decision(code, text, 0, hangs, drop_at, None)
+def _status(code, text, *, hangs=False, drop_at=None, wait_ms=0):
+    """The caller gets a status. With no ``wait_ms`` the adapter does not wait."""
+    return _Decision(code, text, wait_ms, hangs, drop_at, None)
 
 
-def _reply(*, clears=None):
-    """The caller gets a reply message, with no wait."""
-    return _Decision("OK", "", 0, False, None, clears)
+def _reply(*, clears=None, wait_ms=0):
+    """The caller gets a reply message. With no ``wait_ms`` the adapter does not wait."""
+    return _Decision("OK", "", wait_ms, False, None, clears)
 
 
 def _override(cfg, method="GetLatestBlock"):
@@ -498,21 +498,9 @@ def _row(provider):
             "success",
             id="result-override-in-the-default-entry",
         ),
-        # A fault key in a per-method override is not read on gRPC.
-        pytest.param(_override({"mode": "down"}), _reply(), "success", id="per-method-mode-down-is-not-read"),
-        pytest.param(
-            _override({"mode": "rate_limit"}),
-            _reply(),
-            "success",
-            id="per-method-mode-rate-limit-is-not-read",
-        ),
-        pytest.param(_override({"latency_ms": 700}), _reply(), "success", id="per-method-latency-is-not-read"),
-        pytest.param(
-            _override({"error_probability": 1.0}),
-            _reply(),
-            "success",
-            id="per-method-error-probability-is-not-read",
-        ),
+        # A down provider does not read the request, so a per-method override
+        # cannot lift its down. The table of the fault keys of a per-method
+        # override is below this one.
         pytest.param(
             {"mode": "down", **_override({"mode": "success"})},
             _status("UNAVAILABLE", "provider down"),
@@ -699,6 +687,133 @@ def test_what_serve_decides_for_one_call(scenario, want, want_row_status):
     # the row of a provider-wide down.
     want_method = "*" if want_row_status == "down" else "GetLatestBlock"
     assert _row(provider) == (want_method, want_row_status, 0, None)
+
+
+# --- A fault key in a per-method override -------------------------------------
+# The flow merges the seven fault keys of the entry of the called method into
+# the scenario, as on JSON-RPC and REST: mode, latency_ms, error_probability,
+# error_code, error_message, http_status and drop_at. The row of a per-method
+# down names its method and waits for its latency: the request was read to find
+# the entry.
+
+_GLB = "GetLatestBlock"
+
+
+@pytest.mark.parametrize(
+    "scenario, want, want_row",
+    [
+        pytest.param(
+            _override({"mode": "down"}),
+            _status("UNAVAILABLE", "provider down"),
+            (_GLB, "down", 0, None),
+            id="mode-down",
+        ),
+        pytest.param(
+            _override({"mode": "down", "latency_ms": 250}),
+            _status("UNAVAILABLE", "provider down", wait_ms=250),
+            (_GLB, "down", 250, None),
+            id="mode-down-waits-for-the-latency-of-the-entry",
+        ),
+        pytest.param(
+            _override({"mode": "rate_limit"}),
+            _status("RESOURCE_EXHAUSTED", "Too many requests"),
+            (_GLB, "rate_limit", 0, None),
+            id="mode-rate-limit",
+        ),
+        pytest.param(
+            _override({"mode": "hang", "latency_ms": 250}),
+            _status("CANCELLED", "hang timeout", hangs=True),
+            (_GLB, "hang", 0, None),
+            id="mode-hang-does-not-wait-for-a-latency",
+        ),
+        pytest.param(
+            _override({"mode": "drop_connection", "drop_at": "after_headers"}),
+            _status("UNAVAILABLE", "connection dropped", drop_at="after_headers"),
+            (_GLB, "drop_connection", 0, None),
+            id="mode-drop-connection-with-its-drop-at",
+        ),
+        pytest.param(_override({"latency_ms": 700}), _reply(wait_ms=700), (_GLB, "success", 700, None), id="latency"),
+        pytest.param(
+            {"latency_ms": 250, **_override({"latency_ms": 700})},
+            _reply(wait_ms=700),
+            (_GLB, "success", 700, None),
+            id="the-latency-of-the-entry-wins-over-the-latency-of-the-provider",
+        ),
+        pytest.param(
+            _override({"error_probability": 1.0}),
+            _status("UNKNOWN", "Internal error"),
+            (_GLB, "error", 0, None),
+            id="error-probability",
+        ),
+        pytest.param(
+            _override({"error_probability": 1.0, "error_message": "NOT_FOUND"}),
+            _status("NOT_FOUND", "NOT_FOUND"),
+            (_GLB, "error", 0, None),
+            id="error-message-of-the-entry",
+        ),
+        pytest.param(
+            _override({"error_probability": 1.0, "error_message": "no status has this name", "error_code": 5}),
+            _status("NOT_FOUND", "no status has this name"),
+            (_GLB, "error", 0, None),
+            id="error-code-of-the-entry",
+        ),
+        pytest.param(
+            {"mode": "rate_limit", **_override({"mode": "success"})},
+            _reply(),
+            (_GLB, "success", 0, None),
+            id="mode-success-lifts-a-fault-of-the-provider-that-is-not-down",
+        ),
+        pytest.param(
+            _override({"mode": "rate_limit"}, method="GetNodeInfo"),
+            _reply(),
+            (_GLB, "success", 0, None),
+            id="an-entry-of-another-method-does-not-apply",
+        ),
+        pytest.param(
+            {"responses": {"default": {"mode": "rate_limit"}}},
+            _reply(),
+            (_GLB, "success", 0, None),
+            id="a-fault-key-in-the-default-entry-is-not-read",
+        ),
+        pytest.param(
+            {**_override({"mode": "rate_limit"}), "transports": ["ws"]},
+            _reply(),
+            (_GLB, "success", 0, None),
+            id="a-filter-that-does-not-name-the-endpoint-holds-the-fault-key-back",
+        ),
+        pytest.param(
+            {**_override({"latency_ms": 700}), "transports": ["ws"]},
+            _reply(),
+            (_GLB, "success", 0, None),
+            id="a-filter-that-does-not-name-the-endpoint-holds-the-latency-of-the-entry-back",
+        ),
+        pytest.param(
+            {**_override({"mode": "rate_limit"}), "transports": ["http2"]},
+            _status("RESOURCE_EXHAUSTED", "Too many requests"),
+            (_GLB, "rate_limit", 0, None),
+            id="a-filter-that-names-the-endpoint-lets-the-fault-key-through",
+        ),
+        pytest.param(
+            _override({"mode": "rate_limit", "error_stub": "NOT_FOUND"}),
+            _status("RESOURCE_EXHAUSTED", "Too many requests"),
+            (_GLB, "rate_limit", 0, None),
+            id="a-fault-key-comes-before-an-error-stub-of-the-same-entry",
+        ),
+    ],
+)
+def test_what_a_fault_key_in_a_per_method_override_does(scenario, want, want_row):
+    listener, provider = _listener()
+    _upd(listener, scenario)
+    assert _decide(listener) == want
+    assert _row(provider) == want_row
+
+
+def test_the_row_of_a_per_method_down_keeps_the_request_id():
+    listener, provider = _listener()
+    _upd(listener, _override({"mode": "down"}, method="AllBalances"))
+    want = _status("UNAVAILABLE", "provider down")
+    assert _decide(listener, "AllBalances", _all_balances("lava1-probe-d")) == want
+    assert _row(provider) == ("AllBalances", "down", 0, "lava1-probe-d")
 
 
 def test_the_row_of_get_node_info_names_its_method():
