@@ -54,12 +54,38 @@ _ID = 0
 
 
 def _next_request_id() -> int:
-    """Sim-side monotonic id used when the caller sends no X-Request-Id, so every
+    """Sim-side monotonic id used when the caller sends no request id, so every
     REST call still gets a stable /history correlation."""
     global _ID
     with _ID_LOCK:
         _ID += 1
         return _ID
+
+
+# Where a REST caller puts the request id. The query parameter comes first: the
+# smart-router passes a query string on to the provider, and it passes a header
+# only when the chain spec declares that header.
+_REQUEST_ID_PARAM = "request_id"
+_REQUEST_ID_HEADER = "x-request-id"
+
+
+def _caller_request_id(request: RawRequest) -> str | None:
+    """The request id that the caller chose, or None when it sent none.
+
+    The query parameter ``request_id`` wins over the header ``X-Request-Id``.
+    The header name is matched in any letter case, because a header name has no
+    letter case in HTTP. An empty value is no id.
+    """
+    value = (request.query or {}).get(_REQUEST_ID_PARAM)
+    if isinstance(value, (list, tuple)):
+        # parse_qs puts each value in a list. The first value counts.
+        value = value[0] if value else None
+    if value:
+        return str(value)
+    for name, header_value in (request.headers or {}).items():
+        if name.lower() == _REQUEST_ID_HEADER and header_value:
+            return str(header_value)
+    return None
 
 
 def allowed_verbs(path: str) -> list[str]:
@@ -87,7 +113,7 @@ class RestListener(Listener):
         verb = request.verb.upper()
         route_verb = _ROUTE_VERB.get(verb, verb)
         path = request.path
-        req_id = request.headers.get("X-Request-Id") or _next_request_id()
+        req_id = _caller_request_id(request) or _next_request_id()
 
         template = None
         path_params: dict = {}
