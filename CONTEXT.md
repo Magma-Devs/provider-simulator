@@ -308,7 +308,7 @@ _Avoid_: entry, record, log line
 
 **Request id**:
 The value that says which request a history row belongs to. The caller chooses
-it, and each interface names the one place where the caller puts it.
+it, and each interface names where the caller puts it.
 _Avoid_: correlation id, trace id, call id
 
 **Stats**:

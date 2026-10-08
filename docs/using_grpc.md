@@ -60,7 +60,8 @@ grpcurl -plaintext -d '{}' localhost:18548 cosmos.base.tendermint.v1beta1.Servic
 # 6. Real call — AllBalances returns one coin (ulava, 1000000). The `address`
 #    is the request id of the history row, so a test can read the rows of this
 #    one call. The bank service lists more methods, and the simulator serves
-#    this one only: each other method answers Unimplemented.
+#    this one only: each other method answers Unimplemented, and such a call
+#    writes no history row and no count.
 grpcurl -plaintext -d '{"address":"mytest-7f3a"}' localhost:18548 cosmos.bank.v1beta1.Query/AllBalances
 curl -s "https://sim-control.<BASE_DOMAIN>/history?request_id=mytest-7f3a&pool=lava-sim-grpc"
 ```

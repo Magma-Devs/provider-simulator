@@ -122,8 +122,11 @@ def check_servicers(
     the gRPC adapter registers for it. A class serves the public methods that
     it defines itself: a method that it only inherits from the generated base
     answers UNIMPLEMENTED. The gRPC adapter calls this before it starts a
-    server, so a served method always has a row in ``SERVED_METHODS``, and the
-    refusal of two methods of one name sees every served method.
+    server. So each method that the classes of ``servicers`` serve has a row in
+    ``SERVED_METHODS``, and the refusal of two methods of one name sees each of
+    them. The check reads the classes that the caller passes, and no other
+    class. It does not compare the request-id field of a row with the request
+    message.
     """
     table = SERVED_METHODS if served is None else served
     in_code = {
