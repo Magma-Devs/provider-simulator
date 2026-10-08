@@ -38,7 +38,8 @@ These are paste-ready. Replace the target the first time (`localhost:18548` or `
 ```bash
 # 1. Service catalogue — proves reflection is up
 grpcurl -plaintext localhost:18548 list
-# → cosmos.base.tendermint.v1beta1.Service
+# → cosmos.bank.v1beta1.Query
+#   cosmos.base.tendermint.v1beta1.Service
 #   grpc.reflection.v1alpha.ServerReflection
 
 # 2. Methods on the cosmos service
@@ -55,6 +56,13 @@ grpcurl -plaintext -d '{}' localhost:18548 cosmos.base.tendermint.v1beta1.Servic
 
 # 5. Real call — GetNodeInfo (version probe used during provider warmup)
 grpcurl -plaintext -d '{}' localhost:18548 cosmos.base.tendermint.v1beta1.Service/GetNodeInfo
+
+# 6. Real call — AllBalances returns one coin (ulava, 1000000). The `address`
+#    is the request id of the history row, so a test can read the rows of this
+#    one call. The bank service lists more methods, and the simulator serves
+#    this one only: each other method answers Unimplemented.
+grpcurl -plaintext -d '{"address":"mytest-7f3a"}' localhost:18548 cosmos.bank.v1beta1.Query/AllBalances
+curl -s "https://sim-control.<BASE_DOMAIN>/history?request_id=mytest-7f3a&pool=lava-sim-grpc"
 ```
 
 Public-hostname equivalents — same commands, just swap `<BASE_DOMAIN>` for your server's actual domain (`config/base-domain.env`) and drop `-plaintext`:

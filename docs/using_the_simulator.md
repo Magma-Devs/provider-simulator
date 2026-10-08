@@ -141,6 +141,33 @@ curl -s "$SIM_CONTROL_URL/history?request_id=1"
 curl -s "$SIM_CONTROL_URL/history?last=120&lava_header_lava_stateful_api=true"
 ```
 
+### Read the rows of one request
+
+A caller chooses a request id. `GET /history?request_id=<id>&pool=<pool>` then returns the rows of that one request: one row for each provider that received it.
+
+| Interface | Where the caller puts the id |
+|---|---|
+| `jsonrpc` | The `id` of the body. |
+| `tendermintrpc`, POST | The `id` of the body. |
+| `rest` | The query parameter `request_id`. The smart-router passes it on to the provider. The header `X-Request-Id`, in any letter case, works only for a caller that talks to the simulator directly: the router passes a header only when the chain spec declares it. |
+| `grpc` | The field `address` of `cosmos.bank.v1beta1.Query/AllBalances`. `GetLatestBlock` and `GetNodeInfo` have an empty request, so their rows have no request id. |
+
+Three rules:
+
+- The id must not be a plain number. A REST call with no id gets a counter value of the simulator (1, 2, 3 and so on), and the filter compares text. So the filter for `request_id=1` matches the caller id `1` and the counter value 1.
+- The row of a provider-wide `down` has no request id, on every interface. A dead node does not read the request. Count those calls with `GET /stats`.
+- To prove that NO provider received a request, first send a control request with its own id and require one row or more for that id. That proves that the id travels. Then send the request under test.
+
+```bash
+# REST: the id is in the query string
+curl -s "http://localhost:18551/cosmos/bank/v1beta1/balances/lava1probe?request_id=mytest-9c1d"
+curl -s "$SIM_CONTROL_URL/history?request_id=mytest-9c1d&pool=lava-sim-rest"
+
+# gRPC: the id is the address of AllBalances
+grpcurl -plaintext -d '{"address":"mytest-7f3a"}' localhost:18548 cosmos.bank.v1beta1.Query/AllBalances
+curl -s "$SIM_CONTROL_URL/history?request_id=mytest-7f3a&pool=lava-sim-grpc"
+```
+
 For the full filter catalogue and example responses, see [`curl_reference.md`](curl_reference.md#history).
 
 ## Read aggregate stats
