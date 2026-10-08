@@ -264,6 +264,32 @@ def test_grpc_per_method_result_override():
     assert body["result"] == {"custom": 1}
 
 
+def test_grpc_all_balances_has_the_content_of_the_rest_balances_route():
+    st, body = _chain().build_success({"method": "AllBalances"}, _sc(), {}, "grpc")
+    _, rest_body = _chain().build_success(_rest(_BALANCES, path_params={"address": "lava1abc"}), _sc(), {}, "rest")
+    assert st == 200
+    assert body["grpc_method"] == "AllBalances"
+    assert body["balances"] == [{"denom": "ulava", "amount": "1000000"}]
+    assert body["balances"] == rest_body["balances"]
+
+
+def test_grpc_all_balances_reply_does_not_share_the_stub():
+    first = _chain().build_success({"method": "AllBalances"}, _sc(), {}, "grpc")[1]
+    first["balances"].append({"denom": "leak", "amount": "1"})
+    second = _chain().build_success({"method": "AllBalances"}, _sc(), {}, "grpc")[1]
+    assert second["balances"] == [{"denom": "ulava", "amount": "1000000"}]
+
+
+def test_grpc_all_balances_per_method_result_override():
+    st, body = _chain().build_success(
+        {"method": "AllBalances"},
+        _sc(responses={"AllBalances": {"result": {"balances": []}}}),
+        {},
+        "grpc",
+    )
+    assert body["result"] == {"balances": []}
+
+
 # ── the three heads ─────────────────────────────────────────────────────────
 # Lava serves a different height on each protocol, so it owns one head per
 # interface rather than the single ``head`` a one-protocol chain has.
