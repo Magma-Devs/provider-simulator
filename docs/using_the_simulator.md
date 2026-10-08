@@ -154,8 +154,8 @@ A caller chooses a request id. `GET /history?request_id=<id>&pool=<pool>` then r
 
 Three rules:
 
-- The id must not be a plain number. A REST call with no id gets a counter value of the simulator (1, 2, 3 and so on), and the filter compares text. So the filter for `request_id=1` matches the caller id `1` and the counter value 1.
-- The row of a provider-wide `down` has no request id, on every interface. A dead node does not read the request. Count those calls with `GET /stats`.
+- On REST and on gRPC, the id must not be a plain number. A REST call with no id gets a counter value of the simulator (1, 2, 3 and so on), and so does a Tendermint RPC call in the URL form. The filter compares text. So the filter for `request_id=1` matches the caller id `1` and the counter value 1. On JSON-RPC and on a Tendermint RPC POST the id is the `id` of the body, and it can be a number: choose a value that no other caller sends.
+- The row of a provider-wide `down` has no request id on a JSON-RPC, REST, Tendermint RPC or gRPC call. A dead node does not read the request. Count those calls with `GET /stats`. One case differs: the `down` row of a WebSocket subscribe frame keeps its method and its id.
 - To prove that NO provider received a request, first send a control request with its own id and require one row or more for that id. That proves that the id travels. Then send the request under test.
 
 ```bash
