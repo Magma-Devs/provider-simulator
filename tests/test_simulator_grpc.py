@@ -18,6 +18,9 @@ Coverage:
   History tracking            — gRPC requests show up in /history exactly
                                 like ETH/BTC ones, with the gRPC method name
                                 preserved (no JSON-RPC id).
+  Request id                  — AllBalances records its ``address`` as the
+                                request id of its history row.
+  Reflection                  — a served service is found by its symbol.
 
 Run with:
   pytest tests/test_simulator_grpc.py -v
@@ -27,12 +30,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import socket
+import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
 
 import grpc
 import pytest
+from grpc_reflection.v1alpha import reflection_pb2, reflection_pb2_grpc
 
 # Splice cosmos_pb2 onto sys.path so the generated stubs resolve. Must run
 # before the `from cosmos...` import below — isort must not reorder these
@@ -40,6 +48,8 @@ import pytest
 # matters).
 import cosmos_pb2  # noqa: F401  isort: split
 
+from cosmos.bank.v1beta1 import query_pb2 as bank_query_pb2  # isort: skip
+from cosmos.bank.v1beta1 import query_pb2_grpc as bank_query_pb2_grpc  # isort: skip
 from cosmos.base.tendermint.v1beta1 import query_pb2, query_pb2_grpc  # isort: skip
 
 from provider_simulator.chains.lava import GRPC_LATEST_BLOCK
@@ -155,6 +165,92 @@ def _call_get_node_info(address: str, timeout: float = 5.0, metadata: tuple = ()
             await channel.close()
 
     return asyncio.run(_do())
+
+
+def _call_all_balances(address: str, account: str, timeout: float = 5.0) -> bank_query_pb2.QueryAllBalancesResponse:
+    """Open an insecure channel, call AllBalances for ``account``, return the response."""
+
+    async def _do():
+        channel = grpc.aio.insecure_channel(address)
+        try:
+            stub = bank_query_pb2_grpc.QueryStub(channel)
+            req = bank_query_pb2.QueryAllBalancesRequest(address=account)
+            return await asyncio.wait_for(stub.AllBalances(req), timeout=timeout)
+        finally:
+            await channel.close()
+
+    return asyncio.run(_do())
+
+
+def _ask_reflection(address: str, request: reflection_pb2.ServerReflectionRequest, timeout: float = 5.0):
+    """Send one request to the server reflection service, return its reply."""
+
+    async def _do():
+        channel = grpc.aio.insecure_channel(address)
+        try:
+            stub = reflection_pb2_grpc.ServerReflectionStub(channel)
+            call = stub.ServerReflectionInfo(iter([request]))
+            return await asyncio.wait_for(call.read(), timeout=timeout)
+        finally:
+            await channel.close()
+
+    return asyncio.run(_do())
+
+
+def _free_port() -> int:
+    """A local TCP port that nothing listens on now."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# One gRPC endpoint in a process of its own, and a reflection lookup for each
+# symbol given on the command line. This script must NOT import a bank stub:
+# the lookup must find the bank service because the SERVER loaded it.
+_REFLECTION_PROBE = """
+import asyncio
+import sys
+import threading
+import time
+
+import grpc
+from grpc_reflection.v1alpha import reflection_pb2, reflection_pb2_grpc
+
+import server
+from provider_simulator.domain.endpoint import Endpoint
+from provider_simulator.domain.provider import Pool
+from provider_simulator.listeners.grpc import GrpcListener
+from provider_simulator.port_gate import PortGate
+
+port = int(sys.argv[1])
+endpoint = Endpoint("grpc", "http2", port)
+provider = Pool(name="lava-sim-grpc", chain="lava").add_provider("1", [endpoint])
+gate = PortGate(provider, endpoint)
+threading.Thread(
+    target=server._run_grpc_in_thread,
+    args=(GrpcListener(provider, endpoint), port, "127.0.0.1", gate),
+    daemon=True,
+).start()
+deadline = time.monotonic() + 10
+while not gate.accepts():
+    if time.monotonic() > deadline:
+        sys.exit("the gRPC endpoint did not open")
+    time.sleep(0.05)
+
+
+async def lookup(symbol):
+    async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+        stub = reflection_pb2_grpc.ServerReflectionStub(channel)
+        request = reflection_pb2.ServerReflectionRequest(file_containing_symbol=symbol)
+        reply = await stub.ServerReflectionInfo(iter([request])).read()
+        return reply.WhichOneof("message_response")
+
+
+for symbol in sys.argv[2:]:
+    print(symbol, asyncio.run(lookup(symbol)), flush=True)
+"""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -549,6 +645,122 @@ class TestGrpcHistoryTracking:
         _call_get_latest_block(_GRPC_ADDRS["1"])
         _, hist = _get(_ctrl(sim, "/history?pool=lava-sim-grpc&pid=1"))
         assert hist["history"][-1]["request_id"] is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The request id — AllBalances carries it in the field ``address``
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestGrpcAllBalances:
+    """The bank method that carries a request id. The caller chooses the
+    ``address``, and the history row holds it as the request id."""
+
+    def test_all_balances_returns_one_ulava_coin(self, sim):
+        resp = _call_all_balances(_GRPC_ADDRS["1"], "lava1-grpc-a")
+        assert [(coin.denom, coin.amount) for coin in resp.balances] == [("ulava", "1000000")]
+
+    def test_address_selects_the_rows_of_one_request(self, sim):
+        """One request that reached two providers gives two rows under its
+        address, and no row of another request."""
+        _call_all_balances(_GRPC_ADDRS["1"], "lava1-mag3800-a")
+        _call_all_balances(_GRPC_ADDRS["2"], "lava1-mag3800-a")
+        _call_all_balances(_GRPC_ADDRS["1"], "lava1-mag3800-b")
+        _call_get_latest_block(_GRPC_ADDRS["1"])
+        _, hist = _get(_ctrl(sim, "/history?request_id=lava1-mag3800-a&pool=lava-sim-grpc"))
+        assert hist["count"] == 2
+        assert sorted(e["pid"] for e in hist["history"]) == ["1", "2"]
+        assert {e["method"] for e in hist["history"]} == {"AllBalances"}
+        assert {e["request_id"] for e in hist["history"]} == {"lava1-mag3800-a"}
+
+    def test_a_failed_call_keeps_the_address_on_its_row(self, sim):
+        _set_grpc(sim, "1", mode="error", error_message="RESOURCE_EXHAUSTED")
+        with pytest.raises(grpc.RpcError) as excinfo:
+            _call_all_balances(_GRPC_ADDRS["1"], "lava1-mag3800-c")
+        assert excinfo.value.code() == grpc.StatusCode.RESOURCE_EXHAUSTED
+        _, hist = _get(_ctrl(sim, "/history?request_id=lava1-mag3800-c&pool=lava-sim-grpc"))
+        assert hist["count"] == 1
+        assert hist["history"][0]["status"] == "error"
+
+    def test_a_down_provider_row_has_no_request_id(self, sim):
+        _set_grpc(sim, "1", mode="down")
+        with pytest.raises(grpc.RpcError):
+            _call_all_balances(_GRPC_ADDRS["1"], "lava1-mag3800-d")
+        _, by_id = _get(_ctrl(sim, "/history?request_id=lava1-mag3800-d&pool=lava-sim-grpc"))
+        _, by_status = _get(_ctrl(sim, "/history?pool=lava-sim-grpc&pid=1&status=down"))
+        assert by_id["count"] == 0
+        assert by_status["count"] == 1
+        assert by_status["history"][0]["method"] == "AllBalances"
+
+    def test_missing_field_corruption_clears_the_balances(self, sim):
+        _set_grpc(sim, "1", corruption_mode="missing_field", missing_field="balances")
+        resp = _call_all_balances(_GRPC_ADDRS["1"], "lava1-grpc-e")
+        assert len(resp.balances) == 0
+
+    def test_result_override_replaces_the_balances(self, sim):
+        _set_grpc(sim, "1", responses={"AllBalances": {"result": {"balances": [{"denom": "uatom", "amount": "5"}]}}})
+        resp = _call_all_balances(_GRPC_ADDRS["1"], "lava1-grpc-f")
+        assert [(coin.denom, coin.amount) for coin in resp.balances] == [("uatom", "5")]
+
+    def test_other_bank_methods_answer_unimplemented(self, sim):
+        """The simulator serves one method of the bank service. Each other
+        method keeps the generated default. A service that is not registered
+        gives another text, "Method not found!", so the text is read too."""
+
+        async def _do():
+            channel = grpc.aio.insecure_channel(_GRPC_ADDRS["1"])
+            try:
+                stub = bank_query_pb2_grpc.QueryStub(channel)
+                await asyncio.wait_for(stub.TotalSupply(bank_query_pb2.QueryTotalSupplyRequest()), timeout=5.0)
+            finally:
+                await channel.close()
+
+        with pytest.raises(grpc.RpcError) as excinfo:
+            asyncio.run(_do())
+        assert excinfo.value.code() == grpc.StatusCode.UNIMPLEMENTED
+        assert "Method not implemented!" in excinfo.value.details()
+
+
+class TestGrpcReflection:
+    """The smart-router reads the description of a gRPC method from the
+    provider: it asks the provider's reflection for the SYMBOL of the service.
+    The list of services is for ``grpcurl list`` only."""
+
+    def test_reflection_lists_the_served_services(self, sim):
+        reply = _ask_reflection(_GRPC_ADDRS["1"], reflection_pb2.ServerReflectionRequest(list_services=""))
+        assert {service.name for service in reply.list_services_response.service} == {
+            "cosmos.bank.v1beta1.Query",
+            "cosmos.base.tendermint.v1beta1.Service",
+            "grpc.reflection.v1alpha.ServerReflection",
+        }
+
+    def test_reflection_finds_the_bank_symbol_because_the_server_loads_it(self, sim):
+        """This test module imports the bank stubs for its client, so a lookup
+        in this process finds the symbol with any server. The lookup runs in a
+        process of its own, where only the server can load the bank stubs.
+        The staking service is the control: its stubs are compiled, the
+        server does not load them, and the lookup fails."""
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                _REFLECTION_PROBE,
+                str(_free_port()),
+                "cosmos.bank.v1beta1.Query",
+                "cosmos.base.tendermint.v1beta1.Service",
+                "cosmos.staking.v1beta1.Query",
+            ],
+            cwd=_REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.splitlines() == [
+            "cosmos.bank.v1beta1.Query file_descriptor_response",
+            "cosmos.base.tendermint.v1beta1.Service file_descriptor_response",
+            "cosmos.staking.v1beta1.Query error_response",
+        ]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

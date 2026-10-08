@@ -1118,6 +1118,8 @@ def _run_grpc_in_thread(grpc_listener, port: int, host: str, gate: PortGate) -> 
     # imports below.
     import cosmos_pb2  # noqa: F401  isort: split
 
+    from cosmos.bank.v1beta1 import query_pb2 as bank_query_pb2  # isort: skip
+    from cosmos.bank.v1beta1 import query_pb2_grpc as bank_query_pb2_grpc  # isort: skip
     from cosmos.base.tendermint.v1beta1 import query_pb2, query_pb2_grpc  # isort: skip
     from tendermint.types import block_pb2, types_pb2  # isort: skip
 
@@ -1156,17 +1158,26 @@ def _run_grpc_in_thread(grpc_listener, port: int, host: str, gate: PortGate) -> 
         resp.application_version.version = merged.get("app_version", "sim-1.0")
         return resp
 
+    def build_all_balances(data: dict):
+        merged = _merged(data)
+        resp = bank_query_pb2.QueryAllBalancesResponse()
+        for coin in merged.get("balances", []):
+            resp.balances.add(denom=coin["denom"], amount=coin["amount"])
+        return resp
+
     class _Servicer(query_pb2_grpc.ServiceServicer):
         async def GetLatestBlock(self, request, context):
-            return await self._perform("GetLatestBlock", context, build_latest_block)
+            return await self._perform("GetLatestBlock", context, build_latest_block, request)
 
         async def GetNodeInfo(self, request, context):
-            return await self._perform("GetNodeInfo", context, build_node_info)
+            return await self._perform("GetNodeInfo", context, build_node_info, request)
 
-        async def _perform(self, method: str, context, build_fn):
+        async def _perform(self, method: str, context, build_fn, request=None):
             metadata = context.invocation_metadata() or []
             lava = {k: v for (k, v) in metadata if k.lower().startswith("lava-")}
-            plan = grpc_listener.plan(method, lava)
+            # The listener gets the request message: it knows which field of
+            # which method carries the request id.
+            plan = grpc_listener.plan(method, lava, request)
 
             if plan.action == "abort":
                 if plan.hang:
@@ -1194,15 +1205,30 @@ def _run_grpc_in_thread(grpc_listener, port: int, host: str, gate: PortGate) -> 
                 await asyncio.sleep(plan.latency_ms / 1000.0)
             return response
 
+    class _BankServicer(bank_query_pb2_grpc.QueryServicer):
+        """One method of the bank service: AllBalances, whose ``address`` is
+        the request id of the call. Each other method keeps the generated
+        default, which answers UNIMPLEMENTED."""
+
+        _perform = _Servicer._perform
+
+        async def AllBalances(self, request, context):
+            return await self._perform("AllBalances", context, build_all_balances, request)
+
     bind = f"[::]:{port}" if host == "0.0.0.0" else f"{host}:{port}"
 
     def _new_server():
         server = grpc.aio.server()
         query_pb2_grpc.add_ServiceServicer_to_server(_Servicer(), server)
+        bank_query_pb2_grpc.add_QueryServicer_to_server(_BankServicer(), server)
         # Server reflection lets grpcurl discover services without a proto
-        # bundle — a dev/test convenience worth the negligible surface.
+        # bundle — a dev/test convenience worth the negligible surface. The
+        # smart-router does not read this list: it asks reflection for the
+        # symbol of a service, which is found because the stubs are imported
+        # above. The list is what ``grpcurl list`` prints.
         service_names = (
             query_pb2.DESCRIPTOR.services_by_name["Service"].full_name,
+            bank_query_pb2.DESCRIPTOR.services_by_name["Query"].full_name,
             reflection.SERVICE_NAME,
         )
         reflection.enable_server_reflection(service_names, server)
