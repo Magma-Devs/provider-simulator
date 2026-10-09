@@ -1743,3 +1743,16 @@ Use the skill `pr` of the automation repository. The push and the pull request n
 | Section 10.5, "Risk, proof and rollback of 2c": revert 2c while it is the newest merged one | Task 8: one pull request, so one revert |
 | The review of pull request 2b: rows A, B and C, Minor 1, Minor 2, Minor 5 | Task 1 |
 | The review of pull request 2b, recommendation 5: the per-method `down` branch must ask `build_down()` | Task 5; Review Focus 1 |
+
+## What the reviews changed after this plan was written
+
+Six task reviews and one review of the whole branch found no fault in the code. They found texts of this plan that were not exact, and two behaviours with no test of their own. The branch holds the corrected texts. So the branch differs from the code blocks of this plan in these places:
+
+1. Task 6, Step 4, `docs/using_the_simulator.md`. The item about the row of a provider-wide `down` also names its two exceptions: a WebSocket subscribe frame, whose `down` row and `hang` row record the configured latency, and a `down` from a `responses` entry, whose row has the method, the request id and the latency. The next item says "the row of a provider-wide `down`" where this plan says "a `down` row".
+2. Task 6, Step 1, the module docstring of `provider_simulator/listeners/base.py`. The HTTP adapter and the gRPC adapter wait for the latency of a per-method `down`. The WebSocket adapter closes the connection with no wait.
+3. Task 6, Steps 2 and 3. The docstring of `grpc.py` says "did not wait for the latency". The docstring of `tendermint.py` also names `status` and `http_status` as content keys of an entry.
+4. Task 4, Step 3. The message of the refusal says "The value would be stored and would corrupt no reply", and the docstring of the rule says "this rule refuses".
+5. Task 5. The docstring of `Listener.build_down` says that the hook returns a new object for each call. Three test cases were added to the two tables of the fault keys: a latency next to an `error_stub` in one entry, on gRPC and on Tendermint RPC, and `http_status` of a Tendermint RPC entry under a provider-wide `error`. So the suite has 1863 tests, and not 1860.
+6. Texts of `tests/test_listener_grpc.py` and `tests/test_simulator_grpc.py` were made exact. Three of them now say that a filter does not hold the content keys of an entry back, and that it holds its fault keys back. The docstring of the class `TestGrpcWhichCallsWait` now says what a per-method `down` does. The comment above the grid now says that one expected value is computed.
+7. `docs/curl_reference.md`: the sample row of a `down` provider has the method `*`.
+8. `docs/using_the_simulator.md` has one new paragraph in the section "Per-method response override": an entry of `responses` can hold a fault on each of the four interfaces.

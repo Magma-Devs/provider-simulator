@@ -219,7 +219,7 @@ class Listener(ABC):
             mode = merged["mode"]
             latency = merged.get("latency_ms", 0)
 
-        waited = True  # False for a hang: the provider does not wait, and the row records 0
+        waited = True  # False for a hang: the provider does not wait for the latency, and the row records 0
         override = self.build_body_override(method_cfg) if method_cfg else None
         if override is not None:
             result = override
