@@ -178,6 +178,18 @@ def _row(provider):
             ("status", "success", 0, 5),
             id="a-filter-that-does-not-name-the-endpoint-holds-the-latency-of-the-entry-back",
         ),
+        pytest.param(
+            {"responses": {"status": {"latency_ms": 700, "error_stub": "internal"}}},
+            ("respond", 200, 700, "error"),
+            ("status", "error", 700, 5),
+            id="the-latency-of-the-entry-delays-an-error-stub-of-the-same-entry",
+        ),
+        pytest.param(
+            {"mode": "error", "responses": {"status": {"http_status": 500}}},
+            ("respond", 500, 0, "error"),
+            ("status", "error", 0, 5),
+            id="the-http-status-of-the-entry-is-the-status-of-a-fault-of-the-provider",
+        ),
     ],
 )
 def test_what_a_fault_key_in_a_per_method_override_does(scenario, want_reply, want_row):

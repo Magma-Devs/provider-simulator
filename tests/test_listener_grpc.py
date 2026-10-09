@@ -800,6 +800,12 @@ _GLB = "GetLatestBlock"
             (_GLB, "rate_limit", 0, None),
             id="a-fault-key-comes-before-an-error-stub-of-the-same-entry",
         ),
+        pytest.param(
+            _override({"latency_ms": 700, "error_stub": "NOT_FOUND"}),
+            _status("NOT_FOUND", "NOT_FOUND", wait_ms=700),
+            (_GLB, "error", 700, None),
+            id="the-latency-of-the-entry-delays-an-error-stub-of-the-same-entry",
+        ),
     ],
 )
 def test_what_a_fault_key_in_a_per_method_override_does(scenario, want, want_row):
