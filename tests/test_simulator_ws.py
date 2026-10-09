@@ -1925,10 +1925,11 @@ class TestSubscribeAndUnsubscribeFrames:
             _send_frame(sock, {"jsonrpc": "2.0", "method": unsubscribe, "params": [subscription_id], "id": 2})
             removed = _reply(sock)
             rows = _rows(sim)
+            subscriptions = _subscriptions(sim)
 
         assert removed == {"jsonrpc": "2.0", "id": 2, "result": True}
         assert [_facts(row) for row in rows] == [(subscribe, "success", 0, 1), (unsubscribe, "success", 0, 2)]
-        assert _subscriptions(sim) == []
+        assert subscriptions == []
 
     def test_a_text_id_goes_into_the_reply_and_into_the_row(self, sim):
         """The id of a subscribe frame can be text. The reply and the row carry
@@ -2046,10 +2047,11 @@ class TestSubscribeAndUnsubscribeFrames:
             _send_frame(sock, _SUBSCRIBE)
             payload = _payload(sock)
             rows = _rows(sim)
+            subscriptions = _subscriptions(sim)
 
         assert payload == text
         assert [_facts(row) for row in rows] == [("eth_subscribe", "rate_limit", 100, 7)]
-        assert _subscriptions(sim) == []
+        assert subscriptions == []
 
     @pytest.mark.parametrize(
         "block, frame, reply, expected_row",
@@ -2102,10 +2104,11 @@ class TestSubscribeAndUnsubscribeFrames:
             _send_frame(sock, frame)
             answer = _reply(sock)
             rows = _rows(sim)
+            subscriptions = _subscriptions(sim)
 
         assert answer == reply
         assert [_facts(row) for row in rows] == [expected_row]
-        assert _subscriptions(sim) == []
+        assert subscriptions == []
 
     @pytest.mark.parametrize(
         "drop_at, received",
@@ -2206,11 +2209,12 @@ class TestSubscribeAndUnsubscribeFrames:
             _send_frame(sock, _BLOCK_NUMBER)
             other = _reply(sock)
             rows = _rows(sim)
+            subscriptions = _subscriptions(sim)
 
         assert payload == _RATE_LIMIT_TEXT
         assert other["id"] == 8 and other["result"].startswith("0x")
         assert [_facts(row)[:2] for row in rows] == [("eth_subscribe", "rate_limit"), ("eth_blockNumber", "success")]
-        assert _subscriptions(sim) == []
+        assert subscriptions == []
 
     def test_a_per_method_down_with_a_latency_closes_at_once_and_its_row_records_the_latency(self, sim):
         """An entry of `responses` for `eth_subscribe` with `mode: down` and a
@@ -2245,9 +2249,10 @@ class TestSubscribeAndUnsubscribeFrames:
             _send_frame(sock, _SUBSCRIBE)
             _assert_no_frame(sock)
             rows = _rows_when_complete(sim, 1)
+            subscriptions = _subscriptions(sim)
 
         assert [_facts(row) for row in rows] == [("eth_subscribe", "hang", 0, 7)]
-        assert _subscriptions(sim) == []
+        assert subscriptions == []
 
     def test_a_per_method_drop_point_reaches_the_subscribe_frame(self, sim):
         """An entry of `responses` for `eth_subscribe` with `drop_connection`
