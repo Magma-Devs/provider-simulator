@@ -266,7 +266,7 @@ provider_simulator/
   fault_policy.py             — the one fault-decision function
   domain/                     — Endpoint, ScenarioConfig, Quirks, CallLog, Pool/Provider, Registry
   chains/                     — one class per chain (eth/btc/solana/ln/lava)
-  listeners/                  — base template + jsonrpc/rest/tendermint, a gRPC adapter, a WS
+  listeners/                  — base template + jsonrpc/rest/tendermint/grpc, a WS
                                 subscription registry, and the corruption serializer
   control_api.py              — the port-19000 routes over the registry
 stubs*.py                     — default success payloads per surface (eth/btc/ln/solana/rest/tm/ws)

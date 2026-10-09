@@ -61,14 +61,14 @@ def test_blocks_behind_shifts_head():
     assert _serve(listener, "GetLatestBlock").body.data["height"] == 25_000_000 - 7
 
 
-def test_down_is_unavailable_and_records_method_not_star():
+def test_down_is_unavailable_and_its_row_names_no_method():
     listener, provider = _listener()
     _upd(listener, {"mode": "down"})
     result = _serve(listener, "GetLatestBlock")
     assert result.body == GrpcStatus("UNAVAILABLE", "provider down")
     hist = provider.log.get_history()[0]
     assert hist["status"] == "down"
-    assert hist["method"] == "GetLatestBlock"  # gRPC always knows the method
+    assert hist["method"] == "*"  # a dead node does not read the request
 
 
 def test_hang_is_cancelled_with_the_action_hang():
@@ -197,14 +197,13 @@ def test_a_fault_row_of_all_balances_keeps_the_request_id(scenario, status):
 
 
 def test_a_provider_wide_down_row_has_no_request_id():
-    # A dead node does not read the request. The row keeps the method, as every
-    # gRPC row does, and it has no request id, as on JSON-RPC, REST and
-    # Tendermint RPC.
+    # A dead node does not read the request. The row has the method "*" and no
+    # request id, as on JSON-RPC, REST and Tendermint RPC.
     listener, provider = _listener()
     _upd(listener, {"mode": "down"})
     _serve(listener, "AllBalances", _all_balances("never-read"))
     hist = provider.log.get_history()[0]
-    assert (hist["status"], hist["method"], hist["request_id"]) == ("down", "AllBalances", None)
+    assert (hist["status"], hist["method"], hist["request_id"]) == ("down", "*", None)
 
 
 def test_the_served_methods_and_their_request_id_fields():
@@ -223,7 +222,7 @@ def test_two_served_methods_of_one_name_are_refused():
 
 
 # --- The table and the servicers --------------------------------------------
-# The gRPC adapter in server.py writes its servicer classes by hand. The check
+# The gRPC listener module writes its servicer classes by hand. The check
 # below ties them to the table of served methods: a method that a servicer
 # serves must have a row, and a row must have a servicer method. Without the
 # check, a served method with no row records no request id, and the refusal of
@@ -298,11 +297,13 @@ def test_a_request_id_row_of_a_service_with_no_loaded_stubs_is_refused():
 # A gRPC call is answered through Listener.serve. The tables below record
 # what serve() decides for each mode, each corruption mode and each per-method
 # override: the status that the caller gets, the text of that status, and the
-# history row of the call. Each expected value is written out by hand.
+# history row of the call. Each expected value is written out by hand, but
+# one: the first table writes the method of a row one time, in its assertion.
 #
 # ``_decide`` is the one function of this block that calls serve() and reads a
 # ServeResult. Before gRPC moved into Listener.serve, it called plan() and read
-# a GrpcPlan, and the move changed no expected value of the two tables.
+# a GrpcPlan, and the move changed no expected value of the two tables of that
+# time.
 #
 # The content of a reply message is not in these tables. A caller reads the
 # message that the adapter builds from the data of the chain.
@@ -332,14 +333,14 @@ def _decide(listener, method="GetLatestBlock", request=None, lava_headers=None):
     return _Decision("OK", "", result.latency_ms, False, None, clears)
 
 
-def _status(code, text, *, hangs=False, drop_at=None):
-    """The caller gets a status, with no wait."""
-    return _Decision(code, text, 0, hangs, drop_at, None)
+def _status(code, text, *, hangs=False, drop_at=None, wait_ms=0):
+    """The caller gets a status. With no ``wait_ms`` the adapter does not wait."""
+    return _Decision(code, text, wait_ms, hangs, drop_at, None)
 
 
-def _reply(*, clears=None):
-    """The caller gets a reply message, with no wait."""
-    return _Decision("OK", "", 0, False, None, clears)
+def _reply(*, clears=None, wait_ms=0):
+    """The caller gets a reply message. With no ``wait_ms`` the adapter does not wait."""
+    return _Decision("OK", "", wait_ms, False, None, clears)
 
 
 def _override(cfg, method="GetLatestBlock"):
@@ -499,21 +500,9 @@ def _row(provider):
             "success",
             id="result-override-in-the-default-entry",
         ),
-        # A fault key in a per-method override is not read on gRPC.
-        pytest.param(_override({"mode": "down"}), _reply(), "success", id="per-method-mode-down-is-not-read"),
-        pytest.param(
-            _override({"mode": "rate_limit"}),
-            _reply(),
-            "success",
-            id="per-method-mode-rate-limit-is-not-read",
-        ),
-        pytest.param(_override({"latency_ms": 700}), _reply(), "success", id="per-method-latency-is-not-read"),
-        pytest.param(
-            _override({"error_probability": 1.0}),
-            _reply(),
-            "success",
-            id="per-method-error-probability-is-not-read",
-        ),
+        # A down provider does not read the request, so a per-method override
+        # cannot lift its down. The table of the fault keys of a per-method
+        # override is below this one.
         pytest.param(
             {"mode": "down", **_override({"mode": "success"})},
             _status("UNAVAILABLE", "provider down"),
@@ -540,8 +529,10 @@ def _row(provider):
             id="drop-comes-before-a-result-override",
         ),
         # Each corruption mode. Five of them turn the reply message into a
-        # status, and the row then says error. One clears a field. One does
-        # nothing on gRPC.
+        # status, and the row then says error. One clears a field. One,
+        # invalid_json, does nothing on gRPC: the control API refuses it for a
+        # provider that has only gRPC endpoints, and this table writes the
+        # scenario with no control API.
         pytest.param(
             {"corruption_mode": "wrong_type"},
             _status("INTERNAL", "wrong_type corruption on response"),
@@ -673,8 +664,9 @@ def _row(provider):
             "success",
             id="missing-field-with-a-filter-that-does-not-name-it-clears-nothing",
         ),
-        # A per-method override is not a fault of the endpoint: the filters do
-        # not hold it back.
+        # The content keys of a per-method override (error_stub, error, result)
+        # are not a fault of the endpoint: the filters do not hold them back.
+        # The filters do hold its fault keys back: the table below has them.
         pytest.param(
             {**_override({"error_stub": "NOT_FOUND"}), "transports": ["ws"]},
             _status("NOT_FOUND", "NOT_FOUND"),
@@ -693,7 +685,144 @@ def test_what_serve_decides_for_one_call(scenario, want, want_row_status):
     listener, provider = _listener()
     _upd(listener, scenario)
     assert _decide(listener) == want
-    assert _row(provider) == ("GetLatestBlock", want_row_status, 0, None)
+    # A down provider does not read the request, so its row has the method "*",
+    # as on JSON-RPC, REST and Tendermint RPC. Each down row of this table is
+    # the row of a provider-wide down.
+    want_method = "*" if want_row_status == "down" else "GetLatestBlock"
+    assert _row(provider) == (want_method, want_row_status, 0, None)
+
+
+# --- A fault key in a per-method override -------------------------------------
+# The flow merges the seven fault keys of the entry of the called method into
+# the scenario, as on JSON-RPC and REST: mode, latency_ms, error_probability,
+# error_code, error_message, http_status and drop_at. The row of a per-method
+# down names its method and waits for its latency: the request was read to find
+# the entry.
+
+_GLB = "GetLatestBlock"
+
+
+@pytest.mark.parametrize(
+    "scenario, want, want_row",
+    [
+        pytest.param(
+            _override({"mode": "down"}),
+            _status("UNAVAILABLE", "provider down"),
+            (_GLB, "down", 0, None),
+            id="mode-down",
+        ),
+        pytest.param(
+            _override({"mode": "down", "latency_ms": 250}),
+            _status("UNAVAILABLE", "provider down", wait_ms=250),
+            (_GLB, "down", 250, None),
+            id="mode-down-waits-for-the-latency-of-the-entry",
+        ),
+        pytest.param(
+            _override({"mode": "rate_limit"}),
+            _status("RESOURCE_EXHAUSTED", "Too many requests"),
+            (_GLB, "rate_limit", 0, None),
+            id="mode-rate-limit",
+        ),
+        pytest.param(
+            _override({"mode": "hang", "latency_ms": 250}),
+            _status("CANCELLED", "hang timeout", hangs=True),
+            (_GLB, "hang", 0, None),
+            id="mode-hang-does-not-wait-for-a-latency",
+        ),
+        pytest.param(
+            _override({"mode": "drop_connection", "drop_at": "after_headers"}),
+            _status("UNAVAILABLE", "connection dropped", drop_at="after_headers"),
+            (_GLB, "drop_connection", 0, None),
+            id="mode-drop-connection-with-its-drop-at",
+        ),
+        pytest.param(_override({"latency_ms": 700}), _reply(wait_ms=700), (_GLB, "success", 700, None), id="latency"),
+        pytest.param(
+            {"latency_ms": 250, **_override({"latency_ms": 700})},
+            _reply(wait_ms=700),
+            (_GLB, "success", 700, None),
+            id="the-latency-of-the-entry-wins-over-the-latency-of-the-provider",
+        ),
+        pytest.param(
+            _override({"error_probability": 1.0}),
+            _status("UNKNOWN", "Internal error"),
+            (_GLB, "error", 0, None),
+            id="error-probability",
+        ),
+        pytest.param(
+            _override({"error_probability": 1.0, "error_message": "NOT_FOUND"}),
+            _status("NOT_FOUND", "NOT_FOUND"),
+            (_GLB, "error", 0, None),
+            id="error-message-of-the-entry",
+        ),
+        pytest.param(
+            _override({"error_probability": 1.0, "error_message": "no status has this name", "error_code": 5}),
+            _status("NOT_FOUND", "no status has this name"),
+            (_GLB, "error", 0, None),
+            id="error-code-of-the-entry",
+        ),
+        pytest.param(
+            {"mode": "rate_limit", **_override({"mode": "success"})},
+            _reply(),
+            (_GLB, "success", 0, None),
+            id="mode-success-lifts-a-fault-of-the-provider-that-is-not-down",
+        ),
+        pytest.param(
+            _override({"mode": "rate_limit"}, method="GetNodeInfo"),
+            _reply(),
+            (_GLB, "success", 0, None),
+            id="an-entry-of-another-method-does-not-apply",
+        ),
+        pytest.param(
+            {"responses": {"default": {"mode": "rate_limit"}}},
+            _reply(),
+            (_GLB, "success", 0, None),
+            id="a-fault-key-in-the-default-entry-is-not-read",
+        ),
+        pytest.param(
+            {**_override({"mode": "rate_limit"}), "transports": ["ws"]},
+            _reply(),
+            (_GLB, "success", 0, None),
+            id="a-filter-that-does-not-name-the-endpoint-holds-the-fault-key-back",
+        ),
+        pytest.param(
+            {**_override({"latency_ms": 700}), "transports": ["ws"]},
+            _reply(),
+            (_GLB, "success", 0, None),
+            id="a-filter-that-does-not-name-the-endpoint-holds-the-latency-of-the-entry-back",
+        ),
+        pytest.param(
+            {**_override({"mode": "rate_limit"}), "transports": ["http2"]},
+            _status("RESOURCE_EXHAUSTED", "Too many requests"),
+            (_GLB, "rate_limit", 0, None),
+            id="a-filter-that-names-the-endpoint-lets-the-fault-key-through",
+        ),
+        pytest.param(
+            _override({"mode": "rate_limit", "error_stub": "NOT_FOUND"}),
+            _status("RESOURCE_EXHAUSTED", "Too many requests"),
+            (_GLB, "rate_limit", 0, None),
+            id="a-fault-key-comes-before-an-error-stub-of-the-same-entry",
+        ),
+        pytest.param(
+            _override({"latency_ms": 700, "error_stub": "NOT_FOUND"}),
+            _status("NOT_FOUND", "NOT_FOUND", wait_ms=700),
+            (_GLB, "error", 700, None),
+            id="the-latency-of-the-entry-delays-an-error-stub-of-the-same-entry",
+        ),
+    ],
+)
+def test_what_a_fault_key_in_a_per_method_override_does(scenario, want, want_row):
+    listener, provider = _listener()
+    _upd(listener, scenario)
+    assert _decide(listener) == want
+    assert _row(provider) == want_row
+
+
+def test_the_row_of_a_per_method_down_keeps_the_request_id():
+    listener, provider = _listener()
+    _upd(listener, _override({"mode": "down"}, method="AllBalances"))
+    want = _status("UNAVAILABLE", "provider down")
+    assert _decide(listener, "AllBalances", _all_balances("lava1-probe-d")) == want
+    assert _row(provider) == ("AllBalances", "down", 0, "lava1-probe-d")
 
 
 def test_the_row_of_get_node_info_names_its_method():
@@ -799,3 +928,91 @@ def test_a_filter_that_does_not_name_the_endpoint_does_not_use_up_fail_first_n()
     # Those three calls did not use up the window: the named endpoint still gets
     # the mode for its first call, and the then_mode after it.
     assert [_decide(named).code for _ in range(3)] == ["UNAVAILABLE", "RESOURCE_EXHAUSTED", "RESOURCE_EXHAUSTED"]
+
+
+# --- A scenario value of a wrong JSON type ------------------------------------
+# The control API stores each JSON type for ``error_stub``, ``error_message``,
+# ``error_code`` and ``blocks_behind``. These tests record what a call gets
+# then. Three of the answers changed when gRPC moved into Listener.serve: the
+# row of an error_stub that is a list or an object, the row of an error whose
+# message or code is a list or an object, and the answer for a blocks_behind
+# that is no number under a corruption.
+
+
+@pytest.mark.parametrize(
+    "override, want_text",
+    [
+        pytest.param({"error_stub": ["NOT_FOUND"]}, "['NOT_FOUND']", id="a-list"),
+        pytest.param({"error_stub": {"code": "NOT_FOUND"}}, "{'code': 'NOT_FOUND'}", id="an-object"),
+        pytest.param({"error_stub": ["NOT_FOUND"], "message": "gone"}, "gone", id="a-list-with-the-key-message"),
+    ],
+)
+def test_an_error_stub_that_is_a_list_or_an_object_gives_unknown_and_an_error_row(override, want_text):
+    listener, provider = _listener()
+    _upd(listener, _override(override))
+    assert _decide(listener) == _status("UNKNOWN", want_text)
+    assert _row(provider) == ("GetLatestBlock", "error", 0, None)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        pytest.param({"mode": "error", "error_message": ["NOT_FOUND"]}, id="error-message-is-a-list"),
+        pytest.param({"mode": "error", "error_message": {"name": "NOT_FOUND"}}, id="error-message-is-an-object"),
+        pytest.param({"mode": "error", "error_code": [5]}, id="error-code-is-a-list"),
+        pytest.param({"error_probability": 1.0, "error_code": {"code": 5}}, id="error-code-is-an-object"),
+    ],
+)
+def test_an_error_whose_message_or_code_is_a_list_or_an_object_leaves_the_row_in_flight(scenario):
+    # A fault of today, recorded as it is. The lookup of the status fails
+    # before the flow finishes the row. The gRPC library then ends the call
+    # with UNKNOWN: tests/test_simulator_grpc.py holds that for the same kind
+    # of fault, in test_a_per_method_error_that_is_no_object_...
+    listener, provider = _listener()
+    _upd(listener, scenario)
+    with pytest.raises(TypeError, match="unhashable type"):
+        _serve(listener)
+    assert _row(provider) == ("*", "in_flight", 0, None)
+
+
+def test_an_error_code_that_is_a_list_is_not_read_when_error_message_names_a_status():
+    listener, provider = _listener()
+    _upd(listener, {"mode": "error", "error_message": "NOT_FOUND", "error_code": [5]})
+    assert _decide(listener) == _status("NOT_FOUND", "NOT_FOUND")
+    assert _row(provider) == ("GetLatestBlock", "error", 0, None)
+
+
+@pytest.mark.parametrize("corruption", ["wrong_type", "invalid_proto", "empty_response", "truncated", "null_body"])
+def test_a_blocks_behind_that_is_no_number_ends_the_call_before_the_corruption(corruption):
+    # The flow asks the chain for the content before it corrupts the reply, as
+    # on JSON-RPC, REST and Tendermint RPC. So the fault of the chain comes
+    # first, and the row stays in_flight.
+    listener, provider = _listener()
+    _upd(listener, {"blocks_behind": "abc", "corruption_mode": corruption})
+    with pytest.raises(TypeError, match="unsupported operand"):
+        _serve(listener)
+    assert _row(provider) == ("*", "in_flight", 0, None)
+
+
+def test_get_node_info_does_not_read_blocks_behind():
+    listener, provider = _listener()
+    _upd(listener, {"blocks_behind": "abc", "corruption_mode": "wrong_type"})
+    assert _decide(listener, "GetNodeInfo") == _status("INTERNAL", "wrong_type corruption on response")
+    assert _row(provider) == ("GetNodeInfo", "error", 0, None)
+
+
+@pytest.mark.parametrize(
+    "filters, want_ms",
+    [
+        pytest.param({"transports": ["http2"]}, 250, id="a-filter-that-names-the-endpoint"),
+        pytest.param({"transports": ["ws"]}, 0, id="a-filter-that-does-not-name-it"),
+    ],
+)
+def test_on_grpc_a_status_waits_for_latency_ms_only_when_the_filters_name_the_endpoint(filters, want_ms):
+    # An error_stub is a status that no filter holds back. The latency of the
+    # scenario is held back by a filter that does not name the endpoint.
+    listener, provider = _listener()
+    _upd(listener, {"latency_ms": 250, **_override({"error_stub": "NOT_FOUND"}), **filters})
+    decision = _decide(listener)
+    assert (decision.code, decision.wait_ms) == ("NOT_FOUND", want_ms)
+    assert _row(provider) == ("GetLatestBlock", "error", want_ms, None)

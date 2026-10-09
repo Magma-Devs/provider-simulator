@@ -868,7 +868,7 @@ class TestGrpcAllBalances:
         _, by_status = _get(_ctrl(sim, "/history?pool=lava-sim-grpc&pid=1&status=down"))
         assert by_id["count"] == 0
         assert by_status["count"] == 1
-        assert by_status["history"][0]["method"] == "AllBalances"
+        assert by_status["history"][0]["method"] == "*"
 
     def test_missing_field_corruption_clears_the_balances(self, sim):
         _set_grpc(sim, "1", corruption_mode="missing_field", missing_field="balances")
@@ -967,9 +967,9 @@ class TestGrpcReflection:
 
 
 class TestGrpcServedMethods:
-    """The gRPC adapter writes its servicers by hand, and the listener holds
-    the table of the served methods. The adapter compares the two before it
-    starts a server."""
+    """The gRPC listener module writes its servicers by hand and holds the
+    table of the served methods. The adapter compares the two before it starts
+    a server."""
 
     def test_the_adapter_refuses_to_start_when_a_served_method_has_no_row(self, sim, monkeypatch):
         without_all_balances = tuple(row for row in SERVED_METHODS if row[1] != "AllBalances")
@@ -1146,9 +1146,13 @@ class TestGrpcStatusTexts:
         assert _status_of(_call_get_latest_block, _GRPC_ADDRS["1"]) == (want_code, want_text)
         assert [(row["method"], row["status"]) for row in _rows(sim)] == [("GetLatestBlock", want_row_status)]
 
-    def test_invalid_json_corruption_does_nothing_on_grpc(self, sim):
+    def test_invalid_json_corruption_is_refused_for_a_grpc_provider(self, sim):
+        """``invalid_json`` breaks the bytes of a JSON body, and a gRPC reply
+        has none. The control API refuses it, and the provider answers as
+        before."""
         status, body = _set_grpc(sim, "1", corruption_mode="invalid_json")
-        assert status == 200, body
+        assert status == 400, body
+        assert "only gRPC endpoints" in body["error"]
         resp = _call_get_latest_block(_GRPC_ADDRS["1"])
         assert (resp.block.header.height, resp.block.header.chain_id) == (GRPC_LATEST_BLOCK, "lava-sim")
         assert [row["status"] for row in _rows(sim)] == ["success"]
@@ -1172,9 +1176,11 @@ class TestGrpcStatusTexts:
 
 
 class TestGrpcWhichCallsWait:
-    """``latency_ms`` delays a reply message and each status but two. A down
-    provider answers at once, and a hung call waits its own 30 seconds. The row
-    of each of the two records 0."""
+    """``latency_ms`` delays a reply message and each status but two. A
+    provider-wide ``down`` answers at once, and a hung call waits its own 30
+    seconds. The row of each of the two records 0. A per-method ``down`` is
+    different: it waits for its latency, and its row records it. That latency
+    is the one of its entry, or the one of the provider when the entry has none."""
 
     @pytest.mark.parametrize(
         "scenario, want_code, min_s, max_s, want_row_latency_ms",
@@ -1255,18 +1261,24 @@ class TestGrpcWhichCallsWait:
         assert resp.block.header.height == GRPC_LATEST_BLOCK
         assert elapsed < 1.5, f"the reply came after {elapsed:.3f} s, so the pause of 3 s was not performed"
 
-    def test_a_fault_key_in_a_per_method_override_is_not_read(self, sim):
-        """gRPC reads ``error_stub``, ``error`` and ``result`` from a per-method
-        override. It does not read the fault keys, such as ``mode`` and
-        ``latency_ms``: the call below is answered, and at once."""
-        status, body = _set_grpc(sim, "1", responses={"GetLatestBlock": {"mode": "down", "latency_ms": 3000}})
+    def test_a_fault_key_in_a_per_method_override_reaches_the_call_of_that_method(self, sim):
+        """The flow merges the fault keys of a per-method override, such as
+        ``mode`` and ``latency_ms``, as on JSON-RPC and REST. The call of the
+        named method waits for the latency of the entry, and then it gets the
+        status of a down provider. Its row names the method: the request was
+        read to find the entry. A call of another method is answered at once."""
+        status, body = _set_grpc(sim, "1", responses={"GetLatestBlock": {"mode": "down", "latency_ms": 600}})
         assert status == 200, body
         started = time.monotonic()
-        resp = _call_get_latest_block(_GRPC_ADDRS["1"])
+        answer = _status_of(_call_get_latest_block, _GRPC_ADDRS["1"])
         elapsed = time.monotonic() - started
-        assert resp.block.header.height == GRPC_LATEST_BLOCK
-        assert elapsed < 1.5, f"the reply came after {elapsed:.3f} s, so the latency of the override was applied"
-        assert [(row["status"], row["latency_ms"]) for row in _rows(sim)] == [("success", 0)]
+        assert answer == (grpc.StatusCode.UNAVAILABLE, "provider down")
+        assert 0.55 <= elapsed < 5.0, f"the status came after {elapsed:.3f} s with latency_ms=600 in the entry"
+        assert _call_get_node_info(_GRPC_ADDRS["1"]).default_node_info.network == "lava-sim"
+        assert [(row["method"], row["status"], row["latency_ms"]) for row in _rows(sim)] == [
+            ("GetLatestBlock", "down", 600),
+            ("GetNodeInfo", "success", 0),
+        ]
 
     def test_fail_first_n_gives_exactly_that_many_down_rows(self, sim):
         status, body = _set_grpc(sim, "1", mode="down", fail_first_n=3, then_mode="success")
@@ -1366,13 +1378,24 @@ class TestGrpcPerMethodErrors:
         assert [(row["method"], row["status"]) for row in _rows(sim)] == [("*", "in_flight")]
 
     def test_an_error_stub_applies_when_a_filter_does_not_name_the_endpoint(self, sim):
-        """A per-method override is not a fault of the endpoint, so a filter
-        does not hold it back. The endpoint is ``http2``, and the filter names
-        ``http``."""
+        """An ``error_stub`` of a per-method override is not a fault of the
+        endpoint, so a filter does not hold it back. The endpoint is ``http2``,
+        and the filter names ``http``."""
         override = {"GetLatestBlock": {"error_stub": "NOT_FOUND"}}
         status, body = _set_grpc(sim, "1", transports=["http"], responses=override)
         assert status == 200, body
         assert _status_of(_call_get_latest_block, _GRPC_ADDRS["1"]) == (grpc.StatusCode.NOT_FOUND, "NOT_FOUND")
+
+    def test_an_error_stub_that_is_an_object_gives_unknown_with_the_object_as_the_text(self, sim):
+        """The shape of the ``error`` override, given to ``error_stub`` by
+        mistake. The control API stores it. The caller gets UNKNOWN, the text
+        is the object as text, and the row says error."""
+        override = {"GetLatestBlock": {"error_stub": {"code": "NOT_FOUND"}}}
+        status, body = _set_grpc(sim, "1", responses=override)
+        assert status == 200, body
+        answer = _status_of(_call_get_latest_block, _GRPC_ADDRS["1"])
+        assert answer == (grpc.StatusCode.UNKNOWN, "{'code': 'NOT_FOUND'}")
+        assert [(row["method"], row["status"]) for row in _rows(sim)] == [("GetLatestBlock", "error")]
 
 
 class TestGrpcReplyFields:
@@ -1446,9 +1469,9 @@ class TestGrpcReplyFields:
         assert (application.name, application.app_name, application.version) == ("lava-sim", "lava-sim-app", "sim-1.0")
 
     def test_a_result_override_applies_when_a_filter_does_not_name_the_endpoint(self, sim):
-        """A per-method override is not a fault of the endpoint, so a filter
-        does not hold it back. The endpoint is ``http2``, and the filter names
-        ``http``."""
+        """A ``result`` of a per-method override is not a fault of the endpoint,
+        so a filter does not hold it back. The endpoint is ``http2``, and the
+        filter names ``http``."""
         override = {"GetLatestBlock": {"result": {"height": 7}}}
         status, body = _set_grpc(sim, "1", transports=["http"], responses=override)
         assert status == 200, body

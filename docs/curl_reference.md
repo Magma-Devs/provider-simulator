@@ -172,7 +172,7 @@ curl -s "$SIM_CONTROL_URL/history?provider=1&status=success" | python3 -m json.t
     "count": 3,
     "history": [
         { "call_order": 1, "provider": "1", "method": "eth_blockNumber", "status": "rate_limit", "request_id": 1, "ts": 1743300001.164, "time": "2026-03-30 10:12:40.164 UTC", "latency_ms": 2 },
-        { "call_order": 2, "provider": "2", "method": "eth_blockNumber", "status": "down",       "request_id": null, "ts": 1743300001.331, "time": "2026-03-30 10:12:40.331 UTC", "latency_ms": 0 },
+        { "call_order": 2, "provider": "2", "method": "*",               "status": "down",       "request_id": null, "ts": 1743300001.331, "time": "2026-03-30 10:12:40.331 UTC", "latency_ms": 0 },
         { "call_order": 3, "provider": "3", "method": "eth_blockNumber", "status": "success",    "request_id": 1, "ts": 1743300001.512, "time": "2026-03-30 10:12:40.512 UTC", "latency_ms": 8 }
     ]
 }

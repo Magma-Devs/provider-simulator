@@ -8,10 +8,11 @@ Turning that content into the wire form is the matching listener's job:
 - REST:          the returned dict IS the bare HTTP JSON body (no envelope).
 - Tendermint:    the returned dict IS the JSON-RPC envelope (``jsonrpc``/``id``/
                  ``result`` or ``error``) — the same shape EthChain returns.
-- gRPC:          the returned dict is plain success-DATA (height, chain id, node
-                 info). The gRPC listener serializes it into a protobuf message
-                 and maps gRPC-only faults (errors, corruption) to status codes,
-                 because those are wire concerns, not content.
+- gRPC:          the returned dict is the DATA of the reply (height, chain id,
+                 node info, balances), or a per-method error under the key
+                 ``error``. The gRPC listener module builds the protobuf message
+                 from the data, and it turns an error and a corruption into a
+                 status, because those are wire concerns, not content.
 
 This mirrors ``handlers_rest`` / ``handlers_tendermintrpc`` / ``handlers_grpc``,
 reimplemented against the redesigned domain shapes (a ScenarioConfig snapshot and
@@ -312,8 +313,9 @@ class LavaChain(Chain):
         return http_status, {"jsonrpc": "2.0", "id": req_id, "result": result}
 
     # ── gRPC ────────────────────────────────────────────────────────────────
-    # Returns plain success-DATA the gRPC listener serializes into a protobuf
-    # message. request = {method}. Three unary methods are covered: the two
+    # Returns the data of the reply. The gRPC listener module builds the
+    # protobuf message from it. request = {method, message}; this function
+    # reads the method only. Three unary methods are covered: the two
     # that the router uses for its own polls (GetLatestBlock / GetNodeInfo) and
     # AllBalances, which carries a request id.
     # A per-method ``responses`` entry wins: an ``error_stub`` or an ``error``

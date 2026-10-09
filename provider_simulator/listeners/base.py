@@ -16,23 +16,25 @@ label like REST's 404 → ``not_found``).
 
 ``down`` is evaluated and emitted BEFORE the body is parsed (a dead node never
 reads the request), so a down call's history carries method ``"*"`` and
-``request_id`` None — matching the long-standing contract other code relies on.
+``request_id`` None on every interface — matching the long-standing contract
+other code relies on. The provider does not wait for the latency, so the row
+records ``latency_ms`` 0. A ``hang`` row records 0 for the same reason.
 The exception is a per-method ``responses`` override with ``mode="down"``: the
 method had to be parsed to find the override, so that entry carries the real
-method, request id, and the configured latency.
+method, request id, and the configured latency. The HTTP adapter and the gRPC
+adapter wait for that latency. The WebSocket adapter closes the connection
+with no wait.
 
 Per-method ``responses`` overrides can shadow the fault keys (mode, latency_ms,
 error probability/code/message, http_status, drop_at) for one method — the
 merged config inherits every provider-wide key the override doesn't set. The
-override key is the transport's ``method_key`` (JSON-RPC: the method name;
-REST: the (verb, template) route pair; transports that resolve overrides inside
-the chain return None). The transports filter scopes per-method overrides the
-same way it scopes everything else in the block.
+override key is the transport's ``method_key`` (JSON-RPC, Tendermint RPC and
+gRPC: the method name; REST: the (verb, template) route pair). The transports
+filter scopes per-method overrides the same way it scopes everything else in
+the block.
 
-Four more hooks have a default that is right for the HTTP interfaces, and gRPC
-overrides each one: ``early_identity`` (what a provider-wide down row records
-with no parse), ``build_down`` (the reply of a down provider),
-``unpaid_latency`` (the latency of a down row and of a hang row) and
+Two more hooks have a default that is right for the HTTP interfaces, and gRPC
+overrides each one: ``build_down`` (the reply of a down provider) and
 ``corrupt`` (how the interface corrupts a reply, and the label of its row).
 
 serve() returns a ServeResult describing WHAT to put on the wire — including the
@@ -177,17 +179,10 @@ class Listener(ABC):
         latency = scenario.get("latency_ms", 0) if targeted else 0
 
         # Provider-wide down is pre-parse: no body is read, so the row records
-        # what ``early_identity`` knows with no parse (by default method="*" and
-        # no request id), and the provider does not wait for the latency.
+        # method="*" and no request id, on every interface. The provider does
+        # not wait for the latency, so the row records 0.
         if targeted and mode == "down":
-            method, request_id = self.early_identity(request)
-            self.provider.log.finalize(
-                entry,
-                method=method,
-                status="down",
-                latency_ms=self.unpaid_latency(latency),
-                request_id=request_id,
-            )
+            self.provider.log.finalize(entry, method="*", status="down", latency_ms=0)
             return self.build_down()
 
         try:
@@ -224,7 +219,7 @@ class Listener(ABC):
             mode = merged["mode"]
             latency = merged.get("latency_ms", 0)
 
-        waited = True  # False for a hang: the provider does not wait for the latency
+        waited = True  # False for a hang: the provider does not wait for the latency, and the row records 0
         override = self.build_body_override(method_cfg) if method_cfg else None
         if override is not None:
             result = override
@@ -242,7 +237,9 @@ class Listener(ABC):
                     latency_ms=latency,
                     request_id=self.request_id(parsed),
                 )
-                return ServeResult(action="no_body", status=503, latency_ms=latency)
+                result = self.build_down()
+                result.latency_ms = latency
+                return result
             if verdict.kind != "none":
                 result = self.build_fault(verdict, parsed)
                 status_label = _STATUS_LABEL[verdict.kind]
@@ -273,7 +270,7 @@ class Listener(ABC):
             entry,
             method=self.request_method(parsed),
             status=status_label,
-            latency_ms=latency if waited else self.unpaid_latency(latency),
+            latency_ms=latency if waited else 0,
             request_id=request_id,
         )
         return result
@@ -287,22 +284,11 @@ class Listener(ABC):
     @abstractmethod
     def build_success(self, status: int, body: object) -> ServeResult: ...
 
-    def early_identity(self, request: RawRequest) -> "tuple[str, int | str | None]":
-        """The method and the request id that a provider-wide ``down`` row
-        records. The request is not parsed at that point. Default: ``"*"`` and
-        no id, because a dead node does not read the request."""
-        return "*", None
-
     def build_down(self) -> ServeResult:
         """The reply of a provider in the mode ``down``. Default: HTTP 503 with
-        no body."""
+        no body. Return a new object for each call: for a per-method ``down``
+        the flow sets ``latency_ms`` on it."""
         return ServeResult(action="no_body", status=503)
-
-    def unpaid_latency(self, latency_ms: int) -> int:
-        """The ``latency_ms`` that a row records when the provider did not wait
-        for it: a provider-wide ``down`` row and a ``hang`` row. Default: the
-        configured value."""
-        return latency_ms
 
     def corrupt(self, result: ServeResult, status_label: str, scenario: dict) -> str:
         """Apply the corruption of the scenario to a reply of this endpoint, and
@@ -328,9 +314,9 @@ class Listener(ABC):
 
     def method_key(self, request: dict) -> object:
         """The ``responses`` key that selects this request's per-method fault
-        override. Default: the JSON-RPC method name. REST overrides to its
-        (verb, template) pair; transports whose overrides resolve inside the
-        chain (Tendermint) return None to skip the merge."""
+        override. Default: the method name of the request, which is the key on
+        JSON-RPC, Tendermint RPC and gRPC. REST overrides to its (verb,
+        template) pair."""
         return request.get("method") if isinstance(request, dict) else None
 
     def build_body_override(self, method_cfg: dict) -> "ServeResult | None":

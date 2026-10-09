@@ -5,6 +5,14 @@ A client can ask via GET (``/<method>?<params>``) or POST (a JSON-RPC body).
 input raises ParseError, which the base turns into a JSON-RPC -32700. LavaChain
 builds the JSON-RPC ``result`` envelope; a rate_limit / error fault becomes a
 JSON-RPC ``error`` envelope — both matching the flat TendermintHandler.
+
+A per-method ``responses`` entry has two kinds of keys. The request flow merges
+its fault keys (``mode``, ``latency_ms`` and the others) with the method name as
+the key, as on JSON-RPC. LavaChain reads its content keys in the success path:
+``error_stub``, ``error`` and ``body``, and ``status`` or ``http_status`` for
+the HTTP status of that canned reply. So ``http_status`` has two readers: the
+flow uses it for the status of an error fault, and the chain uses it for the
+status of a canned reply.
 """
 
 import json
@@ -79,11 +87,6 @@ class TendermintListener(Listener):
             request_id = body.get("id")
 
         return {"method": method, "params": _normalize_params(raw_params), "id": request_id}
-
-    def method_key(self, request: dict) -> object:
-        # Tendermint per-method overrides (error_stub / error / body) resolve
-        # inside LavaChain's success path; there is no per-method fault merge.
-        return None
 
     def build_fault(self, verdict: fault_policy.Verdict, request: dict) -> ServeResult:
         if verdict.kind == "hang":

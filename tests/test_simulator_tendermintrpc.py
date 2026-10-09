@@ -516,6 +516,35 @@ class TestTmErrorStubs:
         assert entries[0]["status"] == "error"
 
 
+class TestTmPerMethodFaultKeys:
+    """The request flow merges the fault keys of a per-method override on
+    Tendermint RPC, as on JSON-RPC and REST. The key of the entry is the method
+    name, for the POST form and for the GET form."""
+
+    def test_a_per_method_mode_reaches_the_calls_of_that_method_only(self, sim):
+        status, body, _ = _set_tm(sim, "1", responses={"status": {"mode": "rate_limit"}})
+        assert status == 200, body
+        assert _tm_post(sim, "1", "status")[0] == 429
+        assert _tm_get(sim, "1", "status")[0] == 429
+        assert _tm_post(sim, "1", "health")[0] == 200
+        _, hist, _ = _request("GET", _ctrl(sim, "/history?pool=lava-sim-tm&pid=1"))
+        assert [(e["method"], e["status"]) for e in hist["history"]] == [
+            ("status", "rate_limit"),
+            ("status", "rate_limit"),
+            ("health", "success"),
+        ]
+
+    def test_a_per_method_down_answers_503_and_its_row_names_the_method(self, sim):
+        """The row of a provider-wide down has the method "*". The row of a
+        per-method down names its method and its request id: the request was
+        read to find the entry."""
+        status, body, _ = _set_tm(sim, "1", responses={"status": {"mode": "down"}})
+        assert status == 200, body
+        assert _tm_post(sim, "1", "status", request_id=77)[0] == 503
+        _, hist, _ = _request("GET", _ctrl(sim, "/history?pool=lava-sim-tm&pid=1"))
+        assert [(e["method"], e["status"], e["request_id"]) for e in hist["history"]] == [("status", "down", 77)]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Mixed pools — eth-sim:1 faulted + lava-sim-tm:2 healthy in one /scenario
 # ─────────────────────────────────────────────────────────────────────────────
