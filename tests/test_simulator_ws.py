@@ -2504,3 +2504,165 @@ class TestSubscribeAndUnsubscribeFrames:
             ("eth_subscribe", "rate_limit", 0, 2),
             ("eth_subscribe", "success", 0, 3),
         ]
+
+
+class TestAPushedEvent:
+    """An event that the control API pushes with POST /ws/emit.
+
+    `_WireSubscriptions.emit` puts the frame on the queue of the connection and
+    writes the row. It asks no fault policy.
+    """
+
+    @pytest.mark.parametrize(
+        "subscribe, row_method",
+        [
+            pytest.param("eth_subscribe", "eth_subscription push", id="eth"),
+            pytest.param("subscribe", "tendermint_event push", id="tendermint"),
+            pytest.param("accountSubscribe", "solana_account push", id="solana-account"),
+            pytest.param("logsSubscribe", "solana_logs push", id="solana-logs"),
+        ],
+    )
+    def test_a_pushed_event_writes_one_row_with_the_subscription_id_as_its_request_id(self, sim, subscribe, row_method):
+        """One pushed event writes one `success` row. Its method is the
+        envelope of the subscribe method and the word `push`. Its request id is
+        the subscription id. It names the ws endpoint of the provider, and it
+        carries no lava header, also when the upgrade request had some."""
+        with _websocket(lava_headers=_LAVA_HEADERS) as sock:
+            subscription_id = _subscribe(sock, subscribe)
+            answer = _emit(sim, {"subscription_id": subscription_id, "event": {"tag": "A"}})
+            _reply(sock)
+            rows = _rows(sim)
+
+        assert answer == (200, {"status": "emitted", "subscription_id": subscription_id})
+        assert [_facts(row) for row in rows] == [
+            (subscribe, "success", 0, 1),
+            (row_method, "success", 0, subscription_id),
+        ]
+        assert _endpoint(rows[1]) == ("jsonrpc", "ws", _PORT)
+        assert rows[1]["lava_headers"] == {}
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            pytest.param({"event": "text"}, id="a-text"),
+            pytest.param({"event": 5}, id="a-number"),
+            pytest.param({"event": ["a"]}, id="a-list"),
+            pytest.param({"event": None}, id="null"),
+            pytest.param({}, id="no-event-key"),
+        ],
+    )
+    def test_an_event_that_is_no_object_is_pushed_as_an_empty_object(self, sim, body):
+        """The control API accepts an event of each JSON type. An event that is
+        no object reaches the caller as an empty object, and it writes its row."""
+        with _websocket() as sock:
+            subscription_id = _subscribe(sock)
+            answer = _emit(sim, {"subscription_id": subscription_id, **body})
+            frame = _reply(sock)
+            rows = _rows(sim)
+
+        assert answer == (200, {"status": "emitted", "subscription_id": subscription_id})
+        assert frame == {
+            "jsonrpc": "2.0",
+            "method": "eth_subscription",
+            "params": {"subscription": subscription_id, "result": {}},
+        }
+        assert _facts(rows[1]) == ("eth_subscription push", "success", 0, subscription_id)
+
+    def test_an_event_for_an_unknown_subscription_gets_404_and_writes_no_row(self, sim):
+        """An event for a subscription id that does not exist: the control API
+        answers 404, and no row is written."""
+        answer = _emit(sim, {"subscription_id": "0x" + "ab" * 16, "event": {"tag": "A"}})
+
+        assert answer == (404, {"error": "no active subscription '0xabababababababababababababababab'"})
+        assert _every_row(sim) == []
+
+    def test_an_event_for_a_subscription_that_was_removed_gets_404_and_writes_no_row(self, sim):
+        """After an unsubscribe frame removed the subscription, an event for
+        its id gets 404 and writes no row."""
+        with _websocket() as sock:
+            subscription_id = _subscribe(sock)
+            _send_frame(sock, {"jsonrpc": "2.0", "method": "eth_unsubscribe", "params": [subscription_id], "id": 2})
+            _reply(sock)
+            status, _ = _emit(sim, {"subscription_id": subscription_id, "event": {"tag": "A"}})
+            rows = _rows(sim)
+
+        assert status == 404
+        assert [_facts(row)[0] for row in rows] == ["eth_subscribe", "eth_unsubscribe"]
+
+    @pytest.mark.parametrize("mode", ["down", "hang", "rate_limit", "drop_connection"])
+    def test_an_event_reaches_its_subscriber_under_each_mode_of_the_provider(self, sim, mode):
+        """A pushed event asks no fault policy. A fault that is set after the
+        subscribe does not stop the event, and the row is a `success` row."""
+        with _websocket() as sock:
+            subscription_id = _subscribe(sock)
+            _set_scenario(sim, {"mode": mode, "latency_ms": 1500, "transports": ["ws"]})
+            started = time.monotonic()
+            answer = _emit(sim, {"subscription_id": subscription_id, "event": {"tag": "A"}})
+            frame = _reply(sock)
+            waited = time.monotonic() - started
+            rows = _rows(sim)
+
+        assert answer[0] == 200
+        assert frame["params"] == {"subscription": subscription_id, "result": {"tag": "A"}}
+        assert waited < 1.0, f"the event came after {waited:.2f} s"
+        assert _facts(rows[1]) == ("eth_subscription push", "success", 0, subscription_id)
+
+
+class TestASubscriptionBelongsToOneConnection:
+    """The registry that GET /ws/subscriptions shows, and the connection that
+    owns each subscription."""
+
+    def test_ws_subscriptions_shows_one_entry_for_each_subscribe_with_its_pool_and_its_provider(self, sim):
+        """Each subscribe adds one entry. The entry names the subscription id,
+        the pool, the provider id and the subscribe method."""
+        with _websocket(_WS_PORTS["2"]) as sock:
+            first = _subscribe(sock, "accountSubscribe", frame_id=1)
+            second = _subscribe(sock, "eth_subscribe", frame_id=2)
+            entries = _subscriptions(sim)
+
+        assert sorted(entries, key=lambda entry: entry["method"]) == [
+            {"subscription_id": first, "pool": "eth-sim", "pid": "2", "method": "accountSubscribe", "queue_depth": 0},
+            {"subscription_id": second, "pool": "eth-sim", "pid": "2", "method": "eth_subscribe", "queue_depth": 0},
+        ]
+
+    def test_an_unsubscribe_from_another_connection_answers_false_and_removes_nothing(self, sim):
+        """A connection cannot remove the subscription of another connection of
+        the same endpoint. The owner still gets a pushed event, and the owner
+        can remove the subscription."""
+        with _websocket() as owner, _websocket() as other:
+            subscription_id = _subscribe(owner)
+            unsubscribe = {"jsonrpc": "2.0", "method": "eth_unsubscribe", "params": [subscription_id], "id": 9}
+
+            _send_frame(other, unsubscribe)
+            from_the_other = _reply(other)
+            after_the_other = [entry["subscription_id"] for entry in _subscriptions(sim)]
+            emit_status, _ = _emit(sim, {"subscription_id": subscription_id, "event": {"tag": "A"}})
+            event = _reply(owner)
+
+            _send_frame(owner, unsubscribe)
+            from_the_owner = _reply(owner)
+            after_the_owner = _subscriptions(sim)
+
+        assert from_the_other == {"jsonrpc": "2.0", "id": 9, "result": False}
+        assert after_the_other == [subscription_id]
+        assert emit_status == 200
+        assert event["params"] == {"subscription": subscription_id, "result": {"tag": "A"}}
+        assert from_the_owner == {"jsonrpc": "2.0", "id": 9, "result": True}
+        assert after_the_owner == []
+
+    def test_a_close_removes_the_subscriptions_of_its_own_connection_only(self, sim):
+        """When a connection closes, the simulator removes each subscription of
+        that connection. A subscription of another connection stays."""
+        with _websocket() as other:
+            kept = _subscribe(other)
+            with _websocket() as owner:
+                _subscribe(owner, frame_id=1)
+                _subscribe(owner, frame_id=2)
+                assert len(_subscriptions(sim)) == 3
+
+            deadline = time.monotonic() + 2.0
+            while len(_subscriptions(sim)) != 1 and time.monotonic() < deadline:
+                time.sleep(0.02)
+            left = [entry["subscription_id"] for entry in _subscriptions(sim)]
+
+        assert left == [kept]
