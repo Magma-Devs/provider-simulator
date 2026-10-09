@@ -14,6 +14,7 @@ registry before and after every test so scenarios don't leak between tests.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import socket
@@ -1395,3 +1396,475 @@ class TestWsSequencedFaults:
         assert (
             b" 101 " in data.split(b"\r\n", 1)[0]
         ), f"WS upgrade must complete once the window is consumed; got {data[:80]!r}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# What WebSocket does today, in the places that decide a fault outside
+# Listener.serve
+#
+# Three places of server.py decide a WebSocket fault and write its history row:
+# the upgrade request (_WsHandler.do_GET and _refuse_upgrade), a subscribe
+# frame and an unsubscribe frame (_serve_subscription_frame), and a pushed
+# event (_WireSubscriptions.emit). The tests below record the reply and the row
+# of each place. Each expected value is written out by hand. When a change of
+# that code makes a value fail, the value is not edited to pass: the change is
+# a change of behaviour, or it is a defect.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# The sample key of RFC 6455, section 1.3. The RFC gives the accept value
+# s3pPLMBiTxaQ9kYGzzhZRbK+xOo= for it.
+_SAMPLE_KEY = "dGhlIHNhbXBsZSBub25jZQ=="
+
+# The reply to an upgrade that succeeds on provider 1 with the sample key.
+_HANDSHAKE_OF_PROVIDER_1 = (
+    b"HTTP/1.1 101 Switching Protocols\r\n"
+    b"Upgrade: websocket\r\n"
+    b"Connection: Upgrade\r\n"
+    b"Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n"
+    b"Lava-Provider-Address: sim-provider-eth-sim:1\r\n"
+    b"\r\n"
+)
+
+_LAVA_HEADERS = {"lava-consumer-relay": "7", "lava-stateful-api": "true"}
+_RATE_LIMIT_TEXT = b"Rate limit exceeded. Reduce your request rate, or use an API key for a higher limit."
+_PORT = _WS_PORTS["1"]
+_SUBSCRIBE = {"jsonrpc": "2.0", "method": "eth_subscribe", "params": ["newHeads"], "id": 7}
+_BLOCK_NUMBER = {"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 8}
+
+
+def _set_scenario(sim, block, pid="1"):
+    """Set one scenario block on a provider of the pool eth-sim."""
+    status, _ = _control(sim, "POST", "/scenario", {"providers": {f"eth-sim:{pid}": block}})
+    assert status == 200
+
+
+def _rows(sim, pid="1"):
+    """The history rows of the ws endpoint of one provider, oldest first."""
+    _, body = _control(sim, "GET", f"/history?pool=eth-sim&pid={pid}&transport=ws")
+    return body["history"]
+
+
+def _rows_when_complete(sim, count, pid="1", timeout_s=2.0):
+    """The rows of the ws endpoint, read when `count` rows exist and none is in flight."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        rows = _rows(sim, pid)
+        if len(rows) >= count and all(row["status"] != "in_flight" for row in rows):
+            return rows
+        if time.monotonic() > deadline:
+            pytest.fail(f"expected {count} complete rows in {timeout_s} s, got {rows!r}")
+        time.sleep(0.02)
+
+
+def _every_row(sim):
+    """Each history row of the simulator, of every pool and every transport."""
+    _, body = _control(sim, "GET", "/history")
+    return body["history"]
+
+
+def _facts(row):
+    """The method, the status, the latency and the request id of a row."""
+    return (row["method"], row["status"], row["latency_ms"], row["request_id"])
+
+
+def _endpoint(row):
+    """The endpoint that a row names."""
+    return (row["interface"], row["transport"], row["port"])
+
+
+def _subscriptions(sim):
+    _, body = _control(sim, "GET", "/ws/subscriptions")
+    return body["subscriptions"]
+
+
+def _emit(sim, body):
+    """POST /ws/emit. Return the status and the body, for a refusal too."""
+    request = urllib.request.Request(
+        f"{sim['control']}/ws/emit",
+        method="POST",
+        headers={"Content-Type": "application/json"},
+        data=json.dumps(body).encode(),
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as refusal:
+        return refusal.code, json.loads(refusal.read())
+
+
+def _request_upgrade(port=_PORT, path="/ws", upgrade_headers=True, lava_headers=None):
+    """Open a connection and send one request for an upgrade. Return the socket."""
+    lines = [f"GET {path} HTTP/1.1", "Host: x"]
+    if upgrade_headers:
+        lines += [
+            "Upgrade: websocket",
+            "Connection: Upgrade",
+            f"Sec-WebSocket-Key: {_SAMPLE_KEY}",
+            "Sec-WebSocket-Version: 13",
+        ]
+    lines += [f"{name}: {value}" for name, value in (lava_headers or {}).items()]
+    sock = socket.create_connection((_WS_HOST, port), timeout=3)
+    sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("ascii"))
+    return sock
+
+
+def _read_until_the_close(sock, timeout_s=3.0):
+    """Read each byte that arrives until the simulator closes the connection.
+
+    A connection that stays open for `timeout_s` raises socket.timeout.
+    """
+    sock.settimeout(timeout_s)
+    received = b""
+    while True:
+        try:
+            chunk = sock.recv(4096)
+        except ConnectionError:
+            return received
+        if not chunk:
+            return received
+        received += chunk
+
+
+def _refusal(sock):
+    """Read a refused upgrade to its end. Return its HTTP status and its JSON body."""
+    raw = _read_until_the_close(sock)
+    sock.close()
+    head, _, body = raw.partition(b"\r\n\r\n")
+    return int(head.split(b" ", 2)[1]), json.loads(body)
+
+
+def _read_the_handshake(sock):
+    """Read the reply to an upgrade request, up to the end of its headers."""
+    head = b""
+    while not head.endswith(b"\r\n\r\n"):
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        head += chunk
+    return head
+
+
+@contextlib.contextmanager
+def _websocket(port=_PORT, lava_headers=None):
+    """Open a WebSocket with the sample key. Give the socket after the handshake."""
+    sock = _request_upgrade(port, lava_headers=lava_headers)
+    try:
+        head = _read_the_handshake(sock)
+        assert head.startswith(b"HTTP/1.1 101 "), f"the upgrade did not succeed: {head!r}"
+        yield sock
+    finally:
+        try:
+            sock.sendall(ws_protocol.encode_frame(ws_protocol.OPCODE_CLOSE, b"", mask=True))
+        except OSError:
+            pass
+        sock.close()
+
+
+def _send_frame(sock, message):
+    """Send one JSON-RPC message as a text frame."""
+    sock.sendall(ws_protocol.encode_frame(ws_protocol.OPCODE_TEXT, json.dumps(message).encode(), mask=True))
+
+
+def _payload(sock, timeout_s=3.0):
+    """The payload bytes of the next frame."""
+    sock.settimeout(timeout_s)
+    return ws_protocol.parse_frame(sock.recv).payload
+
+
+def _reply(sock, timeout_s=3.0):
+    """The next frame, read as JSON."""
+    return json.loads(_payload(sock, timeout_s))
+
+
+def _assert_no_frame(sock, wait_s=0.5):
+    """No byte arrives in `wait_s`, and the connection stays open."""
+    sock.settimeout(wait_s)
+    with pytest.raises(socket.timeout):
+        sock.recv(1)
+
+
+def _subscribe(sock, method="eth_subscribe", frame_id=1):
+    """Send one subscribe frame. Return the subscription id of the reply."""
+    _send_frame(sock, {"jsonrpc": "2.0", "method": method, "params": ["newHeads"], "id": frame_id})
+    return _reply(sock)["result"]
+
+
+class TestARefusedUpgrade:
+    """The upgrade request that opens a WebSocket, on a provider with a fault.
+
+    The upgrade is not a request of the request flow. `_WsHandler.do_GET`
+    asks the fault policy itself, and `_refuse_upgrade` writes the row.
+    """
+
+    @pytest.mark.parametrize(
+        "block, status, body, method, row_status",
+        [
+            pytest.param({"mode": "down"}, 503, {"error": "provider down"}, "*", "down", id="down"),
+            pytest.param(
+                {"mode": "rate_limit"}, 429, {"error": "rate limited"}, "ws_upgrade", "rate_limit", id="rate-limit"
+            ),
+            pytest.param(
+                {"mode": "rate_limit", "rate_limit_body": "slow down"},
+                429,
+                {"error": "rate limited"},
+                "ws_upgrade",
+                "rate_limit",
+                id="rate-limit-with-a-rate-limit-body",
+            ),
+            pytest.param(
+                {"mode": "error"},
+                400,
+                {"error": "Internal error"},
+                "ws_upgrade",
+                "error",
+                id="error-with-the-default-message",
+            ),
+            pytest.param(
+                {"mode": "error", "error_message": "refused by the test", "error_code": -32099, "http_status": 503},
+                400,
+                {"error": "refused by the test"},
+                "ws_upgrade",
+                "error",
+                id="error-with-a-message-a-code-and-an-http-status",
+            ),
+            pytest.param(
+                {"mode": "success", "error_probability": 1.0},
+                400,
+                {"error": "Internal error"},
+                "ws_upgrade",
+                "error",
+                id="error-probability-of-one",
+            ),
+        ],
+    )
+    def test_a_refused_upgrade_gets_its_status_and_its_body_and_writes_one_row(
+        self, sim, block, status, body, method, row_status
+    ):
+        """Each fault that answers refuses the upgrade with its own HTTP status
+        and its own JSON body. The refusal writes one complete row: the method
+        `*` for `down` and `ws_upgrade` for each other fault, `latency_ms` 0,
+        no request id, and the lava headers of the upgrade request."""
+        _set_scenario(sim, {**block, "transports": ["ws"]})
+
+        answer = _refusal(_request_upgrade(lava_headers=_LAVA_HEADERS))
+
+        assert answer == (status, body)
+        rows = _rows(sim)
+        assert [_facts(row) for row in rows] == [(method, row_status, 0, None)]
+        assert _endpoint(rows[0]) == ("jsonrpc", "ws", _PORT)
+        assert rows[0]["lava_headers"] == _LAVA_HEADERS
+
+    def test_a_hung_upgrade_gets_no_byte_and_writes_one_row(self, sim):
+        """A `hang` provider sends no byte for the upgrade. The row is written
+        before the wait, so a test can read it while the upgrade hangs."""
+        _set_scenario(sim, {"mode": "hang", "transports": ["ws"]})
+
+        sock = _request_upgrade(lava_headers=_LAVA_HEADERS)
+        try:
+            _assert_no_frame(sock)
+            rows = _rows(sim)
+        finally:
+            sock.close()
+
+        assert [_facts(row) for row in rows] == [("ws_upgrade", "hang", 0, None)]
+        assert _endpoint(rows[0]) == ("jsonrpc", "ws", _PORT)
+        assert rows[0]["lava_headers"] == _LAVA_HEADERS
+
+    def test_a_hung_upgrade_ends_after_30_seconds_with_a_closed_connection_and_no_byte(self, sim):
+        """The adapter holds a hung upgrade for 30 seconds. Then it closes the
+        connection, and it sends no byte. This is the one slow test of this
+        part of the file."""
+        _set_scenario(sim, {"mode": "hang", "transports": ["ws"]})
+
+        sock = _request_upgrade()
+        started = time.monotonic()
+        try:
+            received = _read_until_the_close(sock, timeout_s=40.0)
+        finally:
+            sock.close()
+        waited = time.monotonic() - started
+
+        assert received == b""
+        assert 29.0 <= waited <= 35.0, f"the upgrade hung for {waited:.1f} s"
+
+    @pytest.mark.parametrize(
+        "drop_at, reply",
+        [
+            pytest.param(None, b"", id="no-drop-point-in-the-scenario"),
+            pytest.param("before_headers", b"", id="before-headers"),
+            pytest.param("after_headers", _HANDSHAKE_OF_PROVIDER_1, id="after-headers"),
+            pytest.param("mid_body", b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: webso", id="mid-body"),
+        ],
+    )
+    def test_a_dropped_upgrade_gets_the_bytes_of_its_drop_point_and_writes_one_row(self, sim, drop_at, reply):
+        """`drop_connection` closes the connection of the upgrade. The drop
+        point says which bytes arrive first: none, the complete 101 reply, or
+        the first 49 bytes of it."""
+        block = {"mode": "drop_connection", "transports": ["ws"]}
+        if drop_at is not None:
+            block["drop_at"] = drop_at
+        _set_scenario(sim, block)
+
+        sock = _request_upgrade(lava_headers=_LAVA_HEADERS)
+        try:
+            received = _read_until_the_close(sock)
+        finally:
+            sock.close()
+
+        assert received == reply
+        rows = _rows(sim)
+        assert [_facts(row) for row in rows] == [("ws_upgrade", "drop_connection", 0, None)]
+        assert _endpoint(rows[0]) == ("jsonrpc", "ws", _PORT)
+        assert rows[0]["lava_headers"] == _LAVA_HEADERS
+
+    def test_an_upgrade_that_succeeds_gets_the_101_reply_and_writes_no_row(self, sim):
+        """An upgrade with no fault gets the 101 reply with the provider name,
+        and the simulator writes no history row for it."""
+        sock = _request_upgrade(lava_headers=_LAVA_HEADERS)
+        try:
+            head = _read_the_handshake(sock)
+        finally:
+            sock.close()
+
+        assert head == _HANDSHAKE_OF_PROVIDER_1
+        assert _every_row(sim) == []
+
+    @pytest.mark.parametrize("mode", ["success", "down"])
+    def test_a_request_for_another_path_gets_404_and_writes_no_row(self, sim, mode):
+        """The adapter answers a wrong path itself, before it asks the fault
+        policy. So a `down` provider answers 404 too, and no row is written."""
+        _set_scenario(sim, {"mode": mode, "transports": ["ws"]})
+
+        answer = _refusal(_request_upgrade(path="/"))
+
+        assert answer == (404, {"error": "not found"})
+        assert _every_row(sim) == []
+
+    @pytest.mark.parametrize("mode", ["success", "down"])
+    def test_a_request_with_no_upgrade_headers_gets_400_and_writes_no_row(self, sim, mode):
+        """The adapter answers a request that is no upgrade itself, before it
+        asks the fault policy. So a `down` provider answers 400 too, and no
+        row is written."""
+        _set_scenario(sim, {"mode": mode, "transports": ["ws"]})
+
+        answer = _refusal(_request_upgrade(upgrade_headers=False))
+
+        assert answer == (400, {"error": "bad WS upgrade request"})
+        assert _every_row(sim) == []
+
+    def test_a_refused_upgrade_does_not_wait_for_latency_ms(self, sim):
+        """The upgrade applies no `latency_ms`: the refusal comes at once, and
+        its row records 0."""
+        _set_scenario(sim, {"mode": "rate_limit", "latency_ms": 1500, "transports": ["ws"]})
+
+        started = time.monotonic()
+        answer = _refusal(_request_upgrade())
+        waited = time.monotonic() - started
+
+        assert answer == (429, {"error": "rate limited"})
+        assert waited < 1.0, f"the refusal took {waited:.2f} s"
+        assert [_facts(row) for row in _rows(sim)] == [("ws_upgrade", "rate_limit", 0, None)]
+
+    def test_an_upgrade_that_succeeds_does_not_wait_for_latency_ms(self, sim):
+        """The upgrade applies no `latency_ms`: the 101 reply comes at once."""
+        _set_scenario(sim, {"mode": "success", "latency_ms": 1500, "transports": ["ws"]})
+
+        started = time.monotonic()
+        sock = _request_upgrade()
+        try:
+            head = _read_the_handshake(sock)
+        finally:
+            sock.close()
+        waited = time.monotonic() - started
+
+        assert head == _HANDSHAKE_OF_PROVIDER_1
+        assert waited < 1.0, f"the handshake took {waited:.2f} s"
+
+    @pytest.mark.parametrize(
+        "corruption_mode", ["truncated", "invalid_json", "empty_response", "null_body", "missing_field", "wrong_type"]
+    )
+    def test_the_upgrade_applies_no_corruption(self, sim, corruption_mode):
+        """A `corruption_mode` does not change the reply of the upgrade: not
+        the body of a refusal, and not the 101 reply."""
+        corruption = {"corruption_mode": corruption_mode, "missing_field": "error", "transports": ["ws"]}
+
+        _set_scenario(sim, {"mode": "rate_limit", **corruption})
+        assert _refusal(_request_upgrade()) == (429, {"error": "rate limited"})
+
+        _set_scenario(sim, {"mode": "success", **corruption})
+        sock = _request_upgrade()
+        try:
+            assert _read_the_handshake(sock) == _HANDSHAKE_OF_PROVIDER_1
+        finally:
+            sock.close()
+
+    @pytest.mark.parametrize("key", ["ws_upgrade", "*"])
+    def test_the_upgrade_reads_no_per_method_override(self, sim, key):
+        """An entry of `responses` does not reach the upgrade, also when its
+        key is the method name of the row of a refused upgrade."""
+        _set_scenario(sim, {"mode": "success", "transports": ["ws"], "responses": {key: {"mode": "down"}}})
+        sock = _request_upgrade()
+        try:
+            assert _read_the_handshake(sock) == _HANDSHAKE_OF_PROVIDER_1
+        finally:
+            sock.close()
+        assert _every_row(sim) == []
+
+        _set_scenario(sim, {"mode": "rate_limit", "transports": ["ws"], "responses": {key: {"mode": "success"}}})
+        assert _refusal(_request_upgrade()) == (429, {"error": "rate limited"})
+
+    @pytest.mark.parametrize(
+        "scope",
+        [
+            pytest.param({"transports": ["http"]}, id="a-transports-filter"),
+            pytest.param({"ports": [port_of("eth-sim", "1")]}, id="a-ports-filter"),
+        ],
+    )
+    def test_a_filter_that_does_not_name_the_ws_endpoint_leaves_the_upgrade_alone(self, sim, scope):
+        """A `down` with a filter that names the http endpoint only does not
+        reach the upgrade: it succeeds, and no row is written."""
+        _set_scenario(sim, {"mode": "down", **scope})
+
+        sock = _request_upgrade()
+        try:
+            head = _read_the_handshake(sock)
+        finally:
+            sock.close()
+
+        assert head == _HANDSHAKE_OF_PROVIDER_1
+        assert _every_row(sim) == []
+
+    def test_the_upgrade_performs_no_pause(self, sim):
+        """`pause_at` holds a reply of the http endpoint of the provider. The
+        upgrade of its ws endpoint is not held."""
+        _set_scenario(sim, {"mode": "success", "pause_at": "mid_body", "pause_ms": 1500})
+
+        started = time.monotonic()
+        sock = _request_upgrade()
+        try:
+            head = _read_the_handshake(sock)
+        finally:
+            sock.close()
+        waited = time.monotonic() - started
+
+        assert head == _HANDSHAKE_OF_PROVIDER_1
+        assert waited < 1.0, f"the handshake took {waited:.2f} s"
+
+    def test_each_upgrade_uses_one_count_of_the_fail_first_n_window(self, sim):
+        """With `fail_first_n` 2 on the ws endpoint, two upgrades are refused
+        and each one writes its row. The third upgrade succeeds and writes no
+        row."""
+        _set_scenario(sim, {"mode": "rate_limit", "fail_first_n": 2, "then_mode": "success", "transports": ["ws"]})
+
+        first = _refusal(_request_upgrade())
+        second = _refusal(_request_upgrade())
+        sock = _request_upgrade()
+        try:
+            third = _read_the_handshake(sock)
+        finally:
+            sock.close()
+
+        assert first == (429, {"error": "rate limited"})
+        assert second == (429, {"error": "rate limited"})
+        assert third == _HANDSHAKE_OF_PROVIDER_1
+        assert [_facts(row) for row in _rows(sim)] == [("ws_upgrade", "rate_limit", 0, None)] * 2
