@@ -2666,3 +2666,121 @@ class TestASubscriptionBelongsToOneConnection:
             left = [entry["subscription_id"] for entry in _subscriptions(sim)]
 
         assert left == [kept]
+
+
+class TestFramesOutsideTheSubscribeCode:
+    """Frames that the subscribe code does not serve: a frame that the adapter
+    cannot read, and a frame that goes to `Listener.serve`."""
+
+    @pytest.mark.parametrize(
+        "opcode, payload",
+        [
+            pytest.param(ws_protocol.OPCODE_TEXT, b"this is not JSON", id="a-text-frame-that-is-not-json"),
+            pytest.param(ws_protocol.OPCODE_TEXT, b"\xff\xfe\xfd", id="a-text-frame-that-is-not-utf-8"),
+            pytest.param(
+                ws_protocol.OPCODE_BINARY,
+                b'{"jsonrpc": "2.0", "method": "eth_subscribe", "params": ["newHeads"], "id": 1}',
+                id="a-binary-frame-with-a-subscribe-request",
+            ),
+        ],
+    )
+    def test_a_frame_that_the_adapter_cannot_read_gets_no_reply_and_no_row(self, sim, opcode, payload):
+        """The adapter drops a text frame that is not JSON and a frame that is
+        not text. It sends no reply and writes no row, and it registers no
+        subscription. The connection stays open and answers the next frame."""
+        with _websocket() as sock:
+            sock.sendall(ws_protocol.encode_frame(opcode, payload, mask=True))
+            _assert_no_frame(sock)
+            rows_after_the_frame = _every_row(sim)
+            subscriptions = _subscriptions(sim)
+            _send_frame(sock, _BLOCK_NUMBER)
+            next_reply = _reply(sock)
+            rows = _rows(sim)
+
+        assert rows_after_the_frame == []
+        assert subscriptions == []
+        assert next_reply["id"] == 8
+        assert [_facts(row) for row in rows] == [("eth_blockNumber", "success", 0, 8)]
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param(b"5", id="a-number"),
+            pytest.param(b"null", id="null"),
+            pytest.param(b'"eth_subscribe"', id="a-text"),
+            pytest.param(b"{}", id="an-object-with-no-method"),
+        ],
+    )
+    def test_a_json_frame_with_no_method_goes_to_the_request_flow(self, sim, payload):
+        """A text frame that is JSON and names no method goes to the request
+        flow. The eth chain answers it as the method `unknown`, and the row has
+        that method."""
+        with _websocket() as sock:
+            sock.sendall(ws_protocol.encode_frame(ws_protocol.OPCODE_TEXT, payload, mask=True))
+            reply = _reply(sock)
+            rows = _rows(sim)
+            subscriptions = _subscriptions(sim)
+
+        assert reply == {"jsonrpc": "2.0", "id": 1, "result": "0x1"}
+        assert [_facts(row) for row in rows] == [("unknown", "success", 0, 1)]
+        assert subscriptions == []
+
+    def test_a_list_of_requests_gets_the_batch_error_and_registers_no_subscription(self, sim):
+        """A text frame that is a JSON list goes to the request flow, also when
+        the list holds a subscribe request. The reply is the batch error, the
+        row has the method `batch`, and no subscription is registered."""
+        with _websocket() as sock:
+            _send_frame(sock, [_SUBSCRIBE])
+            reply = _reply(sock)
+            rows = _rows(sim)
+            subscriptions = _subscriptions(sim)
+
+        assert reply == {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32600, "message": "batch requests are not supported"},
+        }
+        assert [_facts(row) for row in rows] == [("batch", "error", 0, None)]
+        assert subscriptions == []
+
+    @pytest.mark.parametrize(
+        "block, expected_row",
+        [
+            pytest.param({"mode": "down", "latency_ms": 250}, ("*", "down", 0, None), id="down"),
+            pytest.param({"mode": "hang", "latency_ms": 250}, ("eth_blockNumber", "hang", 0, 8), id="hang"),
+        ],
+    )
+    def test_the_down_row_and_the_hang_row_of_another_frame_record_no_latency(self, sim, block, expected_row):
+        """A frame that is no subscribe frame goes to `Listener.serve`. Its
+        `down` row has the method `*`, no request id and `latency_ms` 0, and
+        its `hang` row records 0. The rows of a subscribe frame differ: the
+        tests of the class above hold them."""
+        with _websocket() as sock:
+            _set_scenario(sim, {**block, "transports": ["ws"]})
+            _send_frame(sock, _BLOCK_NUMBER)
+            rows = _rows_when_complete(sim, 1)
+
+        assert [_facts(row) for row in rows] == [expected_row]
+
+    def test_a_per_method_down_with_a_latency_closes_another_frame_at_once(self, sim):
+        """An entry of `responses` with `mode: down` and a latency, for a frame
+        that goes to `Listener.serve`: the row records the method, the id and
+        the latency. The WebSocket adapter closes the connection with no wait."""
+        _set_scenario(
+            sim,
+            {
+                "mode": "success",
+                "transports": ["ws"],
+                "responses": {"eth_blockNumber": {"mode": "down", "latency_ms": 1500}},
+            },
+        )
+
+        with _websocket() as sock:
+            started = time.monotonic()
+            _send_frame(sock, _BLOCK_NUMBER)
+            received = _read_until_the_close(sock)
+            waited = time.monotonic() - started
+
+        assert received == b""
+        assert waited < 1.0, f"the connection closed after {waited:.2f} s"
+        assert [_facts(row) for row in _rows(sim)] == [("eth_blockNumber", "down", 1500, 8)]
