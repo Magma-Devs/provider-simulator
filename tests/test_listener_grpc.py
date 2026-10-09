@@ -297,11 +297,13 @@ def test_a_request_id_row_of_a_service_with_no_loaded_stubs_is_refused():
 # A gRPC call is answered through Listener.serve. The tables below record
 # what serve() decides for each mode, each corruption mode and each per-method
 # override: the status that the caller gets, the text of that status, and the
-# history row of the call. Each expected value is written out by hand.
+# history row of the call. Each expected value is written out by hand, but
+# one: the first table writes the method of a row one time, in its assertion.
 #
 # ``_decide`` is the one function of this block that calls serve() and reads a
 # ServeResult. Before gRPC moved into Listener.serve, it called plan() and read
-# a GrpcPlan, and the move changed no expected value of the two tables.
+# a GrpcPlan, and the move changed no expected value of the two tables of that
+# time.
 #
 # The content of a reply message is not in these tables. A caller reads the
 # message that the adapter builds from the data of the chain.

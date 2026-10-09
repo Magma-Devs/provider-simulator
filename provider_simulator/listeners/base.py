@@ -21,7 +21,9 @@ other code relies on. The provider does not wait for the latency, so the row
 records ``latency_ms`` 0. A ``hang`` row records 0 for the same reason.
 The exception is a per-method ``responses`` override with ``mode="down"``: the
 method had to be parsed to find the override, so that entry carries the real
-method, request id, and the configured latency, which the adapter waits for.
+method, request id, and the configured latency. The HTTP adapter and the gRPC
+adapter wait for that latency. The WebSocket adapter closes the connection
+with no wait.
 
 Per-method ``responses`` overrides can shadow the fault keys (mode, latency_ms,
 error probability/code/message, http_status, drop_at) for one method — the
@@ -284,7 +286,8 @@ class Listener(ABC):
 
     def build_down(self) -> ServeResult:
         """The reply of a provider in the mode ``down``. Default: HTTP 503 with
-        no body."""
+        no body. Return a new object for each call: for a per-method ``down``
+        the flow sets ``latency_ms`` on it."""
         return ServeResult(action="no_body", status=503)
 
     def corrupt(self, result: ServeResult, status_label: str, scenario: dict) -> str:

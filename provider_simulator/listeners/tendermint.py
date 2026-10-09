@@ -8,8 +8,11 @@ JSON-RPC ``error`` envelope — both matching the flat TendermintHandler.
 
 A per-method ``responses`` entry has two kinds of keys. The request flow merges
 its fault keys (``mode``, ``latency_ms`` and the others) with the method name as
-the key, as on JSON-RPC. LavaChain reads its content keys (``error_stub``,
-``error``, ``body``) in the success path.
+the key, as on JSON-RPC. LavaChain reads its content keys in the success path:
+``error_stub``, ``error`` and ``body``, and ``status`` or ``http_status`` for
+the HTTP status of that canned reply. So ``http_status`` has two readers: the
+flow uses it for the status of an error fault, and the chain uses it for the
+status of a canned reply.
 """
 
 import json

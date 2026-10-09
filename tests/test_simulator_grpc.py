@@ -1179,7 +1179,8 @@ class TestGrpcWhichCallsWait:
     """``latency_ms`` delays a reply message and each status but two. A
     provider-wide ``down`` answers at once, and a hung call waits its own 30
     seconds. The row of each of the two records 0. A per-method ``down`` is
-    different: it waits for the latency of its entry, and its row records it."""
+    different: it waits for its latency, and its row records it. That latency
+    is the one of its entry, or the one of the provider when the entry has none."""
 
     @pytest.mark.parametrize(
         "scenario, want_code, min_s, max_s, want_row_latency_ms",

@@ -33,7 +33,7 @@ Three rules are the same as on the HTTP interfaces, and the flow holds them:
 - The row of a provider-wide ``down`` has the method ``"*"`` and no request id:
   a dead node does not read the request.
 - A provider-wide ``down`` row and a ``hang`` row record latency 0, because the
-  provider did not wait.
+  provider did not wait for the latency.
 - The fault keys of a per-method override are merged into the scenario. The key
   of the entry is the bare method name.
 
