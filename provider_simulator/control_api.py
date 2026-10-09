@@ -179,8 +179,8 @@ def _an_invalid_json_no_endpoint_can_apply(provider: object, scenario_updates: d
     ``invalid_json`` breaks the bytes of a JSON body. A gRPC reply is a protobuf
     message or a status, so the gRPC listener has nothing to apply it to. Before
     this rule the value was stored, ``GET /scenario`` echoed it, and each call
-    got a clean reply. That is the outcome this module refuses each time: a
-    fault that is accepted and does nothing reads as a router that recovered.
+    got a clean reply. That is the outcome this rule refuses: a fault that is
+    accepted and does nothing reads as a router that recovered.
 
     The rule reads the endpoints of the provider and no filter. A provider with
     one endpoint of another interface can apply the corruption there, so its
@@ -192,10 +192,9 @@ def _an_invalid_json_no_endpoint_can_apply(provider: object, scenario_updates: d
     if endpoints and all(ep.interface == "grpc" for ep in endpoints):
         return (
             "corruption_mode 'invalid_json' cannot apply: it breaks the bytes of a JSON body, and "
-            "this provider has only gRPC endpoints, whose replies are protobuf messages. Accepting "
-            "it would corrupt nothing, the provider would answer normally, and a test would read "
-            "that as a router that recovered. Use 'invalid_proto' on a gRPC provider: it ends the "
-            "call with the status UNKNOWN"
+            "this provider has only gRPC endpoints, whose replies are protobuf messages. The value "
+            "would be stored and would corrupt no reply. Use 'invalid_proto' on a gRPC provider: "
+            "it ends the call with the status UNKNOWN"
         )
     return ""
 
