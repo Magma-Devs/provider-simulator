@@ -1265,8 +1265,8 @@ class _HttpPortLoop:
 
     A pass reports "open" only for a server that serves and that no
     ``close_port()`` touched. Each other state is "closed": the port has no
-    socket, or ``close_port()`` began. So the report is true after a pass that
-    raised too.
+    socket, or ``close_port()`` began. So the report is correct after a pass
+    that raised too: such a pass reports "closed", and the port refuses.
 
     A pass and ``stop()`` hold one lock. So ``stop()`` gets the server that the
     port has at that time, and no pass opens the port after it.
@@ -1318,7 +1318,7 @@ class _HttpPortLoop:
                                 # No serve loop runs for this server, and a
                                 # bound socket accepts connections that nothing
                                 # answers. Without the socket the report
-                                # "closed" is true. The next pass binds a new
+                                # "closed" is correct. The next pass binds a new
                                 # server. The loop drops the server first: an
                                 # error of the close then leaves no server in a
                                 # half state.
@@ -1327,7 +1327,7 @@ class _HttpPortLoop:
                                 raise
                     last_error = ""
                 except Exception as exc:
-                    # The next pass tries again. The report below is true
+                    # The next pass tries again. The report below is correct
                     # meanwhile, so a caller that waits for the port gets an
                     # error and not a wrong "ok". The loop logs each new text
                     # one time, and not one time for each pass.

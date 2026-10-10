@@ -7,7 +7,7 @@
 **After the review (2026-10-10 and 2026-10-11).** The branch differs from the tasks below in six places. The text of the pull request has the proof for each one.
 
 1. The tests. The new test file has 31 functions and 41 cases, `tests/test_control_api_port_closed.py` has two more new functions, `tests/test_port_gate.py` has one more, and the suite has `N + 49` tests. The break proof and the review found source lines that no test held, and each one has a test now.
-2. The loop of a port. `_HttpPortLoop` reports "open" only for a server that serves and that no `close_port()` touched. It finishes a `close_port()` that raised, and it closes a server that cannot start its serve thread. So the report to the gate is true after a pass that raised.
+2. The loop of a port. `_HttpPortLoop` reports "open" only for a server that serves and that no `close_port()` touched. It finishes a `close_port()` that raised, and it closes a server that cannot start its serve thread. So the report to the gate is correct after a pass that raised.
 3. The serve thread of a provider port has the name `port-<port>-serve`.
 4. The call that `_provider_server_factory` returns holds the host, and not the simulator. So a simulator that stopped does not keep the socket of its control port.
 5. The adapters `_HttpListenerHandler` and `_WsHandler` drop what a worker thread reads after `close_port()` began: a request, an upgrade request or a frame. On Linux the bytes that arrived before the close stay readable, and such a request got a history row. Section 4 says that this plan edits no line of these two classes; the fix adds one check to each.

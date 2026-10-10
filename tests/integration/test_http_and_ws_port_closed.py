@@ -552,7 +552,7 @@ class TestTheLoopOfOnePort:
         """``serve`` raises one time, as when the system cannot start a thread.
         A bound server with no serve loop accepts connections that nothing
         answers. So the loop closes that server, and the report "closed" is
-        true: the port refuses a connection. The log has the warning of the
+        correct: the port refuses a connection. The log has the warning of the
         pass. The next pass binds a new server."""
 
         class ServeRaisesOneTime(server_module._ProviderHTTPServer):
