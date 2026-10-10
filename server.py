@@ -69,7 +69,7 @@ from provider_simulator.listeners import (
     ws_protocol,
 )
 from provider_simulator.listeners.rest import allowed_verbs
-from provider_simulator.listeners.ws import WsSubscriptions
+from provider_simulator.listeners.ws import Subscription, WsSubscriptions, event_message
 from provider_simulator.port_gate import PortGate
 from provider_simulator.resp_control import RespControlApi
 from provider_simulator.resp_proxy import RespProxy
@@ -377,44 +377,15 @@ def _ws_text_frame(payload_obj, corruption_mode=None, missing_field=None) -> byt
 class _WireSubscriptions(WsSubscriptions):
     """WsSubscriptions that also owns the wire side of an emitted event.
 
-    The control API pushes an event at a subscription id; this subclass wraps
-    it in the subscription's chain envelope, enqueues the ready frame BYTES
-    (the writer thread only ever sends bytes), and records the push in the
-    owning provider's history — so a /history read shows control-plane pushes
-    next to the served calls.
+    The control API pushes an event at a subscription id. The registry asks
+    this subclass for what goes on the queue of the connection: the ready
+    frame BYTES of the event in the envelope of its subscribe method (the
+    writer thread only ever sends bytes). The registry writes the history row
+    of the push.
     """
 
-    def __init__(self, registry: Registry) -> None:
-        super().__init__()
-        self._registry = registry
-
-    def emit(self, sub_id: str, event: object) -> str:
-        sub = self.get(sub_id)
-        if sub is None or sub.closed:
-            return "unknown"
-        envelope = stubs_ws.SUBSCRIBE_METHODS.get(sub.method, {}).get("envelope", "eth_subscription")
-        payload = event if isinstance(event, dict) else {}
-        frame = _ws_text_frame(stubs_ws.build_event_frame(envelope, sub_id, payload))
-        try:
-            sub.out_queue.put_nowait(frame)
-        except queue.Full:
-            return "full"
-        try:
-            provider = self._registry.provider(sub.pool, sub.pid)
-        except KeyError:
-            return "emitted"
-        ws_endpoint = next((ep for ep in provider.endpoints if ep.transport == "ws"), None)
-        provider.log.push(
-            f"{envelope} push",
-            "success",
-            0,
-            interface=ws_endpoint.interface if ws_endpoint else "jsonrpc",
-            transport="ws",
-            port=ws_endpoint.port if ws_endpoint else 0,
-            request_id=sub_id,
-            lava_headers={},
-        )
-        return "emitted"
+    def frame_of(self, sub: Subscription, event: object) -> bytes:
+        return _ws_text_frame(event_message(sub, event))
 
 
 class _WsHandler(BaseHTTPRequestHandler):

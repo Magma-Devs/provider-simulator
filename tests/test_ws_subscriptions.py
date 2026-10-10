@@ -7,6 +7,7 @@ import pytest
 
 from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.provider import Pool
+from provider_simulator.domain.registry import build_registry
 from provider_simulator.listeners import ServeResult
 from provider_simulator.listeners.ws import JsonRpcWsListener, WsSubscriptions
 
@@ -157,3 +158,60 @@ def test_each_upgrade_decision_uses_one_count_of_the_fail_first_n_window():
 
     assert statuses == [429, 429, 101]
     assert [_facts(row) for row in provider.log.get_history()] == [("ws_upgrade", "rate_limit", 0, None)] * 2
+
+
+# ── The row of a pushed event ─────────────────────────────────────────────────
+
+
+def test_emit_with_a_registry_writes_one_push_row_for_the_ws_endpoint_of_the_provider():
+    # The method of the row is the envelope of the subscribe method and the
+    # word "push". 18558 is the ws port of the provider eth-sim:2.
+    registry = build_registry()
+    subscriptions = WsSubscriptions(registry)
+    subscriptions.register("0xabc", "eth-sim", "2", "accountSubscribe")
+
+    assert subscriptions.emit("0xabc", {"tag": "A"}) == "emitted"
+
+    rows = registry.provider("eth-sim", "2").log.get_history()
+    assert [_facts(row) for row in rows] == [("solana_account push", "success", 0, "0xabc")]
+    assert (rows[0]["interface"], rows[0]["transport"], rows[0]["port"]) == ("jsonrpc", "ws", 18558)
+    assert rows[0]["lava_headers"] == {}
+
+
+def test_emit_on_a_full_queue_writes_no_row():
+    registry = build_registry()
+    subscriptions = WsSubscriptions(registry)
+    full_queue = queue.Queue(maxsize=1)
+    full_queue.put_nowait("an older event")
+    subscriptions.register("0xabc", "eth-sim", "1", "eth_subscribe", out_queue=full_queue)
+
+    assert subscriptions.emit("0xabc", {"tag": "A"}) == "full"
+
+    assert registry.provider("eth-sim", "1").log.get_history() == []
+
+
+def test_emit_for_a_provider_that_the_registry_does_not_hold_writes_no_row():
+    registry = build_registry()
+    subscriptions = WsSubscriptions(registry)
+    subscriptions.register("0xabc", "no-such-pool", "1", "eth_subscribe")
+
+    assert subscriptions.emit("0xabc", {"tag": "A"}) == "emitted"
+
+    assert [row for provider in registry.all_providers() for row in provider.log.get_history()] == []
+
+
+class _BytesSubscriptions(WsSubscriptions):
+    """A registry whose frame_of gives bytes, as the registry of the socket
+    adapter does."""
+
+    def frame_of(self, sub, event):
+        return f"{sub.sub_id}:{event}".encode()
+
+
+def test_frame_of_gives_what_goes_on_the_queue():
+    subscriptions = _BytesSubscriptions()
+    sub = subscriptions.register("0xabc", "eth-sim", "1", "eth_subscribe")
+
+    assert subscriptions.emit("0xabc", "tag-A") == "emitted"
+
+    assert sub.out_queue.get_nowait() == b"0xabc:tag-A"

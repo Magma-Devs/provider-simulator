@@ -8,9 +8,10 @@ a refused upgrade.
 
 ``WsSubscriptions`` is the registry of the subscriptions. ``eth_subscribe``
 registers a subscription with an outbound queue. ``POST /ws/emit`` pushes an
-event onto that queue, and the writer thread of the connection sends it.
-``eth_unsubscribe`` or the end of the connection removes the subscription. One
-running simulator has one registry.
+event onto that queue, and the writer thread of the connection sends it. The
+registry writes the history row of each pushed event. ``eth_unsubscribe`` or
+the end of the connection removes the subscription. One running simulator has
+one registry.
 
 The socket adapter in server.py owns the wire: the handshake bytes, the frame
 codec, and the reader thread and the writer thread of each connection. This is
@@ -21,9 +22,11 @@ import queue
 import threading
 from dataclasses import dataclass, field
 
+import stubs_ws
 from provider_simulator import fault_policy
 from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.provider import Provider
+from provider_simulator.domain.registry import Registry
 from provider_simulator.listeners.base import ServeResult
 from provider_simulator.listeners.jsonrpc import JsonRpcListener
 
@@ -38,10 +41,28 @@ class Subscription:
     closed: bool = False
 
 
-class WsSubscriptions:
-    """Thread-safe registry of live WS subscriptions, keyed by subscription id."""
+def _envelope(method: str) -> str:
+    """The envelope of the events of one subscribe method. A method that the
+    table does not hold gets the eth envelope."""
+    return stubs_ws.SUBSCRIBE_METHODS.get(method, {}).get("envelope", "eth_subscription")
 
-    def __init__(self) -> None:
+
+def event_message(sub: Subscription, event: object) -> dict:
+    """The JSON message of one pushed event, in the envelope of its subscribe
+    method. An event that is not an object is pushed as an empty object."""
+    payload = event if isinstance(event, dict) else {}
+    return stubs_ws.build_event_frame(_envelope(sub.method), sub.sub_id, payload)
+
+
+class WsSubscriptions:
+    """Thread-safe registry of live WS subscriptions, keyed by subscription id.
+
+    With a ``Registry`` of providers, ``emit`` also writes the history row of
+    each pushed event. With none, it writes no row.
+    """
+
+    def __init__(self, registry: Registry | None = None) -> None:
+        self._registry = registry
         self._lock = threading.Lock()
         self._subs: dict[str, Subscription] = {}
 
@@ -78,15 +99,43 @@ class WsSubscriptions:
 
     def emit(self, sub_id: str, event: object) -> str:
         """Push an event to the subscription's queue. Returns ``"emitted"``,
-        ``"unknown"`` (no such / closed subscription), or ``"full"``."""
+        ``"unknown"`` (no such / closed subscription), or ``"full"``.
+
+        The queue gets ``frame_of(sub, event)``. Then the push gets one
+        ``success`` row in the history of the provider of the subscription, so
+        a /history read shows the push next to the served calls. A push asks no
+        fault policy. A full queue writes no row.
+        """
         sub = self.get(sub_id)
         if sub is None or sub.closed:
             return "unknown"
         try:
-            sub.out_queue.put_nowait(event)
+            sub.out_queue.put_nowait(self.frame_of(sub, event))
         except queue.Full:
             return "full"
+        if self._registry is None:
+            return "emitted"
+        try:
+            provider = self._registry.provider(sub.pool, sub.pid)
+        except KeyError:
+            return "emitted"
+        ws_endpoint = next((ep for ep in provider.endpoints if ep.transport == "ws"), None)
+        provider.log.push(
+            f"{_envelope(sub.method)} push",
+            "success",
+            0,
+            interface=ws_endpoint.interface if ws_endpoint else "jsonrpc",
+            transport="ws",
+            port=ws_endpoint.port if ws_endpoint else 0,
+            request_id=sub_id,
+            lava_headers={},
+        )
         return "emitted"
+
+    def frame_of(self, sub: Subscription, event: object) -> object:
+        """What ``emit`` puts on the queue for one event. Default: the event as
+        it is. The registry of the socket adapter gives the bytes of a frame."""
+        return event
 
     def list(self) -> list[dict]:
         with self._lock:

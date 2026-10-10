@@ -15,7 +15,8 @@ Two flat tables drive the WS handler:
                          Tests that don't supply a custom event in /ws/emit
                          fall back to these.
 
-The handler imports both. No other modules should depend on stubs_ws.
+The WebSocket listener module, provider_simulator/listeners/ws.py, imports
+the tables.
 """
 
 from typing import Any, Dict, Set
