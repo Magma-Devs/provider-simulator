@@ -1,15 +1,18 @@
 """WsSubscriptions — the WS subscription registry. Per-frame JSON-RPC over WS is
 JsonRpcListener; this covers the subscribe / emit / unsubscribe lifecycle."""
 
+import json
 import queue
+import re
 
 import pytest
 
+from provider_simulator.chains import chain_for
 from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.provider import Pool
 from provider_simulator.domain.registry import build_registry
-from provider_simulator.listeners import ServeResult
-from provider_simulator.listeners.ws import JsonRpcWsListener, WsSubscriptions
+from provider_simulator.listeners import RawRequest, ServeResult
+from provider_simulator.listeners.ws import JsonRpcWsListener, WsConnection, WsSubscriptions
 
 
 def test_register_and_get():
@@ -215,3 +218,115 @@ def test_frame_of_gives_what_goes_on_the_queue():
     assert subscriptions.emit("0xabc", "tag-A") == "emitted"
 
     assert sub.out_queue.get_nowait() == b"0xabc:tag-A"
+
+
+# ── A frame through the listener, with no socket ──────────────────────────────
+
+
+def _serve_frame(listener, connection, method, params, frame_id):
+    """Give one JSON-RPC frame of a connection to the listener."""
+    frame = {"jsonrpc": "2.0", "method": method, "params": params, "id": frame_id}
+    return listener.serve(RawRequest(body=json.dumps(frame).encode(), connection=connection))
+
+
+def test_a_subscribe_frame_registers_a_subscription_on_the_connection_of_the_request():
+    listener, provider = _ws_listener()
+    connection = WsConnection(queue.Queue())
+
+    result = _serve_frame(listener, connection, "accountSubscribe", ["an-account"], 7)
+
+    assert result.action == "respond"
+    subscription_id = result.body["result"]
+    assert re.fullmatch(r"0x[0-9a-f]{32}", subscription_id), subscription_id
+    assert result.body == {"jsonrpc": "2.0", "id": 7, "result": subscription_id}
+    assert list(result.body) == ["jsonrpc", "id", "result"]
+    sub = listener.subscriptions.get(subscription_id)
+    assert (sub.pool, sub.pid, sub.method) == ("eth-sim", "1", "accountSubscribe")
+    assert sub.out_queue is connection.out_queue
+    assert connection.subscription_ids == {subscription_id}
+    assert [_facts(row) for row in provider.log.get_history()] == [("accountSubscribe", "success", 0, 7)]
+
+
+def test_an_unsubscribe_frame_removes_a_subscription_of_its_own_connection_only():
+    listener, _ = _ws_listener()
+    owner, other = WsConnection(queue.Queue()), WsConnection(queue.Queue())
+    subscription_id = _serve_frame(listener, owner, "eth_subscribe", ["newHeads"], 1).body["result"]
+
+    from_the_other = _serve_frame(listener, other, "eth_unsubscribe", [subscription_id], 2)
+    after_the_other = listener.subscriptions.get(subscription_id)
+    from_the_owner = _serve_frame(listener, owner, "eth_unsubscribe", [subscription_id], 3)
+
+    assert from_the_other.body == {"jsonrpc": "2.0", "id": 2, "result": False}
+    assert after_the_other is not None
+    assert from_the_owner.body == {"jsonrpc": "2.0", "id": 3, "result": True}
+    assert listener.subscriptions.get(subscription_id) is None
+    assert owner.subscription_ids == set()
+
+
+@pytest.mark.parametrize(
+    "block, expected_row",
+    [
+        pytest.param({"mode": "down"}, ("*", "down", 0, None), id="down"),
+        pytest.param({"mode": "hang"}, ("eth_subscribe", "hang", 0, 7), id="hang"),
+        pytest.param({"mode": "rate_limit"}, ("eth_subscribe", "rate_limit", 0, 7), id="rate-limit"),
+        pytest.param({"mode": "error"}, ("eth_subscribe", "error", 0, 7), id="error"),
+        pytest.param({"mode": "drop_connection"}, ("eth_subscribe", "drop_connection", 0, 7), id="drop-connection"),
+        pytest.param(
+            {"responses": {"eth_subscribe": {"mode": "down"}}}, ("eth_subscribe", "down", 0, 7), id="a-per-method-down"
+        ),
+        pytest.param(
+            {"responses": {"eth_subscribe": {"body": {"jsonrpc": "2.0", "id": 1, "result": "0xcanned"}}}},
+            ("eth_subscribe", "success", 0, 7),
+            id="a-canned-body",
+        ),
+    ],
+)
+def test_a_fault_or_a_canned_body_on_a_subscribe_frame_registers_nothing(block, expected_row):
+    listener, provider = _ws_listener()
+    connection = WsConnection(queue.Queue())
+    provider.scenario.update(block)
+
+    _serve_frame(listener, connection, "eth_subscribe", ["newHeads"], 7)
+
+    assert listener.subscriptions.list() == []
+    assert connection.subscription_ids == set()
+    assert [_facts(row) for row in provider.log.get_history()] == [expected_row]
+
+
+def test_release_removes_each_subscription_of_one_connection_and_no_other():
+    listener, _ = _ws_listener()
+    ended, still_open = WsConnection(queue.Queue()), WsConnection(queue.Queue())
+    _serve_frame(listener, ended, "eth_subscribe", ["newHeads"], 1)
+    _serve_frame(listener, ended, "logsSubscribe", ["all"], 2)
+    kept = _serve_frame(listener, still_open, "eth_subscribe", ["newHeads"], 3).body["result"]
+    assert len(listener.subscriptions.list()) == 3
+
+    listener.release(ended)
+
+    assert [entry["subscription_id"] for entry in listener.subscriptions.list()] == [kept]
+
+
+def test_a_frame_of_another_method_gets_the_content_of_the_chain():
+    listener, provider = _ws_listener()
+    connection = WsConnection(queue.Queue())
+
+    block_number = _serve_frame(listener, connection, "eth_blockNumber", [], 8)
+    no_method = listener.serve(RawRequest(body=b"{}", connection=connection))
+
+    assert block_number.body["id"] == 8
+    assert int(block_number.body["result"], 16) == chain_for("eth").head.current()
+    assert no_method.body == {"jsonrpc": "2.0", "id": 1, "result": "0x1"}
+    assert [_facts(row) for row in provider.log.get_history()] == [
+        ("eth_blockNumber", "success", 0, 8),
+        ("unknown", "success", 0, 1),
+    ]
+    assert listener.subscriptions.list() == []
+
+
+def test_a_subscribe_frame_with_no_connection_raises_a_clear_error():
+    listener, _ = _ws_listener()
+
+    with pytest.raises(ValueError, match="WsConnection"):
+        _serve_frame(listener, None, "eth_subscribe", ["newHeads"], 7)
+
+    assert listener.subscriptions.list() == []

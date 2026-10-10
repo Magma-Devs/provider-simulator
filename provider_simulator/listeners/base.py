@@ -37,7 +37,8 @@ Three more hooks have a default. Two defaults are right for the HTTP
 interfaces, and gRPC overrides each one: ``build_down`` (the reply of a down
 provider) and ``corrupt`` (how the interface corrupts a reply, and the label of
 its row). The third hook is ``build_content``: it gives the success content of
-a request, and its default asks the chain of the provider.
+a request, and its default asks the chain of the provider. The WebSocket
+listener overrides it for a subscribe frame and an unsubscribe frame.
 
 serve() returns a ServeResult describing WHAT to put on the wire — including the
 latency to wait first and any corruption to apply when serializing a ``respond``
@@ -125,8 +126,8 @@ class RawRequest:
     query: dict = field(default_factory=dict)
     # gRPC only: the request message of the call, as the gRPC library parsed it.
     message: object = None
-    # WebSocket only: the connection that the frame arrived on. Each other
-    # adapter leaves it empty.
+    # WebSocket only: the WsConnection of the connection that the frame arrived
+    # on. Each other adapter leaves it empty.
     connection: object = None
 
 

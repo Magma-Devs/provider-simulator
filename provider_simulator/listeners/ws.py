@@ -1,17 +1,24 @@
-"""The WebSocket listener and the subscription registry.
+"""The WebSocket listener, the connection object and the subscription registry.
 
 ``JsonRpcWsListener`` is the listener of a ``(jsonrpc, ws, port)`` endpoint. It
-is a ``JsonRpcListener``: a frame gets the same chain and the same fault
-handling as a request of the http endpoint. It also decides the upgrade request
-that opens a connection (``decide_upgrade``), and it writes the history row of
-a refused upgrade.
+is a ``JsonRpcListener``: each JSON frame goes through ``serve()``, with the
+same chain and the same fault handling as a request of the http endpoint. Two
+things are its own. It answers a subscribe frame and an unsubscribe frame from
+the registry, and it asks no chain for them (``build_content``). It also
+decides the upgrade request that opens a connection (``decide_upgrade``), and
+it writes the history row of a refused upgrade.
 
-``WsSubscriptions`` is the registry of the subscriptions. ``eth_subscribe``
-registers a subscription with an outbound queue. ``POST /ws/emit`` pushes an
-event onto that queue, and the writer thread of the connection sends it. The
-registry writes the history row of each pushed event. ``eth_unsubscribe`` or
-the end of the connection removes the subscription. One running simulator has
-one registry.
+``WsConnection`` is one connection, as the listener needs it: the queue that
+the writer thread of the connection drains, and the ids of the subscriptions
+that the connection owns. The socket adapter makes one for each connection,
+and it gives it to ``serve()`` in ``RawRequest.connection``.
+
+``WsSubscriptions`` is the registry of the subscriptions. A subscribe frame
+registers a subscription with the queue of its connection. ``POST /ws/emit``
+pushes an event onto that queue, and the writer thread of the connection sends
+it. The registry writes the history row of each pushed event. An unsubscribe
+frame of the same connection, or the end of the connection, removes the
+subscription. One running simulator has one registry.
 
 The socket adapter in server.py owns the wire: the handshake bytes, the frame
 codec, and the reader thread and the writer thread of each connection. This is
@@ -19,6 +26,7 @@ the same split as gRPC: this module owns the decision and the state.
 """
 
 import queue
+import secrets
 import threading
 from dataclasses import dataclass, field
 
@@ -27,7 +35,7 @@ from provider_simulator import fault_policy
 from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.provider import Provider
 from provider_simulator.domain.registry import Registry
-from provider_simulator.listeners.base import ServeResult
+from provider_simulator.listeners.base import RawRequest, ServeResult
 from provider_simulator.listeners.jsonrpc import JsonRpcListener
 
 
@@ -39,6 +47,17 @@ class Subscription:
     method: str
     out_queue: queue.Queue = field(default_factory=queue.Queue)
     closed: bool = False
+
+
+@dataclass
+class WsConnection:
+    """One WebSocket connection, as the listener needs it. One reader thread
+    owns the object."""
+
+    # The queue that the writer thread of the connection drains.
+    out_queue: queue.Queue
+    # The ids of the subscriptions that this connection registered and still owns.
+    subscription_ids: set[str] = field(default_factory=set)
 
 
 def _envelope(method: str) -> str:
@@ -159,11 +178,55 @@ class WsSubscriptions:
 
 class JsonRpcWsListener(JsonRpcListener):
     """The listener of a ``ws`` endpoint: a ``JsonRpcListener`` that also
-    decides the upgrade request."""
+    answers a subscribe frame and an unsubscribe frame, and that decides the
+    upgrade request."""
 
     def __init__(self, provider: Provider, endpoint: Endpoint, subscriptions: WsSubscriptions) -> None:
         super().__init__(provider, endpoint)
         self.subscriptions = subscriptions
+
+    def build_content(self, parsed: dict, scenario: dict, request: RawRequest) -> tuple[int, object]:
+        """The success content of one frame. A subscribe frame registers a
+        subscription on the connection of the request, and an unsubscribe
+        frame removes one. The listener asks no chain for these two, so a
+        content key of ``responses`` does not reach them. Each other frame
+        gets the content of the chain."""
+        method = parsed.get("method")
+        if method not in stubs_ws.SUBSCRIBE_METHODS and method not in stubs_ws.UNSUBSCRIBE_METHODS:
+            return super().build_content(parsed, scenario, request)
+
+        connection = request.connection
+        if not isinstance(connection, WsConnection):
+            raise ValueError(
+                f"the frame {method!r} needs a WsConnection in RawRequest.connection, "
+                f"and the request has {connection!r}"
+            )
+        # The reply has the id of the frame, and null for a frame with no id.
+        if method in stubs_ws.SUBSCRIBE_METHODS:
+            sub_id = "0x" + secrets.token_hex(16)
+            self.subscriptions.register(
+                sub_id, self.provider.pool.name, self.provider.pid, method, out_queue=connection.out_queue
+            )
+            connection.subscription_ids.add(sub_id)
+            return 200, {"jsonrpc": "2.0", "id": parsed.get("id"), "result": sub_id}
+
+        # A connection removes only a subscription that it owns. A ``params``
+        # of a wrong shape stops the flow here with an error, and the row of
+        # the frame stays in_flight. The recorded test
+        # test_an_unsubscribe_frame_with_params_of_a_wrong_shape_closes_the_connection_and_leaves_its_row_in_flight
+        # holds that defect as it is.
+        params = parsed.get("params") or []
+        target_id = params[0] if params else None
+        removed = False
+        if target_id and target_id in connection.subscription_ids and self.subscriptions.unregister(target_id):
+            connection.subscription_ids.discard(target_id)
+            removed = True
+        return 200, {"jsonrpc": "2.0", "id": parsed.get("id"), "result": removed}
+
+    def release(self, connection: WsConnection) -> None:
+        """Remove each subscription of a connection that ended."""
+        for sub_id in list(connection.subscription_ids):
+            self.subscriptions.unregister(sub_id)
 
     def decide_upgrade(self, headers: dict) -> ServeResult:
         """Decide the upgrade request that opens a WebSocket.

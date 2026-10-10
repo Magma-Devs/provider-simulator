@@ -16,10 +16,11 @@ the registry and PERFORMS each listener's plan:
   thread also performs ``mode="port_closed"``, the one fault that is not a
   reply: it stops the endpoint's gRPC server, which closes the port, and starts
   a new one when the mode is gone.
-- WebSocket endpoints do the RFC 6455 handshake (the provider's
-  ``JsonRpcWsListener`` decides whether to refuse the upgrade), then serve each
-  TEXT frame through that listener; the subscription lifecycle (eth_subscribe /
-  emit / unsubscribe) is handled here because it is per-connection wire state.
+- WebSocket endpoints own the socket, the RFC 6455 frame bytes, and the reader
+  thread and the writer thread of each connection. The provider's
+  ``JsonRpcWsListener`` decides the upgrade request, and this module performs
+  the decision. Each JSON TEXT frame goes through ``Listener.serve()`` of that
+  listener, which also answers a subscribe frame and an unsubscribe frame.
 - The control API (port 19000) dispatches each route to a ``ControlApi``
   method and writes its (status, dict) result as JSON.
 
@@ -33,7 +34,6 @@ import json
 import logging
 import os
 import queue
-import secrets
 import socket
 import socketserver
 import threading
@@ -41,7 +41,6 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-import stubs_ws
 from constants import (
     CACHE_SIM_PORTS,
     CONTROL_PORT,
@@ -53,7 +52,6 @@ from constants import (
     RESP_STORE_PORT,
     RESP_STORE_USERNAME,
 )
-from provider_simulator import fault_policy
 from provider_simulator.cache_sim import CacheSimRegistry
 from provider_simulator.control_api import ControlApi
 from provider_simulator.domain.registry import Registry, build_registry
@@ -69,21 +67,12 @@ from provider_simulator.listeners import (
     ws_protocol,
 )
 from provider_simulator.listeners.rest import allowed_verbs
-from provider_simulator.listeners.ws import Subscription, WsSubscriptions, event_message
+from provider_simulator.listeners.ws import Subscription, WsConnection, WsSubscriptions, event_message
 from provider_simulator.port_gate import PortGate
 from provider_simulator.resp_control import RespControlApi
 from provider_simulator.resp_proxy import RespProxy
 
 _log = logging.getLogger(__name__)
-
-# Verdict kind -> history status label (for paths served outside Listener.serve).
-_STATUS_LABEL = {
-    "down": "down",
-    "hang": "hang",
-    "drop": "drop_connection",
-    "rate_limit": "rate_limit",
-    "error": "error",
-}
 
 
 class _SimThreadingHTTPServer(ThreadingHTTPServer):
@@ -103,7 +92,6 @@ class _SimThreadingHTTPServer(ThreadingHTTPServer):
 
     # Wiring attached by SimulatorServer.start() before serving begins.
     listener: Listener
-    subscriptions: "_WireSubscriptions"
     control: ControlApi
     registry: Registry
     extra_ready_ports: "frozenset[int]"
@@ -393,10 +381,15 @@ class _WsHandler(BaseHTTPRequestHandler):
 
     A WS endpoint is still ``(jsonrpc, ws, port)``, so frames are served by the
     provider's JsonRpcWsListener — same chain, same fault policy as the http
-    endpoint. The listener also decides the upgrade request, and this adapter
-    performs the decision. What is WS-specific lives here: the handshake bytes,
-    the frame codec, the reader/writer thread pair, and the subscription
-    lifecycle.
+    endpoint. The listener also decides the upgrade request, and it answers a
+    subscribe frame and an unsubscribe frame. This adapter performs what the
+    listener decides. What is WS-specific lives here: the handshake bytes, the
+    frame codec, and the reader/writer thread pair.
+
+    The adapter handles four cases with no listener, and each one writes no
+    history row: a wrong path (404), a bad upgrade request (400), a frame that
+    is not JSON text (no reply), and a JSON frame whose method is a list or an
+    object (the connection closes).
     """
 
     timeout = 30
@@ -500,8 +493,9 @@ class _WsHandler(BaseHTTPRequestHandler):
             pass
 
     def _reader_loop(self, listener: Listener, out_queue: "queue.Queue", lava: dict) -> None:
-        subscriptions = self.server.subscriptions
-        connection_subs: set[str] = set()
+        # One object for the life of the connection. The listener registers
+        # each subscription of the connection on it.
+        connection = WsConnection(out_queue)
         try:
             while True:
                 try:
@@ -525,96 +519,21 @@ class _WsHandler(BaseHTTPRequestHandler):
                     body = json.loads(frame.payload.decode("utf-8"))
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
-                method = body.get("method") if isinstance(body, dict) else None
+                # A frame whose method is a list or an object closes the
+                # connection, with no reply and no history row. The request flow
+                # cannot serve such a frame: it stops with an error after it
+                # wrote the arrival row. The recorded test
+                # test_a_frame_whose_method_is_a_list_or_an_object_closes_the_connection
+                # holds this close.
+                if isinstance(body, dict) and isinstance(body.get("method"), (list, dict)):
+                    return
 
-                if method in stubs_ws.SUBSCRIBE_METHODS or method in stubs_ws.UNSUBSCRIBE_METHODS:
-                    action = self._serve_subscription_frame(
-                        listener, subscriptions, out_queue, body, lava, connection_subs
-                    )
-                else:
-                    result = listener.serve(RawRequest(body=frame.payload, headers=lava))
-                    action = self._perform_frame(result, out_queue)
-                if action == "close":
+                result = listener.serve(RawRequest(body=frame.payload, headers=lava, connection=connection))
+                if self._perform_frame(result, out_queue) == "close":
                     return
         finally:
             # Tear down every subscription still registered to this connection.
-            for sub_id in list(connection_subs):
-                subscriptions.unregister(sub_id)
-
-    def _serve_subscription_frame(
-        self,
-        listener: Listener,
-        subscriptions: "_WireSubscriptions",
-        out_queue: "queue.Queue",
-        body: dict,
-        lava: dict,
-        connection_subs: "set[str]",
-    ) -> str:
-        """Subscribe/unsubscribe are transport-level calls: the fault ladder
-        still applies (a faulted provider can't accept a subscription), but the
-        success response is the subscription lifecycle, not a chain response."""
-        provider, endpoint = listener.provider, listener.endpoint
-        method = body.get("method")
-        req_id = body.get("id")
-        entry = provider.log.record_arrival(endpoint.interface, endpoint.transport, endpoint.port, lava_headers=lava)
-        scenario = provider.scenario.snapshot()
-        targeted, mode = fault_policy.resolve_mode(scenario, endpoint, provider)
-        merged = scenario
-        if targeted:
-            # Per-method fault overrides apply to subscription methods too —
-            # e.g. `eth_subscribe: {mode: down}` must drop the connection
-            # BEFORE any subscription is registered.
-            method_cfg = (scenario.get("responses") or {}).get(method)
-            if isinstance(method_cfg, dict):
-                merged = dict(scenario)
-                merged["mode"] = mode
-                for key in ("mode", "latency_ms", "drop_at", "error_code", "error_message"):
-                    if key in method_cfg:
-                        merged[key] = method_cfg[key]
-                mode = merged["mode"]
-        latency = merged.get("latency_ms", 0) if targeted else 0
-        verdict = fault_policy.ladder(mode, merged) if targeted else fault_policy.NONE_VERDICT
-
-        if verdict.kind == "down":
-            provider.log.finalize(entry, method=str(method), status="down", latency_ms=latency, request_id=req_id)
-            return "close"
-        if verdict.kind != "none":
-            result = listener.build_fault(verdict, body)
-            result.latency_ms = latency
-            if result.action == "respond" and targeted:
-                result.corruption_mode = scenario.get("corruption_mode")
-                result.missing_field = scenario.get("missing_field")
-            provider.log.finalize(
-                entry,
-                method=str(method),
-                status=_STATUS_LABEL[verdict.kind],
-                latency_ms=latency,
-                request_id=req_id,
-            )
-            return self._perform_frame(result, out_queue)
-
-        if method in stubs_ws.SUBSCRIBE_METHODS:
-            sub_id = "0x" + secrets.token_hex(16)
-            subscriptions.register(sub_id, provider.pool.name, provider.pid, method, out_queue=out_queue)
-            connection_subs.add(sub_id)
-            response = {"jsonrpc": "2.0", "id": req_id, "result": sub_id}
-        else:
-            params = body.get("params") or []
-            target_id = params[0] if params else None
-            removed = False
-            if target_id and target_id in connection_subs and subscriptions.unregister(target_id):
-                connection_subs.discard(target_id)
-                removed = True
-            response = {"jsonrpc": "2.0", "id": req_id, "result": removed}
-
-        provider.log.finalize(entry, method=str(method), status="success", latency_ms=latency, request_id=req_id)
-        if latency > 0:
-            time.sleep(latency / 1000.0)
-        try:
-            out_queue.put_nowait(_ws_text_frame(response))
-        except queue.Full:
-            return "close"
-        return "continue"
+            listener.release(connection)
 
     def _perform_frame(self, result: ServeResult, out_queue: "queue.Queue") -> str:
         """Perform a ServeResult as a WS frame action. Returns ``"continue"``
@@ -1316,7 +1235,6 @@ class SimulatorServer:
                     srv.listener = JsonRpcWsListener(provider, endpoint, self.subscriptions)
                 else:
                     srv.listener = listener_cls(provider, endpoint)
-                srv.subscriptions = self.subscriptions
                 self._servers.append(srv)
 
         ctrl = _SimThreadingHTTPServer((self.host, self.control_port), _ControlHandler)

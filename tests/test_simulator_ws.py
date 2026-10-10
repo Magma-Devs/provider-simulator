@@ -2028,11 +2028,11 @@ class TestSubscribeAndUnsubscribeFrames:
         assert [_facts(row) for row in rows] == [("eth_subscribe", "success", 1500, 7)]
         assert [entry["subscription_id"] for entry in subscriptions] == [reply["result"]]
 
-    def test_a_subscribe_frame_of_a_down_provider_closes_the_connection_and_its_row_names_the_frame(self, sim):
+    def test_a_subscribe_frame_of_a_down_provider_closes_the_connection_and_its_row_names_no_frame(self, sim):
         """A provider-wide `down` on a subscribe frame: no reply, and the
-        connection closes with no wait. The row records the method, the id of
-        the frame and the configured latency. This differs from each other
-        frame, whose `down` row has the method `*`, no request id and 0."""
+        connection closes with no wait. A `down` provider does not read the
+        frame. So the row has the method `*`, no request id and `latency_ms`
+        0, as the `down` row of each other frame."""
         with _websocket(lava_headers=_LAVA_HEADERS) as sock:
             _set_scenario(sim, {"mode": "down", "latency_ms": 1500, "transports": ["ws"]})
             started = time.monotonic()
@@ -2043,15 +2043,16 @@ class TestSubscribeAndUnsubscribeFrames:
         assert received == b""
         assert waited < 1.0, f"the connection closed after {waited:.2f} s"
         rows = _rows(sim)
-        assert [_facts(row) for row in rows] == [("eth_subscribe", "down", 1500, 7)]
+        assert [_facts(row) for row in rows] == [("*", "down", 0, None)]
         assert _endpoint(rows[0]) == ("jsonrpc", "ws", _PORT)
         assert rows[0]["lava_headers"] == _LAVA_HEADERS
         assert _subscriptions(sim) == []
 
     def test_a_subscribe_frame_of_a_hung_provider_gets_no_reply_and_the_connection_stays_open(self, sim):
         """A `hang` on a subscribe frame: no reply, and no subscription. The
-        row records the configured latency. The connection stays open: it
-        answers the next frame when the fault is gone."""
+        provider does not wait for the configured latency, so the row records
+        0. The connection stays open: it answers the next frame when the fault
+        is gone."""
         with _websocket() as sock:
             _set_scenario(sim, {"mode": "hang", "latency_ms": 250, "transports": ["ws"]})
             _send_frame(sock, _SUBSCRIBE)
@@ -2062,7 +2063,7 @@ class TestSubscribeAndUnsubscribeFrames:
             _send_frame(sock, _BLOCK_NUMBER)
             next_reply = _reply(sock)
 
-        assert [_facts(row) for row in rows] == [("eth_subscribe", "hang", 250, 7)]
+        assert [_facts(row) for row in rows] == [("eth_subscribe", "hang", 0, 7)]
         assert subscriptions == []
         assert next_reply["id"] == 8
 
@@ -2186,14 +2187,37 @@ class TestSubscribeAndUnsubscribeFrames:
         assert _subscriptions(sim) == []
 
     @pytest.mark.parametrize(
-        "corruption_mode", ["truncated", "invalid_json", "empty_response", "null_body", "missing_field", "wrong_type"]
+        "corruption_mode, subscribe_payload, unsubscribe_payload",
+        [
+            pytest.param(
+                "truncated",
+                b'{"jsonrpc": "2.0", "id": 7, "result": "0x<the first 24 digits of the id>',
+                b'{"jsonrpc": "2.0", "id": 9, "resu',
+                id="truncated",
+            ),
+            pytest.param("invalid_json", b"}{ {{ not valid json", b"}{ {{ not valid json", id="invalid-json"),
+            pytest.param("empty_response", b"", b"", id="empty-response"),
+            pytest.param("null_body", b"null", b"null", id="null-body"),
+            pytest.param(
+                "missing_field", b'{"jsonrpc": "2.0", "id": 7}', b'{"jsonrpc": "2.0", "id": 9}', id="missing-field"
+            ),
+            pytest.param(
+                "wrong_type",
+                b'{"jsonrpc": "2.0", "id": 7, "result": 12345}',
+                b'{"jsonrpc": "2.0", "id": 9, "result": 1}',
+                id="wrong-type",
+            ),
+        ],
     )
-    def test_a_corruption_mode_does_not_change_the_reply_of_a_subscribe_or_an_unsubscribe_frame(
-        self, sim, corruption_mode
+    def test_a_corruption_mode_changes_the_reply_of_a_subscribe_and_of_an_unsubscribe_frame(
+        self, sim, corruption_mode, subscribe_payload, unsubscribe_payload
     ):
-        """Today a `corruption_mode` does not reach the success reply of a
-        subscribe frame or of an unsubscribe frame. The caller reads the
-        subscription id, and the subscription is registered."""
+        """A `corruption_mode` reaches the success reply of a subscribe frame
+        and of an unsubscribe frame. The subscription is registered, the
+        unsubscribe frame removes it, and both rows stay `success`. The caller
+        cannot read the id from a corrupted reply, so the test reads it from
+        GET /ws/subscriptions. A `truncated` reply loses its last 10 bytes: 24
+        of the 32 digits of the id stay."""
         _set_scenario(
             sim,
             {"mode": "success", "corruption_mode": corruption_mode, "missing_field": "result", "transports": ["ws"]},
@@ -2201,18 +2225,22 @@ class TestSubscribeAndUnsubscribeFrames:
 
         with _websocket() as sock:
             _send_frame(sock, _SUBSCRIBE)
-            subscribed = _reply(sock)
+            subscribed = _payload(sock)
             registered = [entry["subscription_id"] for entry in _subscriptions(sim)]
-            _send_frame(
-                sock, {"jsonrpc": "2.0", "method": "eth_unsubscribe", "params": [subscribed["result"]], "id": 9}
-            )
-            removed = _reply(sock)
+            _send_frame(sock, {"jsonrpc": "2.0", "method": "eth_unsubscribe", "params": registered[:1], "id": 9})
+            removed = _payload(sock)
+            rows = _rows(sim)
+            left = _subscriptions(sim)
 
-        assert set(subscribed) == {"jsonrpc", "id", "result"}
-        assert subscribed["id"] == 7
-        assert re.fullmatch(r"0x[0-9a-f]{32}", subscribed["result"]), subscribed
-        assert registered == [subscribed["result"]]
-        assert removed == {"jsonrpc": "2.0", "id": 9, "result": True}
+        assert len(registered) == 1 and re.fullmatch(r"0x[0-9a-f]{32}", registered[0]), registered
+        first_24_digits = registered[0][2:26].encode()
+        assert subscribed == subscribe_payload.replace(b"<the first 24 digits of the id>", first_24_digits)
+        assert removed == unsubscribe_payload
+        assert [_facts(row) for row in rows] == [
+            ("eth_subscribe", "success", 0, 7),
+            ("eth_unsubscribe", "success", 0, 9),
+        ]
+        assert left == []
 
     @pytest.mark.parametrize(
         "block, payload, row_status",
@@ -2370,10 +2398,11 @@ class TestSubscribeAndUnsubscribeFrames:
         assert of_the_method == {"jsonrpc": "2.0", "id": 7, "error": {"code": -32601, "message": "of this method"}}
         assert of_the_provider == {"jsonrpc": "2.0", "id": 8, "error": {"code": -32000, "message": "of the provider"}}
 
-    def test_a_per_method_error_probability_is_not_read_for_a_subscribe_frame(self, sim):
-        """Today the subscribe code does not read `error_probability` from an
-        entry of `responses`: the subscribe succeeds. The request flow reads
-        that key: the same entry for `eth_blockNumber` gives an error."""
+    def test_a_per_method_error_probability_reaches_a_subscribe_frame(self, sim):
+        """The request flow reads `error_probability` from an entry of
+        `responses`. The entry for `eth_subscribe` gives the subscribe frame
+        the error reply, and no subscription is registered. The same entry for
+        `eth_blockNumber` gives that frame the error reply too."""
         _set_scenario(
             sim,
             {
@@ -2394,16 +2423,18 @@ class TestSubscribeAndUnsubscribeFrames:
             rows = _rows(sim)
             subscriptions = _subscriptions(sim)
 
-        assert re.fullmatch(r"0x[0-9a-f]{32}", subscribed["result"]), subscribed
+        assert subscribed == {"jsonrpc": "2.0", "id": 7, "error": {"code": -32000, "message": "Internal error"}}
         assert other == {"jsonrpc": "2.0", "id": 8, "error": {"code": -32000, "message": "Internal error"}}
-        assert [_facts(row) for row in rows] == [("eth_subscribe", "success", 0, 7), ("eth_blockNumber", "error", 0, 8)]
-        assert [entry["subscription_id"] for entry in subscriptions] == [subscribed["result"]]
+        assert [_facts(row) for row in rows] == [("eth_subscribe", "error", 0, 7), ("eth_blockNumber", "error", 0, 8)]
+        assert subscriptions == []
 
-    def test_a_canned_body_is_not_read_for_a_subscribe_frame(self, sim):
-        """Today the subscribe code does not read a canned `body` from an entry
-        of `responses`: the subscribe registers a subscription and answers its
-        id. The request flow reads that key: the same entry for
-        `eth_blockNumber` gives the canned body."""
+    def test_a_canned_body_answers_a_subscribe_frame_and_registers_no_subscription(self, sim):
+        """The request flow reads a canned `body` from an entry of `responses`.
+        The entry for `eth_subscribe` answers the subscribe frame with that
+        body, with the id of the body and not the id of the frame. No
+        subscription is registered, and the row is a `success` row with the id
+        of the frame. The same entry for `eth_blockNumber` gives the canned
+        body too."""
         canned = {"jsonrpc": "2.0", "id": 1, "result": "0xcanned"}
         _set_scenario(
             sim,
@@ -2419,12 +2450,13 @@ class TestSubscribeAndUnsubscribeFrames:
             subscribed = _reply(sock)
             _send_frame(sock, _BLOCK_NUMBER)
             other = _reply(sock)
+            rows = _rows(sim)
             subscriptions = _subscriptions(sim)
 
-        assert subscribed["id"] == 7
-        assert re.fullmatch(r"0x[0-9a-f]{32}", subscribed["result"]), subscribed
+        assert subscribed == canned
         assert other == canned
-        assert [entry["subscription_id"] for entry in subscriptions] == [subscribed["result"]]
+        assert _facts(rows[0]) == ("eth_subscribe", "success", 0, 7)
+        assert subscriptions == []
 
     @pytest.mark.parametrize(
         "responses, other_reply",
@@ -2489,25 +2521,21 @@ class TestSubscribeAndUnsubscribeFrames:
         assert re.fullmatch(r"0x[0-9a-f]{32}", subscribed["result"]), subscribed
         assert waited < 1.0, f"the reply came after {waited:.2f} s"
 
-    def test_a_per_method_success_comes_before_a_provider_wide_down_for_a_subscribe_frame(self, sim):
-        """Today the subscribe code reads the entry of `responses` before the
-        `down` check. Under a provider-wide `down`, an entry with
-        `mode: success` makes the subscribe succeed. Each other frame gets the
-        `down`: the connection closes, and the row has the method `*`."""
+    def test_a_provider_wide_down_comes_before_a_per_method_success_for_a_subscribe_frame(self, sim):
+        """The request flow checks a provider-wide `down` before it reads an
+        entry of `responses`. So an entry with `mode: success` for
+        `eth_subscribe` does not make the subscribe succeed. The frame gets no
+        reply, the connection closes, and the row has the method `*`."""
         with _websocket() as sock:
             _set_scenario(
                 sim, {"mode": "down", "transports": ["ws"], "responses": {"eth_subscribe": {"mode": "success"}}}
             )
             _send_frame(sock, _SUBSCRIBE)
-            subscribed = _reply(sock)
-            subscriptions = _subscriptions(sim)
-            _send_frame(sock, _BLOCK_NUMBER)
             received = _read_until_the_close(sock)
 
-        assert re.fullmatch(r"0x[0-9a-f]{32}", subscribed["result"]), subscribed
-        assert [entry["subscription_id"] for entry in subscriptions] == [subscribed["result"]]
         assert received == b""
-        assert [_facts(row) for row in _rows(sim)] == [("eth_subscribe", "success", 0, 7), ("*", "down", 0, None)]
+        assert [_facts(row) for row in _rows(sim)] == [("*", "down", 0, None)]
+        assert _subscriptions(sim) == []
 
     @pytest.mark.parametrize(
         "scope",
@@ -2899,13 +2927,15 @@ class TestMoreOfWhatWebSocketDoesToday:
     @pytest.mark.parametrize(
         "mode, expected_row",
         [
-            pytest.param("down", ("eth_unsubscribe", "down", 250, 9), id="down"),
-            pytest.param("hang", ("eth_unsubscribe", "hang", 250, 9), id="hang"),
+            pytest.param("down", ("*", "down", 0, None), id="down"),
+            pytest.param("hang", ("eth_unsubscribe", "hang", 0, 9), id="hang"),
         ],
     )
     def test_the_row_of_an_unsubscribe_frame_of_a_down_or_a_hung_provider(self, sim, mode, expected_row):
-        """A provider-wide `down` or `hang` on an unsubscribe frame. The row
-        records the method, the id of the frame and the configured latency."""
+        """A provider-wide `down` or `hang` on an unsubscribe frame. The `down`
+        row has the method `*` and no request id. The `hang` row has the
+        method and the id of the frame. The provider does not wait for the
+        configured latency, so each row records 0."""
         with _websocket() as sock:
             _set_scenario(sim, {"mode": mode, "latency_ms": 250, "transports": ["ws"]})
             _send_frame(sock, {"jsonrpc": "2.0", "method": "eth_unsubscribe", "params": ["0x00"], "id": 9})
@@ -2915,9 +2945,9 @@ class TestMoreOfWhatWebSocketDoesToday:
 
     def test_a_canned_body_for_a_subscribe_method_under_a_provider_wide_rate_limit(self, sim):
         """An entry of `responses` for `eth_subscribe` with a canned `body`,
-        under a provider-wide `rate_limit`. The subscribe frame gets the
-        rate-limit text, and its row has the status `rate_limit`. No
-        subscription is registered."""
+        under a provider-wide `rate_limit`. The request flow reads the canned
+        body before the fault. So the subscribe frame gets the canned body,
+        and its row has the status `success`. No subscription is registered."""
         canned = {"jsonrpc": "2.0", "id": 1, "result": "0xcanned"}
         with _websocket() as sock:
             _set_scenario(
@@ -2928,8 +2958,8 @@ class TestMoreOfWhatWebSocketDoesToday:
             rows = _rows(sim)
             subscriptions = _subscriptions(sim)
 
-        assert payload == _RATE_LIMIT_TEXT
-        assert [_facts(row) for row in rows] == [("eth_subscribe", "rate_limit", 0, 7)]
+        assert payload == b'{"jsonrpc": "2.0", "id": 1, "result": "0xcanned"}'
+        assert [_facts(row) for row in rows] == [("eth_subscribe", "success", 0, 7)]
         assert subscriptions == []
 
     def test_an_event_for_a_full_queue_gets_503_and_writes_no_row(self, sim):
