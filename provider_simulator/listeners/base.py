@@ -44,10 +44,10 @@ socket adapter that performs the write (and the corruption, via
 ``listeners.wire.serialize``) lives in server.py. Returning a plan keeps the
 whole flow unit-testable without a socket.
 
-The adapter may record the arrival stub itself — before it reads the request
-body off the socket, so a client that cancels mid-body-read still leaves an
-in_flight history row — and pass it in via ``serve(request, entry=...)``.
-Without one, serve() records the arrival itself.
+An adapter that reads a request body off a socket calls ``arrive()`` before
+that read. So a client that cancels during the read still leaves an in_flight
+history row. The adapter gives the row to ``serve(request, entry=...)``. With
+no row, serve() calls ``arrive()`` itself.
 """
 
 from abc import ABC, abstractmethod
@@ -163,15 +163,21 @@ class Listener(ABC):
         self.provider = provider
         self.endpoint = endpoint
 
+    def arrive(self, headers: dict | None = None) -> dict:
+        """Record the arrival of one request, and return its row for
+        ``serve(request, entry=...)``. The row keeps the ``lava-`` headers
+        only."""
+        lava = {k: v for k, v in (headers or {}).items() if k.lower().startswith("lava-")}
+        return self.provider.log.record_arrival(
+            self.endpoint.interface,
+            self.endpoint.transport,
+            self.endpoint.port,
+            lava_headers=lava,
+        )
+
     def serve(self, request: RawRequest, entry: dict | None = None) -> ServeResult:
         if entry is None:
-            lava = {k: v for k, v in (request.headers or {}).items() if k.lower().startswith("lava-")}
-            entry = self.provider.log.record_arrival(
-                self.endpoint.interface,
-                self.endpoint.transport,
-                self.endpoint.port,
-                lava_headers=lava,
-            )
+            entry = self.arrive(request.headers)
         scenario = self.provider.scenario.snapshot()
         # One stateful policy step per request: the transports filter plus the
         # fail_first_n window (consumed here, exactly once).

@@ -129,17 +129,16 @@ class _HttpListenerHandler(BaseHTTPRequestHandler):
 
     def _run(self, verb: str) -> None:
         listener = self.server.listener
-        provider, endpoint = listener.provider, listener.endpoint
-        lava = {k: v for k, v in self.headers.items() if k.lower().startswith("lava-")}
+        headers = dict(self.headers.items())
         # Record the arrival BEFORE the body read: a client that cancels while
         # sending the body still leaves an in_flight history row.
-        entry = provider.log.record_arrival(endpoint.interface, endpoint.transport, endpoint.port, lava_headers=lava)
+        entry = listener.arrive(headers)
         length = int(self.headers.get("Content-Length", 0) or 0)
         body = self.rfile.read(length) if length > 0 else b""
         parsed = urlparse(self.path)
         raw = RawRequest(
             body=body,
-            headers=dict(self.headers.items()),
+            headers=headers,
             verb=verb,
             path=parsed.path,
             query=parse_qs(parsed.query),

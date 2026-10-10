@@ -183,3 +183,30 @@ def test_block_at_effective_head_still_serializes_a_block():
     assert res.status == 200
     assert isinstance(res.body["result"], dict), "a block at the head must not be null"
     assert res.body["result"]["number"] == at_head
+
+
+def _facts(row):
+    return (row["method"], row["status"], row["latency_ms"], row["request_id"])
+
+
+def test_arrive_writes_one_row_in_flight_with_the_lava_headers_of_the_call():
+    # An adapter calls arrive before it reads the body of a request. The row
+    # names the endpoint, and it keeps the lava headers only.
+    listener, provider = _listener()
+    listener.arrive({"Lava-Guid": "GUID_1", "X-Other": "no"})
+    rows = provider.log.get_history()
+    assert [_facts(row) for row in rows] == [("*", "in_flight", 0, None)]
+    assert rows[0]["lava_headers"] == {"Lava-Guid": "GUID_1"}
+    assert (rows[0]["interface"], rows[0]["transport"], rows[0]["port"]) == ("jsonrpc", "http", 18545)
+
+
+def test_serve_finishes_the_row_that_arrive_wrote():
+    # serve does not write a second row: it completes the row of arrive.
+    listener, provider = _listener()
+    entry = listener.arrive({"Lava-Guid": "GUID_1"})
+    res = listener.serve(RawRequest(body=_raw("eth_blockNumber")), entry=entry)
+    assert res.action == "respond"
+    rows = provider.log.get_history()
+    assert [_facts(row) for row in rows] == [("eth_blockNumber", "success", 0, 1)]
+    assert rows[0]["lava_headers"] == {"Lava-Guid": "GUID_1"}
+    assert provider.log.stats()["calls_by_status"] == {"success": 1}
