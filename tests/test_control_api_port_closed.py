@@ -142,6 +142,21 @@ def test_a_write_that_moves_no_port_waits_for_no_gate(monkeypatch):
     assert st == 200, resp
 
 
+def test_a_write_that_arrives_while_a_pass_runs_waits_for_the_gate(monkeypatch):
+    """The last report is "open", and mode="down" needs the port open. But a
+    pass of the loop runs, and it can still move the port. So the call asks the
+    gate and waits for the next pass. This gate has no listener: the wait takes
+    the whole settle time, and the call answers 500."""
+    monkeypatch.setattr(control_api, "_PORT_SETTLE_S", 0.2)
+    api, port = _api_with_a_gate_nothing_serves()
+    gate = api.port_gates[port]
+    gate.end_pass(gate.begin_pass(), is_open=True)
+    gate.begin_pass()  # a pass begins, and it does not end
+    st, resp = api.apply_scenario({"providers": {KEY: {"mode": "down"}}})
+    assert st == 500, resp
+    assert f"port {port} is not accepting connections" in resp["error"]
+
+
 def test_the_ports_closed_by_a_scenario_are_read_from_the_scenario():
     api, port = _api_with_a_gate_nothing_serves()
     assert api.ports_closed_by_scenario() == []

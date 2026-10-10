@@ -410,6 +410,18 @@ def _a_loop(first, new_server=None):
     return loop, gate, provider.scenario
 
 
+def _report_between_two_passes(gate, timeout=2.0):
+    """The last report of a gate, read when no pass runs.
+
+    A gate gives no report while a pass runs. A loop with a short poll runs a
+    pass often, so one read can meet a pass. This function reads until it gets
+    a report."""
+    deadline = time.monotonic() + timeout
+    while (report := gate.last_report()) is None and time.monotonic() < deadline:
+        time.sleep(0.001)
+    return report
+
+
 class TestTheLoopOfOnePort:
     def test_an_ask_ends_the_wait_of_the_loop_at_once(self, monkeypatch):
         """The loop waits 30 seconds between two passes here. So a pass that
@@ -461,13 +473,14 @@ class TestTheLoopOfOnePort:
                 while len(tries) < 3 and time.monotonic() < deadline:
                     time.sleep(0.01)
                 assert len(tries) >= 3, f"the poll must try the bind again; the loop tried {len(tries)} times"
-                assert (gate.last_report(), _connect(port)) == (False, errno.ECONNREFUSED)
+                assert (_report_between_two_passes(gate), _connect(port)) == (False, errno.ECONNREFUSED)
 
                 in_use.clear()
                 deadline = time.monotonic() + 2.0
                 while gate.last_report() is not True and time.monotonic() < deadline:
                     time.sleep(0.01)
-                assert (gate.last_report(), _connect(port)) == (True, 0), "the port must open when the bind works"
+                report = _report_between_two_passes(gate)
+                assert (report, _connect(port)) == (True, 0), "the port must open when the bind works"
             warnings = [text for text in caplog.messages if "could not change its state" in text]
             assert len(warnings) == 1, f"one warning for one error text; the log has {warnings}"
             assert loop.thread.is_alive(), "the loop thread must live through a bind that fails"

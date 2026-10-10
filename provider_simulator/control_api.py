@@ -503,9 +503,10 @@ class ControlApi:
         The call does not ask a gate whose last report is the wished state. It
         asks for no pass and tries no connection for that gate, so a write that
         moves no port waits for no port. The call asks a gate that has no
-        report. It also asks a gate whose newest ask has no answer: after a
-        call that got no answer for a port, the next call waits for that port
-        again.
+        report: no pass finished, or a pass runs at that moment and can still
+        move the port. It also asks a gate whose newest ask has no answer:
+        after a call that got no answer for a port, the next call waits for
+        that port again.
 
         The call first asks each gate that needs a pass. Then it waits for each
         one. So the ports change side by side, and one ``_PORT_SETTLE_S``

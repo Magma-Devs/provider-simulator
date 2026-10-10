@@ -25,7 +25,8 @@ Three parties meet here, and each owns one thing:
   pass is not accepted: it describes the port before the scenario changed, and
   a caller that trusted it would be told the port had closed while it was
   still open. The control API asks only a gate whose ``last_report()`` differs
-  from the wish. So a write that moves no port waits for no port.
+  from the wish. So a write that moves no port waits for no port. A gate gives
+  no report while a pass runs: a pass in progress can still move the port.
 
 No grpc import here on purpose: the control API imports this module and has to
 stay importable on a machine without grpcio.
@@ -50,6 +51,7 @@ class PortGate:
         self._done = 0  # the newest ask a FINISHED pass had already seen
         self._open = False  # no server until the first pass starts one
         self._reported = False  # no pass has finished
+        self._in_pass = False  # a pass began, and it did not end
         self._wake: Callable[[], object] | None = None
 
     def wants_closed(self) -> bool:
@@ -68,8 +70,12 @@ class PortGate:
         The order is the whole guarantee. A caller writes the scenario and then
         asks, so a pass that read the ask counter first and the scenario second
         has seen every write made before that ask.
+
+        From this call to ``end_pass`` the gate gives no report: see
+        ``last_report``.
         """
         with self._cond:
+            self._in_pass = True
             return self._asked
 
     def end_pass(self, seen: int, is_open: bool) -> None:
@@ -77,6 +83,7 @@ class PortGate:
             self._done = max(self._done, seen)
             self._open = is_open
             self._reported = True
+            self._in_pass = False
             self._cond.notify_all()
 
     # ── the control API's side ───────────────────────────────────────────────
@@ -84,14 +91,16 @@ class PortGate:
         """The state that the newest finished pass left the port in.
 
         True is open and False is closed. None means that the gate has no
-        report to trust. Either no pass has finished, or an ask has no answer
-        yet: no pass that began after the newest ask has finished.
+        report to trust. There are three causes. No pass has finished. Or a
+        pass runs: it read the scenario before it finished, and it can still
+        move the port. Or an ask has no answer yet: no pass that began after
+        the newest ask has finished.
 
         The control API waits for a port only when this value differs from the
         state that the scenario asks for.
         """
         with self._cond:
-            if not self._reported or self._done < self._asked:
+            if not self._reported or self._in_pass or self._done < self._asked:
                 return None
             return self._open
 

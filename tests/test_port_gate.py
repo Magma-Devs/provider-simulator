@@ -181,3 +181,17 @@ def test_a_gate_with_an_ask_that_no_pass_answered_has_no_report():
 
     gate.end_pass(gate.begin_pass(), is_open=False)  # a pass that began after the ask
     assert gate.last_report() is False
+
+
+def test_a_gate_gives_no_report_while_a_pass_runs():
+    """A pass that runs can still move the port. A caller that trusted the
+    report of the pass before it would get "ok" for a state that the port then
+    leaves. So the gate gives no report from the start of a pass to its end."""
+    gate = _gate(_free_port())
+    gate.end_pass(gate.begin_pass(), is_open=True)
+    assert gate.last_report() is True
+
+    seen = gate.begin_pass()
+    assert gate.last_report() is None, "a pass runs, and it can still move the port"
+    gate.end_pass(seen, is_open=False)
+    assert gate.last_report() is False
