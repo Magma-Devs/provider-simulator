@@ -16,7 +16,7 @@ from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.provider import Pool
 from provider_simulator.domain.registry import build_registry
 from provider_simulator.listeners import RawRequest, ServeResult
-from provider_simulator.listeners.ws import JsonRpcWsListener, WsConnection, WsSubscriptions
+from provider_simulator.listeners.ws import JsonRpcWsListener, WsConnection, WsSubscriptions, event_message
 
 
 def test_register_and_get():
@@ -396,3 +396,56 @@ def test_a_canned_body_for_a_subscribe_method_comes_before_each_provider_wide_fa
     assert listener.subscriptions.list() == []
     assert connection.subscription_ids == set()
     assert [_facts(row) for row in provider.log.get_history()] == [("eth_subscribe", "success", 0, 7)]
+
+
+# ── More cases of the registry and the listener, with no socket ───────────────
+
+
+def test_a_pushed_event_for_a_provider_with_no_ws_endpoint_writes_a_row_with_the_port_0():
+    # The smallest registry that holds such a provider: one row, with one http endpoint.
+    http_only = (("jsonrpc", "http", 18545),)
+    registry = build_registry((("eth-sim", "eth", "1", "", False, "", http_only),))
+    subscriptions = WsSubscriptions(registry)
+    subscriptions.register("0xabc", "eth-sim", "1", "eth_subscribe")
+
+    assert subscriptions.emit("0xabc", {"tag": "A"}) == "emitted"
+
+    rows = registry.provider("eth-sim", "1").log.get_history()
+    assert [_facts(row) for row in rows] == [("eth_subscription push", "success", 0, "0xabc")]
+    assert (rows[0]["interface"], rows[0]["transport"], rows[0]["port"]) == ("jsonrpc", "ws", 0)
+
+
+def test_an_event_of_a_subscribe_method_that_the_table_does_not_hold_gets_the_eth_envelope():
+    # stubs_ws.SUBSCRIBE_METHODS holds subscribe methods, and "newHeads" is not one of them.
+    registry = build_registry()
+    subscriptions = WsSubscriptions(registry)
+    sub = subscriptions.register("0xabc", "eth-sim", "2", "newHeads")
+
+    assert event_message(sub, {"tag": "A"}) == {
+        "jsonrpc": "2.0",
+        "method": "eth_subscription",
+        "params": {"subscription": "0xabc", "result": {"tag": "A"}},
+    }
+    assert subscriptions.emit("0xabc", {"tag": "A"}) == "emitted"
+    rows = registry.provider("eth-sim", "2").log.get_history()
+    assert [_facts(row) for row in rows] == [("eth_subscription push", "success", 0, "0xabc")]
+
+
+def test_an_unsubscribe_frame_with_an_empty_list_as_its_first_parameter_answers_false_and_removes_nothing():
+    """An empty list is falsy, so `build_content` skips the lookup in the ids of
+    the connection. A list with an item reaches the lookup and raises an error:
+    `tests/test_simulator_ws.py` records that defect."""
+    listener, provider = _ws_listener()
+    connection = WsConnection(queue.Queue())
+    subscription_id = _serve_frame(listener, connection, "eth_subscribe", ["newHeads"], 1).body["result"]
+
+    result = _serve_frame(listener, connection, "eth_unsubscribe", [[]], 9)
+
+    assert result.action == "respond"
+    assert result.body == {"jsonrpc": "2.0", "id": 9, "result": False}
+    assert [entry["subscription_id"] for entry in listener.subscriptions.list()] == [subscription_id]
+    assert connection.subscription_ids == {subscription_id}
+    assert [_facts(row) for row in provider.log.get_history()] == [
+        ("eth_subscribe", "success", 0, 1),
+        ("eth_unsubscribe", "success", 0, 9),
+    ]

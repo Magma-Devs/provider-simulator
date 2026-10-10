@@ -73,9 +73,10 @@ def test_server_py_imports_no_fault_policy():
 def test_server_py_calls_no_method_that_writes_a_history_row():
     """``server.py`` has no call of ``record_arrival``, ``finalize`` or
     ``push``. A listener, or the subscription registry of the listeners,
-    writes each history row."""
+    writes each history row. A call of another object with one of these names
+    also matches: use another name, or change the guard after the owner agrees."""
     found = [place for place in _forbidden(_SERVER_PY.read_text(encoding="utf-8")) if place.endswith("()")]
-    assert found == [], f"server.py writes a history row: {found}"
+    assert found == [], f"server.py calls a method named record_arrival, finalize or push: {found}"
 
 
 def test_the_guard_finds_each_forbidden_line_of_a_sample_source():
