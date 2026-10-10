@@ -8,6 +8,8 @@ a new connection, and each open connection ends.
 server class that can close its port. Each test makes a server on a port that
 the system gives, with a small handler class of this file. These tests use no
 simulator.
+
+Each other test uses the shared simulator of the session (see conftest.py).
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ import time
 import pytest
 
 import server as server_module
+from constants import CACHE_SIM_PORTS, CONTROL_PORT, RESP_CONTROL_PORT, RESP_PROXY_PORTS
 
 # The address of a server on a port that the system gives.
 _ANY_PORT = ("127.0.0.1", 0)
@@ -200,3 +203,23 @@ class TestTheServerOfOneProviderPort:
             assert "TypeError: a defect of the handler" in capsys.readouterr().err
         finally:
             server.server_close()
+
+
+# ── what a scenario cannot close ─────────────────────────────────────────────
+
+
+class TestWhatAScenarioCannotClose:
+    def test_only_provider_ports_have_a_gate(self, sim):
+        """A scenario can close a port only if the port has a gate. Each
+        provider port has one. A port that is not of a provider has none: the
+        control port, each cache simulator port, each RESP proxy port and the
+        RESP control port."""
+        gated = set(sim["server"].control.port_gates)
+        provider_ports = set(sim["registry"].ports())
+        assert gated == provider_ports, (
+            f"{len(gated)} ports have a gate, and the registry has {len(provider_ports)} provider ports. "
+            f"Provider ports with no gate: {sorted(provider_ports - gated)}. "
+            f"Gates of a port that is not of a provider: {sorted(gated - provider_ports)}"
+        )
+        not_of_a_provider = {CONTROL_PORT, RESP_CONTROL_PORT, *CACHE_SIM_PORTS.values(), *RESP_PROXY_PORTS.values()}
+        assert not gated & not_of_a_provider, f"a scenario can close {sorted(gated & not_of_a_provider)}"

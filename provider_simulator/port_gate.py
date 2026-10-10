@@ -1,10 +1,11 @@
-"""One gRPC port that a scenario can close, and a way to wait until it has.
+"""One provider port that a scenario can close, and a way to wait until it has.
 
 ``mode="port_closed"`` is the one fault that is not a reply. Every other mode
-decides what to answer a request that arrived; this one stops the gRPC server
+decides what to answer a request that arrived; this one stops the server
 of the endpoint, so the listening socket is gone, every open connection is
 closed, and a new TCP connection is refused. Nothing arrives, so nothing is
-recorded in the provider's history.
+recorded in the provider's history. A gRPC port, an ``http`` port and a ``ws``
+port each have one gate.
 
 Three parties meet here, and each owns one thing:
 
@@ -12,9 +13,11 @@ Three parties meet here, and each owns one thing:
   ``fault_policy.port_closed``. Nothing else stores the wish, so a change by
   any writer (a control call, a reset, the scenario time-to-live sweep) is seen
   the same way.
-- **The serve loop owns the server.** It runs on the port's own thread and
-  event loop (``_run_grpc_in_thread`` in server.py) and is the only code that
-  stops or starts the server. It works in passes: read the wish, act, report.
+- **The serve loop owns the server.** It runs on the port's own thread and is
+  the only code that stops or starts the server. For a gRPC port it is
+  ``_run_grpc_in_thread``, on the event loop of that thread. For an ``http``
+  port and for a ``ws`` port it is ``_HttpPortLoop``. Both are in server.py.
+  It works in passes: read the wish, act, report.
   It runs a pass when it is woken and also on a short poll, which is what
   tries a failed bind again.
 - **The control API waits.** ``ask()`` asks for a pass and ``wait()`` blocks

@@ -23,6 +23,10 @@ the registry and PERFORMS each listener's plan:
   listener, which also answers a subscribe frame and an unsubscribe frame. A
   JSON frame whose method is a list or an object is the one exception: the
   adapter closes the connection for it.
+- Each ``http`` endpoint and each ``ws`` endpoint also has one
+  ``_HttpPortLoop``. The loop performs ``mode="port_closed"`` for its port: it
+  closes the server of the port, and it starts a new server on the same port
+  when the mode is gone.
 - The control API (port 19000) dispatches each route to a ``ControlApi``
   method and writes its (status, dict) result as JSON.
 
@@ -43,6 +47,7 @@ import sys
 import threading
 import time
 import typing
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -738,9 +743,9 @@ def _dispatch_cache_get(control: ControlApi, path: str) -> tuple[int, dict]:
     return 404, {"error": f"unknown cache-sim action {action!r}", "actions": ["calls", "(none, for the cache itself)"]}
 
 
-# How long /ready waits for a control write that is moving a gRPC port. A port
-# changes in a few milliseconds; a write that takes longer than this is waiting
-# on a port that does not change, and /ready answers without it.
+# How long /ready waits for a control write that is moving a provider port. A
+# port changes in a few milliseconds; a write that takes longer than this is
+# waiting on a port that does not change, and /ready answers without it.
 _READY_LOCK_WAIT_S = 1.0
 
 
@@ -1201,6 +1206,93 @@ def _run_grpc_in_thread(grpc_listener, port: int, host: str, gate: PortGate) -> 
     asyncio.run(_serve())
 
 
+# ── The loop of an http port or a ws port ─────────────────────────────────────
+
+# The time between two passes of an ``_HttpPortLoop`` that nobody asked for.
+# Each control write asks for a pass, and an ask ends the wait at once. So this
+# time bounds only what no write announces: a bind that failed is tried again.
+_HTTP_PORT_POLL_S = 1.0
+
+
+class _HttpPortLoop:
+    """Keeps one ``http`` or ``ws`` provider port in the state that its scenario asks for.
+
+    The loop has the form of ``_serve`` in ``_run_grpc_in_thread``. One pass
+    reads whether the scenario closes the port, closes or opens the port to
+    match, and reports to the gate. A pass runs when a control write asks for
+    one, and also each ``_HTTP_PORT_POLL_S``.
+
+    ``_ProviderHTTPServer.close_port()`` performs ``mode="port_closed"``. A
+    closed server does not open again, so a new server object on the same port
+    opens the port. ``new_server`` makes that object, with the listener of the
+    first server.
+
+    A pass and ``stop()`` hold one lock. So ``stop()`` gets the server that the
+    port has at that time, and no pass opens the port after it.
+    """
+
+    def __init__(
+        self, gate: PortGate, first: _ProviderHTTPServer, new_server: Callable[[], _ProviderHTTPServer]
+    ) -> None:
+        self.gate = gate
+        # ``SimulatorServer.start()`` bound the first server, so a port that
+        # cannot bind fails the start. The first pass starts its serve loop.
+        self._server: _ProviderHTTPServer | None = first
+        self._new_server = new_server
+        self._wake = threading.Event()
+        self._lock = threading.Lock()
+        self._stopped = False
+        self.thread = threading.Thread(target=self._run, daemon=True, name=f"port-{gate.endpoint.port}")
+
+    def _run(self) -> None:
+        port = self.gate.endpoint.port
+        self.gate.attach(self._wake.set)
+        last_error = ""
+        while True:
+            # The ask counter is read BEFORE the scenario. See PortGate.begin_pass.
+            seen = self.gate.begin_pass()
+            with self._lock:
+                if self._stopped:
+                    return
+                try:
+                    if self.gate.wants_closed():
+                        if self._server is not None:
+                            self._server.close_port()
+                            self._server = None
+                            _log.info("provider port %s closed by scenario", port)
+                    else:
+                        if self._server is None:
+                            self._server = self._new_server()
+                            _log.info("provider port %s bound again", port)
+                        if not self._server.serve_started:
+                            self._server.serve()
+                    last_error = ""
+                except Exception as exc:
+                    # The next pass tries again. The gate reports what is true
+                    # meanwhile, so a caller that waits for the port gets an
+                    # error and not a wrong "ok". Each new text is logged one
+                    # time, and not one time for each pass.
+                    if str(exc) != last_error:
+                        last_error = str(exc)
+                        _log.warning("provider port %s could not change its state: %s", port, exc)
+                is_open = self._server is not None and self._server.serve_started
+            self.gate.end_pass(seen, is_open=is_open)
+            self._wake.wait(timeout=_HTTP_PORT_POLL_S)
+            self._wake.clear()
+
+    def stop(self) -> None:
+        """Stop the loop and the server that the port has. The port does not open again."""
+        with self._lock:
+            self._stopped = True
+            server, self._server = self._server, None
+        self._wake.set()  # the loop thread reads the flag and ends
+        if server is None:
+            return
+        if server.serve_started:
+            server.shutdown()
+        server.server_close()
+
+
 # ── Scenario TTL sweep ────────────────────────────────────────────────────────
 
 
@@ -1256,10 +1348,12 @@ _HTTP_ADAPTERS: dict = {
 class SimulatorServer:
     """The whole simulator as one object: registry + one bound socket per
     endpoint + the control API. ``start()`` binds and serves on daemon
-    threads; ``stop()`` shuts the HTTP servers down (gRPC loops and the TTL
-    sweep are daemon threads that die with the process). A gRPC loop closes its
-    own port while a scenario sets ``mode="port_closed"`` on it; that is a fault
-    a test asked for, not a shutdown.
+    threads; ``stop()`` shuts the HTTP servers down, and it closes the socket of
+    each ``http`` port and each ``ws`` port (gRPC loops and the TTL
+    sweep are daemon threads that die with the process). The loop of a provider
+    port (gRPC, ``http`` or ``ws``) closes its own port while a scenario sets
+    ``mode="port_closed"`` on it; that is a fault a test asked for, not a
+    shutdown.
 
     Tests construct this directly (with ``host="127.0.0.1"`` and the TTL sweep
     disabled) to run the real server in-process on the real ports.
@@ -1334,24 +1428,54 @@ class SimulatorServer:
         self.cache_sims_enabled = False
         # The RESP proxies are raw TCP rather than HTTP, so this list carries two
         # server types. Both answer shutdown(), which is all stop() asks of them.
+        # The server of an http port or of a ws port is not in this list: the
+        # loop of the port owns it.
         self._servers: list[socketserver.BaseServer] = []
         self._threads: list[threading.Thread] = []
+        # One loop for each http port and each ws port. A port that opens again
+        # gets a new server object, so stop() reaches the server of a port
+        # through its loop.
+        self._port_loops: list[_HttpPortLoop] = []
+
+    def _provider_server_factory(self, port: int, handler_cls, listener: Listener) -> Callable[[], _ProviderHTTPServer]:
+        """A call that binds a new server of one provider port.
+
+        Each server of one port gets the same listener object. So a port that
+        opened again serves the same provider, and a ``ws`` port keeps the one
+        subscription registry of the simulator.
+        """
+
+        def new_server() -> _ProviderHTTPServer:
+            srv = _ProviderHTTPServer((self.host, port), handler_cls)
+            srv.listener = listener
+            return srv
+
+        return new_server
 
     def start(self) -> None:
         grpc_endpoints = []
+        probe_host = "127.0.0.1" if self.host == "0.0.0.0" else self.host
         for provider in self.registry.all_providers():
             for endpoint in provider.endpoints:
                 if endpoint.interface == "grpc":
                     grpc_endpoints.append((provider, endpoint))
                     continue
                 handler_cls, listener_cls = _HTTP_ADAPTERS[(endpoint.interface, endpoint.transport)]
-                srv = _SimThreadingHTTPServer((self.host, endpoint.port), handler_cls)
                 if listener_cls is JsonRpcWsListener:
                     # Each ws listener gets the one subscription registry of the simulator.
-                    srv.listener = JsonRpcWsListener(provider, endpoint, self.subscriptions)
+                    listener = JsonRpcWsListener(provider, endpoint, self.subscriptions)
                 else:
-                    srv.listener = listener_cls(provider, endpoint)
-                self._servers.append(srv)
+                    listener = listener_cls(provider, endpoint)
+                # The first server binds here, so a port that cannot bind fails
+                # the start.
+                new_server = self._provider_server_factory(endpoint.port, handler_cls, listener)
+                first = new_server()
+                # One gate for each http port and each ws port. The loop that
+                # closes the port and the control API that waits for the port
+                # share the gate. These gates need no grpcio.
+                gate = PortGate(provider, endpoint, probe_host)
+                self.control.port_gates[endpoint.port] = gate
+                self._port_loops.append(_HttpPortLoop(gate, first, new_server))
 
         ctrl = _SimThreadingHTTPServer((self.host, self.control_port), _ControlHandler)
         ctrl.control = self.control
@@ -1375,6 +1499,7 @@ class SimulatorServer:
             self._servers.append(resp_ctrl)
 
         self._threads = [threading.Thread(target=srv.serve_forever, daemon=True) for srv in self._servers]
+        self._threads.extend(loop.thread for loop in self._port_loops)
 
         # gRPC endpoints — optional dependency: a missing grpcio downgrades
         # them to a warning instead of killing the HTTP-only simulator.
@@ -1382,13 +1507,13 @@ class SimulatorServer:
             try:
                 from provider_simulator.listeners.grpc import GrpcListener
 
-                probe_host = "127.0.0.1" if self.host == "0.0.0.0" else self.host
                 for provider, endpoint in grpc_endpoints:
                     # One gate per gRPC port, shared by the serve loop that
                     # closes the port and the control API that waits for it.
-                    # Registered only here, after the grpcio import worked: a
-                    # port with no gate is a port nothing can close, and the
-                    # control API refuses mode="port_closed" for it.
+                    # The gate of a gRPC port is registered only here, after
+                    # the grpcio import worked: a port with no gate is a port
+                    # nothing can close, and the control API refuses
+                    # mode="port_closed" for it.
                     gate = PortGate(provider, endpoint, probe_host)
                     self.control.port_gates[endpoint.port] = gate
                     self._threads.append(
@@ -1441,6 +1566,9 @@ class SimulatorServer:
         # (up to its 0.5s poll interval) — run them concurrently so stopping
         # ~40 listeners takes one poll interval, not the sum of them.
         stoppers = [threading.Thread(target=srv.shutdown) for srv in self._servers]
+        # The loop of a port stops the server that the port has at this time.
+        # That server is a new object after the port closed and opened again.
+        stoppers.extend(threading.Thread(target=loop.stop) for loop in self._port_loops)
         for stopper in stoppers:
             stopper.start()
         for stopper in stoppers:
