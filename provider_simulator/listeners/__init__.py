@@ -12,6 +12,7 @@ from provider_simulator.listeners.base import Listener, ParseError, RawRequest, 
 from provider_simulator.listeners.jsonrpc import JsonRpcListener
 from provider_simulator.listeners.rest import RestListener
 from provider_simulator.listeners.tendermint import TendermintListener
+from provider_simulator.listeners.ws import JsonRpcWsListener
 
 __all__ = [
     "Listener",
@@ -19,6 +20,7 @@ __all__ = [
     "RawRequest",
     "ServeResult",
     "JsonRpcListener",
+    "JsonRpcWsListener",
     "RestListener",
     "TendermintListener",
 ]
