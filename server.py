@@ -32,12 +32,14 @@ duplicate module state (one WS-subscription registry per copy) and desync the
 control API from the listeners.
 """
 
+import errno
 import json
 import logging
 import os
 import queue
 import socket
 import socketserver
+import sys
 import threading
 import time
 import typing
@@ -98,6 +100,115 @@ class _SimThreadingHTTPServer(ThreadingHTTPServer):
     control: ControlApi
     registry: Registry
     extra_ready_ports: "frozenset[int]"
+
+
+class _ProviderHTTPServer(_SimThreadingHTTPServer):
+    """The server of one ``http`` or ``ws`` provider port. It can close its port.
+
+    ``mode="port_closed"`` closes the port with ``close_port()``. A closed
+    listening socket is not sufficient for that: a worker thread continues to
+    serve each connection that the server accepted before. So the server
+    records each client socket that it accepts, and ``close_port()`` ends each
+    one.
+
+    A closed server does not open again. A new server object on the same port
+    opens the port.
+
+    The control server and the RESP control server are plain
+    ``_SimThreadingHTTPServer`` objects. No scenario closes them.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        self._clients: set[socket.socket] = set()
+        self._clients_lock = threading.Lock()
+        # True after ``serve()`` started the serve thread. ``shutdown()`` waits
+        # for the serve loop, so nothing calls it for a server that never served.
+        self.serve_started = False
+        # True after ``close_port()`` began. An OSError of the serve thread or
+        # of a worker thread is then a result of the close.
+        self.closed_by_scenario = False
+        super().__init__(*args, **kwargs)
+
+    def serve(self) -> threading.Thread:
+        """Start ``serve_forever`` on a daemon thread, and return the thread."""
+        thread = threading.Thread(target=self._serve_until_stopped, daemon=True)
+        thread.start()
+        self.serve_started = True
+        return thread
+
+    def _serve_until_stopped(self) -> None:
+        """Run ``serve_forever``. The serve thread raises no error for a closed port.
+
+        ``close_port()`` can close the socket before the serve loop registers
+        it for its poll. The loop then stops with a ValueError or an OSError.
+        """
+        try:
+            self.serve_forever()
+        except (OSError, ValueError):
+            if not self.closed_by_scenario:
+                raise
+
+    def close_port(self) -> None:
+        """Refuse new connections, end the open ones, and tell the serve loop to stop.
+
+        This method waits for nothing. The serve loop ends on its own thread.
+        Each worker thread ends when its next read or write fails.
+        """
+        with self._clients_lock:  # the flag and the copy change together
+            self.closed_by_scenario = True
+            clients = list(self._clients)
+        # ``socket.shutdown`` comes before ``socket.close``, and it is not
+        # ``BaseServer.shutdown``. On Linux a listening socket accepts
+        # connections for as long as the serve loop sits in its poll, if only
+        # ``close`` runs. ``socket.shutdown`` takes the socket out of the
+        # listening state at once.
+        try:
+            self.socket.shutdown(socket.SHUT_RDWR)
+        except OSError as exc:
+            if exc.errno != errno.ENOTCONN:  # a Mac answers ENOTCONN here, and that is expected
+                _log.warning("provider port %s: the listening socket did not shut down: %s", self.server_port, exc)
+        self.socket.close()
+        for client in clients:
+            try:
+                client.shutdown(socket.SHUT_RDWR)  # not close(): the worker thread owns the socket
+            except OSError:
+                pass  # the client is gone
+        if self.serve_started:
+            # Nothing waits for the old serve loop.
+            threading.Thread(target=self.shutdown, daemon=True).start()
+
+    def get_request(self):
+        """Accept one connection, and record its socket.
+
+        The serve loop can accept a connection in the moment of the close.
+        ``close_port()`` does not have that socket in its copy, so this method
+        ends the connection. ``BaseServer._handle_request_noblock`` drops the
+        OSError.
+        """
+        request, client_address = super().get_request()
+        with self._clients_lock:
+            if self.closed_by_scenario:
+                request.close()
+                raise OSError(f"provider port {self.server_port} is closed by a scenario")
+            self._clients.add(request)
+        return request, client_address
+
+    def shutdown_request(self, request) -> None:
+        with self._clients_lock:
+            self._clients.discard(request)
+        super().shutdown_request(request)
+
+    def handle_error(self, request, client_address) -> None:
+        """Drop the OSError of a worker thread that ``close_port()`` cut off.
+
+        ``close_port()`` ends the socket of the worker thread, so the next read
+        or write of the thread fails. That error is a result of the close. Each
+        other error prints its traceback: an error before the close, and an
+        error that is not an OSError.
+        """
+        if self.closed_by_scenario and isinstance(sys.exc_info()[1], OSError):
+            return
+        super().handle_error(request, client_address)
 
 
 # ── HTTP request/response adapter (jsonrpc / rest / tendermintrpc) ────────────
