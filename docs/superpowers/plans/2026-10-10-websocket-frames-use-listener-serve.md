@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:subagent-driven-development to implement this plan task by task.
 
-> **The state of this plan on 2026-10-10.** A helper that only read wrote it, from the code of the branch `pin-todays-websocket-rows` at `5657f71`. Nothing ran before Task 0. Victoria gave her go for this plan on 2026-10-10, with the decisions that section 2 names. The line numbers of `server.py` and of `tests/test_simulator_ws.py` below are of `5657f71`.
+> **The state of this plan on 2026-10-10.** A helper that only read wrote it, from the code of the branch `pin-todays-websocket-rows` at `5657f71`. Nothing ran before Task 0. Victoria gave her go for this plan on 2026-10-10, with the decisions that section 2 names. The line numbers of `server.py` and of `tests/test_simulator_ws.py` below are of `5657f71`. Both steps of the design, the recorded tests and the move, merged in pull request 144 as one squashed commit, `f8086f2`. Where this plan calls pull request 144 another pull request, or says this pull request opens after it, read the text with this fact.
 
 ## 1. Goal, architecture and tech stack
 
@@ -362,7 +362,7 @@ Outside the simulator repository, after the merge:
 
 - Before the merge: each task is one commit. Undo a task with `git revert` of its commit. Do not reset the branch.
 - After the merge: revert the merge commit of this pull request with a new pull request, while it is the newest merged one. The edits of the recorded tests go back with it, so the suite is green again. If the real down merged after it, revert that one first (section 10 of the design).
-- Pull request 144 can stay: it holds tests only.
+- Pull request 144 holds the recorded tests and the move as one commit on `main`, `f8086f2`. One revert of that commit removes both. A change that takes back only the move must keep the recorded tests and put back their old expected values.
 - If the move cannot be finished: WebSocket keeps its places in `server.py`. Three settings that a subscribe frame ignores today can then be repaired where the code is: the corruption, the per-method `error_probability` and the canned `body` (section 11 of the design).
 - A revert needs Victoria's go, as each push does.
 

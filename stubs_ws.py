@@ -12,8 +12,7 @@ Two flat tables drive the WebSocket listener:
   UNSUBSCRIBE_METHODS  — the matching unsubscribe method names.
 
   EVENT_DEFAULTS       — canned event payload templates per (chain, event_type).
-                         Tests that don't supply a custom event in /ws/emit
-                         fall back to these.
+                         No code reads this table.
 
 The WebSocket listener module, provider_simulator/listeners/ws.py, imports
 the tables.
