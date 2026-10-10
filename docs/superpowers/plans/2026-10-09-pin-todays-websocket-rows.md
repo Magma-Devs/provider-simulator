@@ -519,7 +519,7 @@ class TestARefusedUpgrade:
     def test_a_dropped_upgrade_gets_the_bytes_of_its_drop_point_and_writes_one_row(self, sim, drop_at, reply):
         """`drop_connection` closes the connection of the upgrade. The drop
         point says which bytes arrive first: none, the complete 101 reply, or
-        the first 49 bytes of it."""
+        the first 48 bytes of it."""
         block = {"mode": "drop_connection", "transports": ["ws"]}
         if drop_at is not None:
             block["drop_at"] = drop_at
@@ -2080,7 +2080,7 @@ Each row is one run of 2026-10-09 on the copy of `main` at `8ed08aa`. One source
 2. A change of a source file. A fault that a test of this plan shows is recorded as it is.
 3. A change of the automation repository. Pull request 3a needs none: it changes no behaviour, so no skill page becomes untrue.
 4. A run of the automation suites (choice 10).
-5. The four edits of the design document that wait for Victoria's word: its status line, the rows A, B and C of section 9.2, part B of the spike in section 14.5, and the limits of a per-method fault.
+5. The three edits of the design document that wait for Victoria's word: its status line, the rows A, B and C of section 9.2, and the limits of a per-method fault.
 6. The behaviours that a test of `main` holds. The section "Spec coverage" names each one.
 7. A test of `http_status` in a per-method override of a subscribe method. A WebSocket frame has no HTTP status, so the key changes nothing that a test can read (section 9.2 of the design).
 8. A test of the queue of a connection that is full, and of an event for a provider that the registry does not hold. No test can reach either state through the control API.
@@ -2118,3 +2118,20 @@ Each row is one run of 2026-10-09 on the copy of `main` at `8ed08aa`. One source
 | Section 14.6, the column F of the table: the fields that a subscribe frame applies | Task 2. These apply: `mode`, `latency_ms`, a provider-wide `error_probability`, `error_code`, `error_message`, `rate_limit_body`, the five fault keys of `responses`, the corruption of a fault reply, `drop_at`, `fail_first_n` (`test_each_subscribe_frame_uses_one_count_of_the_fail_first_n_window`) and the filters (`test_a_filter_that_does_not_name_the_ws_endpoint_holds_everything_back`). These do not: a per-method `error_probability`, the content keys of `responses` (`test_a_content_key_of_responses_is_not_read_for_a_subscribe_frame`), the corruption of a success reply, and the pause (`test_a_subscribe_frame_performs_no_pause`) |
 | The handoff of 2026-10-09: the `down` row and the `hang` row of a subscribe frame record the configured latency and the method | Task 2: `test_a_subscribe_frame_of_a_down_provider_closes_the_connection_and_its_row_names_the_frame` and `test_a_subscribe_frame_of_a_hung_provider_gets_no_reply_and_the_connection_stays_open` |
 | The handoff of 2026-10-09: a frame under a per-method `down` with a latency: the row records the latency, and the adapter closes with no wait | Task 2: `test_a_per_method_down_with_a_latency_closes_at_once_and_its_row_records_the_latency`. Task 4: `test_a_per_method_down_with_a_latency_closes_another_frame_at_once` |
+
+## What the reviews changed after this plan was written
+
+Four task reviews and one review of the whole branch found no test that is wrong about today's behaviour. They found checks that could not fail, texts that the code does not support, behaviours with no test, and helpers whose failure did not show what arrived. The branch holds the fixes. So the branch differs from the code blocks of this plan in these places:
+
+1. **Seven tests read `GET /ws/subscriptions` while the connection is open.** `_reader_loop` removes each subscription of a connection when that connection closes. So a read after the close cannot see a subscription that a fault registered. Five tests of Task 2: `test_each_subscribe_method_and_each_unsubscribe_method_writes_a_row_with_its_own_name`, `test_a_subscribe_frame_of_a_rate_limited_provider_gets_the_text_of_the_rate_limit`, `test_a_subscription_frame_of_a_provider_with_an_error_gets_the_error_reply`, `test_a_per_method_rate_limit_reaches_the_subscribe_frame_only` and `test_a_per_method_hang_gives_no_reply_to_the_subscribe_frame`. Two tests of Task 4: `test_a_json_frame_with_no_method_goes_to_the_request_flow` and `test_a_list_of_requests_gets_the_batch_error_and_registers_no_subscription`. In three tests the simulator closes the connection itself, and their read stays after the close.
+2. **The class of the upgrade tests has the name `TestTheUpgradeRequest`.** The code blocks and the text of this plan say `TestARefusedUpgrade`. Victoria chose the new name on 2026-10-10: nine of its fourteen tests do not hold a refusal by a fault.
+3. **Three new tests and one new case.** The new part has 56 test functions and 114 cases, and not 53 and 108.
+   - `test_an_unsubscribe_frame_of_a_provider_with_an_error_removes_nothing`, in `TestSubscribeAndUnsubscribeFrames`. The unsubscribe case of the error test names an id that no connection holds, so it cannot show a removal.
+   - `test_a_connection_that_ends_with_no_close_frame_loses_its_subscriptions`, two cases, in `TestASubscriptionBelongsToOneConnection`: the client closes the socket, and a `down` provider closes the connection.
+   - `test_a_frame_whose_method_is_a_list_or_an_object_closes_the_connection`, two cases, in `TestFramesOutsideTheSubscribeCode`. It records a defect of `main` and does not judge it: `server.py` raises `TypeError` for such a frame before it writes a row. Victoria chose on 2026-10-10 to record it as it is.
+   - The case `error` of `test_an_event_reaches_its_subscriber_under_each_mode_of_the_provider`.
+4. **A helper that fails shows what arrived.** `_read_until_the_close`, `_refusal`, `_payload`, `_reply`, `_assert_no_frame` and `_subscribe` fail with a text that holds the bytes or the reply. `_payload` also requires a text frame, so each test that reads a reply holds the frame type. `_refusal` closes its socket in each case.
+5. **`test_a_hung_upgrade_gets_no_byte_and_writes_one_row` reads its row with `_rows_when_complete`**, and not after a fixed time.
+6. **Texts that were not exact.** The comment at the head of the new part says that three places write a history row, and that two of them decide a fault. The docstring of the dropped upgrade says 48 bytes: Task 1 of this plan said 49, and it is corrected in place. These docstrings say only what their test holds: the row of the other frame in the test of a per-method latency; the kinds of event that are no object; the frame that goes to `Listener.serve`, with the class that holds the rows of a subscribe frame; and the row that `_refuse_upgrade` writes. Eight sentences of more than 25 words are split.
+7. **The counts.** The file gives `173 passed`: the 59 tests of `main` and the 114 new cases. The whole suite has 1977 tests.
+8. **The breaks.** The section "The breaks" has the 109 runs of 2026-10-09 on the code blocks of this plan. Nine breaks were added after it: four for the tests of item 1, and five for the tests and the frame-type check of items 3 and 4. On 2026-10-10 all 118 ran on the final test file. Each one made one case or more fail, and each of the 114 cases failed in one run or more. The last commit of the branch changed two docstrings after that run.
