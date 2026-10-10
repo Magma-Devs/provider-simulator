@@ -1512,7 +1512,8 @@ def _request_upgrade(port=_PORT, path="/ws", upgrade_headers=True, lava_headers=
 def _read_until_the_close(sock, timeout_s=3.0):
     """Read each byte that arrives until the simulator closes the connection.
 
-    A connection that stays open for `timeout_s` raises socket.timeout.
+    A reset counts as a close. A connection that stays open for `timeout_s`
+    fails the test, and the failure shows the bytes that arrived.
     """
     sock.settimeout(timeout_s)
     received = b""
@@ -1521,6 +1522,8 @@ def _read_until_the_close(sock, timeout_s=3.0):
             chunk = sock.recv(4096)
         except ConnectionError:
             return received
+        except socket.timeout:
+            pytest.fail(f"the connection stayed open for {timeout_s} s, and these bytes arrived: {received!r}")
         if not chunk:
             return received
         received += chunk
@@ -1528,10 +1531,15 @@ def _read_until_the_close(sock, timeout_s=3.0):
 
 def _refusal(sock):
     """Read a refused upgrade to its end. Return its HTTP status and its JSON body."""
-    raw = _read_until_the_close(sock)
-    sock.close()
+    try:
+        raw = _read_until_the_close(sock)
+    finally:
+        sock.close()
     head, _, body = raw.partition(b"\r\n\r\n")
-    return int(head.split(b" ", 2)[1]), json.loads(body)
+    try:
+        return int(head.split(b" ", 2)[1]), json.loads(body)
+    except (IndexError, ValueError):
+        pytest.fail(f"expected a refusal with an HTTP status and a JSON body, and these bytes arrived: {raw!r}")
 
 
 def _read_the_handshake(sock):
@@ -1567,27 +1575,49 @@ def _send_frame(sock, message):
 
 
 def _payload(sock, timeout_s=3.0):
-    """The payload bytes of the next frame."""
+    """The payload bytes of the next frame. The frame must be a text frame."""
     sock.settimeout(timeout_s)
-    return ws_protocol.parse_frame(sock.recv).payload
+    try:
+        frame = ws_protocol.parse_frame(sock.recv)
+    except socket.timeout:
+        pytest.fail(f"expected a frame in {timeout_s} s, and no frame arrived")
+    assert (
+        frame.opcode == ws_protocol.OPCODE_TEXT
+    ), f"expected a text frame, and a frame with the opcode {frame.opcode} arrived: {frame.payload!r}"
+    return frame.payload
 
 
 def _reply(sock, timeout_s=3.0):
     """The next frame, read as JSON."""
-    return json.loads(_payload(sock, timeout_s))
+    payload = _payload(sock, timeout_s)
+    try:
+        return json.loads(payload)
+    except ValueError:
+        pytest.fail(f"expected a JSON reply, and this payload arrived: {payload!r}")
 
 
 def _assert_no_frame(sock, wait_s=0.5):
     """No byte arrives in `wait_s`, and the connection stays open."""
     sock.settimeout(wait_s)
-    with pytest.raises(socket.timeout):
-        sock.recv(1)
+    try:
+        arrived = sock.recv(1)
+    except socket.timeout:
+        return
+    except ConnectionError as reset:
+        pytest.fail(f"expected an open connection for {wait_s} s, and the simulator reset it: {reset!r}")
+    if arrived:
+        pytest.fail(f"expected no byte in {wait_s} s, and this byte arrived: {arrived!r}")
+    pytest.fail(f"expected an open connection for {wait_s} s, and the simulator closed it")
 
 
 def _subscribe(sock, method="eth_subscribe", frame_id=1):
     """Send one subscribe frame. Return the subscription id of the reply."""
     _send_frame(sock, {"jsonrpc": "2.0", "method": method, "params": ["newHeads"], "id": frame_id})
-    return _reply(sock)["result"]
+    reply = _reply(sock)
+    assert (
+        isinstance(reply, dict) and "result" in reply
+    ), f"expected a subscription id, and this reply arrived: {reply!r}"
+    return reply["result"]
 
 
 class TestTheUpgradeRequest:
@@ -1665,7 +1695,7 @@ class TestTheUpgradeRequest:
         sock = _request_upgrade(lava_headers=_LAVA_HEADERS)
         try:
             _assert_no_frame(sock)
-            rows = _rows(sim)
+            rows = _rows_when_complete(sim, 1)
         finally:
             sock.close()
 
@@ -2111,6 +2141,21 @@ class TestSubscribeAndUnsubscribeFrames:
         assert answer == reply
         assert [_facts(row) for row in rows] == [expected_row]
         assert subscriptions == []
+
+    def test_an_unsubscribe_frame_of_a_provider_with_an_error_removes_nothing(self, sim):
+        """`error` on an unsubscribe frame that names a subscription of its own
+        connection: the reply is the JSON-RPC error, and the subscription stays."""
+        with _websocket() as sock:
+            subscription_id = _subscribe(sock, frame_id=1)
+            _set_scenario(sim, {"mode": "error", "transports": ["ws"]})
+            _send_frame(sock, {"jsonrpc": "2.0", "method": "eth_unsubscribe", "params": [subscription_id], "id": 2})
+            answer = _reply(sock)
+            rows = _rows(sim)
+            subscriptions = _subscriptions(sim)
+
+        assert answer == {"jsonrpc": "2.0", "id": 2, "error": {"code": -32000, "message": "Internal error"}}
+        assert [_facts(row) for row in rows] == [("eth_subscribe", "success", 0, 1), ("eth_unsubscribe", "error", 0, 2)]
+        assert [entry["subscription_id"] for entry in subscriptions] == [subscription_id]
 
     @pytest.mark.parametrize(
         "drop_at, received",
@@ -2592,7 +2637,7 @@ class TestAPushedEvent:
         assert status == 404
         assert [_facts(row)[0] for row in rows] == ["eth_subscribe", "eth_unsubscribe"]
 
-    @pytest.mark.parametrize("mode", ["down", "hang", "rate_limit", "drop_connection"])
+    @pytest.mark.parametrize("mode", ["down", "hang", "rate_limit", "error", "drop_connection"])
     def test_an_event_reaches_its_subscriber_under_each_mode_of_the_provider(self, sim, mode):
         """A pushed event asks no fault policy. A fault that is set after the
         subscribe does not stop the event, and the row is a `success` row."""
@@ -2669,6 +2714,40 @@ class TestASubscriptionBelongsToOneConnection:
             left = [entry["subscription_id"] for entry in _subscriptions(sim)]
 
         assert left == [kept]
+
+    @pytest.mark.parametrize(
+        "down_closes_it",
+        [
+            pytest.param(False, id="the-client-closes-the-socket"),
+            pytest.param(True, id="a-down-provider-closes-the-connection"),
+        ],
+    )
+    def test_a_connection_that_ends_with_no_close_frame_loses_its_subscriptions(self, sim, down_closes_it):
+        """A connection can end with no close frame: the client closes the
+        socket, or a `down` provider closes the connection. The simulator then
+        removes each subscription of that connection."""
+        sock = _request_upgrade()
+        try:
+            head = _read_the_handshake(sock)
+            assert head.startswith(b"HTTP/1.1 101 "), f"the upgrade did not succeed: {head!r}"
+            _subscribe(sock, frame_id=1)
+            _subscribe(sock, frame_id=2)
+            before = len(_subscriptions(sim))
+            received = b""
+            if down_closes_it:
+                _set_scenario(sim, {"mode": "down", "transports": ["ws"]})
+                _send_frame(sock, _BLOCK_NUMBER)
+                received = _read_until_the_close(sock)
+        finally:
+            sock.close()
+
+        deadline = time.monotonic() + 2.0
+        while _subscriptions(sim) and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+        assert before == 2
+        assert received == b""
+        assert _subscriptions(sim) == []
 
 
 class TestFramesOutsideTheSubscribeCode:
@@ -2788,3 +2867,23 @@ class TestFramesOutsideTheSubscribeCode:
         assert received == b""
         assert waited < 1.0, f"the connection closed after {waited:.2f} s"
         assert [_facts(row) for row in _rows(sim)] == [("eth_blockNumber", "down", 1500, 8)]
+
+    @pytest.mark.parametrize(
+        "method",
+        [
+            pytest.param(["eth_subscribe"], id="a-list"),
+            pytest.param({"name": "eth_subscribe"}, id="an-object"),
+        ],
+    )
+    def test_a_frame_whose_method_is_a_list_or_an_object_closes_the_connection(self, sim, method):
+        """This test records a defect and does not judge it. A JSON frame whose
+        `method` is a list or an object stops the reader of the connection. The
+        caller gets no byte, and the connection closes. No row is written, and
+        no subscription is registered."""
+        with _websocket() as sock:
+            _send_frame(sock, {"jsonrpc": "2.0", "method": method, "params": [], "id": 1})
+            received = _read_until_the_close(sock)
+
+        assert received == b""
+        assert _every_row(sim) == []
+        assert _subscriptions(sim) == []
