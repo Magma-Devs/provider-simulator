@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import queue
 import re
 import socket
 import sys
@@ -2887,3 +2888,89 @@ class TestFramesOutsideTheSubscribeCode:
         assert received == b""
         assert _every_row(sim) == []
         assert _subscriptions(sim) == []
+
+
+class TestMoreOfWhatWebSocketDoesToday:
+    """Four behaviours that no test above holds: the `down` row and the `hang`
+    row of an unsubscribe frame, a canned `body` for a subscribe method under
+    a provider-wide `rate_limit`, an event for a full queue, and an
+    unsubscribe frame whose `params` has a wrong shape."""
+
+    @pytest.mark.parametrize(
+        "mode, expected_row",
+        [
+            pytest.param("down", ("eth_unsubscribe", "down", 250, 9), id="down"),
+            pytest.param("hang", ("eth_unsubscribe", "hang", 250, 9), id="hang"),
+        ],
+    )
+    def test_the_row_of_an_unsubscribe_frame_of_a_down_or_a_hung_provider(self, sim, mode, expected_row):
+        """A provider-wide `down` or `hang` on an unsubscribe frame. The row
+        records the method, the id of the frame and the configured latency."""
+        with _websocket() as sock:
+            _set_scenario(sim, {"mode": mode, "latency_ms": 250, "transports": ["ws"]})
+            _send_frame(sock, {"jsonrpc": "2.0", "method": "eth_unsubscribe", "params": ["0x00"], "id": 9})
+            rows = _rows_when_complete(sim, 1)
+
+        assert [_facts(row) for row in rows] == [expected_row]
+
+    def test_a_canned_body_for_a_subscribe_method_under_a_provider_wide_rate_limit(self, sim):
+        """An entry of `responses` for `eth_subscribe` with a canned `body`,
+        under a provider-wide `rate_limit`. The subscribe frame gets the
+        rate-limit text, and its row has the status `rate_limit`. No
+        subscription is registered."""
+        canned = {"jsonrpc": "2.0", "id": 1, "result": "0xcanned"}
+        with _websocket() as sock:
+            _set_scenario(
+                sim, {"mode": "rate_limit", "transports": ["ws"], "responses": {"eth_subscribe": {"body": canned}}}
+            )
+            _send_frame(sock, _SUBSCRIBE)
+            payload = _payload(sock)
+            rows = _rows(sim)
+            subscriptions = _subscriptions(sim)
+
+        assert payload == _RATE_LIMIT_TEXT
+        assert [_facts(row) for row in rows] == [("eth_subscribe", "rate_limit", 0, 7)]
+        assert subscriptions == []
+
+    def test_an_event_for_a_full_queue_gets_503_and_writes_no_row(self, sim):
+        """An event for a subscription whose queue is full: the control API
+        answers 503, and no row is written. The event before it gets 200 and
+        writes its row."""
+        subscription_id = "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        sim["server"].subscriptions.register(
+            subscription_id, "eth-sim", "1", "eth_subscribe", out_queue=queue.Queue(maxsize=1)
+        )
+
+        first = _emit(sim, {"subscription_id": subscription_id, "event": {"tag": "A"}})
+        rows_after_the_first = _rows(sim)
+        second = _emit(sim, {"subscription_id": subscription_id, "event": {"tag": "B"}})
+        rows = _rows(sim)
+
+        the_push_row = ("eth_subscription push", "success", 0, subscription_id)
+        assert first == (200, {"status": "emitted", "subscription_id": subscription_id})
+        assert [_facts(row) for row in rows_after_the_first] == [the_push_row]
+        assert second == (503, {"error": "subscription '0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd' queue full"})
+        assert [_facts(row) for row in rows] == [the_push_row]
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            pytest.param({"id": "0x00"}, id="an-object"),
+            pytest.param(5, id="a-number"),
+            pytest.param([["0x00"]], id="a-list-whose-first-item-is-a-list"),
+            pytest.param([{"id": "0x00"}], id="a-list-whose-first-item-is-an-object"),
+        ],
+    )
+    def test_an_unsubscribe_frame_with_params_of_a_wrong_shape_closes_the_connection_and_leaves_its_row_in_flight(
+        self, sim, params
+    ):
+        """This test records a defect and does not judge it. An unsubscribe
+        frame whose `params` has a wrong shape stops the reader of the
+        connection. The caller gets no byte, and the connection closes. The
+        row of the frame stays `in_flight`."""
+        with _websocket() as sock:
+            _send_frame(sock, {"jsonrpc": "2.0", "method": "eth_unsubscribe", "params": params, "id": 9})
+            received = _read_until_the_close(sock)
+
+        assert received == b""
+        assert [_facts(row) for row in _rows(sim)] == [("*", "in_flight", 0, None)]
