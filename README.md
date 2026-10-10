@@ -137,11 +137,14 @@ nc -z localhost 18557   # the ws port of the same provider: refused too
 
 - **With no filter each port of the provider closes.** `transports` and `ports`
   name fewer ports, as for every other mode. The other providers are untouched.
-- **An open connection ends with no reply.** A request that the provider holds
-  gets no answer. A WebSocket connection ends with no close frame.
+- **An open connection ends.** A request that the provider holds gets no
+  reply. A reply that the provider is sending is cut: the caller can get the
+  status line and the headers, and no body or a part of it. A WebSocket
+  connection ends with no close frame.
 - **A closed port stores no row.** The provider receives nothing, so it records
   nothing in `/history`. The row of a request in flight stays as the simulator
-  wrote it when the request arrived.
+  wrote it when the request arrived. A request that reached the socket before
+  the close, and that the provider did not read yet, gets no row and no reply.
 - **The subscriptions of a closed `ws` port leave `GET /ws/subscriptions`** when
   their connection ends. That is a moment after the control call returns.
 - **The control call returns after the port has changed.** Closed after a call

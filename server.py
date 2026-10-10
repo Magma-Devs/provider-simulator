@@ -175,7 +175,9 @@ class _ProviderHTTPServer(_SimThreadingHTTPServer):
         try:
             self.socket.shutdown(socket.SHUT_RDWR)
         except OSError as exc:
-            if exc.errno != errno.ENOTCONN:  # a Mac answers ENOTCONN here, and that is expected
+            # A Mac answers ENOTCONN here, and that is expected. EBADF means
+            # that an earlier call of this method closed the socket.
+            if exc.errno not in (errno.ENOTCONN, errno.EBADF):
                 _log.warning("provider port %s: the listening socket did not shut down: %s", self.server_port, exc)
         self.socket.close()
         for client in clients:
@@ -221,6 +223,20 @@ class _ProviderHTTPServer(_SimThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
+def _port_is_closed(server: object) -> bool:
+    """True when ``close_port()`` began for the server of this connection.
+
+    ``close_port()`` shuts down each client socket. On Linux the bytes that
+    arrived before the shutdown stay readable. So a worker thread can read a
+    whole request, an upgrade request or a frame after the port closed. A
+    closed port receives no request: an adapter drops what it reads then, with
+    no history row and no reply.
+
+    The control server and the RESP control server have no such flag.
+    """
+    return bool(getattr(server, "closed_by_scenario", False))
+
+
 # ── HTTP request/response adapter (jsonrpc / rest / tendermintrpc) ────────────
 
 
@@ -230,6 +246,9 @@ class _HttpListenerHandler(BaseHTTPRequestHandler):
     Subclasses pick the verbs they answer, whether ``missing_field`` corruption
     uses dotted paths (REST / Tendermint address nested keys; JSON-RPC targets a
     flat top-level field), and the partial bytes a ``mid_body`` drop sends.
+
+    A request that this thread reads after ``close_port()`` began gets no
+    history row and no reply: see ``_port_is_closed``.
     """
 
     # Socket timeout honoured by BaseHTTPRequestHandler: caps the otherwise
@@ -241,6 +260,9 @@ class _HttpListenerHandler(BaseHTTPRequestHandler):
     server: _SimThreadingHTTPServer  # narrowed for the wiring attributes
 
     def _run(self, verb: str) -> None:
+        if _port_is_closed(self.server):
+            self.close_connection = True
+            return
         listener = self.server.listener
         headers = dict(self.headers.items())
         # Record the arrival BEFORE the body read: a client that cancels while
@@ -513,8 +535,10 @@ class _WsHandler(BaseHTTPRequestHandler):
     The adapter handles these cases with no listener, and each one writes no
     history row: a wrong path (404); a bad upgrade request (400); a ping frame
     (a pong); a close frame (the connection closes); a binary frame, or a text
-    frame that is not JSON (no reply); and a JSON frame whose method is a list
-    or an object (the connection closes).
+    frame that is not JSON (no reply); a JSON frame whose method is a list or
+    an object (the connection closes); and an upgrade request or a frame that
+    this thread reads after ``close_port()`` began (no reply, and the
+    connection closes: see ``_port_is_closed``).
     """
 
     timeout = 30
@@ -522,6 +546,9 @@ class _WsHandler(BaseHTTPRequestHandler):
     server: _SimThreadingHTTPServer
 
     def do_GET(self):
+        if _port_is_closed(self.server):
+            self.close_connection = True
+            return
         # The ws row of _HTTP_ADAPTERS gives this handler a JsonRpcWsListener.
         listener = typing.cast(JsonRpcWsListener, self.server.listener)
         provider = listener.provider
@@ -627,6 +654,8 @@ class _WsHandler(BaseHTTPRequestHandler):
                 try:
                     frame = ws_protocol.parse_frame(self.connection.recv)
                 except (ws_protocol.FrameParseError, OSError):
+                    return
+                if _port_is_closed(self.server):
                     return
                 if frame.opcode == ws_protocol.OPCODE_CLOSE:
                     return

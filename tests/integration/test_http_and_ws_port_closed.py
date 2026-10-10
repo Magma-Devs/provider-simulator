@@ -15,6 +15,11 @@ keeps one port in the state that its scenario asks for. Each test makes one
 loop and one gate. Most of them write the scenario of the provider. These tests
 use no simulator.
 
+``TestWhatAWorkerThreadReadsAfterTheClose`` has the tests of the adapters for
+a request, an upgrade request and a frame that a worker thread reads after the
+port closed. Each test makes one server with a real handler class and a real
+listener. These tests use no simulator.
+
 The tests of each other class use the shared simulator of the session (see
 conftest.py) and the provider ``eth-sim:1``, which has an ``http`` port and a
 ``ws`` port. The control API answers only when the port has changed. So each
@@ -48,6 +53,8 @@ from constants import CACHE_SIM_PORTS, CONTROL_PORT, RESP_CONTROL_PORT, RESP_PRO
 from provider_simulator import topology
 from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.provider import Pool
+from provider_simulator.listeners import JsonRpcListener, JsonRpcWsListener
+from provider_simulator.listeners.ws import WsSubscriptions
 from provider_simulator.port_gate import PortGate
 from provider_simulator.topology import port_of
 from tests.ws_client import WsClient
@@ -522,6 +529,8 @@ class TestTheLoopOfOnePort:
             loop.stop()
         warnings = [text for text in caplog.messages if "could not change its state" in text]
         assert warnings == [f"provider port {port} could not change its state: can't start new thread"]
+        # The second close_port() meets a socket that the first call closed. That is no fault of the socket.
+        assert [text for text in caplog.messages if "did not shut down" in text] == []
         assert thread_errors == []
 
     def test_a_server_that_cannot_start_its_serve_thread_is_closed_and_the_next_pass_binds_a_new_one(
@@ -563,6 +572,131 @@ class TestTheLoopOfOnePort:
         warnings = [text for text in caplog.messages if "could not change its state" in text]
         assert warnings == [f"provider port {port} could not change its state: can't start new thread"]
         assert thread_errors == []
+
+
+# ── what a worker thread reads after the close ───────────────────────────────
+
+_WS_UPGRADE_REQUEST = (
+    b"GET /ws HTTP/1.1\r\nHost: test\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+    b"Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+)
+
+
+def _a_server_whose_worker_reads_late(handler_cls, transport):
+    """Start one ``_ProviderHTTPServer`` with a real handler class and a real
+    listener, for a provider that no simulator holds.
+
+    The worker thread of a connection waits for ``read_now`` before its first
+    read. So the test decides what the port is when the thread reads. It
+    returns the server, the provider and three events: the worker thread
+    started, the thread can read, and the thread ended."""
+    started, read_now, ended = threading.Event(), threading.Event(), threading.Event()
+
+    class ReadsLate(handler_cls):
+        def setup(self):
+            started.set()
+            read_now.wait(10)
+            super().setup()
+
+        def finish(self):
+            try:
+                super().finish()
+            finally:
+                ended.set()
+
+    server = server_module._ProviderHTTPServer(_ANY_PORT, ReadsLate)
+    endpoint = Endpoint("jsonrpc", transport, server.server_port)
+    provider = Pool(name="late-sim", chain="eth").add_provider("1", [endpoint])
+    if transport == "ws":
+        server.listener = JsonRpcWsListener(provider, endpoint, WsSubscriptions())
+    else:
+        server.listener = JsonRpcListener(provider, endpoint)
+    server.serve()
+    return server, provider, (started, read_now, ended)
+
+
+class TestWhatAWorkerThreadReadsAfterTheClose:
+    """``close_port`` shuts down each client socket. On Linux the bytes that
+    arrived before the shutdown stay readable, so a worker thread can read them
+    after the port closed. A closed port receives no request: the adapter drops
+    what it reads then.
+
+    A test with "the flag of the close" sets the flag by hand, and the socket
+    stays open. So the bytes are readable on a Mac too, and the test holds the
+    drop on each system."""
+
+    @pytest.mark.parametrize("the_close", ["the flag of the close", "close_port"])
+    def test_an_http_request_that_waits_unread_at_the_close_gets_no_row_and_no_reply(self, the_close):
+        """The whole request is in the receive queue of the connection, and
+        the worker thread did not read it yet. Then the port closes. With
+        "close_port" the close is the real one: a Mac throws the request away,
+        and Linux keeps it."""
+        server, provider, (started, read_now, ended) = _a_server_whose_worker_reads_late(
+            server_module._JsonRpcHttpHandler, "http"
+        )
+        body = json.dumps(_CHAIN_ID_CALL).encode()
+        head = f"POST / HTTP/1.1\r\nHost: test\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n"
+        client = socket.create_connection(("127.0.0.1", server.server_port), timeout=5)
+        try:
+            client.sendall(head.encode() + body)
+            assert started.wait(5), "the worker thread did not start"
+            time.sleep(0.1)  # the whole request is in the receive queue of the connection now
+            if the_close == "close_port":
+                server.close_port()
+            else:
+                server.closed_by_scenario = True
+            read_now.set()
+            received = _bytes_until_the_end(client, timeout=2.0)
+            assert ended.wait(5), "the worker thread did not end"
+        finally:
+            read_now.set()
+            client.close()
+            server.close_port()
+            server.server_close()
+        assert received == b"", f"a closed port sent a reply: {received!r}"
+        assert provider.log.get_history() == [], "a closed port stored a row"
+
+    def test_a_ws_upgrade_request_that_waits_unread_at_the_close_gets_no_handshake(self):
+        """The same moment for a ``ws`` port: the upgrade request waits unread
+        when the port closes. The adapter does not complete the handshake."""
+        server, provider, (started, read_now, ended) = _a_server_whose_worker_reads_late(server_module._WsHandler, "ws")
+        client = socket.create_connection(("127.0.0.1", server.server_port), timeout=5)
+        try:
+            client.sendall(_WS_UPGRADE_REQUEST)
+            assert started.wait(5), "the worker thread did not start"
+            server.closed_by_scenario = True
+            read_now.set()
+            received = _bytes_until_the_end(client, timeout=2.0)
+            assert ended.wait(5), "the worker thread did not end"
+        finally:
+            read_now.set()
+            client.close()
+            server.close_port()
+            server.server_close()
+        assert received == b"", f"a closed port answered the upgrade request: {received[:40]!r}"
+        assert provider.log.get_history() == [], "a closed port stored a row"
+
+    def test_a_ws_frame_that_the_reader_reads_after_the_close_began_gets_no_row_and_no_reply(self):
+        """A frame can reach the socket of an open WebSocket connection before
+        the close, and the reader thread can read it after. The adapter does
+        not serve it: no reply frame, no history row and no subscription."""
+        server = server_module._ProviderHTTPServer(_ANY_PORT, server_module._WsHandler)
+        endpoint = Endpoint("jsonrpc", "ws", server.server_port)
+        provider = Pool(name="late-sim", chain="eth").add_provider("1", [endpoint])
+        subscriptions = WsSubscriptions()
+        server.listener = JsonRpcWsListener(provider, endpoint, subscriptions)
+        server.serve()
+        try:
+            with WsClient("127.0.0.1", server.server_port, "/ws") as client:
+                server.closed_by_scenario = True
+                client.send_json(_SUBSCRIBE)
+                received = _bytes_until_the_end(client.sock, timeout=2.0)
+        finally:
+            server.close_port()
+            server.server_close()
+        assert received == b"", f"a closed port answered a frame: {received!r}"
+        assert provider.log.get_history() == [], "a closed port stored a row"
+        assert subscriptions.list() == [], "a closed port registered a subscription"
 
 
 # ── what a scenario cannot close ─────────────────────────────────────────────

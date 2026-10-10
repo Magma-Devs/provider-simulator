@@ -4,12 +4,13 @@
 
 **The state of this plan.** Written on 2026-10-10 from a read, by a helper that only read. Nothing ran for it before Task 0. Victoria gave her go on 2026-10-10, with the decisions that section 2 names. **The base changed after the plan was written:** the WebSocket move merged into `main` on 2026-10-10 as the commit `f8086f2` (pull request 144, with the recorded WebSocket tests). So this branch starts from `main`, or from a small follow-up branch of that merge, and not from a branch of the WebSocket move. Each line number of `server.py` below is of `8ed08aa`, before that merge: Task 0, Step 3 reads the places again on the base, and the code of the base is right. Each measurement below is a reading of another session, with its date: most are of the spike of 2026-10-08. Simulator code: READ at `main` `8ed08aa` (the merge of pull request 143, "four differences become uniform"), in the worktree `pin-todays-websocket-rows`. Automation code: READ at `main` `045ab9e33f`. A line number with no other note is a line of `8ed08aa`.
 
-**After the review (2026-10-10).** The branch differs from the tasks below in four places. The text of the pull request has the proof for each one.
+**After the review (2026-10-10).** The branch differs from the tasks below in five places. The text of the pull request has the proof for each one.
 
-1. The tests. The new test file has 28 functions and 37 cases, `tests/test_control_api_port_closed.py` has one more new function, and the suite has `N + 43` tests. The break proof and the review found source lines that no test held, and each one has a test now.
+1. The tests. The new test file has 31 functions and 41 cases, `tests/test_control_api_port_closed.py` has one more new function, and the suite has `N + 47` tests. The break proof and the review found source lines that no test held, and each one has a test now.
 2. The loop of a port. `_HttpPortLoop` reports "open" only for a server that serves and that no `close_port()` touched. It finishes a `close_port()` that raised, and it closes a server that cannot start its serve thread. So the report to the gate is true after a pass that raised.
 3. The serve thread of a provider port has the name `port-<port>-serve`.
 4. The call that `_provider_server_factory` returns holds the host, and not the simulator. So a simulator that stopped does not keep the socket of its control port.
+5. The adapters `_HttpListenerHandler` and `_WsHandler` drop what a worker thread reads after `close_port()` began: a request, an upgrade request or a frame. On Linux the bytes that arrived before the close stay readable, and such a request got a history row. Section 4 says that this plan edits no line of these two classes; the fix adds one check to each.
 
 `CLAUDE.md` has no edit: it waits for Victoria's word.
 

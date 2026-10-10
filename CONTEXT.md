@@ -241,9 +241,11 @@ mode the provider receives the request: `down` answers on an open connection,
 with HTTP 503 on JSON-RPC, REST and Tendermint-RPC, and with the status
 `UNAVAILABLE` on gRPC. With `port_closed` the simulator stops the server of the
 endpoint and closes the listening socket, so it refuses a new TCP connection.
-Each open connection ends with no reply, and a WebSocket connection ends with
-no close frame. Nothing reaches the provider, so its history gets no row. The
-row of a request in flight stays as the simulator wrote it.
+Each open connection ends, and a WebSocket connection ends with no close frame.
+A request that the provider holds gets no reply, and a reply in progress is
+cut. Nothing reaches the provider, so its history gets no row. The row of a
+request in flight stays as the simulator wrote it. A request that the provider
+did not read before the close gets no row.
 
 It is a state of the port and not a fault on a request. That is why the control
 API refuses it in every place that needs a request to arrive: a per-method
