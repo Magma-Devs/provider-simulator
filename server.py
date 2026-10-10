@@ -1290,9 +1290,11 @@ class _HttpPortLoop:
                                 # bound socket accepts connections that nothing
                                 # answers. Without the socket the report
                                 # "closed" is true. The next pass binds a new
-                                # server.
-                                self._server.server_close()
-                                self._server = None
+                                # server. The loop drops the server first: an
+                                # error of the close then leaves no server in a
+                                # half state.
+                                unserved, self._server = self._server, None
+                                unserved.server_close()
                                 raise
                     last_error = ""
                 except Exception as exc:

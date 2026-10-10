@@ -12,8 +12,8 @@ simulator.
 
 ``TestTheLoopOfOnePort`` has the tests of ``_HttpPortLoop``, the loop that
 keeps one port in the state that its scenario asks for. Each test makes one
-loop and one gate, and it writes the scenario of the provider. These tests use
-no simulator.
+loop and one gate. Most of them write the scenario of the provider. These tests
+use no simulator.
 
 The tests of each other class use the shared simulator of the session (see
 conftest.py) and the provider ``eth-sim:1``, which has an ``http`` port and a
@@ -468,48 +468,70 @@ class TestTheLoopOfOnePort:
             loop.stop()
         assert thread_errors == []
 
-    def test_a_close_that_raised_part_way_is_finished_and_the_port_opens_again(self, monkeypatch):
-        """``close_port`` closes the socket, and then it raises one time, as
-        when the system cannot start the thread that stops the serve loop. The
-        loop keeps that server. Its report must be "closed", because the port
-        refuses a connection. When the scenario opens the port, the loop
-        finishes the close and binds a new server."""
+    def test_a_close_that_raised_part_way_is_finished_and_the_port_opens_again(self, monkeypatch, caplog):
+        """The first ``close_port`` closes the sockets, and it raises before it
+        tells the serve loop to stop, as when the system cannot start the
+        thread for that. The loop keeps that server. Its report must be
+        "closed", because the port refuses a connection. When the scenario
+        opens the port, the loop finishes the close, so the old serve loop
+        ends. Then the loop binds a new server."""
 
         class ClosesAndRaisesOneTime(server_module._ProviderHTTPServer):
             raised = False
+            serve_thread: threading.Thread | None = None
+
+            def serve(self) -> threading.Thread:
+                ClosesAndRaisesOneTime.serve_thread = super().serve()
+                return ClosesAndRaisesOneTime.serve_thread
 
             def close_port(self) -> None:
-                super().close_port()
-                if not ClosesAndRaisesOneTime.raised:
-                    ClosesAndRaisesOneTime.raised = True
-                    raise RuntimeError("can't start new thread")
+                if ClosesAndRaisesOneTime.raised:
+                    super().close_port()
+                    return
+                ClosesAndRaisesOneTime.raised = True
+                self.serve_started = False  # so this call starts no thread that stops the serve loop
+                try:
+                    super().close_port()
+                finally:
+                    self.serve_started = True
+                raise RuntimeError("can't start new thread")
 
         thread_errors: list[str] = []
         monkeypatch.setattr(threading, "excepthook", lambda args: thread_errors.append(repr(args.exc_value)))
         # No pass comes from the poll, so each pass of this test comes from an ask.
         monkeypatch.setattr(server_module, "_HTTP_PORT_POLL_S", 30.0)
+        caplog.set_level(logging.WARNING)
         first = ClosesAndRaisesOneTime(_ANY_PORT, _OneByteForOneByte)
         port = first.server_port
         loop, gate, scenario = _a_loop(first)
         try:
             assert gate.wait(gate.ask(), want_open=True, timeout_s=5.0), "the port did not open at the start"
+            old_serve_thread = ClosesAndRaisesOneTime.serve_thread
+            assert old_serve_thread is not None and old_serve_thread.is_alive(), "the first server must serve"
             scenario.update({"mode": "port_closed"})
             assert gate.wait(gate.ask(), want_open=False, timeout_s=2.0), "the report must be closed: the port refuses"
-            assert ClosesAndRaisesOneTime.raised, "the close of this test must raise"
             assert (gate.last_report(), _connect(port)) == (False, errno.ECONNREFUSED)
+            assert old_serve_thread.is_alive(), "the close of this test must leave the old serve loop running"
 
             scenario.update({"mode": "success"})
             assert gate.wait(gate.ask(), want_open=True, timeout_s=2.0), "the port did not open again"
             assert _one_byte_for_one_byte(port) == b"x", "the new server does not serve"
+            old_serve_thread.join(timeout=2.0)
+            assert not old_serve_thread.is_alive(), "the loop did not finish the close: the old serve loop still runs"
         finally:
             loop.stop()
+        warnings = [text for text in caplog.messages if "could not change its state" in text]
+        assert warnings == [f"provider port {port} could not change its state: can't start new thread"]
         assert thread_errors == []
 
-    def test_a_server_that_cannot_start_its_serve_thread_is_closed_and_the_next_pass_binds_a_new_one(self, monkeypatch):
+    def test_a_server_that_cannot_start_its_serve_thread_is_closed_and_the_next_pass_binds_a_new_one(
+        self, monkeypatch, caplog
+    ):
         """``serve`` raises one time, as when the system cannot start a thread.
         A bound server with no serve loop accepts connections that nothing
         answers. So the loop closes that server, and the report "closed" is
-        true: the port refuses a connection. The next pass binds a new server."""
+        true: the port refuses a connection. The log has the warning of the
+        pass. The next pass binds a new server."""
 
         class ServeRaisesOneTime(server_module._ProviderHTTPServer):
             raised = False
@@ -524,6 +546,7 @@ class TestTheLoopOfOnePort:
         monkeypatch.setattr(threading, "excepthook", lambda args: thread_errors.append(repr(args.exc_value)))
         # No pass comes from the poll. The first pass comes from the start of the loop.
         monkeypatch.setattr(server_module, "_HTTP_PORT_POLL_S", 30.0)
+        caplog.set_level(logging.WARNING)
         first = ServeRaisesOneTime(_ANY_PORT, _OneByteForOneByte)
         port = first.server_port
         loop, gate, _scenario = _a_loop(first)
@@ -537,6 +560,8 @@ class TestTheLoopOfOnePort:
             assert _one_byte_for_one_byte(port) == b"x", "the new server does not serve"
         finally:
             loop.stop()
+        warnings = [text for text in caplog.messages if "could not change its state" in text]
+        assert warnings == [f"provider port {port} could not change its state: can't start new thread"]
         assert thread_errors == []
 
 
@@ -928,7 +953,9 @@ def test_a_stopped_simulator_that_no_name_holds_frees_its_control_port():
     bind that port.
 
     The cycle collector is off here. So the object goes only if no cycle holds
-    it."""
+    it. It goes a moment after ``stop()`` returns, when the serve thread of the
+    control server has ended. So the test waits for the refusal, for 2 seconds
+    at most."""
 
     def start_and_stop() -> None:
         simulator = _a_simulator_of_its_own(_FREED_ROWS, _FREED_CONTROL)
@@ -942,7 +969,9 @@ def test_a_stopped_simulator_that_no_name_holds_frees_its_control_port():
     gc.disable()
     try:
         start_and_stop()  # no name holds the simulator after this line
-        freed = _connect(_FREED_CONTROL)
+        deadline = time.monotonic() + 2.0
+        while (freed := _connect(_FREED_CONTROL)) != errno.ECONNREFUSED and time.monotonic() < deadline:
+            time.sleep(0.02)
     finally:
         if collector_was_on:
             gc.enable()
