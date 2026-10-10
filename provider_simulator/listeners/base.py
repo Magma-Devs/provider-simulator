@@ -14,8 +14,8 @@ request and shaping the wire output — the ``parse_request`` / ``build_fault`` 
 overrides for transports with a malformed-wire path or a non-standard history
 label like REST's 404 → ``not_found``).
 
-``down`` is evaluated and emitted BEFORE the body is parsed (a dead node never
-reads the request), so a down call's history carries method ``"*"`` and
+``down`` is evaluated and emitted BEFORE the body is parsed (the provider does
+not read the request), so a down call's history carries method ``"*"`` and
 ``request_id`` None on every interface — matching the long-standing contract
 other code relies on. The provider does not wait for the latency, so the row
 records ``latency_ms`` 0. A ``hang`` row records 0 for the same reason.

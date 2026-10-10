@@ -35,8 +35,9 @@ the listener applies it, not the policy.
 
 ``mode="port_closed"`` is NOT a Verdict either, for a different reason: a Verdict
 answers a request, and a closed port receives none. ``port_closed(scenario,
-endpoint)`` is the decision for it, read by the gRPC serve loop rather than per
-request. It goes through ``targets`` like everything else here.
+endpoint)`` is the decision for it. The loop of the port reads it, and not each
+request. It goes through ``targets`` like everything else here. Each provider
+port has such a loop: a gRPC port, an ``http`` port and a ``ws`` port.
 """
 
 import random
@@ -86,8 +87,8 @@ def port_closed(scenario: dict, endpoint: Endpoint) -> bool:
     """Does this scenario block close this endpoint's port?
 
     ``port_closed`` is the one mode that is not a Verdict. A Verdict says what
-    to answer a request that arrived, and a closed port receives none: the gRPC
-    serve loop reads this function and stops the endpoint's server instead (see
+    to answer a request that arrived, and a closed port receives none: the loop
+    of the port reads this function and stops the endpoint's server instead (see
     ``provider_simulator/port_gate.py``). It honours the same ``transports`` and
     ``ports`` filters as every other mode, through ``targets``.
 

@@ -283,6 +283,17 @@ class TestThePortIsClosed:
         ready_status, ready = _get(f"{sim['control']}/ready")
         assert (ready_status, ready["closed_by_scenario"], ready["expected"]) == (200, [], baseline["expected"])
 
+    def test_an_endpoint_that_is_not_grpc_closes_too(self, sim):
+        """eth-sim:1 serves jsonrpc over http and ws. Each of the two ports has
+        a gate and a loop, as a gRPC port has, so the mode closes both. The
+        other tests of these ports are in
+        tests/integration/test_http_and_ws_port_closed.py."""
+        http_port, ws_port = port_of("eth-sim", "1"), port_of("eth-sim", "1", transport="ws")
+        status, body = _set(sim["control"], "eth-sim:1", mode="port_closed")
+        ports = (_connect(http_port), _connect(ws_port))
+        assert status == 200, body
+        assert ports == (errno.ECONNREFUSED, errno.ECONNREFUSED)
+
 
 # ── the port opens again ─────────────────────────────────────────────────────
 
@@ -418,18 +429,6 @@ def _assert_refused_and_nothing_changed(sim, key: str, port: int, block: dict, r
 
 
 class TestRefusals:
-    def test_an_endpoint_that_is_not_grpc_is_refused(self, sim):
-        """eth-sim:1 serves jsonrpc over http and ws. Neither listener can stop
-        listening, so accepting the mode would leave the provider answering."""
-        http_port = port_of("eth-sim", "1")
-        _assert_refused_and_nothing_changed(
-            sim, "eth-sim:1", http_port, {"mode": "port_closed"}, "only a gRPC endpoint can close its port"
-        )
-        status, body = _post(
-            f"http://127.0.0.1:{http_port}", {"jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []}
-        )
-        assert status == 200 and "result" in body, "the refused provider must still answer normally"
-
     def test_a_block_that_targets_no_endpoint_is_refused(self, sim):
         """The gRPC provider has no ws endpoint, so this filter matches nothing."""
         _assert_refused_and_nothing_changed(
@@ -815,12 +814,12 @@ class TestFiltersOnAProviderWithSeveralPorts:
         _post(f"{mixed}/reset/all", {})
         yield
 
-    def test_with_no_filter_the_rest_port_makes_it_a_refusal(self, mixed):
+    def test_with_no_filter_every_port_of_the_provider_closes(self, mixed):
         status, body = _set(mixed, "mixed-sim:1", mode="port_closed")
-        assert status == 400, body
-        assert "only a gRPC endpoint can close its port" in body["error"]
-        assert f"rest/http :{_MIXED_REST}" in body["error"], "the refusal must name the endpoint in the way"
-        assert (_connect(_MIXED_GRPC_A), _connect(_MIXED_GRPC_B)) == (0, 0), "nothing may close on a refusal"
+        assert status == 200, body
+        closed = (_connect(_MIXED_GRPC_A), _connect(_MIXED_GRPC_B), _connect(_MIXED_REST))
+        assert closed == (errno.ECONNREFUSED, errno.ECONNREFUSED, errno.ECONNREFUSED)
+        assert _connect(_MIXED_OTHER) == 0, "the other provider must be untouched"
 
     @pytest.mark.parametrize(
         "closed, open_port", [(_MIXED_GRPC_A, _MIXED_GRPC_B), (_MIXED_GRPC_B, _MIXED_GRPC_A)], ids=["first", "second"]
@@ -853,14 +852,14 @@ class TestFiltersOnAProviderWithSeveralPorts:
         assert status == 200, body
         assert (_connect(_MIXED_GRPC_A), _connect(_MIXED_GRPC_B)) == (0, errno.ECONNREFUSED)
 
-    def test_widening_a_stored_filter_onto_the_rest_port_is_refused(self, mixed):
+    def test_widening_a_stored_filter_onto_the_rest_port_closes_it_too(self, mixed):
         status, body = _set(mixed, "mixed-sim:1", mode="port_closed", ports=[_MIXED_GRPC_A])
         assert status == 200, body
         status, body = _set(mixed, "mixed-sim:1", ports=[_MIXED_GRPC_A, _MIXED_REST])
-        assert status == 400, body
-        assert "only a gRPC endpoint can close its port" in body["error"]
+        assert status == 200, body
         assert _connect(_MIXED_GRPC_A) == errno.ECONNREFUSED, "the stored fault must still hold"
-        assert _rest_answers(_MIXED_REST)
+        assert _connect(_MIXED_REST) == errno.ECONNREFUSED, "the REST port is in the filter now"
+        assert _connect(_MIXED_GRPC_B) == 0, "the port outside the filter stays open"
 
 
 # ── a port that cannot bind ──────────────────────────────────────────────────
