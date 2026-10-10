@@ -1401,16 +1401,17 @@ class TestWsSequencedFaults:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# What WebSocket does today, in the places that write a history row outside
-# Listener.serve
+# What WebSocket does for the upgrade request, for a subscribe frame and an
+# unsubscribe frame, and for a pushed event
 #
-# Three places of server.py write a history row outside Listener.serve. The
-# upgrade request: _WsHandler.do_GET and _refuse_upgrade. A subscribe frame and
-# an unsubscribe frame: _serve_subscription_frame. A pushed event:
-# _WireSubscriptions.emit. The first two also decide a fault. The tests below
-# record the reply and the row of each place. Each expected value is written
-# out by hand. A change of that code can make a value fail. Then the value is
-# not edited to pass: the change is a change of behaviour, or it is a defect.
+# The package provider_simulator/listeners/ serves each of the three, and it
+# writes the history row. The upgrade request: JsonRpcWsListener.decide_upgrade.
+# A subscribe frame and an unsubscribe frame: Listener.serve, with the content
+# of JsonRpcWsListener.build_content. A pushed event: WsSubscriptions.emit. The
+# first two also decide a fault. The tests below record the reply and the row
+# of each one. Each expected value is written out by hand. A change of that
+# code can make a value fail. Then the value is not edited to pass: the change
+# is a change of behaviour, or it is a defect.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # The sample key of RFC 6455, section 1.3. The RFC gives the accept value
@@ -1625,9 +1626,10 @@ class TestTheUpgradeRequest:
     """The upgrade request that opens a WebSocket: a refusal, and an upgrade
     that succeeds.
 
-    The upgrade is not a request of the request flow. `_WsHandler.do_GET`
-    asks the fault policy itself, and `_refuse_upgrade` writes the row of a
-    refusal. An upgrade that succeeds writes no row.
+    The upgrade is not a request of the request flow.
+    `JsonRpcWsListener.decide_upgrade` asks the fault policy, and it writes the
+    row of a refusal. The adapter `_WsHandler` performs the decision. An
+    upgrade that succeeds writes no row.
     """
 
     @pytest.mark.parametrize(
@@ -1766,8 +1768,9 @@ class TestTheUpgradeRequest:
 
     @pytest.mark.parametrize("mode", ["success", "down"])
     def test_a_request_for_another_path_gets_404_and_writes_no_row(self, sim, mode):
-        """The adapter answers a wrong path itself, before it asks the fault
-        policy. So a `down` provider answers 404 too, and no row is written."""
+        """The adapter answers a wrong path itself, before it asks the listener
+        for a decision. So a `down` provider answers 404 too, and no row is
+        written."""
         _set_scenario(sim, {"mode": mode, "transports": ["ws"]})
 
         answer = _refusal(_request_upgrade(path="/"))
@@ -1778,8 +1781,8 @@ class TestTheUpgradeRequest:
     @pytest.mark.parametrize("mode", ["success", "down"])
     def test_a_request_with_no_upgrade_headers_gets_400_and_writes_no_row(self, sim, mode):
         """The adapter answers a request that is no upgrade itself, before it
-        asks the fault policy. So a `down` provider answers 400 too, and no
-        row is written."""
+        asks the listener for a decision. So a `down` provider answers 400 too,
+        and no row is written."""
         _set_scenario(sim, {"mode": mode, "transports": ["ws"]})
 
         answer = _refusal(_request_upgrade(upgrade_headers=False))
@@ -1908,8 +1911,9 @@ class TestTheUpgradeRequest:
 class TestSubscribeAndUnsubscribeFrames:
     """A subscribe frame and an unsubscribe frame.
 
-    `_WsHandler._serve_subscription_frame` serves these frames with its own
-    copy of the request flow. It writes their rows itself.
+    These frames go through the request flow, `Listener.serve`, as each other
+    JSON frame does. `JsonRpcWsListener.build_content` gives their success
+    content from the subscription registry, and it asks no chain for them.
     """
 
     def test_each_frame_writes_one_success_row_with_its_method_and_its_request_id(self, sim):
@@ -2484,9 +2488,10 @@ class TestSubscribeAndUnsubscribeFrames:
     )
     def test_a_content_key_of_responses_is_not_read_for_a_subscribe_frame(self, sim, responses, other_reply):
         """A chain reads the content keys `result`, `error_stub` and `error` of
-        an entry of `responses`, and the entry `default`. The subscribe code
-        asks no chain: the subscribe registers a subscription and answers its
-        id. The same key reaches `eth_blockNumber` on the same connection."""
+        an entry of `responses`, and the entry `default`. The listener asks no
+        chain for a subscribe frame: the subscribe registers a subscription and
+        answers its id. The same key reaches `eth_blockNumber` on the same
+        connection."""
         _set_scenario(sim, {"mode": "success", "transports": ["ws"], "responses": responses})
 
         with _websocket() as sock:
@@ -2586,7 +2591,7 @@ class TestSubscribeAndUnsubscribeFrames:
 class TestAPushedEvent:
     """An event that the control API pushes with POST /ws/emit.
 
-    `_WireSubscriptions.emit` puts the frame on the queue of the connection and
+    `WsSubscriptions.emit` puts the frame on the queue of the connection and
     writes the row. It asks no fault policy.
     """
 
@@ -2781,8 +2786,9 @@ class TestASubscriptionBelongsToOneConnection:
 
 
 class TestFramesOutsideTheSubscribeCode:
-    """Frames that the subscribe code does not serve: a frame that the adapter
-    cannot read, and a frame that goes to `Listener.serve`."""
+    """Frames that are not a subscribe frame or an unsubscribe frame: a frame
+    that the adapter does not give to `Listener.serve`, and a frame of another
+    method."""
 
     @pytest.mark.parametrize(
         "opcode, payload",
@@ -2865,8 +2871,8 @@ class TestFramesOutsideTheSubscribeCode:
     def test_the_down_row_and_the_hang_row_of_another_frame_record_no_latency(self, sim, block, expected_row):
         """A frame such as `eth_blockNumber` goes to `Listener.serve`. Its `down`
         row has the method `*`, no request id and `latency_ms` 0, and its `hang`
-        row records 0. The rows of a subscribe frame differ: the tests of
-        `TestSubscribeAndUnsubscribeFrames` hold them."""
+        row records 0. The rows of a subscribe frame follow the same rule: the
+        tests of `TestSubscribeAndUnsubscribeFrames` hold them."""
         with _websocket() as sock:
             _set_scenario(sim, {**block, "transports": ["ws"]})
             _send_frame(sock, _BLOCK_NUMBER)

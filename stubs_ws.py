@@ -1,11 +1,11 @@
 """
 stubs_ws.py — WebSocket subscription method routing + event-frame envelopes.
 
-Two flat tables drive the WS handler:
+Two flat tables drive the WebSocket listener:
 
   SUBSCRIBE_METHODS    — JSON-RPC method name → which chain it belongs to and
                          what envelope wraps pushed events. Used by both the
-                         reader loop (to recognise subscribe calls) and
+                         listener (to recognise subscribe calls) and
                          POST /ws/emit (to build the correctly-shaped push
                          frame from a caller-supplied event payload).
 

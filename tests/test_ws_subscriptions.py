@@ -1,5 +1,9 @@
-"""WsSubscriptions — the WS subscription registry. Per-frame JSON-RPC over WS is
-JsonRpcListener; this covers the subscribe / emit / unsubscribe lifecycle."""
+"""The WebSocket listener and its subscription registry, with no socket.
+
+WsSubscriptions holds the subscriptions, and it writes the row of a pushed
+event. JsonRpcWsListener decides the upgrade request. It answers a subscribe
+frame and an unsubscribe frame through Listener.serve.
+"""
 
 import json
 import queue
