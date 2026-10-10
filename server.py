@@ -16,10 +16,10 @@ the registry and PERFORMS each listener's plan:
   thread also performs ``mode="port_closed"``, the one fault that is not a
   reply: it stops the endpoint's gRPC server, which closes the port, and starts
   a new one when the mode is gone.
-- WebSocket endpoints do the RFC 6455 handshake (refusing the upgrade when the
-  fault policy says so), then serve each TEXT frame through the provider's
-  ``JsonRpcListener``; the subscription lifecycle (eth_subscribe / emit /
-  unsubscribe) is handled here because it is per-connection wire state.
+- WebSocket endpoints do the RFC 6455 handshake (the provider's
+  ``JsonRpcWsListener`` decides whether to refuse the upgrade), then serve each
+  TEXT frame through that listener; the subscription lifecycle (eth_subscribe /
+  emit / unsubscribe) is handled here because it is per-connection wire state.
 - The control API (port 19000) dispatches each route to a ``ControlApi``
   method and writes its (status, dict) result as JSON.
 
@@ -59,6 +59,7 @@ from provider_simulator.control_api import ControlApi
 from provider_simulator.domain.registry import Registry, build_registry
 from provider_simulator.listeners import (
     JsonRpcListener,
+    JsonRpcWsListener,
     Listener,
     RawRequest,
     RestListener,
@@ -420,10 +421,11 @@ class _WsHandler(BaseHTTPRequestHandler):
     """WebSocket endpoint: HTTP upgrade handshake + per-frame JSON-RPC.
 
     A WS endpoint is still ``(jsonrpc, ws, port)``, so frames are served by the
-    provider's JsonRpcListener — same chain, same fault policy as the http
-    endpoint. What is WS-specific lives here: the handshake (a faulted provider
-    refuses the upgrade), the frame codec, the reader/writer thread pair, and
-    the subscription lifecycle.
+    provider's JsonRpcWsListener — same chain, same fault policy as the http
+    endpoint. The listener also decides the upgrade request, and this adapter
+    performs the decision. What is WS-specific lives here: the handshake bytes,
+    the frame codec, the reader/writer thread pair, and the subscription
+    lifecycle.
     """
 
     timeout = 30
@@ -432,7 +434,7 @@ class _WsHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         listener = self.server.listener
-        provider, endpoint = listener.provider, listener.endpoint
+        provider = listener.provider
 
         # Only /ws accepts the upgrade — wrong-path mistakes fail loudly.
         if urlparse(self.path).path != "/ws":
@@ -450,12 +452,12 @@ class _WsHandler(BaseHTTPRequestHandler):
         client_key = self.headers["Sec-WebSocket-Key"]
         lava = {k: v for k, v in self.headers.items() if k.lower().startswith("lava-")}
 
-        # Fault evaluation BEFORE completing the handshake, so a faulted
-        # provider refuses the upgrade the way it refuses an HTTP request.
-        scenario = provider.scenario.snapshot()
-        verdict = fault_policy.decide(scenario, endpoint, provider)
-        if verdict.kind != "none":
-            self._refuse_upgrade(verdict, scenario, client_key, lava)
+        # The listener decides the upgrade BEFORE the handshake completes, so a
+        # faulted provider refuses the upgrade the way it refuses an HTTP
+        # request. The status 101 says: complete the handshake.
+        decision = listener.decide_upgrade(lava)
+        if decision.action != "respond" or decision.status != 101:
+            self._refuse_upgrade(decision, client_key)
             return
 
         try:
@@ -489,40 +491,16 @@ class _WsHandler(BaseHTTPRequestHandler):
                 pass
             writer.join(timeout=1.0)
 
-    def _refuse_upgrade(self, verdict, scenario: dict, client_key: str, lava: dict) -> None:
-        """Refuse the WS upgrade per the fault verdict, recording history the
-        way the flat WS handler did (method ``"*"`` for down — the provider is
-        dead before it reads anything — ``ws_upgrade`` for everything else)."""
+    def _refuse_upgrade(self, decision: ServeResult, client_key: str) -> None:
+        """Perform a decision of the listener that refuses the WS upgrade: a
+        JSON refusal, a hang, or a drop. The listener wrote the history row."""
         provider = self.server.listener.provider
-        endpoint = self.server.listener.endpoint
-
-        def _record(method: str, status: str) -> None:
-            provider.log.push(
-                method,
-                status,
-                0,
-                interface=endpoint.interface,
-                transport=endpoint.transport,
-                port=endpoint.port,
-                lava_headers=lava,
-            )
-
-        if verdict.kind == "down":
-            _record("*", "down")
-            self._send_simple_error(503, "provider down")
+        if decision.action == "respond":
+            refusal = decision.body
+            assert isinstance(refusal, dict), refusal
+            self._send_simple_error(decision.status, refusal["error"])
             return
-        if verdict.kind == "rate_limit":
-            _record("ws_upgrade", "rate_limit")
-            self._send_simple_error(429, "rate limited")
-            return
-        if verdict.kind == "error":
-            # 200-without-101 is non-spec for WS upgrades; 4xx is the cleanest
-            # "upgrade refused" a client can read.
-            _record("ws_upgrade", "error")
-            self._send_simple_error(400, scenario.get("error_message", "Internal error"))
-            return
-        if verdict.kind == "hang":
-            _record("ws_upgrade", "hang")
+        if decision.action == "hang":
             time.sleep(30)
             try:
                 self.connection.close()
@@ -530,9 +508,8 @@ class _WsHandler(BaseHTTPRequestHandler):
                 pass
             return
         # drop
-        _record("ws_upgrade", "drop_connection")
         try:
-            if verdict.drop_at == "after_headers":
+            if decision.drop_at == "after_headers":
                 # Complete the 101 (with Lava-Provider-Address), then close.
                 self.connection.sendall(
                     ws_protocol.build_handshake_response(
@@ -540,7 +517,7 @@ class _WsHandler(BaseHTTPRequestHandler):
                         extra_headers={"Lava-Provider-Address": f"sim-provider-{provider.key}"},
                     )
                 )
-            elif verdict.drop_at == "mid_body":
+            elif decision.drop_at == "mid_body":
                 # The 101 has no body — "mid_body" maps to mid-header here.
                 self.connection.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: webso")
             # before_headers (default): silent close, no bytes.
@@ -1264,7 +1241,7 @@ def _revert_stale_scenarios(control: ControlApi, ttl_s: int, now: float) -> None
 
 _HTTP_ADAPTERS: dict = {
     ("jsonrpc", "http"): (_JsonRpcHttpHandler, JsonRpcListener),
-    ("jsonrpc", "ws"): (_WsHandler, JsonRpcListener),
+    ("jsonrpc", "ws"): (_WsHandler, JsonRpcWsListener),
     ("rest", "http"): (_RestHttpHandler, RestListener),
     ("tendermintrpc", "http"): (_TendermintHttpHandler, TendermintListener),
 }
@@ -1363,7 +1340,11 @@ class SimulatorServer:
                     continue
                 handler_cls, listener_cls = _HTTP_ADAPTERS[(endpoint.interface, endpoint.transport)]
                 srv = _SimThreadingHTTPServer((self.host, endpoint.port), handler_cls)
-                srv.listener = listener_cls(provider, endpoint)
+                if listener_cls is JsonRpcWsListener:
+                    # Each ws listener gets the one subscription registry of the simulator.
+                    srv.listener = JsonRpcWsListener(provider, endpoint, self.subscriptions)
+                else:
+                    srv.listener = listener_cls(provider, endpoint)
                 srv.subscriptions = self.subscriptions
                 self._servers.append(srv)
 
