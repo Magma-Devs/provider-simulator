@@ -210,3 +210,69 @@ def test_serve_finishes_the_row_that_arrive_wrote():
     assert [_facts(row) for row in rows] == [("eth_blockNumber", "success", 0, 1)]
     assert rows[0]["lava_headers"] == {"Lava-Guid": "GUID_1"}
     assert provider.log.stats()["calls_by_status"] == {"success": 1}
+
+
+class _OwnContentListener(JsonRpcListener):
+    """A listener that gives its own success content. It keeps each call of
+    build_content."""
+
+    def __init__(self, provider, endpoint):
+        super().__init__(provider, endpoint)
+        self.asked = []
+
+    def build_content(self, parsed, scenario, request):
+        self.asked.append((parsed, request))
+        return 200, {"jsonrpc": "2.0", "id": 5, "result": "own content"}
+
+
+def _own_content_listener():
+    provider = Pool(name="eth-sim", chain="eth").add_provider("1", [HTTP])
+    return _OwnContentListener(provider, HTTP), provider
+
+
+def test_the_flow_asks_build_content_for_the_success_content_and_gives_it_the_request():
+    # The body of the hook is the reply, and its id is the request id of the
+    # row. The hook gets the request of the adapter, with its connection.
+    listener, provider = _own_content_listener()
+    connection = object()
+    request = RawRequest(body=_raw("eth_blockNumber", req_id=1), connection=connection)
+
+    res = listener.serve(request)
+
+    assert res.action == "respond"
+    assert res.body == {"jsonrpc": "2.0", "id": 5, "result": "own content"}
+    assert [_facts(row) for row in provider.log.get_history()] == [("eth_blockNumber", "success", 0, 5)]
+    assert len(listener.asked) == 1
+    parsed, got = listener.asked[0]
+    assert parsed["method"] == "eth_blockNumber"
+    assert got is request
+    assert got.connection is connection
+
+
+@pytest.mark.parametrize(
+    "block, row_status",
+    [
+        pytest.param({"mode": "error"}, "error", id="error"),
+        pytest.param({"mode": "rate_limit"}, "rate_limit", id="rate-limit"),
+        pytest.param({"mode": "hang"}, "hang", id="hang"),
+        pytest.param({"mode": "drop_connection"}, "drop_connection", id="drop-connection"),
+        pytest.param({"responses": {"eth_blockNumber": {"mode": "down"}}}, "down", id="a-per-method-down"),
+        pytest.param(
+            {"responses": {"eth_blockNumber": {"body": {"jsonrpc": "2.0", "id": 1, "result": "0xcanned"}}}},
+            "success",
+            id="a-canned-body",
+        ),
+    ],
+)
+def test_the_flow_asks_build_content_for_a_success_and_not_for_a_fault_or_a_canned_body(block, row_status):
+    # A request with no fault asks the hook one time. The request of each case
+    # does not ask it again.
+    listener, provider = _own_content_listener()
+    _serve(listener, "eth_blockNumber")
+    assert len(listener.asked) == 1
+
+    provider.scenario.update(block)
+    _serve(listener, "eth_blockNumber")
+
+    assert [row["status"] for row in provider.log.get_history()] == ["success", row_status]
+    assert len(listener.asked) == 1

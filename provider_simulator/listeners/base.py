@@ -5,7 +5,7 @@ serve() runs one fixed sequence for all transports:
     record arrival → snapshot scenario → resolve the effective mode (transports
     filter + fail_first_n window, consumed once) → (provider-wide down? emit
     before parsing) → parse request (parse error?) → merge per-method overrides
-    → body override OR fault ladder OR chain success → finalize the log entry.
+    → body override OR fault ladder OR success content → finalize the log entry.
 
 The fault ladder (via ``fault_policy``) and the success dispatch (via the
 provider's chain) live here, once. Transports differ only in parsing the raw
@@ -33,9 +33,11 @@ gRPC: the method name; REST: the (verb, template) route pair). The transports
 filter scopes per-method overrides the same way it scopes everything else in
 the block.
 
-Two more hooks have a default that is right for the HTTP interfaces, and gRPC
-overrides each one: ``build_down`` (the reply of a down provider) and
-``corrupt`` (how the interface corrupts a reply, and the label of its row).
+Three more hooks have a default. Two defaults are right for the HTTP
+interfaces, and gRPC overrides each one: ``build_down`` (the reply of a down
+provider) and ``corrupt`` (how the interface corrupts a reply, and the label of
+its row). The third hook is ``build_content``: it gives the success content of
+a request, and its default asks the chain of the provider.
 
 serve() returns a ServeResult describing WHAT to put on the wire — including the
 latency to wait first and any corruption to apply when serializing a ``respond``
@@ -123,6 +125,9 @@ class RawRequest:
     query: dict = field(default_factory=dict)
     # gRPC only: the request message of the call, as the gRPC library parsed it.
     message: object = None
+    # WebSocket only: the connection that the frame arrived on. Each other
+    # adapter leaves it empty.
+    connection: object = None
 
 
 @dataclass
@@ -252,10 +257,7 @@ class Listener(ABC):
                 request_id = self.request_id(parsed)
                 waited = verdict.kind != "hang"
             else:
-                chain = chain_for(self.provider.pool.chain)
-                status, body = chain.build_success(
-                    parsed, scenario, self.provider.quirks.snapshot(), self.endpoint.interface
-                )
+                status, body = self.build_content(parsed, scenario, request)
                 result = self.build_success(status, body)
                 status_label = self.success_label(status, body)
                 request_id = self.response_id(body) or self.request_id(parsed)
@@ -295,6 +297,15 @@ class Listener(ABC):
         no body. Return a new object for each call: for a per-method ``down``
         the flow sets ``latency_ms`` on it."""
         return ServeResult(action="no_body", status=503)
+
+    def build_content(self, parsed: dict, scenario: dict, request: RawRequest) -> tuple[int, object]:
+        """The success content of one request: its HTTP status and its body.
+        The flow asks this hook only when the request gets no fault and no
+        canned body. Default: ask the chain of the provider. ``request`` is
+        the request of the adapter, for a listener that needs more than the
+        parsed fields."""
+        chain = chain_for(self.provider.pool.chain)
+        return chain.build_success(parsed, scenario, self.provider.quirks.snapshot(), self.endpoint.interface)
 
     def corrupt(self, result: ServeResult, status_label: str, scenario: dict) -> str:
         """Apply the corruption of the scenario to a reply of this endpoint, and
