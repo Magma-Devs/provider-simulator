@@ -1625,7 +1625,8 @@ class TestTheUpgradeRequest:
     that succeeds.
 
     The upgrade is not a request of the request flow. `_WsHandler.do_GET`
-    asks the fault policy itself, and `_refuse_upgrade` writes the row.
+    asks the fault policy itself, and `_refuse_upgrade` writes the row of a
+    refusal. An upgrade that succeeds writes no row.
     """
 
     @pytest.mark.parametrize(
@@ -2833,10 +2834,9 @@ class TestFramesOutsideTheSubscribeCode:
         ],
     )
     def test_the_down_row_and_the_hang_row_of_another_frame_record_no_latency(self, sim, block, expected_row):
-        """A frame that is neither a subscribe frame nor an unsubscribe frame
-        goes to `Listener.serve`. Its `down` row has the method `*`, no request
-        id and `latency_ms` 0, and its `hang` row records 0. The rows of a
-        subscribe frame differ: the tests of
+        """A frame such as `eth_blockNumber` goes to `Listener.serve`. Its `down`
+        row has the method `*`, no request id and `latency_ms` 0, and its `hang`
+        row records 0. The rows of a subscribe frame differ: the tests of
         `TestSubscribeAndUnsubscribeFrames` hold them."""
         with _websocket() as sock:
             _set_scenario(sim, {**block, "transports": ["ws"]})
