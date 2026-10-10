@@ -355,7 +355,7 @@ Not in this plan: `docs/ARCHITECTURE_GUIDE.md`, `docs/CLASS_REFERENCE.md`, `docs
 
 Outside the simulator repository, after the merge:
 
-1. The automation repository, one paired pull request. `.claude/skills/add-simulator-entity/SKILL.md` says in two places that `JsonRpcListener` serves WebSocket: lines 43 and 661 at `045ab9e33f`. A search of 2026-10-10 found no skill sentence about a subscribe frame under `down`, a corruption, `error_probability` or a canned body.
+1. The automation repository, one paired pull request. `.claude/skills/add-simulator-entity/SKILL.md` says in two places that `JsonRpcListener` serves WebSocket: lines 43 and 661 at `045ab9e33f`. A search of 2026-10-10 found no skill sentence about a subscribe frame under `down`, a corruption, `error_probability` or a canned body. The same pull request has three more edits. It deletes one sentence of `.claude/skills/writing-simulator-tests/SKILL.md`, which a skill pages change of 2026-10-10 adds: "A WebSocket subscribe frame and an unsubscribe frame read only `mode`, `latency_ms`, `drop_at`, `error_code` and `error_message` of an entry." It corrects "Four exist." in the item about `provider_simulator/listeners/` of `add-simulator-entity/SKILL.md`. It can add that an entry of `responses` cannot lift a provider-wide `down`: that sentence is true for each frame only after this move.
 2. The design, on the branch of pull request 137: one new row of section 9.2 for each choice that changes a row. If the `hang` row shows 0 (choice 1, A), that is one row.
 
 ## 9. Rollback
