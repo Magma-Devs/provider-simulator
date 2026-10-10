@@ -135,8 +135,11 @@ class _ProviderHTTPServer(_SimThreadingHTTPServer):
         super().__init__(*args, **kwargs)
 
     def serve(self) -> threading.Thread:
-        """Start ``serve_forever`` on a daemon thread, and return the thread."""
-        thread = threading.Thread(target=self._serve_until_stopped, daemon=True)
+        """Start ``serve_forever`` on a daemon thread, and return the thread.
+
+        The name of the thread is ``port-<port>-serve``. The loop of the port
+        has the name ``port-<port>``."""
+        thread = threading.Thread(target=self._serve_until_stopped, daemon=True, name=f"port-{self.server_port}-serve")
         thread.start()
         self.serve_started = True
         return thread
@@ -158,6 +161,8 @@ class _ProviderHTTPServer(_SimThreadingHTTPServer):
 
         This method waits for nothing. The serve loop ends on its own thread.
         Each worker thread ends when its next read or write fails.
+
+        A second call finishes a call that raised before its end.
         """
         with self._clients_lock:  # the flag and the copy change together
             self.closed_by_scenario = True
@@ -1079,8 +1084,9 @@ class _RespControlServer(_SimThreadingHTTPServer):
 # ── gRPC adapter ──────────────────────────────────────────────────────────────
 
 # How often a gRPC serve loop runs a pass when nobody woke it. Every control
-# write wakes the loop, the scenario time-to-live sweep included, so this bounds
-# only what no write announces: a bind that failed is tried again.
+# write that must move the port wakes the loop, the scenario time-to-live sweep
+# included. So this bounds only what no write announces: the loop tries a
+# failed bind again.
 _GRPC_PORT_POLL_S = 0.2
 
 
@@ -1209,8 +1215,9 @@ def _run_grpc_in_thread(grpc_listener, port: int, host: str, gate: PortGate) -> 
 # ── The loop of an http port or a ws port ─────────────────────────────────────
 
 # The time between two passes of an ``_HttpPortLoop`` that nobody asked for.
-# Each control write asks for a pass, and an ask ends the wait at once. So this
-# time bounds only what no write announces: a bind that failed is tried again.
+# Each control write that must move the port asks for a pass, and an ask ends
+# the wait at once. So this time bounds only what no write announces: the loop
+# tries a failed bind again.
 _HTTP_PORT_POLL_S = 1.0
 
 
@@ -1226,6 +1233,11 @@ class _HttpPortLoop:
     closed server does not open again, so a new server object on the same port
     opens the port. ``new_server`` makes that object, with the listener of the
     first server.
+
+    A pass reports "open" only for a server that serves and that no
+    ``close_port()`` touched. Each other state is "closed": the port has no
+    socket, or ``close_port()`` began. So the report is true after a pass that
+    raised too.
 
     A pass and ``stop()`` hold one lock. So ``stop()`` gets the server that the
     port has at that time, and no pass opens the port after it.
@@ -1261,21 +1273,38 @@ class _HttpPortLoop:
                             self._server = None
                             _log.info("provider port %s closed by scenario", port)
                     else:
+                        if self._server is not None and self._server.closed_by_scenario:
+                            # An earlier ``close_port()`` raised before its
+                            # end. A second call finishes the close, and a new
+                            # server opens the port.
+                            self._server.close_port()
+                            self._server = None
                         if self._server is None:
                             self._server = self._new_server()
                             _log.info("provider port %s bound again", port)
                         if not self._server.serve_started:
-                            self._server.serve()
+                            try:
+                                self._server.serve()
+                            except Exception:
+                                # No serve loop runs for this server, and a
+                                # bound socket accepts connections that nothing
+                                # answers. Without the socket the report
+                                # "closed" is true. The next pass binds a new
+                                # server.
+                                self._server.server_close()
+                                self._server = None
+                                raise
                     last_error = ""
                 except Exception as exc:
-                    # The next pass tries again. The gate reports what is true
+                    # The next pass tries again. The report below is true
                     # meanwhile, so a caller that waits for the port gets an
-                    # error and not a wrong "ok". Each new text is logged one
-                    # time, and not one time for each pass.
+                    # error and not a wrong "ok". The loop logs each new text
+                    # one time, and not one time for each pass.
                     if str(exc) != last_error:
                         last_error = str(exc)
                         _log.warning("provider port %s could not change its state: %s", port, exc)
-                is_open = self._server is not None and self._server.serve_started
+                server = self._server
+                is_open = server is not None and server.serve_started and not server.closed_by_scenario
             self.gate.end_pass(seen, is_open=is_open)
             self._wake.wait(timeout=_HTTP_PORT_POLL_S)
             self._wake.clear()
@@ -1348,9 +1377,9 @@ _HTTP_ADAPTERS: dict = {
 class SimulatorServer:
     """The whole simulator as one object: registry + one bound socket per
     endpoint + the control API. ``start()`` binds and serves on daemon
-    threads; ``stop()`` shuts the HTTP servers down, and it closes the socket of
-    each ``http`` port and each ``ws`` port (gRPC loops and the TTL
-    sweep are daemon threads that die with the process). The loop of a provider
+    threads. ``stop()`` shuts the HTTP servers down, and it closes the socket
+    of each ``http`` port and each ``ws`` port. The gRPC loops and the TTL
+    sweep are daemon threads that die with the process. The loop of a provider
     port (gRPC, ``http`` or ``ws``) closes its own port while a scenario sets
     ``mode="port_closed"`` on it; that is a fault a test asked for, not a
     shutdown.
@@ -1443,10 +1472,16 @@ class SimulatorServer:
         Each server of one port gets the same listener object. So a port that
         opened again serves the same provider, and a ``ws`` port keeps the one
         subscription registry of the simulator.
+
+        The call holds the host, and not the simulator. The loop of the port
+        keeps the call, so a call that holds the simulator makes a reference
+        cycle. A simulator that stopped, and that no name holds, then keeps the
+        socket of its control port until the cycle collector runs.
         """
+        host = self.host
 
         def new_server() -> _ProviderHTTPServer:
-            srv = _ProviderHTTPServer((self.host, port), handler_cls)
+            srv = _ProviderHTTPServer((host, port), handler_cls)
             srv.listener = listener
             return srv
 
@@ -1510,9 +1545,9 @@ class SimulatorServer:
                 for provider, endpoint in grpc_endpoints:
                     # One gate per gRPC port, shared by the serve loop that
                     # closes the port and the control API that waits for it.
-                    # The gate of a gRPC port is registered only here, after
-                    # the grpcio import worked: a port with no gate is a port
-                    # nothing can close, and the control API refuses
+                    # This code registers the gate of a gRPC port only here,
+                    # after the grpcio import worked. A port with no gate is a
+                    # port that nothing can close, so the control API refuses
                     # mode="port_closed" for it.
                     gate = PortGate(provider, endpoint, probe_host)
                     self.control.port_gates[endpoint.port] = gate

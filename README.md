@@ -97,8 +97,7 @@ endpoints of the provider; omit it and the block covers every endpoint. There is
 no `chain_family` field any more — the pool already fixes the chain.
 
 **`down` is provider-wide by default.** A provider set to `down` returns 503 on
-all of its endpoints — a dead node is unreachable on every port. This is the
-natural default now, not a special case.
+all of its endpoints. This is the natural default now, not a special case.
 
 ## Fault primitives
 
@@ -122,10 +121,11 @@ Pick one `mode`; combine it with the orthogonal fields.
 ### `port_closed`: a provider whose port is really closed
 
 In every other mode the provider receives the request. `down` answers it on an
-open connection: HTTP 503, and on gRPC the status `UNAVAILABLE`. `port_closed`
-is the mode where the provider receives nothing. The simulator stops the server
-of the endpoint and closes the listening socket, so it refuses a new TCP
-connection. A test chooses between `down` and `port_closed`.
+open connection: HTTP 503 on JSON-RPC, REST and Tendermint-RPC, and the status
+`UNAVAILABLE` on gRPC. `port_closed` is the mode where the provider receives
+nothing. The simulator stops the server of the endpoint and closes the
+listening socket, so it refuses a new TCP connection. A test chooses between
+`down` and `port_closed`.
 
 The mode works on each provider endpoint: `http`, `ws` and `http2` (gRPC).
 

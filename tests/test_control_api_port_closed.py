@@ -99,6 +99,17 @@ def test_a_listener_that_never_acts_is_an_error_naming_pool_provider_and_port(mo
         assert named in resp["error"], f"the error must name {named}: {resp['error']!r}"
 
 
+def test_the_error_for_a_port_that_did_not_move_names_the_listener_and_no_grpc_listener(monkeypatch):
+    """An http port and a ws port have a listener too. So the text of the error
+    says "The listener", and not "The gRPC listener"."""
+    monkeypatch.setattr(control_api, "_PORT_SETTLE_S", 0.2)
+    api, _port = _api_with_a_gate_nothing_serves()
+    st, resp = api.apply_scenario({"providers": {KEY: {"mode": "port_closed"}}})
+    assert st == 500
+    assert "The listener did not reach the state the scenario asks for" in resp["error"], resp["error"]
+    assert "gRPC listener" not in resp["error"], resp["error"]
+
+
 @pytest.mark.parametrize("route", ["reset", "reset_all"])
 def test_a_reset_that_cannot_reopen_the_port_is_an_error_too(monkeypatch, route):
     """The gate has no listener, so its port never accepts. A reset that answered

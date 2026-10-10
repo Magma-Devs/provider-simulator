@@ -237,13 +237,13 @@ _Avoid_: state, status, behaviour
 The mode in which the port of a provider endpoint is really closed. It works on
 each provider endpoint: `http`, `ws` and `http2`. With no filter each port of
 the provider closes, and `transports` and `ports` name fewer. In every other
-mode the provider receives the request: `down` answers HTTP 503 on an open
-connection, and on gRPC the status `UNAVAILABLE`. With `port_closed` the
-simulator stops the server of the endpoint and closes the listening socket, so
-it refuses a new TCP connection. Each open connection ends with no reply, and a
-WebSocket connection ends with no close frame. Nothing reaches the provider, so
-its history gets no row. The row of a request in flight stays as the simulator
-wrote it.
+mode the provider receives the request: `down` answers on an open connection,
+with HTTP 503 on JSON-RPC, REST and Tendermint-RPC, and with the status
+`UNAVAILABLE` on gRPC. With `port_closed` the simulator stops the server of the
+endpoint and closes the listening socket, so it refuses a new TCP connection.
+Each open connection ends with no reply, and a WebSocket connection ends with
+no close frame. Nothing reaches the provider, so its history gets no row. The
+row of a request in flight stays as the simulator wrote it.
 
 It is a state of the port and not a fault on a request. That is why the control
 API refuses it in every place that needs a request to arrive: a per-method

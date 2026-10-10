@@ -500,15 +500,16 @@ class ControlApi:
     def _settle_ports(self, wishes: list) -> str:
         """Wait until each port is in the state wished for; "" when all are.
 
-        A gate whose last report is the wished state is not asked. The call
-        asks for no pass and tries no connection for it, so a write that moves
-        no port waits for no port. A gate with no report is asked. A gate whose
-        newest ask has no answer yet is asked too: after an error for a port,
-        the next call waits for that port again.
+        The call does not ask a gate whose last report is the wished state. It
+        asks for no pass and tries no connection for that gate, so a write that
+        moves no port waits for no port. The call asks a gate that has no
+        report. It also asks a gate whose newest ask has no answer: after a
+        call that got no answer for a port, the next call waits for that port
+        again.
 
-        Each gate that needs a pass is asked first and waited on second, so the
-        ports change side by side and the whole call is bounded by one
-        ``_PORT_SETTLE_S``. A port that does not get there is named, with its
+        The call first asks each gate that needs a pass. Then it waits for each
+        one. So the ports change side by side, and one ``_PORT_SETTLE_S``
+        bounds the whole call. A port that does not get there is named, with its
         pool and provider: a 200 for a state that was not reached would let a
         test connect to a port it believes closed.
         """

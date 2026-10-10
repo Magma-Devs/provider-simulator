@@ -10,14 +10,19 @@ server class that can close its port. Each test makes a server on a port that
 the system gives, with a small handler class of this file. These tests use no
 simulator.
 
+``TestTheLoopOfOnePort`` has the tests of ``_HttpPortLoop``, the loop that
+keeps one port in the state that its scenario asks for. Each test makes one
+loop and one gate, and it writes the scenario of the provider. These tests use
+no simulator.
+
 The tests of each other class use the shared simulator of the session (see
 conftest.py) and the provider ``eth-sim:1``, which has an ``http`` port and a
 ``ws`` port. The control API answers only when the port has changed. So each
 test reads the port with a raw TCP connection on the line after the control
 call, with no sleep.
 
-The last test is in no class. It starts a simulator of its own, because it
-stops that simulator.
+The last two tests are in no class. Each one starts a simulator of its own,
+because it stops that simulator.
 
 What a gRPC port does with the mode is in tests/test_simulator_grpc_port_closed.py.
 """
@@ -25,8 +30,10 @@ What a gRPC port does with the mode is in tests/test_simulator_grpc_port_closed.
 from __future__ import annotations
 
 import errno
+import gc
 import http.client
 import json
+import logging
 import socket
 import socketserver
 import threading
@@ -39,6 +46,9 @@ import pytest
 import server as server_module
 from constants import CACHE_SIM_PORTS, CONTROL_PORT, RESP_CONTROL_PORT, RESP_PROXY_PORTS
 from provider_simulator import topology
+from provider_simulator.domain.endpoint import Endpoint
+from provider_simulator.domain.provider import Pool
+from provider_simulator.port_gate import PortGate
 from provider_simulator.topology import port_of
 from tests.ws_client import WsClient
 
@@ -98,6 +108,18 @@ def _subscriptions(control: str) -> list[tuple]:
     """The entries of GET /ws/subscriptions, each one as (subscription id, pool, provider id)."""
     _, body = _get(f"{control}/ws/subscriptions")
     return [(entry["subscription_id"], entry["pool"], entry["pid"]) for entry in body["subscriptions"]]
+
+
+def _subscriptions_after_a_wait(control: str, timeout: float = 2.0) -> list[tuple]:
+    """Wait until GET /ws/subscriptions has no entry, and return its entries.
+
+    The entry of a connection that ended leaves the registry on the thread of
+    that connection, a moment after the end. An empty list is the result that
+    a caller wants. A list with entries says which ones stayed."""
+    deadline = time.monotonic() + timeout
+    while (entries := _subscriptions(control)) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return entries
 
 
 def _connect(port: int) -> int:
@@ -227,6 +249,24 @@ class TestTheServerOfOneProviderPort:
             _stop(server)
             serve_thread.join(timeout=2.0)
 
+    def test_the_server_forgets_the_socket_of_a_connection_that_ended(self):
+        """The server records each client socket, so that ``close_port`` can
+        end it. The worker thread removes the socket when the connection ends.
+        A socket that stays recorded is a leak: the simulator runs for days,
+        and each connection of a router adds one socket."""
+        server = server_module._ProviderHTTPServer(_ANY_PORT, _OneByteThenHold)
+        serve_thread = server.serve()
+        try:
+            for _ in range(3):
+                assert _one_byte_from(server.server_port) == b"x", "the server did not serve"
+            deadline = time.monotonic() + 2.0
+            while server._clients and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert server._clients == set(), "the socket of a connection that ended is still recorded"
+        finally:
+            _stop(server)
+            serve_thread.join(timeout=2.0)
+
     def test_close_port_returns_while_the_serve_loop_still_runs(self, monkeypatch):
         """``BaseServer.shutdown`` waits for the serve loop. ``close_port`` must
         not wait for it, because a control call waits for ``close_port``. Here
@@ -291,6 +331,19 @@ class TestTheServerOfOneProviderPort:
         assert not serve_thread.is_alive(), "the serve thread of a closed server did not end"
         assert thread_errors == []
 
+    def test_the_serve_thread_of_a_server_that_no_scenario_closed_shows_its_error(self, monkeypatch):
+        """Only ``close_port`` makes the error of the serve loop an expected
+        error. Here the socket closes with no ``close_port``. The serve thread
+        must end with its error, so that a person can see why the port died."""
+        thread_errors: list[str] = []
+        monkeypatch.setattr(threading, "excepthook", lambda args: thread_errors.append(repr(args.exc_value)))
+        server = server_module._ProviderHTTPServer(_ANY_PORT, _OneByteThenHold)
+        server.socket.close()
+        serve_thread = server.serve()
+        serve_thread.join(timeout=2.0)
+        assert not serve_thread.is_alive(), "the serve thread of a server with a closed socket did not end"
+        assert len(thread_errors) == 1, f"the serve thread must show one error; it showed {thread_errors}"
+
     def test_only_an_os_error_of_a_closed_server_is_dropped(self, capsys):
         """``close_port`` ends the socket of each worker thread, so the next
         read or write of the thread fails with an OSError. The server drops
@@ -309,6 +362,182 @@ class TestTheServerOfOneProviderPort:
             assert "TypeError: a defect of the handler" in capsys.readouterr().err
         finally:
             server.server_close()
+
+
+# ── the loop of one port ─────────────────────────────────────────────────────
+
+
+class _OneByteForOneByte(socketserver.BaseRequestHandler):
+    """Answers one byte with one byte. A connection that sends nothing ends
+    with no error: the connection check of a gate is such a connection."""
+
+    def handle(self) -> None:
+        if self.request.recv(1):
+            self.request.sendall(b"x")
+
+
+def _one_byte_for_one_byte(port: int) -> bytes:
+    """Open one connection, send one byte, and read the byte that the handler answers."""
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+        client.sendall(b"?")
+        return client.recv(1)
+
+
+def _a_loop(first, new_server=None):
+    """Start one ``_HttpPortLoop`` for a provider that no simulator holds.
+
+    It returns the loop, its gate and the scenario of the provider. A test
+    writes the scenario and asks the gate, as the control API does. With no
+    ``new_server``, a port that opens again gets a plain server of this file."""
+    port = first.server_port
+    endpoint = Endpoint("jsonrpc", "http", port)
+    provider = Pool(name="loop-sim", chain="eth").add_provider("1", [endpoint])
+    gate = PortGate(provider, endpoint)
+    if new_server is None:
+
+        def new_server():
+            return server_module._ProviderHTTPServer(("127.0.0.1", port), _OneByteForOneByte)
+
+    loop = server_module._HttpPortLoop(gate, first, new_server)
+    loop.thread.start()
+    return loop, gate, provider.scenario
+
+
+class TestTheLoopOfOnePort:
+    def test_an_ask_ends_the_wait_of_the_loop_at_once(self, monkeypatch):
+        """The loop waits 30 seconds between two passes here. So a pass that
+        comes in time comes from the ask, and not from the poll."""
+        monkeypatch.setattr(server_module, "_HTTP_PORT_POLL_S", 30.0)
+        loop, gate, scenario = _a_loop(server_module._ProviderHTTPServer(_ANY_PORT, _OneByteForOneByte))
+        try:
+            assert gate.wait(gate.ask(), want_open=True, timeout_s=5.0), "the port did not open at the start"
+            scenario.update({"mode": "port_closed"})
+            assert gate.wait(gate.ask(), want_open=False, timeout_s=2.0), "the ask for a close did not wake the loop"
+            scenario.update({"mode": "success"})
+            assert gate.wait(gate.ask(), want_open=True, timeout_s=2.0), "the ask for an open did not wake the loop"
+        finally:
+            loop.stop()
+
+    def test_a_bind_that_fails_is_tried_again_with_no_ask_and_the_loop_thread_raises_no_error(
+        self, monkeypatch, caplog
+    ):
+        """The port cannot bind: the address is in use. One ask starts the
+        first try. The loop tries again at each poll, with no other ask. The
+        gate reports "closed" for as long as the bind fails, the loop thread
+        raises no error, and the log has the warning one time, and not one
+        time for each pass."""
+        thread_errors: list[str] = []
+        monkeypatch.setattr(threading, "excepthook", lambda args: thread_errors.append(repr(args.exc_value)))
+        monkeypatch.setattr(server_module, "_HTTP_PORT_POLL_S", 0.05)
+        first = server_module._ProviderHTTPServer(_ANY_PORT, _OneByteForOneByte)
+        port = first.server_port
+        in_use = threading.Event()
+        in_use.set()
+        tries: list[int] = []
+
+        def new_server():
+            tries.append(len(tries))
+            if in_use.is_set():
+                raise OSError(errno.EADDRINUSE, "Address already in use")
+            return server_module._ProviderHTTPServer(("127.0.0.1", port), _OneByteForOneByte)
+
+        loop, gate, scenario = _a_loop(first, new_server)
+        try:
+            assert gate.wait(gate.ask(), want_open=True, timeout_s=5.0), "the port did not open at the start"
+            scenario.update({"mode": "port_closed"})
+            assert gate.wait(gate.ask(), want_open=False, timeout_s=2.0), "the port did not close"
+
+            with caplog.at_level(logging.WARNING):
+                scenario.update({"mode": "success"})
+                gate.ask()
+                deadline = time.monotonic() + 2.0
+                while len(tries) < 3 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert len(tries) >= 3, f"the poll must try the bind again; the loop tried {len(tries)} times"
+                assert (gate.last_report(), _connect(port)) == (False, errno.ECONNREFUSED)
+
+                in_use.clear()
+                deadline = time.monotonic() + 2.0
+                while gate.last_report() is not True and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert (gate.last_report(), _connect(port)) == (True, 0), "the port must open when the bind works"
+            warnings = [text for text in caplog.messages if "could not change its state" in text]
+            assert len(warnings) == 1, f"one warning for one error text; the log has {warnings}"
+            assert loop.thread.is_alive(), "the loop thread must live through a bind that fails"
+        finally:
+            loop.stop()
+        assert thread_errors == []
+
+    def test_a_close_that_raised_part_way_is_finished_and_the_port_opens_again(self, monkeypatch):
+        """``close_port`` closes the socket, and then it raises one time, as
+        when the system cannot start the thread that stops the serve loop. The
+        loop keeps that server. Its report must be "closed", because the port
+        refuses a connection. When the scenario opens the port, the loop
+        finishes the close and binds a new server."""
+
+        class ClosesAndRaisesOneTime(server_module._ProviderHTTPServer):
+            raised = False
+
+            def close_port(self) -> None:
+                super().close_port()
+                if not ClosesAndRaisesOneTime.raised:
+                    ClosesAndRaisesOneTime.raised = True
+                    raise RuntimeError("can't start new thread")
+
+        thread_errors: list[str] = []
+        monkeypatch.setattr(threading, "excepthook", lambda args: thread_errors.append(repr(args.exc_value)))
+        # No pass comes from the poll, so each pass of this test comes from an ask.
+        monkeypatch.setattr(server_module, "_HTTP_PORT_POLL_S", 30.0)
+        first = ClosesAndRaisesOneTime(_ANY_PORT, _OneByteForOneByte)
+        port = first.server_port
+        loop, gate, scenario = _a_loop(first)
+        try:
+            assert gate.wait(gate.ask(), want_open=True, timeout_s=5.0), "the port did not open at the start"
+            scenario.update({"mode": "port_closed"})
+            assert gate.wait(gate.ask(), want_open=False, timeout_s=2.0), "the report must be closed: the port refuses"
+            assert ClosesAndRaisesOneTime.raised, "the close of this test must raise"
+            assert (gate.last_report(), _connect(port)) == (False, errno.ECONNREFUSED)
+
+            scenario.update({"mode": "success"})
+            assert gate.wait(gate.ask(), want_open=True, timeout_s=2.0), "the port did not open again"
+            assert _one_byte_for_one_byte(port) == b"x", "the new server does not serve"
+        finally:
+            loop.stop()
+        assert thread_errors == []
+
+    def test_a_server_that_cannot_start_its_serve_thread_is_closed_and_the_next_pass_binds_a_new_one(self, monkeypatch):
+        """``serve`` raises one time, as when the system cannot start a thread.
+        A bound server with no serve loop accepts connections that nothing
+        answers. So the loop closes that server, and the report "closed" is
+        true: the port refuses a connection. The next pass binds a new server."""
+
+        class ServeRaisesOneTime(server_module._ProviderHTTPServer):
+            raised = False
+
+            def serve(self) -> threading.Thread:
+                if not ServeRaisesOneTime.raised:
+                    ServeRaisesOneTime.raised = True
+                    raise RuntimeError("can't start new thread")
+                return super().serve()
+
+        thread_errors: list[str] = []
+        monkeypatch.setattr(threading, "excepthook", lambda args: thread_errors.append(repr(args.exc_value)))
+        # No pass comes from the poll. The first pass comes from the start of the loop.
+        monkeypatch.setattr(server_module, "_HTTP_PORT_POLL_S", 30.0)
+        first = ServeRaisesOneTime(_ANY_PORT, _OneByteForOneByte)
+        port = first.server_port
+        loop, gate, _scenario = _a_loop(first)
+        try:
+            deadline = time.monotonic() + 2.0
+            while gate.last_report() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert gate.last_report() is False, "after a serve that raised, the gate must report closed"
+            assert _connect(port) == errno.ECONNREFUSED, "a server with no serve loop must not keep the port bound"
+            assert gate.wait(gate.ask(), want_open=True, timeout_s=2.0), "the next pass did not open the port"
+            assert _one_byte_for_one_byte(port) == b"x", "the new server does not serve"
+        finally:
+            loop.stop()
+        assert thread_errors == []
 
 
 # ── what a scenario cannot close ─────────────────────────────────────────────
@@ -461,6 +690,7 @@ class TestAWsConnectionOfAClosedPort:
         subscription leaves the registry when the thread of the connection
         ends. The control call does not wait for that, so the test polls."""
         control = sim["control"]
+        assert _subscriptions_after_a_wait(control) == [], "an earlier test left a subscription"
         with WsClient("127.0.0.1", WS_PORT, "/ws") as client:
             client.send_json(_SUBSCRIBE)
             sub_id = client.recv_json(timeout=2.0)["result"]
@@ -473,10 +703,8 @@ class TestAWsConnectionOfAClosedPort:
             received = _bytes_until_the_end(client.sock, timeout=2.0)
         assert received == b"", f"the connection must end with no close frame; the client read {received!r}"
 
-        deadline = time.monotonic() + 2.0
-        while _subscriptions(control) and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert _subscriptions(control) == [], "the subscription of a connection that ended is still in the registry"
+        left = _subscriptions_after_a_wait(control)
+        assert left == [], "the subscription of a connection that ended is still in the registry"
 
     def test_a_connection_with_no_subscription_ends_too(self, sim):
         with WsClient("127.0.0.1", WS_PORT, "/ws") as client:
@@ -534,6 +762,7 @@ class TestThePortOpensAgain:
         the listener of the first one: the listener holds the provider, and the
         ``ws`` listener holds the subscription registry of the simulator."""
         control = sim["control"]
+        assert _subscriptions_after_a_wait(control) == [], "an earlier test left a subscription"
         _close_both_ports(control)
         status, body = _set(control, KEY, mode="success")
         assert status == 200, body
@@ -613,8 +842,9 @@ class TestThePortOpensAgain:
 
 # ── stop() ───────────────────────────────────────────────────────────────────
 
-# The simulator of the last test, on this file's own block of ports. The block
-# is below the range that the kernel gives to client sockets.
+# The simulators of the last two tests, each one on its own block of ports of
+# this file. The blocks are below the range that the kernel gives to client
+# sockets.
 _STOP_CONTROL = 29751
 _STOP_HTTP, _STOP_WS = 28751, 28752
 _STOP_ROWS = [
@@ -630,19 +860,37 @@ _STOP_ROWS = [
 ]
 
 
-def test_stop_reaches_a_server_that_opened_again():
-    """A port that closed and opened again has a new server object. ``stop()``
-    must stop that server too. If ``stop()`` stops only the first server of the
-    port, the port answers after the stop."""
+_FREED_CONTROL = 29761
+_FREED_HTTP = 28761
+_FREED_ROWS = [
+    ("freed-sim", "eth", "1", "FreedPrimaryProvider1", False, "", (("jsonrpc", "http", _FREED_HTTP),)),
+]
+
+
+def _a_simulator_of_its_own(rows, control_port):
+    """A simulator that has only the providers of ``rows``. The test starts it and stops it."""
     shipped = topology.TOPOLOGY
-    topology.TOPOLOGY = _STOP_ROWS
+    topology.TOPOLOGY = rows
     try:
-        simulator = server_module.SimulatorServer(
-            host="127.0.0.1", control_port=_STOP_CONTROL, scenario_ttl_s=0, cache_ports={}, resp_proxy_ports={}
+        return server_module.SimulatorServer(
+            host="127.0.0.1", control_port=control_port, scenario_ttl_s=0, cache_ports={}, resp_proxy_ports={}
         )
     finally:
         topology.TOPOLOGY = shipped
+
+
+def test_stop_reaches_a_server_that_opened_again():
+    """A port that closed and opened again has a new server object. ``stop()``
+    must stop that server too. If ``stop()`` stops only the first server of the
+    port, the port answers after the stop.
+
+    After ``stop()`` each of the two ports refuses a connection, and the loop
+    thread and the serve thread of each port have ended."""
+    simulator = _a_simulator_of_its_own(_STOP_ROWS, _STOP_CONTROL)
     control = f"http://127.0.0.1:{_STOP_CONTROL}"
+    # The loop thread and the serve thread of each of the two ports.
+    port_threads = {f"port-{port}{part}" for port in (_STOP_HTTP, _STOP_WS) for part in ("", "-serve")}
+    client = WsClient("127.0.0.1", _STOP_WS, "/ws")
     simulator.start()
     try:
         simulator.wait_ready(20.0)
@@ -652,8 +900,50 @@ def test_stop_reaches_a_server_that_opened_again():
         assert status == 200, body
         status, reply = _post(f"http://127.0.0.1:{_STOP_HTTP}", _CHAIN_ID_CALL)
         assert status == 200 and "result" in reply, "the port that opened again must answer before the stop"
+        # A client keeps one connection to the ws port that opened again. The
+        # thread of that connection keeps the server object. So the listening
+        # socket closes only if stop() closes it, and not when the object goes.
+        client.connect()
+        alive = {thread.name for thread in threading.enumerate()}
+        assert port_threads <= alive, f"no thread has the name {sorted(port_threads - alive)}"
     finally:
         simulator.stop()
-    with pytest.raises((*_CONNECTION_ERRORS, TimeoutError)):
-        _post(f"http://127.0.0.1:{_STOP_HTTP}", _CHAIN_ID_CALL, timeout=1.5)
-    assert (_connect(_STOP_HTTP), _connect(_STOP_WS)) == (errno.ECONNREFUSED, errno.ECONNREFUSED)
+    try:
+        with pytest.raises((*_CONNECTION_ERRORS, TimeoutError)):
+            _post(f"http://127.0.0.1:{_STOP_HTTP}", _CHAIN_ID_CALL, timeout=1.5)
+        assert (_connect(_STOP_HTTP), _connect(_STOP_WS)) == (errno.ECONNREFUSED, errno.ECONNREFUSED)
+        deadline = time.monotonic() + 2.0
+        while (left := sorted(port_threads & {t.name for t in threading.enumerate()})) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert left == [], f"stop() left threads of the provider ports: {left}"
+    finally:
+        client.close()
+
+
+def test_a_stopped_simulator_that_no_name_holds_frees_its_control_port():
+    """``stop()`` stops the control server, and it does not close the socket of
+    that server: the socket closes when the simulator object goes. So no loop
+    can hold the simulator in a reference cycle. With such a cycle the control
+    port listens until the cycle collector runs, and a new simulator cannot
+    bind that port.
+
+    The cycle collector is off here. So the object goes only if no cycle holds
+    it."""
+
+    def start_and_stop() -> None:
+        simulator = _a_simulator_of_its_own(_FREED_ROWS, _FREED_CONTROL)
+        simulator.start()
+        try:
+            simulator.wait_ready(20.0)
+        finally:
+            simulator.stop()
+
+    collector_was_on = gc.isenabled()
+    gc.disable()
+    try:
+        start_and_stop()  # no name holds the simulator after this line
+        freed = _connect(_FREED_CONTROL)
+    finally:
+        if collector_was_on:
+            gc.enable()
+    assert freed == errno.ECONNREFUSED, "the control port of a stopped simulator still listens"

@@ -35,7 +35,7 @@ the listener applies it, not the policy.
 
 ``mode="port_closed"`` is NOT a Verdict either, for a different reason: a Verdict
 answers a request, and a closed port receives none. ``port_closed(scenario,
-endpoint)`` is the decision for it, read by the loop of the port rather than per
+endpoint)`` is the decision for it. The loop of the port reads it, and not each
 request. It goes through ``targets`` like everything else here. Each provider
 port has such a loop: a gRPC port, an ``http`` port and a ``ws`` port.
 """
