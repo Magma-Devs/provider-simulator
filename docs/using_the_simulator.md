@@ -198,13 +198,13 @@ The fault ladder is evaluated in the order above (first match wins). Only `laten
 
 ### `mode=port_closed` is not in that table
 
-It is not a reply, so it has no rung on the ladder, and it is not parallel across chain families: only a gRPC endpoint can perform it.
+It is not a reply, so it has no rung on the ladder. It works on each provider endpoint: `http`, `ws` and `http2`. With no `transports` filter and no `ports` filter, each port of the provider closes.
 
 | | JSON-RPC, REST, Tendermint-RPC, WebSocket | gRPC |
 |---|---|---|
-| `mode=port_closed` | **refused with HTTP 400.** None of these listeners can stop listening | the endpoint's gRPC server is stopped: the listening socket and every open connection are closed, and a new TCP connection is refused. No status is sent and nothing is recorded in the history |
+| `mode=port_closed` | the simulator stops the server of the endpoint: it closes the listening socket, and it refuses a new TCP connection. Each open connection ends with no reply, and a WebSocket connection ends with no close frame. The subscriptions of a closed `ws` port leave `GET /ws/subscriptions` when their connection ends. The history gets no row, and the row of a request in flight stays as the simulator wrote it | the endpoint's gRPC server is stopped: the listening socket and every open connection are closed, and a new TCP connection is refused. No status is sent and nothing is recorded in the history |
 
-On gRPC, `mode=down` and `mode=drop_connection` both answer `UNAVAILABLE`, so a router always gets an answer from them. `port_closed` is the mode to use when the router must get none. The control call returns after the port has changed, in both directions, so no sleep is needed after it. The full list of what is refused is in the README, under `port_closed`.
+`mode=down` answers on an open connection: HTTP 503 on JSON-RPC, REST and Tendermint-RPC, and the status `UNAVAILABLE` on gRPC. So a router gets an answer from it. `port_closed` refuses the connection: it is the mode to use when the router must get no answer. A test chooses. The control call returns after the port has changed, in both directions, so no sleep is needed after it. A control call that asks for the state that the port already has makes no new connection check. The full list of what is refused is in the README, under `port_closed`.
 
 ## Common recipes
 

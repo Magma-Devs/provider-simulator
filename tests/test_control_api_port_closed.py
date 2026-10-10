@@ -1,12 +1,13 @@
 """mode="port_closed" through the control API routes, with no socket.
 
 The same style as test_control_api.py: a real Registry, a ControlApi, no
-listener. That is exactly the case these tests are about. With no gRPC listener
+listener. That is exactly the case these tests are about. With no listener
 running there is nothing that could close a port, so the API has to refuse, or
 answer an error, instead of storing a fault nothing performs.
 
 What a running listener does with the mode is in
-test_simulator_grpc_port_closed.py.
+test_simulator_grpc_port_closed.py for a gRPC port, and in
+integration/test_http_and_ws_port_closed.py for an http port and a ws port.
 """
 
 import pytest

@@ -1,14 +1,18 @@
 """The port gate, and the one decision it reads. No simulator, no gRPC.
 
 ``test_simulator_grpc_port_closed.py`` shows the whole path on real gRPC
-servers. This file pins the two rules that path depends on and cannot isolate:
+servers, and ``integration/test_http_and_ws_port_closed.py`` shows it on real
+http and ws servers. This file pins the three rules that path depends on and
+cannot isolate:
 
 - a report from a serve-loop pass that began BEFORE the caller asked is not an
-  answer to the caller, and
+  answer to the caller,
 - a port the serve loop reports closed is only closed when a connection to it is
-  really refused.
+  really refused, and
+- a gate gives no last report while an ask has no answer, so a caller waits for
+  that port again.
 
-Both are about a caller being told the port changed when it had not.
+All three are about a caller being told the port changed when it had not.
 """
 
 import socket
