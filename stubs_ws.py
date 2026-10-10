@@ -48,9 +48,8 @@ UNSUBSCRIBE_METHODS: Set[str] = {
 }
 
 
-# Canned event payload templates per (chain, event_type). Used by /ws/emit
-# when the caller doesn't supply a custom event payload, or by tests that
-# want a known-good default shape.
+# Canned event payload templates per (chain, event_type). No code reads this
+# table: POST /ws/emit pushes the event that its caller gives.
 EVENT_DEFAULTS: Dict[tuple, Dict[str, Any]] = {
     ("eth", "newHeads"): {
         "number": "0x1312D01",
