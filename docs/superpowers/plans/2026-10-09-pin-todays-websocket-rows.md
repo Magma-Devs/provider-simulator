@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Tests record what a WebSocket endpoint of the simulator does today in the places of `server.py` that decide a fault and write a history row outside `Listener.serve`: the upgrade request, a subscribe frame and an unsubscribe frame, and a pushed event. Pull request 3b can then move that code into `provider_simulator/listeners/` and show each reply and each row that changed.
+**Goal:** Tests record what a WebSocket endpoint of the simulator does today in the places of `server.py` that decide a fault and write a history row outside `Listener.serve`: the upgrade request, a subscribe frame and an unsubscribe frame, and a pushed event. The next step, in the same pull request, can then move that code into `provider_simulator/listeners/` and show each reply and each row that changed. The design calls that step 3b.
 
 **Architecture:** Tests only, at the end of one file that exists, `tests/test_simulator_ws.py`. They use the shared simulator of the test session, the control API over HTTP, and a plain socket that sends the upgrade request and the frames. No source file changes, and no test file is created.
 
@@ -12,23 +12,33 @@
 
 ## The state of this plan
 
-Written on 2026-10-09, after pull request 2c merged as the commit `8ed08aa` of `main`. Victoria gave her go for the worktree, the branch and this plan file on 2026-10-09. The worktree and the branch exist. No test of this plan is in the repository.
+Written on 2026-10-09, after pull request 2c merged as the commit `8ed08aa` of `main`. Victoria gave her go for the worktree, the branch and this plan file on 2026-10-09. Reviews then changed the tests. The code blocks and the counts of this plan now hold those changes, as the last section says.
+
+The state on 2026-10-10: the branch is pushed, and pull request 144 is open. The same pull request also holds a second step, the move of the WebSocket code, with its own plan file `2026-10-10-websocket-frames-use-listener-serve.md`. This plan describes the commits up to `5657f71`. In this plan, "this pull request" and "tests only" mean those commits.
 
 | | |
 |---|---|
 | Worktree | `.claude/worktrees/pin-todays-websocket-rows` of the simulator checkout |
-| Branch | `pin-todays-websocket-rows`, made from `main` at `8ed08aa`. Not pushed. Its first commit is this plan. |
+| Branch | `pin-todays-websocket-rows`, made from `main` at `8ed08aa`. Pushed. Its first commit is this plan. |
 
-**What RAN for this plan.** On 2026-10-09, on a copy of `main` at `8ed08aa` in a temporary folder, on a Mac (Darwin 25.3, Python 3.12.12, pytest 9.1.1, pytest-timeout 2.4.0):
+**What RAN for this plan on 2026-10-09.** The runs used a copy of `main` at `8ed08aa` in a temporary folder, on a Mac (Darwin 25.3, Python 3.12.12, pytest 9.1.1, pytest-timeout 2.4.0). They used the code blocks of that day, before the reviews:
 
-- The file `tests/test_simulator_ws.py` of `main`: `59 passed`. With the code of Tasks 1 to 4: `167 passed`, three times in a row (40.64 s, 40.73 s and 40.54 s). 30 seconds of each run are the one slow test (choice 2).
-- The whole suite with the code of Tasks 1 to 4: `1971 passed in 237.01s (0:03:57)`, from 23:03:00 to 23:06:57 IDT, with no test skipped. `main` has 1863 tests: READ from the log of the CI run 37976966668 of `main` at `8ed08aa`, job `test`, `1863 passed in 205.71s`.
-- `black --check`, `ruff check` and `mypy` on the test file: clean, with black 26.5.1, ruff 0.15.22 and mypy 2.3.0. CI has ruff 0.15.20 and mypy 2.2.0. Task 6 runs the versions of CI.
-- 109 breaks of the source, one at a time, each one with the new tests. Each break fails one test or more, and each of the 108 new cases fails under one break or more. The section "The breaks" has each run.
-- The file as it is after Task 1, after Task 2 and after Task 3: `black --check` and `ruff check` are clean for each of the three states, and pytest gives `90 passed`, `138 passed` and `156 passed`.
-- Linux: the file ran one time in a container on the Mac: Linux 6.12.68 (arm64), Python 3.12.13, `167 passed in 41.16s`. Task 6, Step 4 has the command.
+- On 2026-10-09, the file `tests/test_simulator_ws.py` of `main`: `59 passed`. With the code of Tasks 1 to 4 of that day: `167 passed`, three times in a row (40.64 s, 40.73 s and 40.54 s). 30 seconds of each run are the one slow test (choice 2).
+- On 2026-10-09, the whole suite with the code of Tasks 1 to 4: `1971 passed in 237.01s (0:03:57)`, from 23:03:00 to 23:06:57 IDT, with no test skipped. `main` has 1863 tests: READ from the log of the CI run 37976966668 of `main` at `8ed08aa`, job `test`, `1863 passed in 205.71s`.
+- On 2026-10-09, `black --check`, `ruff check` and `mypy` on the test file of that day: clean, with black 26.5.1, ruff 0.15.22 and mypy 2.3.0. CI has ruff 0.15.20 and mypy 2.2.0. Task 6 runs the versions of CI.
+- On 2026-10-09, 109 breaks of the source, one at a time, each one with the new tests of that day. Each break failed one test or more, and each of the 108 new cases of that day failed under one break or more. The section "The breaks" has each run.
+- On 2026-10-09, the file ran as it was after Task 1, after Task 2 and after Task 3. `black --check` and `ruff check` were clean for each of the three states. Pytest gave `90 passed`, `138 passed` and `156 passed`.
+- On 2026-10-09, on Linux: the file ran one time in a container on the Mac: Linux 6.12.68 (arm64), Python 3.12.13, `167 passed in 41.16s`. Task 6, Step 4 has the command.
 
-**What did not run.** The three checks with the versions of CI. The whole suite on Linux: the job `test` of CI is its first run. The commands of Tasks 1 to 4 in the worktree: they ran on the copy, which holds the same files.
+**What did not run on 2026-10-09.** The three checks with the versions of CI. The whole suite on Linux: the job `test` of CI ran it on 2026-10-10. The commands of Tasks 1 to 4 in the worktree: they ran on the copy, which holds the same files.
+
+**What RAN on 2026-10-10.** These runs used the final test file, which has 114 new cases:
+
+- On a Mac, the test file ran two times in a row: `173 passed` (40.65 s and 40.61 s). That is the 59 tests of `main` and the 114 new cases. The file had the checksum `19233b2b7df87b97b4000b75085fe31a`, which is the file of the commit `dfe4b3b`. Victoria chose two runs in a row, and not three.
+- On Linux, the job `test` of the pull request: `1977 passed`. That is the 1863 tests of `main` and the 114 new cases.
+- All 118 breaks of the source ran, one at a time. They ran on the test file of the commit `dfe4b3b`, against the four source files of `main` at `8ed08aa`. The control run with no break gave `113 passed, 60 deselected`. Each break made one case or more fail, and each of the 114 new cases failed in one run or more. 109 of the 118 breaks are the runs of 2026-10-09 in the section "The breaks". The reviews added nine more: the last section of this plan names them.
+- The commit `21a48df` then changed two docstrings of the test file and no code. So the file of the checkpoint (Task 4, Step 4) has another checksum than the file of the Mac runs and of the breaks.
+- The counts after Tasks 1, 2 and 3 come from the case counts, and not from a run: `90 passed`, `139 passed` and `160 passed`.
 
 A step that does not go as this plan says is a stop: tell Victoria, and do not work around it.
 
@@ -36,7 +46,7 @@ A step that does not go as this plan says is a stop: tell Victoria, and do not w
 
 Victoria can change each one.
 
-1. **Each new test goes into `tests/test_simulator_ws.py`.** Section 12 of the design names that file for each test of 3a. So this plan creates no test file. The file grows from 1397 lines to 2779.
+1. **Each new test goes into `tests/test_simulator_ws.py`.** Section 12 of the design names that file for each test of 3a. So this plan creates no test file. The file grows from 1397 lines to 2889.
 2. **One test takes 30 seconds.** `test_a_hung_upgrade_ends_after_30_seconds_with_a_closed_connection_and_no_byte` waits for the close of a hung upgrade. The adapter holds a hung upgrade for 30 seconds, and no test of today reads what comes after the first second: `test_mode_hang_pre_handshake_sleeps_then_closes` stops after 1 second. Pull request 3b moves the code that performs the hang of an upgrade. The cost is 30 seconds for each run of the suite, which takes 206 seconds in CI today. The other way: leave the close after 30 seconds with no test. The plan of pull request 2a made the same choice for the gRPC hang.
 3. **The new tests use a plain socket, and not the class `WsClient` of `tests/ws_client.py`.** `WsClient` sends no extra header, and a row must carry the lava headers of the upgrade request. It uses a random key, and this plan compares the 101 reply byte for byte with the sample key of RFC 6455. It reads frames only, and a refused upgrade and a dropped frame are raw bytes. The helpers are private functions of the test file. `tests/ws_client.py` does not change.
 4. **Today's side of rows 3 to 6 of section 9.2 is recorded as it is.** Each of the four behaviours that pull request 3b changes on purpose has a test here. So each change of 3b shows as a changed expected value: the table "The expected values that pull request 3b changes" names each test. This is the method of pull requests 2a and 2c.
@@ -90,7 +100,7 @@ Pull request 3b changes four behaviours on purpose: rows 3, 4, 5 and 6 of sectio
 
 1. **The `hang` row of a subscribe frame.** Today it records the configured latency: `test_a_subscribe_frame_of_a_hung_provider_gets_no_reply_and_the_connection_stays_open` holds `("eth_subscribe", "hang", 250, 7)`. `Listener.serve` records 0 for a `hang` row. Section 9.2 of the design does not name this change. So 3b keeps 250 with a hook, or Victoria accepts 0 as a new row of section 9.2.
 2. **A per-method `down` with a latency.** The row records the latency of the entry, and the WebSocket adapter closes the connection with no wait: `test_a_per_method_down_with_a_latency_closes_at_once_and_its_row_records_the_latency` for a subscribe frame, and `test_a_per_method_down_with_a_latency_closes_another_frame_at_once` for each other frame. The HTTP adapter and the gRPC adapter wait for that latency. If the WebSocket adapter of 3b waits too, both tests fail, and the change is a new row for Victoria.
-3. **The upgrade reads less of the scenario than a request.** For `error` it reads `error_message` only: `error_code` and `http_status` do not change the 400. For `rate_limit` it does not read `rate_limit_body`. It reads no latency, no corruption, no pause and no entry of `responses`. The class `TestARefusedUpgrade` holds each one, so the upgrade method of the new WebSocket listener must not start to read them.
+3. **The upgrade reads less of the scenario than a request.** For `error` it reads `error_message` only: `error_code` and `http_status` do not change the 400. For `rate_limit` it does not read `rate_limit_body`. It reads no latency, no corruption, no pause and no entry of `responses`. The class `TestTheUpgradeRequest` holds each one, so the upgrade method of the new WebSocket listener must not start to read them.
 4. **A pushed event asks no fault policy.** `test_an_event_reaches_its_subscriber_under_each_mode_of_the_provider` holds it. When `listeners/ws.py` writes the row of a pushed event, it must still ask no fault policy.
 5. **An unsubscribe method removes a subscription of each subscribe method.** `eth_unsubscribe` removes a subscription that `accountSubscribe` made. The test records it and does not judge it.
 6. **The module `server.py` has its own copy of the table of status labels**, `_STATUS_LABEL`, and only the subscribe code uses it. The breaks of the section "The breaks" show that the new tests hold each label of it.
@@ -103,18 +113,18 @@ One file changes, and one file is created.
 
 | File | Its part in this change |
 |---|---|
-| `tests/test_simulator_ws.py` | Two imports in the import block: `contextlib` and `re`. At the end of the file: seven constants, eighteen helpers and five test classes with 53 test functions, 108 cases. |
+| `tests/test_simulator_ws.py` | Two imports in the import block: `contextlib` and `re`. At the end of the file: seven constants, eighteen helpers and five test classes with 56 test functions, 114 cases. |
 | `docs/superpowers/plans/2026-10-09-pin-todays-websocket-rows.md` | This plan |
 
 The five classes, and the code of `server.py` that each one holds:
 
 | Class | Cases | The code that pull request 3b moves |
 |---|---|---|
-| `TestARefusedUpgrade` | 31 | `_WsHandler.do_GET` and `_WsHandler._refuse_upgrade` |
-| `TestSubscribeAndUnsubscribeFrames` | 48 | `_WsHandler._serve_subscription_frame` |
-| `TestAPushedEvent` | 15 | `_WireSubscriptions.emit` |
-| `TestASubscriptionBelongsToOneConnection` | 3 | `_WsHandler._reader_loop` and `_serve_subscription_frame`, with `WsSubscriptions` of `provider_simulator/listeners/ws.py` |
-| `TestFramesOutsideTheSubscribeCode` | 11 | `_WsHandler._reader_loop` and `_WsHandler._perform_frame` |
+| `TestTheUpgradeRequest` | 31 | `_WsHandler.do_GET` and `_WsHandler._refuse_upgrade` |
+| `TestSubscribeAndUnsubscribeFrames` | 49 | `_WsHandler._serve_subscription_frame` |
+| `TestAPushedEvent` | 16 | `_WireSubscriptions.emit` |
+| `TestASubscriptionBelongsToOneConnection` | 5 | `_WsHandler._reader_loop` and `_serve_subscription_frame`, with `WsSubscriptions` of `provider_simulator/listeners/ws.py` |
+| `TestFramesOutsideTheSubscribeCode` | 13 | `_WsHandler._reader_loop` and `_WsHandler._perform_frame` |
 
 ---
 
@@ -213,22 +223,22 @@ import urllib.error
 import urllib.request
 ```
 
-- [ ] **Step 2: Add the constants, the helpers and the class `TestARefusedUpgrade`**
+- [ ] **Step 2: Add the constants, the helpers and the class `TestTheUpgradeRequest`**
 
 Append this to the end of `tests/test_simulator_ws.py`, after two empty lines:
 
 ```python
 # ─────────────────────────────────────────────────────────────────────────────
-# What WebSocket does today, in the places that decide a fault outside
+# What WebSocket does today, in the places that write a history row outside
 # Listener.serve
 #
-# Three places of server.py decide a WebSocket fault and write its history row:
-# the upgrade request (_WsHandler.do_GET and _refuse_upgrade), a subscribe
-# frame and an unsubscribe frame (_serve_subscription_frame), and a pushed
-# event (_WireSubscriptions.emit). The tests below record the reply and the row
-# of each place. Each expected value is written out by hand. When a change of
-# that code makes a value fail, the value is not edited to pass: the change is
-# a change of behaviour, or it is a defect.
+# Three places of server.py write a history row outside Listener.serve. The
+# upgrade request: _WsHandler.do_GET and _refuse_upgrade. A subscribe frame and
+# an unsubscribe frame: _serve_subscription_frame. A pushed event:
+# _WireSubscriptions.emit. The first two also decide a fault. The tests below
+# record the reply and the row of each place. Each expected value is written
+# out by hand. A change of that code can make a value fail. Then the value is
+# not edited to pass: the change is a change of behaviour, or it is a defect.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # The sample key of RFC 6455, section 1.3. The RFC gives the accept value
@@ -331,7 +341,8 @@ def _request_upgrade(port=_PORT, path="/ws", upgrade_headers=True, lava_headers=
 def _read_until_the_close(sock, timeout_s=3.0):
     """Read each byte that arrives until the simulator closes the connection.
 
-    A connection that stays open for `timeout_s` raises socket.timeout.
+    A reset counts as a close. A connection that stays open for `timeout_s`
+    fails the test, and the failure shows the bytes that arrived.
     """
     sock.settimeout(timeout_s)
     received = b""
@@ -340,6 +351,8 @@ def _read_until_the_close(sock, timeout_s=3.0):
             chunk = sock.recv(4096)
         except ConnectionError:
             return received
+        except socket.timeout:
+            pytest.fail(f"the connection stayed open for {timeout_s} s, and these bytes arrived: {received!r}")
         if not chunk:
             return received
         received += chunk
@@ -347,10 +360,15 @@ def _read_until_the_close(sock, timeout_s=3.0):
 
 def _refusal(sock):
     """Read a refused upgrade to its end. Return its HTTP status and its JSON body."""
-    raw = _read_until_the_close(sock)
-    sock.close()
+    try:
+        raw = _read_until_the_close(sock)
+    finally:
+        sock.close()
     head, _, body = raw.partition(b"\r\n\r\n")
-    return int(head.split(b" ", 2)[1]), json.loads(body)
+    try:
+        return int(head.split(b" ", 2)[1]), json.loads(body)
+    except (IndexError, ValueError):
+        pytest.fail(f"expected a refusal with an HTTP status and a JSON body, and these bytes arrived: {raw!r}")
 
 
 def _read_the_handshake(sock):
@@ -386,34 +404,58 @@ def _send_frame(sock, message):
 
 
 def _payload(sock, timeout_s=3.0):
-    """The payload bytes of the next frame."""
+    """The payload bytes of the next frame. The frame must be a text frame."""
     sock.settimeout(timeout_s)
-    return ws_protocol.parse_frame(sock.recv).payload
+    try:
+        frame = ws_protocol.parse_frame(sock.recv)
+    except socket.timeout:
+        pytest.fail(f"expected a frame in {timeout_s} s, and no frame arrived")
+    assert (
+        frame.opcode == ws_protocol.OPCODE_TEXT
+    ), f"expected a text frame, and a frame with the opcode {frame.opcode} arrived: {frame.payload!r}"
+    return frame.payload
 
 
 def _reply(sock, timeout_s=3.0):
     """The next frame, read as JSON."""
-    return json.loads(_payload(sock, timeout_s))
+    payload = _payload(sock, timeout_s)
+    try:
+        return json.loads(payload)
+    except ValueError:
+        pytest.fail(f"expected a JSON reply, and this payload arrived: {payload!r}")
 
 
 def _assert_no_frame(sock, wait_s=0.5):
     """No byte arrives in `wait_s`, and the connection stays open."""
     sock.settimeout(wait_s)
-    with pytest.raises(socket.timeout):
-        sock.recv(1)
+    try:
+        arrived = sock.recv(1)
+    except socket.timeout:
+        return
+    except ConnectionError as reset:
+        pytest.fail(f"expected an open connection for {wait_s} s, and the simulator reset it: {reset!r}")
+    if arrived:
+        pytest.fail(f"expected no byte in {wait_s} s, and this byte arrived: {arrived!r}")
+    pytest.fail(f"expected an open connection for {wait_s} s, and the simulator closed it")
 
 
 def _subscribe(sock, method="eth_subscribe", frame_id=1):
     """Send one subscribe frame. Return the subscription id of the reply."""
     _send_frame(sock, {"jsonrpc": "2.0", "method": method, "params": ["newHeads"], "id": frame_id})
-    return _reply(sock)["result"]
+    reply = _reply(sock)
+    assert (
+        isinstance(reply, dict) and "result" in reply
+    ), f"expected a subscription id, and this reply arrived: {reply!r}"
+    return reply["result"]
 
 
-class TestARefusedUpgrade:
-    """The upgrade request that opens a WebSocket, on a provider with a fault.
+class TestTheUpgradeRequest:
+    """The upgrade request that opens a WebSocket: a refusal, and an upgrade
+    that succeeds.
 
     The upgrade is not a request of the request flow. `_WsHandler.do_GET`
-    asks the fault policy itself, and `_refuse_upgrade` writes the row.
+    asks the fault policy itself, and `_refuse_upgrade` writes the row of a
+    refusal. An upgrade that succeeds writes no row.
     """
 
     @pytest.mark.parametrize(
@@ -461,9 +503,10 @@ class TestARefusedUpgrade:
         self, sim, block, status, body, method, row_status
     ):
         """Each fault that answers refuses the upgrade with its own HTTP status
-        and its own JSON body. The refusal writes one complete row: the method
-        `*` for `down` and `ws_upgrade` for each other fault, `latency_ms` 0,
-        no request id, and the lava headers of the upgrade request."""
+        and its own JSON body. The refusal writes one complete row. Its method
+        is `*` for `down` and `ws_upgrade` for each other fault. The row has
+        `latency_ms` 0, no request id, and the lava headers of the upgrade
+        request."""
         _set_scenario(sim, {**block, "transports": ["ws"]})
 
         answer = _refusal(_request_upgrade(lava_headers=_LAVA_HEADERS))
@@ -482,7 +525,7 @@ class TestARefusedUpgrade:
         sock = _request_upgrade(lava_headers=_LAVA_HEADERS)
         try:
             _assert_no_frame(sock)
-            rows = _rows(sim)
+            rows = _rows_when_complete(sim, 1)
         finally:
             sock.close()
 
@@ -698,7 +741,7 @@ Expected: no output.
 
 Run: `python -m pytest tests/test_simulator_ws.py -q -p no:cacheprovider`
 
-Expected: `90 passed`. That is the 59 tests of `main` and the 31 cases of `TestARefusedUpgrade`. The run takes about 35 seconds: 30 of them are the one slow test.
+Expected: `90 passed`. That is the 59 tests of `main` and the 31 cases of `TestTheUpgradeRequest`. The run takes about 35 seconds: 30 of them are the one slow test.
 
 - [ ] **Step 4: Run the checks on the file**
 
@@ -759,10 +802,10 @@ class TestSubscribeAndUnsubscribeFrames:
     """
 
     def test_each_frame_writes_one_success_row_with_its_method_and_its_request_id(self, sim):
-        """A subscribe frame, an unsubscribe frame that removes the
-        subscription, and an unsubscribe frame that removes nothing: each one
-        writes one `success` row with the method and the id of the frame. Each
-        row carries the lava headers of the upgrade request."""
+        """Three frames: a subscribe frame, an unsubscribe frame that removes
+        the subscription, and an unsubscribe frame that removes nothing. Each
+        one writes one `success` row with the method and the id of the frame.
+        Each row carries the lava headers of the upgrade request."""
         with _websocket(lava_headers=_LAVA_HEADERS) as sock:
             _send_frame(sock, {"jsonrpc": "2.0", "method": "eth_subscribe", "params": ["newHeads"], "id": 41})
             subscription_id = _reply(sock)["result"]
@@ -805,10 +848,11 @@ class TestSubscribeAndUnsubscribeFrames:
             _send_frame(sock, {"jsonrpc": "2.0", "method": unsubscribe, "params": [subscription_id], "id": 2})
             removed = _reply(sock)
             rows = _rows(sim)
+            subscriptions = _subscriptions(sim)
 
         assert removed == {"jsonrpc": "2.0", "id": 2, "result": True}
         assert [_facts(row) for row in rows] == [(subscribe, "success", 0, 1), (unsubscribe, "success", 0, 2)]
-        assert _subscriptions(sim) == []
+        assert subscriptions == []
 
     def test_a_text_id_goes_into_the_reply_and_into_the_row(self, sim):
         """The id of a subscribe frame can be text. The reply and the row carry
@@ -926,10 +970,11 @@ class TestSubscribeAndUnsubscribeFrames:
             _send_frame(sock, _SUBSCRIBE)
             payload = _payload(sock)
             rows = _rows(sim)
+            subscriptions = _subscriptions(sim)
 
         assert payload == text
         assert [_facts(row) for row in rows] == [("eth_subscribe", "rate_limit", 100, 7)]
-        assert _subscriptions(sim) == []
+        assert subscriptions == []
 
     @pytest.mark.parametrize(
         "block, frame, reply, expected_row",
@@ -975,17 +1020,33 @@ class TestSubscribeAndUnsubscribeFrames:
         self, sim, block, frame, reply, expected_row
     ):
         """`error`, or an `error_probability` of the provider, on a subscribe
-        frame or an unsubscribe frame: the reply is the JSON-RPC error of the
+        frame or an unsubscribe frame. The reply is the JSON-RPC error of the
         scenario, and no subscription is registered."""
         with _websocket() as sock:
             _set_scenario(sim, {**block, "transports": ["ws"]})
             _send_frame(sock, frame)
             answer = _reply(sock)
             rows = _rows(sim)
+            subscriptions = _subscriptions(sim)
 
         assert answer == reply
         assert [_facts(row) for row in rows] == [expected_row]
-        assert _subscriptions(sim) == []
+        assert subscriptions == []
+
+    def test_an_unsubscribe_frame_of_a_provider_with_an_error_removes_nothing(self, sim):
+        """`error` on an unsubscribe frame that names a subscription of its own
+        connection: the reply is the JSON-RPC error, and the subscription stays."""
+        with _websocket() as sock:
+            subscription_id = _subscribe(sock, frame_id=1)
+            _set_scenario(sim, {"mode": "error", "transports": ["ws"]})
+            _send_frame(sock, {"jsonrpc": "2.0", "method": "eth_unsubscribe", "params": [subscription_id], "id": 2})
+            answer = _reply(sock)
+            rows = _rows(sim)
+            subscriptions = _subscriptions(sim)
+
+        assert answer == {"jsonrpc": "2.0", "id": 2, "error": {"code": -32000, "message": "Internal error"}}
+        assert [_facts(row) for row in rows] == [("eth_subscribe", "success", 0, 1), ("eth_unsubscribe", "error", 0, 2)]
+        assert [entry["subscription_id"] for entry in subscriptions] == [subscription_id]
 
     @pytest.mark.parametrize(
         "drop_at, received",
@@ -1073,8 +1134,8 @@ class TestSubscribeAndUnsubscribeFrames:
         assert [_facts(row) for row in rows] == [("eth_subscribe", row_status, 0, 7)]
 
     def test_a_per_method_rate_limit_reaches_the_subscribe_frame_only(self, sim):
-        """An entry of `responses` for `eth_subscribe` with `mode: rate_limit`:
-        the subscribe frame gets the rate-limit text, and another frame of the
+        """An entry of `responses` for `eth_subscribe` with `mode: rate_limit`.
+        The subscribe frame gets the rate-limit text, and another frame of the
         same connection gets its result."""
         _set_scenario(
             sim, {"mode": "success", "transports": ["ws"], "responses": {"eth_subscribe": {"mode": "rate_limit"}}}
@@ -1086,11 +1147,12 @@ class TestSubscribeAndUnsubscribeFrames:
             _send_frame(sock, _BLOCK_NUMBER)
             other = _reply(sock)
             rows = _rows(sim)
+            subscriptions = _subscriptions(sim)
 
         assert payload == _RATE_LIMIT_TEXT
         assert other["id"] == 8 and other["result"].startswith("0x")
         assert [_facts(row)[:2] for row in rows] == [("eth_subscribe", "rate_limit"), ("eth_blockNumber", "success")]
-        assert _subscriptions(sim) == []
+        assert subscriptions == []
 
     def test_a_per_method_down_with_a_latency_closes_at_once_and_its_row_records_the_latency(self, sim):
         """An entry of `responses` for `eth_subscribe` with `mode: down` and a
@@ -1125,13 +1187,14 @@ class TestSubscribeAndUnsubscribeFrames:
             _send_frame(sock, _SUBSCRIBE)
             _assert_no_frame(sock)
             rows = _rows_when_complete(sim, 1)
+            subscriptions = _subscriptions(sim)
 
         assert [_facts(row) for row in rows] == [("eth_subscribe", "hang", 0, 7)]
-        assert _subscriptions(sim) == []
+        assert subscriptions == []
 
     def test_a_per_method_drop_point_reaches_the_subscribe_frame(self, sim):
         """An entry of `responses` for `eth_subscribe` with `drop_connection`
-        and the drop point `mid_body`: the frame header that declares 100
+        and the drop point `mid_body`. The frame header that declares 100
         bytes arrives with 50 bytes, and the connection closes."""
         _set_scenario(
             sim,
@@ -1151,8 +1214,8 @@ class TestSubscribeAndUnsubscribeFrames:
 
     def test_a_per_method_latency_delays_the_subscribe_frame_only(self, sim):
         """An entry of `responses` for `eth_subscribe` with a latency: the
-        subscribe frame waits and its row records the latency. Another frame of
-        the same connection does not wait, and its row records 0."""
+        subscribe frame waits and its row records the latency. The row of
+        another frame of the same connection records 0."""
         _set_scenario(
             sim, {"mode": "success", "transports": ["ws"], "responses": {"eth_subscribe": {"latency_ms": 300}}}
         )
@@ -1389,7 +1452,7 @@ Expected: no output.
 
 Run: `python -m pytest tests/test_simulator_ws.py -q -p no:cacheprovider`
 
-Expected: `138 passed`. That is 48 more cases.
+Expected: `139 passed`. That is 49 more cases.
 
 - [ ] **Step 4: Run the checks on the file**
 
@@ -1470,8 +1533,9 @@ class TestAPushedEvent:
         ],
     )
     def test_an_event_that_is_no_object_is_pushed_as_an_empty_object(self, sim, body):
-        """The control API accepts an event of each JSON type. An event that is
-        no object reaches the caller as an empty object, and it writes its row."""
+        """The control API accepts an event that is a text, a number, a list or
+        `null`, and a body with no event. Each one reaches the caller as an
+        empty object, and it writes its row."""
         with _websocket() as sock:
             subscription_id = _subscribe(sock)
             answer = _emit(sim, {"subscription_id": subscription_id, **body})
@@ -1507,7 +1571,7 @@ class TestAPushedEvent:
         assert status == 404
         assert [_facts(row)[0] for row in rows] == ["eth_subscribe", "eth_unsubscribe"]
 
-    @pytest.mark.parametrize("mode", ["down", "hang", "rate_limit", "drop_connection"])
+    @pytest.mark.parametrize("mode", ["down", "hang", "rate_limit", "error", "drop_connection"])
     def test_an_event_reaches_its_subscriber_under_each_mode_of_the_provider(self, sim, mode):
         """A pushed event asks no fault policy. A fault that is set after the
         subscribe does not stop the event, and the row is a `success` row."""
@@ -1584,6 +1648,40 @@ class TestASubscriptionBelongsToOneConnection:
             left = [entry["subscription_id"] for entry in _subscriptions(sim)]
 
         assert left == [kept]
+
+    @pytest.mark.parametrize(
+        "down_closes_it",
+        [
+            pytest.param(False, id="the-client-closes-the-socket"),
+            pytest.param(True, id="a-down-provider-closes-the-connection"),
+        ],
+    )
+    def test_a_connection_that_ends_with_no_close_frame_loses_its_subscriptions(self, sim, down_closes_it):
+        """A connection can end with no close frame: the client closes the
+        socket, or a `down` provider closes the connection. The simulator then
+        removes each subscription of that connection."""
+        sock = _request_upgrade()
+        try:
+            head = _read_the_handshake(sock)
+            assert head.startswith(b"HTTP/1.1 101 "), f"the upgrade did not succeed: {head!r}"
+            _subscribe(sock, frame_id=1)
+            _subscribe(sock, frame_id=2)
+            before = len(_subscriptions(sim))
+            received = b""
+            if down_closes_it:
+                _set_scenario(sim, {"mode": "down", "transports": ["ws"]})
+                _send_frame(sock, _BLOCK_NUMBER)
+                received = _read_until_the_close(sock)
+        finally:
+            sock.close()
+
+        deadline = time.monotonic() + 2.0
+        while _subscriptions(sim) and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+        assert before == 2
+        assert received == b""
+        assert _subscriptions(sim) == []
 ```
 
 - [ ] **Step 2: Run the file**
@@ -1594,7 +1692,7 @@ Expected: no output.
 
 Run: `python -m pytest tests/test_simulator_ws.py -q -p no:cacheprovider`
 
-Expected: `156 passed`. That is 15 more cases of `TestAPushedEvent` and 3 of `TestASubscriptionBelongsToOneConnection`.
+Expected: `160 passed`. That is 16 more cases of `TestAPushedEvent` and 5 of `TestASubscriptionBelongsToOneConnection`.
 
 - [ ] **Step 3: Run the checks on the file**
 
@@ -1680,10 +1778,11 @@ class TestFramesOutsideTheSubscribeCode:
             sock.sendall(ws_protocol.encode_frame(ws_protocol.OPCODE_TEXT, payload, mask=True))
             reply = _reply(sock)
             rows = _rows(sim)
+            subscriptions = _subscriptions(sim)
 
         assert reply == {"jsonrpc": "2.0", "id": 1, "result": "0x1"}
         assert [_facts(row) for row in rows] == [("unknown", "success", 0, 1)]
-        assert _subscriptions(sim) == []
+        assert subscriptions == []
 
     def test_a_list_of_requests_gets_the_batch_error_and_registers_no_subscription(self, sim):
         """A text frame that is a JSON list goes to the request flow, also when
@@ -1693,6 +1792,7 @@ class TestFramesOutsideTheSubscribeCode:
             _send_frame(sock, [_SUBSCRIBE])
             reply = _reply(sock)
             rows = _rows(sim)
+            subscriptions = _subscriptions(sim)
 
         assert reply == {
             "jsonrpc": "2.0",
@@ -1700,7 +1800,7 @@ class TestFramesOutsideTheSubscribeCode:
             "error": {"code": -32600, "message": "batch requests are not supported"},
         }
         assert [_facts(row) for row in rows] == [("batch", "error", 0, None)]
-        assert _subscriptions(sim) == []
+        assert subscriptions == []
 
     @pytest.mark.parametrize(
         "block, expected_row",
@@ -1710,10 +1810,10 @@ class TestFramesOutsideTheSubscribeCode:
         ],
     )
     def test_the_down_row_and_the_hang_row_of_another_frame_record_no_latency(self, sim, block, expected_row):
-        """A frame that is no subscribe frame goes to `Listener.serve`. Its
-        `down` row has the method `*`, no request id and `latency_ms` 0, and
-        its `hang` row records 0. The rows of a subscribe frame differ: the
-        tests of the class above hold them."""
+        """A frame such as `eth_blockNumber` goes to `Listener.serve`. Its `down`
+        row has the method `*`, no request id and `latency_ms` 0, and its `hang`
+        row records 0. The rows of a subscribe frame differ: the tests of
+        `TestSubscribeAndUnsubscribeFrames` hold them."""
         with _websocket() as sock:
             _set_scenario(sim, {**block, "transports": ["ws"]})
             _send_frame(sock, _BLOCK_NUMBER)
@@ -1723,7 +1823,7 @@ class TestFramesOutsideTheSubscribeCode:
 
     def test_a_per_method_down_with_a_latency_closes_another_frame_at_once(self, sim):
         """An entry of `responses` with `mode: down` and a latency, for a frame
-        that goes to `Listener.serve`: the row records the method, the id and
+        that goes to `Listener.serve`. The row records the method, the id and
         the latency. The WebSocket adapter closes the connection with no wait."""
         _set_scenario(
             sim,
@@ -1743,6 +1843,26 @@ class TestFramesOutsideTheSubscribeCode:
         assert received == b""
         assert waited < 1.0, f"the connection closed after {waited:.2f} s"
         assert [_facts(row) for row in _rows(sim)] == [("eth_blockNumber", "down", 1500, 8)]
+
+    @pytest.mark.parametrize(
+        "method",
+        [
+            pytest.param(["eth_subscribe"], id="a-list"),
+            pytest.param({"name": "eth_subscribe"}, id="an-object"),
+        ],
+    )
+    def test_a_frame_whose_method_is_a_list_or_an_object_closes_the_connection(self, sim, method):
+        """This test records a defect and does not judge it. A JSON frame whose
+        `method` is a list or an object stops the reader of the connection. The
+        caller gets no byte, and the connection closes. No row is written, and
+        no subscription is registered."""
+        with _websocket() as sock:
+            _send_frame(sock, {"jsonrpc": "2.0", "method": method, "params": [], "id": 1})
+            received = _read_until_the_close(sock)
+
+        assert received == b""
+        assert _every_row(sim) == []
+        assert _subscriptions(sim) == []
 ```
 
 - [ ] **Step 2: Run the file**
@@ -1753,7 +1873,7 @@ Expected: no output.
 
 Run: `python -m pytest tests/test_simulator_ws.py -q -p no:cacheprovider`
 
-Expected: `167 passed`. That is 11 more cases.
+Expected: `173 passed`. That is 13 more cases.
 
 - [ ] **Step 3: Run the checks on the file**
 
@@ -1769,11 +1889,11 @@ Run: `python -m mypy tests/test_simulator_ws.py`
 
 Expected: `Success: no issues found in 1 source file`
 
-- [ ] **Step 4: Check that the file is the file that the proof ran on**
+- [ ] **Step 4: Check the file against the checkpoint**
 
 Run: `md5 -q tests/test_simulator_ws.py` (on Linux: `md5sum tests/test_simulator_ws.py`)
 
-Expected: `a64ee57acf351b80bb04179cad1200c9`. The file has 2779 lines. Another value means that a code block of Tasks 1 to 4 did not arrive as it is written here: compare the file with the four code blocks before you go on.
+Expected: at the commit `21a48df`, the file has 2889 lines and the checksum `82d87881e7125ca31057e3479d33a60d`. Another value means that a code block of Tasks 1 to 4 did not arrive as it is written here: compare the file with the four code blocks before you go on. Later commits of the same pull request, from the plan of the WebSocket move, change the file again. So this checkpoint is valid for the file at `21a48df`.
 
 - [ ] **Step 5: Commit**
 
@@ -1784,7 +1904,7 @@ git commit -m "test(ws): record the frames that the subscribe code does not serv
 
 ---
 
-### Task 5: Three runs in a row, and the proof that each new test can fail
+### Task 5: Two runs in a row, and the proof that each new test can fail
 
 **Files:** none in the repository. The script of the breaks and its output go into the evidence folder of the design, `handoffs/evidence-2026-10-07-one-request-flow-design/proof-runs-3a-pin-todays-websocket-rows/` of the automation checkout. Git ignores that folder.
 
@@ -1792,17 +1912,21 @@ git commit -m "test(ws): record the frames that the subscribe code does not serv
 - Consumes: the branch after Task 4.
 - Produces: the counts for the pull request, and the list of breaks for its body.
 
-- [ ] **Step 1: Run the file three times in a row**
+- [ ] **Step 1: Run the file two times in a row**
 
-Run three times: `python -m pytest tests/test_simulator_ws.py -q -p no:cacheprovider`
+Run two times: `python -m pytest tests/test_simulator_ws.py -q -p no:cacheprovider`
 
-Expected each time: `167 passed`. Record the three run times.
+Expected each time: `173 passed`. Record the two run times.
+
+RAN on 2026-10-10 on a Mac: `173 passed`, two times in a row (40.65 s and 40.61 s). The file had the checksum `19233b2b7df87b97b4000b75085fe31a`, which is the file of the commit `dfe4b3b`. The definition of done of the ticket (Global Constraint 12) names three runs. Victoria chose two runs in a row, and not three.
 
 - [ ] **Step 2: Decide if the proof of this plan holds**
 
-The proof ran on 2026-10-09 on a file with the checksum of Task 4, Step 4, against `server.py`, `provider_simulator/listeners/base.py`, `provider_simulator/listeners/ws.py` and `provider_simulator/control_api.py` of `main` at `8ed08aa`. The section "The breaks" has each run.
+The proof ran on 2026-10-10. All 118 breaks ran, one at a time. They ran on the test file of the commit `dfe4b3b` (checksum `19233b2b7df87b97b4000b75085fe31a`). They ran against `server.py`, `provider_simulator/listeners/base.py`, `provider_simulator/listeners/ws.py` and `provider_simulator/control_api.py` of `main` at `8ed08aa`. The control run with no break gave `113 passed, 60 deselected`. Each break made one case or more fail, and each of the 114 new cases failed in one run or more. 109 of the 118 runs are the runs of 2026-10-09 in the section "The breaks". The reviews added nine more: the last section of this plan names them.
 
-- If the checksum of Task 4, Step 4 is the same, and `main` did not move (Task 0, Step 2): the proof holds. Do not run the breaks again.
+The commit `21a48df` then changed two docstrings of the test file and no code. So the file of the checkpoint (Task 4, Step 4) has another checksum than the file of the proof.
+
+- If the file has the checksum of Task 4, Step 4, and `main` did not move (Task 0, Step 2): the proof holds. The code of that file is the code of the proof, so do not run the breaks again.
 - If a review changed a test, or `main` moved: run the breaks of the changed part again (Step 3).
 
 - [ ] **Step 3: The rules for a run of the breaks**
@@ -1813,7 +1937,7 @@ A break that fails no test is not "equivalent" until every path to the changed l
 
 - [ ] **Step 4: Save the evidence**
 
-Copy the script of the breaks, its log and its result file into the evidence folder that the head of this task names. The session that wrote this plan holds them as `mutate.py`, `mutation-run.log` and `mutation-results.json`.
+Copy the script of the breaks, its log and its result file into the evidence folder that the head of this task names. The session that wrote this plan holds them as `mutate.py`, `mutation-run.log` and `mutation-results.json`. The final run of 2026-10-10 is in the subfolder `final-run-2026-10-10/` of that folder: `mutate.py`, `mutation-results.json`, `mutation-results-only.json` and the log `mutation-run-final.log`.
 
 ---
 
@@ -1835,7 +1959,9 @@ Expected: no output. Another session can run a timed test on the local k3d clust
 
 Run: `python -m pytest tests -q -p no:cacheprovider`
 
-Expected: `1971 passed`. That is the 1863 tests of `main` at `8ed08aa` and the 108 new cases. No test fails and no test is skipped.
+Expected: `1977 passed`. That is the 1863 tests of `main` at `8ed08aa` and the 114 new cases. No test fails and no test is skipped.
+
+The job `test` of the pull request gave `1977 passed` on Linux on 2026-10-10.
 
 - [ ] **Step 3: Run the three checks with the versions of CI**
 
@@ -1860,9 +1986,9 @@ Run this from the root of the worktree:
 docker run --rm --user 0 -v "$PWD":/src:ro provider-simulator:local sh -c "cp -r /src /tmp/work && cd /tmp/work && pip install -q pytest==9.1.1 pytest-timeout==2.4.0 && python -m pytest tests/test_simulator_ws.py -q -p no:cacheprovider"
 ```
 
-Expected: `167 passed`.
+Expected: `173 passed`.
 
-RAN on 2026-10-09 on the copy of `main` with the code of Tasks 1 to 4, with the image `provider-simulator:request-id`, a local build of 2026-10-08 for linux/arm64: Linux 6.12.68, Python 3.12.13, `167 passed in 41.16s`.
+RAN on 2026-10-09 on the copy of `main`, with the code of Tasks 1 to 4 before the reviews. The image was `provider-simulator:request-id`, a local build of 2026-10-08 for linux/arm64. The result: Linux 6.12.68, Python 3.12.13, `167 passed in 41.16s`.
 
 The job `test` of the pull request then runs the whole suite on `ubuntu-latest`. Open the log of a red check before you call it red. Three kinds of new test can differ on Linux: the tests that read a socket to its close, the tests with a time bound, and the one slow test.
 
@@ -1905,7 +2031,7 @@ The title: `test(ws): record today's WebSocket rows before the move into Listene
 
 Run: `gh pr checks <number>`
 
-Expected: `lint`, `test`, "Suite must pass before anything is published" and "Build and publish image" pass. The log of `test` must say `1971 passed`. Open the log of a red check before you call it red. The job `comment-jira` must print that it found no Jira key.
+Expected: `lint`, `test`, "Suite must pass before anything is published" and "Build and publish image" pass. The log of `test` must say `1977 passed` for the commits of this plan. The second step of the same pull request adds tests, and its plan gives the count after it. Open the log of a red check before you call it red. The job `comment-jira` must print that it found no Jira key.
 
 - [ ] **Step 3: Before the merge**
 
@@ -1913,7 +2039,7 @@ Three things must be clean before Victoria merges: a Copilot review, the skill `
 
 - [ ] **Step 4: After the merge**
 
-Read `tests/test_simulator_ws.py` on `main`, and read the run "Lint and test" of the merge commit. Its job `test` must say `1971 passed`. Pull request 3b then starts from that `main`.
+Read `tests/test_simulator_ws.py` on `main`, and read the run "Lint and test" of the merge commit. Its job `test` must say `1977 passed` for the commits of this plan. The next step, the move of the WebSocket code, is in the same pull request, and its plan gives the count after both steps.
 
 **Rollback:** revert this pull request. It holds tests only, so no behaviour changes with it or without it.
 
@@ -1921,9 +2047,11 @@ Read `tests/test_simulator_ws.py` on `main`, and read the run "Lint and test" of
 
 ## The breaks
 
-Each row is one run of 2026-10-09 on the copy of `main` at `8ed08aa`. One source file was changed in one place, the new tests ran, and the file was put back from a copy. "Failed" is the count of new cases that failed, of the 107 cases that ran. The one slow test ran only with the break of the wait of a hung upgrade, so that run had one case more.
+Each row is one run of 2026-10-09 on the copy of `main` at `8ed08aa`, with the new tests of that day. One source file was changed in one place, the new tests ran, and the file was put back from a copy. "Failed" is the count of new cases that failed, of the 107 cases that ran on that day. The one slow test ran only with the break of the wait of a hung upgrade, so that run had one case more.
 
-109 runs in all. Each one made one test or more fail. Each of the 108 new cases failed in one run or more.
+109 runs of 2026-10-09 in all. Each one made one test or more fail. Each of the 108 new cases of that day failed in one run or more.
+
+On 2026-10-10 all 118 breaks ran again, on the test file of the commit `dfe4b3b`: these 109 and nine more. The last section names the nine. The counts of the column "Failed" below are those of 2026-10-09. The evidence folder of the final run holds the counts of 2026-10-10 (Task 5, Step 4). Each break made one case or more fail, and each of the 114 new cases failed in one run or more.
 
 **The upgrade request: `_WsHandler.do_GET` and `_WsHandler._refuse_upgrade` in `server.py`.** 32 runs.
 
@@ -2076,7 +2204,7 @@ Each row is one run of 2026-10-09 on the copy of `main` at `8ed08aa`. One source
 
 ## Not in this plan
 
-1. Pull request 3b, the move of the subscribe frames into `Listener.serve` and of the row writers into `provider_simulator/listeners/`. It has a plan of its own. The guard test of section 8.4 of the design belongs to 3b.
+1. The next step, 3b of the design: the move of the subscribe frames into `Listener.serve` and of the row writers into `provider_simulator/listeners/`. It goes into the same pull request, and it has a plan file of its own, `2026-10-10-websocket-frames-use-listener-serve.md`. The guard test of section 8.4 of the design belongs to that step.
 2. A change of a source file. A fault that a test of this plan shows is recorded as it is.
 3. A change of the automation repository. Pull request 3a needs none: it changes no behaviour, so no skill page becomes untrue.
 4. A run of the automation suites (choice 10).
@@ -2096,7 +2224,7 @@ Each row is one run of 2026-10-09 on the copy of `main` at `8ed08aa`. One source
 | Section 12, 3a: the reply body of a refused upgrade | Task 1: the same three tests. The body is compared as JSON, and the bytes of a drop point byte for byte |
 | Section 12, 3a: no row for an upgrade that succeeds | Task 1: `test_an_upgrade_that_succeeds_gets_the_101_reply_and_writes_no_row` |
 | Section 12, 3a: the row of a pushed event: method, status and request id | Task 3: `test_a_pushed_event_writes_one_row_with_the_subscription_id_as_its_request_id`, one case for each of the four envelopes |
-| Section 12, 3a: the rows of a subscribe frame and an unsubscribe frame: method, status and request id | Task 2: `test_each_frame_writes_one_success_row_with_its_method_and_its_request_id`, `test_each_subscribe_method_and_each_unsubscribe_method_writes_a_row_with_its_own_name`, and the row of each fault test |
+| Section 12, 3a: the rows of a subscribe frame and an unsubscribe frame: method, status and request id | Task 2: `test_each_frame_writes_one_success_row_with_its_method_and_its_request_id`, `test_each_subscribe_method_and_each_unsubscribe_method_writes_a_row_with_its_own_name`, and the row of each fault test. For an unsubscribe frame under `error`: `test_an_unsubscribe_frame_of_a_provider_with_an_error_removes_nothing` |
 | Section 12, 3a: a frame that is not JSON gets no reply and no row | Task 4: `test_a_frame_that_the_adapter_cannot_read_gets_no_reply_and_no_row` |
 | Section 12.1, item 1: a refused upgrade: its HTTP status (503, 429, 400), its row with the method `ws_upgrade` and its status, and the forms of `drop_at` | Task 1, as above. On `main`: the three statuses, in `TestPreHandshakeFaults` |
 | Section 12.1, item 2: the row of a pushed event, the row of a subscribe frame, and a frame that is not JSON | Tasks 3, 2 and 4, as above |
@@ -2104,7 +2232,7 @@ Each row is one run of 2026-10-09 on the copy of `main` at `8ed08aa`. One source
 | Section 12.1, item 4: a `ws` row keeps `transport`, `port` and `method`, and a frame row carries the lava headers of the upgrade | Task 1: the three tests of a refused upgrade. Task 2: `test_each_frame_writes_one_success_row_with_its_method_and_its_request_id` and the test of a `down` provider. Task 3: the test of a pushed event. Each one compares `_endpoint(row)` and `lava_headers`. On `main`: `TestLavaHeaderCapture`, for a frame that goes to `Listener.serve` |
 | Section 12.1, item 5: the arrival row of an `http` call is written before the body is read | On `main`: `tests/test_simulator.py`, `test_rst_before_body_arrives_still_records_history`, `test_rst_before_body_does_not_double_record` and `test_arrival_stub_carries_lava_headers`. They must pass with no edit in 3b |
 | Section 12.1, item 6: `WsSubscriptions()` with no argument | On `main`: the control API of `tests/test_control_api_cache.py`, `tests/test_cache_sim_wire.py` and `tests/test_resp_control.py` is built with it |
-| Section 12.1, item 7, and section 14.6, point 2: a subscription belongs to one connection | Task 3: `test_an_unsubscribe_from_another_connection_answers_false_and_removes_nothing` and `test_a_close_removes_the_subscriptions_of_its_own_connection_only` |
+| Section 12.1, item 7, and section 14.6, point 2: a subscription belongs to one connection | Task 3: `test_an_unsubscribe_from_another_connection_answers_false_and_removes_nothing`, `test_a_close_removes_the_subscriptions_of_its_own_connection_only` and `test_a_connection_that_ends_with_no_close_frame_loses_its_subscriptions` |
 | Section 4.4, row 2: a subscribe frame reads five fault keys of a per-method override: `mode`, `latency_ms`, `drop_at`, `error_code` and `error_message` | Task 2. `mode`: `test_a_per_method_rate_limit_reaches_the_subscribe_frame_only`, `test_a_per_method_hang_gives_no_reply_to_the_subscribe_frame`, and the tests of the next two keys, which set `down` and `drop_connection`. `latency_ms`: `test_a_per_method_down_with_a_latency_closes_at_once_and_its_row_records_the_latency` and `test_a_per_method_latency_delays_the_subscribe_frame_only`. `drop_at`: `test_a_per_method_drop_point_reaches_the_subscribe_frame`. `error_code` and `error_message`: `test_a_per_method_error_code_and_message_reach_the_subscribe_frame_only`. A key that is not read: `test_a_per_method_error_probability_is_not_read_for_a_subscribe_frame` |
 | Section 9.2, rows 3 to 6: today's side | Task 2: the table "The expected values that pull request 3b changes" |
 | Section 9.3, difference 8: the upgrade applies no `latency_ms`, and its rows record 0 | Task 1: `test_a_refused_upgrade_does_not_wait_for_latency_ms` and `test_an_upgrade_that_succeeds_does_not_wait_for_latency_ms` |
@@ -2113,7 +2241,7 @@ Each row is one run of 2026-10-09 on the copy of `main` at `8ed08aa`. One source
 | Section 9.3, difference 11: the upgrade has its own reply bodies | Task 1: the bodies `{"error": "provider down"}`, `{"error": "rate limited"}` and `{"error": <error_message>}` |
 | Section 9.3, difference 12: each upgrade uses one count of the `fail_first_n` window | On `main`: `TestWsSequencedFaults`. Task 1: `test_each_upgrade_uses_one_count_of_the_fail_first_n_window`, with the rows |
 | Section 8.4: the adapter answers a wrong path and a bad upgrade request itself, with no listener and no row | Task 1: `test_a_request_for_another_path_gets_404_and_writes_no_row` and `test_a_request_with_no_upgrade_headers_gets_400_and_writes_no_row` |
-| Section 8.4: after 3b the adapter gives each text frame that is JSON to the listener | Task 4: `test_a_json_frame_with_no_method_goes_to_the_request_flow` and `test_a_list_of_requests_gets_the_batch_error_and_registers_no_subscription` hold what such a frame gets today when it names no subscribe method |
+| Section 8.4: after 3b the adapter gives each text frame that is JSON to the listener | Task 4: `test_a_json_frame_with_no_method_goes_to_the_request_flow` and `test_a_list_of_requests_gets_the_batch_error_and_registers_no_subscription` hold what such a frame gets today when it names no subscribe method. `test_a_frame_whose_method_is_a_list_or_an_object_closes_the_connection` holds a frame whose `method` is a list or an object: today the connection closes, and no row is written |
 | Section 14.6, the column U of the table: the fields that the upgrade applies | Task 1. These apply: `error_probability`, `error_message` and `drop_at` (the cases of the refusal test and of the drop test), the filters (`test_a_filter_that_does_not_name_the_ws_endpoint_leaves_the_upgrade_alone`) and `fail_first_n`. These do not: `latency_ms`, `error_code`, `http_status` and `rate_limit_body` (cases of the refusal test, and the two latency tests), `responses`, the corruption, and the pause (`test_the_upgrade_performs_no_pause`) |
 | Section 14.6, the column F of the table: the fields that a subscribe frame applies | Task 2. These apply: `mode`, `latency_ms`, a provider-wide `error_probability`, `error_code`, `error_message`, `rate_limit_body`, the five fault keys of `responses`, the corruption of a fault reply, `drop_at`, `fail_first_n` (`test_each_subscribe_frame_uses_one_count_of_the_fail_first_n_window`) and the filters (`test_a_filter_that_does_not_name_the_ws_endpoint_holds_everything_back`). These do not: a per-method `error_probability`, the content keys of `responses` (`test_a_content_key_of_responses_is_not_read_for_a_subscribe_frame`), the corruption of a success reply, and the pause (`test_a_subscribe_frame_performs_no_pause`) |
 | The handoff of 2026-10-09: the `down` row and the `hang` row of a subscribe frame record the configured latency and the method | Task 2: `test_a_subscribe_frame_of_a_down_provider_closes_the_connection_and_its_row_names_the_frame` and `test_a_subscribe_frame_of_a_hung_provider_gets_no_reply_and_the_connection_stays_open` |
@@ -2121,17 +2249,23 @@ Each row is one run of 2026-10-09 on the copy of `main` at `8ed08aa`. One source
 
 ## What the reviews changed after this plan was written
 
-Four task reviews and one review of the whole branch found no test that is wrong about today's behaviour. They found checks that could not fail, texts that the code does not support, behaviours with no test, and helpers whose failure did not show what arrived. The branch holds the fixes. So the branch differs from the code blocks of this plan in these places:
+The code blocks and the counts of this plan now hold the changes that the reviews made after this plan was written. Four task reviews and one review of the whole branch found no test that was wrong about today's behaviour. They found checks that could not fail, and texts that the code did not support. They also found behaviours with no test, and helpers whose failure did not show what arrived. The fixes made these changes:
 
-1. **Seven tests read `GET /ws/subscriptions` while the connection is open.** `_reader_loop` removes each subscription of a connection when that connection closes. So a read after the close cannot see a subscription that a fault registered. Five tests of Task 2: `test_each_subscribe_method_and_each_unsubscribe_method_writes_a_row_with_its_own_name`, `test_a_subscribe_frame_of_a_rate_limited_provider_gets_the_text_of_the_rate_limit`, `test_a_subscription_frame_of_a_provider_with_an_error_gets_the_error_reply`, `test_a_per_method_rate_limit_reaches_the_subscribe_frame_only` and `test_a_per_method_hang_gives_no_reply_to_the_subscribe_frame`. Two tests of Task 4: `test_a_json_frame_with_no_method_goes_to_the_request_flow` and `test_a_list_of_requests_gets_the_batch_error_and_registers_no_subscription`. In three tests the simulator closes the connection itself, and their read stays after the close.
-2. **The class of the upgrade tests has the name `TestTheUpgradeRequest`.** The code blocks and the text of this plan say `TestARefusedUpgrade`. Victoria chose the new name on 2026-10-10: nine of its fourteen tests do not hold a refusal by a fault.
-3. **Three new tests and one new case.** The new part has 56 test functions and 114 cases, and not 53 and 108.
-   - `test_an_unsubscribe_frame_of_a_provider_with_an_error_removes_nothing`, in `TestSubscribeAndUnsubscribeFrames`. The unsubscribe case of the error test names an id that no connection holds, so it cannot show a removal.
+1. **Seven tests started to read `GET /ws/subscriptions` while the connection was open.** `_reader_loop` removes each subscription of a connection when that connection closes. So a read after the close could not see a subscription that a fault registered. The five tests of Task 2: `test_each_subscribe_method_and_each_unsubscribe_method_writes_a_row_with_its_own_name`, `test_a_subscribe_frame_of_a_rate_limited_provider_gets_the_text_of_the_rate_limit`, `test_a_subscription_frame_of_a_provider_with_an_error_gets_the_error_reply`, `test_a_per_method_rate_limit_reaches_the_subscribe_frame_only` and `test_a_per_method_hang_gives_no_reply_to_the_subscribe_frame`. The two tests of Task 4: `test_a_json_frame_with_no_method_goes_to_the_request_flow` and `test_a_list_of_requests_gets_the_batch_error_and_registers_no_subscription`. In three tests the simulator closed the connection itself, and their read stayed after the close.
+2. **The class of the upgrade tests got the name `TestTheUpgradeRequest`.** On 2026-10-09 this plan said `TestARefusedUpgrade`. Victoria chose the new name on 2026-10-10: nine of its fourteen tests do not hold a refusal by a fault.
+3. **The reviews added three tests and one case.** On 2026-10-09 the new part had 53 test functions and 108 cases. After the reviews it has 56 and 114.
+   - `test_an_unsubscribe_frame_of_a_provider_with_an_error_removes_nothing`, in `TestSubscribeAndUnsubscribeFrames`. The unsubscribe case of the error test named an id that no connection held, so it could not show a removal.
    - `test_a_connection_that_ends_with_no_close_frame_loses_its_subscriptions`, two cases, in `TestASubscriptionBelongsToOneConnection`: the client closes the socket, and a `down` provider closes the connection.
    - `test_a_frame_whose_method_is_a_list_or_an_object_closes_the_connection`, two cases, in `TestFramesOutsideTheSubscribeCode`. It records a defect of `main` and does not judge it: `server.py` raises `TypeError` for such a frame before it writes a row. Victoria chose on 2026-10-10 to record it as it is.
    - The case `error` of `test_an_event_reaches_its_subscriber_under_each_mode_of_the_provider`.
-4. **A helper that fails shows what arrived.** `_read_until_the_close`, `_refusal`, `_payload`, `_reply`, `_assert_no_frame` and `_subscribe` fail with a text that holds the bytes or the reply. `_payload` also requires a text frame, so each test that reads a reply holds the frame type. `_refusal` closes its socket in each case.
-5. **`test_a_hung_upgrade_gets_no_byte_and_writes_one_row` reads its row with `_rows_when_complete`**, and not after a fixed time.
-6. **Texts that were not exact.** The comment at the head of the new part says that three places write a history row, and that two of them decide a fault. The docstring of the dropped upgrade says 48 bytes: Task 1 of this plan said 49, and it is corrected in place. These docstrings say only what their test holds: the row of the other frame in the test of a per-method latency; the kinds of event that are no object; the frame that goes to `Listener.serve`, with the class that holds the rows of a subscribe frame; and the row that `_refuse_upgrade` writes. Eight sentences of more than 25 words are split.
-7. **The counts.** The file gives `173 passed`: the 59 tests of `main` and the 114 new cases. The whole suite has 1977 tests.
-8. **The breaks.** The section "The breaks" has the 109 runs of 2026-10-09 on the code blocks of this plan. Nine breaks were added after it: four for the tests of item 1, and five for the tests and the frame-type check of items 3 and 4. On 2026-10-10 all 118 ran on the final test file. Each one made one case or more fail, and each of the 114 cases failed in one run or more. The last commit of the branch changed two docstrings after that run.
+4. **The helpers that fail began to show what arrived.** `_read_until_the_close`, `_refusal`, `_payload`, `_reply`, `_assert_no_frame` and `_subscribe` got a failure text that holds the bytes or the reply. `_payload` also got a check for a text frame, so each test that reads a reply holds the frame type. `_refusal` got a close of its socket in each case.
+5. **`test_a_hung_upgrade_gets_no_byte_and_writes_one_row` read its row after a fixed time.** A review changed it to `_rows_when_complete`.
+6. **Texts that were not exact.** The reviews corrected the comment at the head of the new part. It names three places that write a history row, and two of them decide a fault. The reviews corrected the docstring of the dropped upgrade to 48 bytes. Task 1 of this plan said 49 first, and a review corrected the plan in place. The reviews changed four more docstrings to say only what their test holds:
+   - The row of the other frame, in the test of a per-method latency.
+   - The kinds of event that are no object.
+   - The frame that goes to `Listener.serve`, with the class that holds the rows of a subscribe frame.
+   - The row that `_refuse_upgrade` writes.
+
+   The reviews also split eight sentences of more than 25 words.
+7. **The counts rose with the new tests.** The file gave `173 passed`: the 59 tests of `main` and the 114 new cases. The whole suite gave `1977 passed`.
+8. **The breaks.** The section "The breaks" holds the 109 runs of 2026-10-09 on the code blocks before the reviews. The reviews added nine breaks. Four are for the tests of item 1, and five are for the tests and the frame-type check of items 3 and 4. On 2026-10-10 all 118 ran on the test file of the commit `dfe4b3b`. Each one made one case or more fail, and each of the 114 cases failed in one run or more. The commit `21a48df` changed two docstrings after that run, and no code.
