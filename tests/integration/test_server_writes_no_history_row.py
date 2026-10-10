@@ -9,6 +9,11 @@ fail when a line that decides a fault or writes a row comes back.
 
 The guard reads the syntax tree and not the text. So a comment, a docstring or
 a text that names a forbidden thing does not count.
+
+The guard has limits. It reads ``server.py`` only. It finds a forbidden name
+that the code writes, and it does not find one that the code reaches in
+another way: a row writer behind an alias or a callback, a ``getattr`` call,
+or an import through a text.
 """
 
 import ast
@@ -75,8 +80,8 @@ def test_server_py_calls_no_method_that_writes_a_history_row():
 
 def test_the_guard_finds_each_forbidden_line_of_a_sample_source():
     """The sample has four forbidden lines: the import of ``fault_policy`` and
-    one call of each method that writes a row. The guard also finds each other
-    form of a line that uses ``fault_policy``."""
+    one call of each method that writes a row. The guard also finds four more
+    forms of a line that uses ``fault_policy``."""
     assert _forbidden(_SAMPLE) == [
         "line 3: fault_policy",
         "line 8: record_arrival()",

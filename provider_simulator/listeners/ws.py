@@ -1,12 +1,13 @@
 """The WebSocket listener, the connection object and the subscription registry.
 
 ``JsonRpcWsListener`` is the listener of a ``(jsonrpc, ws, port)`` endpoint. It
-is a ``JsonRpcListener``: each JSON frame goes through ``serve()``, with the
-same chain and the same fault handling as a request of the http endpoint. Two
-things are its own. It answers a subscribe frame and an unsubscribe frame from
-the registry, and it asks no chain for them (``build_content``). It also
-decides the upgrade request that opens a connection (``decide_upgrade``), and
-it writes the history row of a refused upgrade.
+is a ``JsonRpcListener``: each frame that the adapter gives it goes through
+``serve()``, with the same chain and the same fault handling as a request of
+the http endpoint. Three things are its own. It answers a subscribe frame and
+an unsubscribe frame from the subscription registry, and it asks no chain for
+them (``build_content``). It removes the subscriptions of a connection that
+ended (``release``). It decides the upgrade request that opens a connection
+(``decide_upgrade``), and it writes the history row of a refused upgrade.
 
 ``WsConnection`` is one connection, as the listener needs it: the queue that
 the writer thread of the connection drains, and the ids of the subscriptions
@@ -16,7 +17,8 @@ and it gives it to ``serve()`` in ``RawRequest.connection``.
 ``WsSubscriptions`` is the registry of the subscriptions. A subscribe frame
 registers a subscription with the queue of its connection. ``POST /ws/emit``
 pushes an event onto that queue, and the writer thread of the connection sends
-it. The registry writes the history row of each pushed event. An unsubscribe
+it. With a ``Registry`` of providers, ``WsSubscriptions`` also writes the
+history row of each pushed event. An unsubscribe
 frame of the same connection, or the end of the connection, removes the
 subscription. One running simulator has one registry.
 
@@ -120,7 +122,7 @@ class WsSubscriptions:
         """Push an event to the subscription's queue. Returns ``"emitted"``,
         ``"unknown"`` (no such / closed subscription), or ``"full"``.
 
-        The queue gets ``frame_of(sub, event)``. With a registry of providers,
+        The queue gets ``frame_of(sub, event)``. With a ``Registry`` of providers,
         a push that reached the queue then gets one ``success`` row. The row is
         in the history of the provider of the subscription, so a /history read
         shows the push next to the served calls. A push asks no fault policy. A

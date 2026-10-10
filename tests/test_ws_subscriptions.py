@@ -283,6 +283,11 @@ def test_an_unsubscribe_frame_removes_a_subscription_of_its_own_connection_only(
             ("eth_subscribe", "success", 0, 7),
             id="a-canned-body",
         ),
+        pytest.param(
+            {"responses": {"eth_subscribe": {"mode": "hang", "latency_ms": 250}}},
+            ("eth_subscribe", "hang", 0, 7),
+            id="a-per-method-hang-with-a-latency",
+        ),
     ],
 )
 def test_a_fault_or_a_canned_body_on_a_subscribe_frame_registers_nothing(block, expected_row):
@@ -334,3 +339,60 @@ def test_a_subscribe_frame_with_no_connection_raises_a_clear_error():
         _serve_frame(listener, None, "eth_subscribe", ["newHeads"], 7)
 
     assert listener.subscriptions.list() == []
+
+
+@pytest.mark.parametrize(
+    "override, expected_body, expected_row",
+    [
+        pytest.param(
+            {"error_probability": 1.0},
+            {"jsonrpc": "2.0", "id": 9, "error": {"code": -32000, "message": "Internal error"}},
+            ("eth_unsubscribe", "error", 0, 9),
+            id="a-per-method-error-probability",
+        ),
+        pytest.param(
+            {"body": {"jsonrpc": "2.0", "id": 1, "result": "canned"}},
+            {"jsonrpc": "2.0", "id": 1, "result": "canned"},
+            ("eth_unsubscribe", "success", 0, 9),
+            id="a-canned-body",
+        ),
+    ],
+)
+def test_a_per_method_error_probability_and_a_canned_body_reach_an_unsubscribe_frame(
+    override, expected_body, expected_row
+):
+    """An unsubscribe frame goes through the request flow too. A per-method
+    `error_probability` gives the error reply, and a canned `body` gives that
+    body. In both cases the frame removes nothing."""
+    listener, provider = _ws_listener()
+    connection = WsConnection(queue.Queue())
+    subscription_id = _serve_frame(listener, connection, "eth_subscribe", ["newHeads"], 1).body["result"]
+    provider.scenario.update({"responses": {"eth_unsubscribe": override}})
+
+    result = _serve_frame(listener, connection, "eth_unsubscribe", [subscription_id], 9)
+
+    assert result.action == "respond"
+    assert result.body == expected_body
+    assert [entry["subscription_id"] for entry in listener.subscriptions.list()] == [subscription_id]
+    assert connection.subscription_ids == {subscription_id}
+    assert [_facts(row) for row in provider.log.get_history()] == [("eth_subscribe", "success", 0, 1), expected_row]
+
+
+@pytest.mark.parametrize("mode", ["hang", "error", "drop_connection"])
+def test_a_canned_body_for_a_subscribe_method_comes_before_each_provider_wide_fault_but_down(mode):
+    """The request flow reads a canned `body` before the fault of the provider.
+    So the frame gets that body under `hang`, `error` and `drop_connection`,
+    with a `success` row, and it registers no subscription. Only a
+    provider-wide `down` comes before the canned body."""
+    listener, provider = _ws_listener()
+    connection = WsConnection(queue.Queue())
+    canned = {"jsonrpc": "2.0", "id": 1, "result": "0xcanned"}
+    provider.scenario.update({"mode": mode, "responses": {"eth_subscribe": {"body": canned}}})
+
+    result = _serve_frame(listener, connection, "eth_subscribe", ["newHeads"], 7)
+
+    assert result.action == "respond"
+    assert result.body == canned
+    assert listener.subscriptions.list() == []
+    assert connection.subscription_ids == set()
+    assert [_facts(row) for row in provider.log.get_history()] == [("eth_subscribe", "success", 0, 7)]

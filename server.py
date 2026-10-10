@@ -20,7 +20,9 @@ the registry and PERFORMS each listener's plan:
   thread and the writer thread of each connection. The provider's
   ``JsonRpcWsListener`` decides the upgrade request, and this module performs
   the decision. Each JSON TEXT frame goes through ``Listener.serve()`` of that
-  listener, which also answers a subscribe frame and an unsubscribe frame.
+  listener, which also answers a subscribe frame and an unsubscribe frame. A
+  JSON frame whose method is a list or an object is the one exception: the
+  adapter closes the connection for it.
 - The control API (port 19000) dispatches each route to a ``ControlApi``
   method and writes its (status, dict) result as JSON.
 
@@ -386,11 +388,11 @@ class _WsHandler(BaseHTTPRequestHandler):
     listener decides. What is WS-specific lives here: the handshake bytes, the
     frame codec, and the reader/writer thread pair.
 
-    The adapter handles four cases with no listener, and each one writes no
-    history row: a wrong path (404), a bad upgrade request (400), a text frame
-    that is not JSON or a binary frame (no reply), and a JSON frame whose
-    method is a list or an object (the connection closes). It also answers a
-    ping with a pong, and it ends the connection at a close frame.
+    The adapter handles these cases with no listener, and each one writes no
+    history row: a wrong path (404); a bad upgrade request (400); a ping frame
+    (a pong); a close frame (the connection closes); a binary frame, or a text
+    frame that is not JSON (no reply); and a JSON frame whose method is a list
+    or an object (the connection closes).
     """
 
     timeout = 30

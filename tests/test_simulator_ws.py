@@ -1911,8 +1911,8 @@ class TestTheUpgradeRequest:
 class TestSubscribeAndUnsubscribeFrames:
     """A subscribe frame and an unsubscribe frame.
 
-    These frames go through the request flow, `Listener.serve`, as each other
-    JSON frame does. `JsonRpcWsListener.build_content` gives their success
+    These frames go through the request flow, `Listener.serve`, as a frame such
+    as `eth_blockNumber` does. `JsonRpcWsListener.build_content` gives their success
     content from the subscription registry, and it asks no chain for them.
     """
 
