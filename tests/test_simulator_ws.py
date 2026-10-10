@@ -1400,16 +1400,16 @@ class TestWsSequencedFaults:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# What WebSocket does today, in the places that decide a fault outside
+# What WebSocket does today, in the places that write a history row outside
 # Listener.serve
 #
-# Three places of server.py decide a WebSocket fault and write its history row:
-# the upgrade request (_WsHandler.do_GET and _refuse_upgrade), a subscribe
-# frame and an unsubscribe frame (_serve_subscription_frame), and a pushed
-# event (_WireSubscriptions.emit). The tests below record the reply and the row
-# of each place. Each expected value is written out by hand. When a change of
-# that code makes a value fail, the value is not edited to pass: the change is
-# a change of behaviour, or it is a defect.
+# Three places of server.py write a history row outside Listener.serve. The
+# upgrade request: _WsHandler.do_GET and _refuse_upgrade. A subscribe frame and
+# an unsubscribe frame: _serve_subscription_frame. A pushed event:
+# _WireSubscriptions.emit. The first two also decide a fault. The tests below
+# record the reply and the row of each place. Each expected value is written
+# out by hand. A change of that code can make a value fail. Then the value is
+# not edited to pass: the change is a change of behaviour, or it is a defect.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # The sample key of RFC 6455, section 1.3. The RFC gives the accept value
@@ -1590,8 +1590,9 @@ def _subscribe(sock, method="eth_subscribe", frame_id=1):
     return _reply(sock)["result"]
 
 
-class TestARefusedUpgrade:
-    """The upgrade request that opens a WebSocket, on a provider with a fault.
+class TestTheUpgradeRequest:
+    """The upgrade request that opens a WebSocket: a refusal, and an upgrade
+    that succeeds.
 
     The upgrade is not a request of the request flow. `_WsHandler.do_GET`
     asks the fault policy itself, and `_refuse_upgrade` writes the row.
@@ -1642,9 +1643,10 @@ class TestARefusedUpgrade:
         self, sim, block, status, body, method, row_status
     ):
         """Each fault that answers refuses the upgrade with its own HTTP status
-        and its own JSON body. The refusal writes one complete row: the method
-        `*` for `down` and `ws_upgrade` for each other fault, `latency_ms` 0,
-        no request id, and the lava headers of the upgrade request."""
+        and its own JSON body. The refusal writes one complete row. Its method
+        is `*` for `down` and `ws_upgrade` for each other fault. The row has
+        `latency_ms` 0, no request id, and the lava headers of the upgrade
+        request."""
         _set_scenario(sim, {**block, "transports": ["ws"]})
 
         answer = _refusal(_request_upgrade(lava_headers=_LAVA_HEADERS))
@@ -1700,7 +1702,7 @@ class TestARefusedUpgrade:
     def test_a_dropped_upgrade_gets_the_bytes_of_its_drop_point_and_writes_one_row(self, sim, drop_at, reply):
         """`drop_connection` closes the connection of the upgrade. The drop
         point says which bytes arrive first: none, the complete 101 reply, or
-        the first 49 bytes of it."""
+        the first 48 bytes of it."""
         block = {"mode": "drop_connection", "transports": ["ws"]}
         if drop_at is not None:
             block["drop_at"] = drop_at
@@ -1879,10 +1881,10 @@ class TestSubscribeAndUnsubscribeFrames:
     """
 
     def test_each_frame_writes_one_success_row_with_its_method_and_its_request_id(self, sim):
-        """A subscribe frame, an unsubscribe frame that removes the
-        subscription, and an unsubscribe frame that removes nothing: each one
-        writes one `success` row with the method and the id of the frame. Each
-        row carries the lava headers of the upgrade request."""
+        """Three frames: a subscribe frame, an unsubscribe frame that removes
+        the subscription, and an unsubscribe frame that removes nothing. Each
+        one writes one `success` row with the method and the id of the frame.
+        Each row carries the lava headers of the upgrade request."""
         with _websocket(lava_headers=_LAVA_HEADERS) as sock:
             _send_frame(sock, {"jsonrpc": "2.0", "method": "eth_subscribe", "params": ["newHeads"], "id": 41})
             subscription_id = _reply(sock)["result"]
@@ -2097,7 +2099,7 @@ class TestSubscribeAndUnsubscribeFrames:
         self, sim, block, frame, reply, expected_row
     ):
         """`error`, or an `error_probability` of the provider, on a subscribe
-        frame or an unsubscribe frame: the reply is the JSON-RPC error of the
+        frame or an unsubscribe frame. The reply is the JSON-RPC error of the
         scenario, and no subscription is registered."""
         with _websocket() as sock:
             _set_scenario(sim, {**block, "transports": ["ws"]})
@@ -2196,8 +2198,8 @@ class TestSubscribeAndUnsubscribeFrames:
         assert [_facts(row) for row in rows] == [("eth_subscribe", row_status, 0, 7)]
 
     def test_a_per_method_rate_limit_reaches_the_subscribe_frame_only(self, sim):
-        """An entry of `responses` for `eth_subscribe` with `mode: rate_limit`:
-        the subscribe frame gets the rate-limit text, and another frame of the
+        """An entry of `responses` for `eth_subscribe` with `mode: rate_limit`.
+        The subscribe frame gets the rate-limit text, and another frame of the
         same connection gets its result."""
         _set_scenario(
             sim, {"mode": "success", "transports": ["ws"], "responses": {"eth_subscribe": {"mode": "rate_limit"}}}
@@ -2256,7 +2258,7 @@ class TestSubscribeAndUnsubscribeFrames:
 
     def test_a_per_method_drop_point_reaches_the_subscribe_frame(self, sim):
         """An entry of `responses` for `eth_subscribe` with `drop_connection`
-        and the drop point `mid_body`: the frame header that declares 100
+        and the drop point `mid_body`. The frame header that declares 100
         bytes arrives with 50 bytes, and the connection closes."""
         _set_scenario(
             sim,
@@ -2276,8 +2278,8 @@ class TestSubscribeAndUnsubscribeFrames:
 
     def test_a_per_method_latency_delays_the_subscribe_frame_only(self, sim):
         """An entry of `responses` for `eth_subscribe` with a latency: the
-        subscribe frame waits and its row records the latency. Another frame of
-        the same connection does not wait, and its row records 0."""
+        subscribe frame waits and its row records the latency. The row of
+        another frame of the same connection records 0."""
         _set_scenario(
             sim, {"mode": "success", "transports": ["ws"], "responses": {"eth_subscribe": {"latency_ms": 300}}}
         )
@@ -2552,8 +2554,9 @@ class TestAPushedEvent:
         ],
     )
     def test_an_event_that_is_no_object_is_pushed_as_an_empty_object(self, sim, body):
-        """The control API accepts an event of each JSON type. An event that is
-        no object reaches the caller as an empty object, and it writes its row."""
+        """The control API accepts an event that is a text, a number, a list or
+        `null`, and a body with no event. Each one reaches the caller as an
+        empty object, and it writes its row."""
         with _websocket() as sock:
             subscription_id = _subscribe(sock)
             answer = _emit(sim, {"subscription_id": subscription_id, **body})
@@ -2751,10 +2754,11 @@ class TestFramesOutsideTheSubscribeCode:
         ],
     )
     def test_the_down_row_and_the_hang_row_of_another_frame_record_no_latency(self, sim, block, expected_row):
-        """A frame that is no subscribe frame goes to `Listener.serve`. Its
-        `down` row has the method `*`, no request id and `latency_ms` 0, and
-        its `hang` row records 0. The rows of a subscribe frame differ: the
-        tests of the class above hold them."""
+        """A frame that is neither a subscribe frame nor an unsubscribe frame
+        goes to `Listener.serve`. Its `down` row has the method `*`, no request
+        id and `latency_ms` 0, and its `hang` row records 0. The rows of a
+        subscribe frame differ: the tests of
+        `TestSubscribeAndUnsubscribeFrames` hold them."""
         with _websocket() as sock:
             _set_scenario(sim, {**block, "transports": ["ws"]})
             _send_frame(sock, _BLOCK_NUMBER)
@@ -2764,7 +2768,7 @@ class TestFramesOutsideTheSubscribeCode:
 
     def test_a_per_method_down_with_a_latency_closes_another_frame_at_once(self, sim):
         """An entry of `responses` with `mode: down` and a latency, for a frame
-        that goes to `Listener.serve`: the row records the method, the id and
+        that goes to `Listener.serve`. The row records the method, the id and
         the latency. The WebSocket adapter closes the connection with no wait."""
         _set_scenario(
             sim,
