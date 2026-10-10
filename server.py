@@ -387,9 +387,10 @@ class _WsHandler(BaseHTTPRequestHandler):
     frame codec, and the reader/writer thread pair.
 
     The adapter handles four cases with no listener, and each one writes no
-    history row: a wrong path (404), a bad upgrade request (400), a frame that
-    is not JSON text (no reply), and a JSON frame whose method is a list or an
-    object (the connection closes).
+    history row: a wrong path (404), a bad upgrade request (400), a text frame
+    that is not JSON or a binary frame (no reply), and a JSON frame whose
+    method is a list or an object (the connection closes). It also answers a
+    ping with a pong, and it ends the connection at a close frame.
     """
 
     timeout = 30

@@ -120,10 +120,11 @@ class WsSubscriptions:
         """Push an event to the subscription's queue. Returns ``"emitted"``,
         ``"unknown"`` (no such / closed subscription), or ``"full"``.
 
-        The queue gets ``frame_of(sub, event)``. Then the push gets one
-        ``success`` row in the history of the provider of the subscription, so
-        a /history read shows the push next to the served calls. A push asks no
-        fault policy. A full queue writes no row.
+        The queue gets ``frame_of(sub, event)``. With a registry of providers,
+        a push that reached the queue then gets one ``success`` row. The row is
+        in the history of the provider of the subscription, so a /history read
+        shows the push next to the served calls. A push asks no fault policy. A
+        full queue writes no row.
         """
         sub = self.get(sub_id)
         if sub is None or sub.closed:
