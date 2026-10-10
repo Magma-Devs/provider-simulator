@@ -21,7 +21,8 @@ Three parties meet here, and each owns one thing:
   until a pass that STARTED after the ask has finished. A report from an older
   pass is not accepted: it describes the port before the scenario changed, and
   a caller that trusted it would be told the port had closed while it was
-  still open.
+  still open. The control API asks only a gate whose ``last_report()`` differs
+  from the wish. So a write that moves no port waits for no port.
 
 No grpc import here on purpose: the control API imports this module and has to
 stay importable on a machine without grpcio.
@@ -45,6 +46,7 @@ class PortGate:
         self._asked = 0  # passes asked for so far
         self._done = 0  # the newest ask a FINISHED pass had already seen
         self._open = False  # no server until the first pass starts one
+        self._reported = False  # no pass has finished
         self._wake: Callable[[], object] | None = None
 
     def wants_closed(self) -> bool:
@@ -71,9 +73,25 @@ class PortGate:
         with self._cond:
             self._done = max(self._done, seen)
             self._open = is_open
+            self._reported = True
             self._cond.notify_all()
 
     # ── the control API's side ───────────────────────────────────────────────
+    def last_report(self) -> bool | None:
+        """The state that the newest finished pass left the port in.
+
+        True is open and False is closed. None means that the gate has no
+        report to trust. Either no pass has finished, or an ask has no answer
+        yet: no pass that began after the newest ask has finished.
+
+        The control API waits for a port only when this value differs from the
+        state that the scenario asks for.
+        """
+        with self._cond:
+            if not self._reported or self._done < self._asked:
+                return None
+            return self._open
+
     def ask(self) -> int:
         """Ask the serve loop for a pass at once. Returns the ticket to wait on."""
         with self._cond:

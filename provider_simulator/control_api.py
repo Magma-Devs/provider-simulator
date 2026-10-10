@@ -510,13 +510,19 @@ class ControlApi:
     def _settle_ports(self, wishes: list) -> str:
         """Wait until each port is in the state wished for; "" when all are.
 
-        Every gate is asked first and waited on second, so the ports change
-        side by side and the whole call is bounded by one ``_PORT_SETTLE_S``.
-        A port that does not get there is named, with its pool and provider:
-        a 200 for a state that was not reached would let a test connect to a
-        port it believes closed.
+        A gate whose last report is the wished state is not asked. The call
+        asks for no pass and tries no connection for it, so a write that moves
+        no port waits for no port. A gate with no report is asked. A gate whose
+        newest ask has no answer yet is asked too: after an error for a port,
+        the next call waits for that port again.
+
+        Each gate that needs a pass is asked first and waited on second, so the
+        ports change side by side and the whole call is bounded by one
+        ``_PORT_SETTLE_S``. A port that does not get there is named, with its
+        pool and provider: a 200 for a state that was not reached would let a
+        test connect to a port it believes closed.
         """
-        asked = [(gate, want_open, gate.ask()) for gate, want_open in wishes]
+        asked = [(gate, want_open, gate.ask()) for gate, want_open in wishes if gate.last_report() != want_open]
         deadline = time.monotonic() + _PORT_SETTLE_S
         stuck = []
         for gate, want_open, ticket in asked:

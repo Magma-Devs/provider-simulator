@@ -117,6 +117,18 @@ def test_clearing_history_waits_for_no_port(monkeypatch):
     assert st == 200
 
 
+def test_a_write_that_moves_no_port_waits_for_no_gate(monkeypatch):
+    """The gate reported "open", and mode="down" needs the port open. No port
+    has to move, so the call waits for no gate. This gate has no listener: a
+    wait would take the whole settle time and answer 500."""
+    monkeypatch.setattr(control_api, "_PORT_SETTLE_S", 0.2)
+    api, port = _api_with_a_gate_nothing_serves()
+    gate = api.port_gates[port]
+    gate.end_pass(gate.begin_pass(), is_open=True)
+    st, resp = api.apply_scenario({"providers": {KEY: {"mode": "down"}}})
+    assert st == 200, resp
+
+
 def test_the_ports_closed_by_a_scenario_are_read_from_the_scenario():
     api, port = _api_with_a_gate_nothing_serves()
     assert api.ports_closed_by_scenario() == []
