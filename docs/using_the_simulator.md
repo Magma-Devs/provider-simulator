@@ -252,10 +252,11 @@ curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" 
 
 A `responses` entry can also hold a fault for one method: `mode`, `latency_ms`, `error_probability`, `error_code`, `error_message`, `http_status` or `drop_at`. The fault reaches the requests of that method only. It works on JSON-RPC, REST, Tendermint RPC and gRPC. `http_status` has no effect on gRPC, because a gRPC status has no HTTP status. It has no effect on a WebSocket frame, because a frame has no HTTP status. The key of the entry is the method name. On REST the key is the `[verb, template]` pair, and `responses` is then a list of pairs: `"responses": [[["GET", "/cosmos/base/tendermint/v1beta1/blocks/latest"], {"mode": "rate_limit"}]]`. An object with a text key is stored for a REST provider and matches no route. The control API refuses `mode=error` and `mode=port_closed` in an entry.
 
-A WebSocket subscribe frame and a WebSocket unsubscribe frame go through the same request flow as each other request. Two results of that:
+A WebSocket subscribe frame and a WebSocket unsubscribe frame go through the same request flow as each other request. Three results of that:
 
 - A `corruption_mode` reaches the reply of a subscribe frame. The caller gets the corrupted reply, the simulator registers the subscription, and `GET /ws/subscriptions` shows it.
 - A canned `body` in the `responses` entry of a subscribe method answers the frame with that body. The simulator registers no subscription.
+- The content keys `result`, `error_stub` and `error` of a `responses` entry do not reach a subscribe frame or an unsubscribe frame. The entry `default` does not reach them either. The listener asks no chain for these two frames.
 
 ### Per-method error override (named catalogue)
 

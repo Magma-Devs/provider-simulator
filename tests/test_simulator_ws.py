@@ -2459,7 +2459,10 @@ class TestSubscribeAndUnsubscribeFrames:
 
         assert subscribed == canned
         assert other == canned
-        assert _facts(rows[0]) == ("eth_subscribe", "success", 0, 7)
+        assert [_facts(row) for row in rows] == [
+            ("eth_subscribe", "success", 0, 7),
+            ("eth_blockNumber", "success", 0, 8),
+        ]
         assert subscriptions == []
 
     @pytest.mark.parametrize(
@@ -2509,7 +2512,12 @@ class TestSubscribeAndUnsubscribeFrames:
         assert set(subscribed) == {"jsonrpc", "id", "result"}
         assert re.fullmatch(r"0x[0-9a-f]{32}", subscribed["result"]), subscribed
         assert other_facts == other_reply
-        assert _facts(rows[0]) == ("eth_subscribe", "success", 0, 7)
+        # The second row is the row of eth_blockNumber. A reply with an error envelope gets the status "error".
+        other_status = "error" if other_reply[0] == "error" else "success"
+        assert [_facts(row) for row in rows] == [
+            ("eth_subscribe", "success", 0, 7),
+            ("eth_blockNumber", other_status, 0, 8),
+        ]
         assert [entry["subscription_id"] for entry in subscriptions] == [subscribed["result"]]
 
     def test_a_subscribe_frame_performs_no_pause(self, sim):

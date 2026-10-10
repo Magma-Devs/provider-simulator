@@ -40,6 +40,7 @@ import socket
 import socketserver
 import threading
 import time
+import typing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -400,7 +401,8 @@ class _WsHandler(BaseHTTPRequestHandler):
     server: _SimThreadingHTTPServer
 
     def do_GET(self):
-        listener = self.server.listener
+        # The ws row of _HTTP_ADAPTERS gives this handler a JsonRpcWsListener.
+        listener = typing.cast(JsonRpcWsListener, self.server.listener)
         provider = listener.provider
 
         # Only /ws accepts the upgrade — wrong-path mistakes fail loudly.
@@ -495,7 +497,7 @@ class _WsHandler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
-    def _reader_loop(self, listener: Listener, out_queue: "queue.Queue", lava: dict) -> None:
+    def _reader_loop(self, listener: JsonRpcWsListener, out_queue: "queue.Queue", lava: dict) -> None:
         # One object for the life of the connection. The listener registers
         # each subscription of the connection on it.
         connection = WsConnection(out_queue)
