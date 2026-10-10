@@ -91,7 +91,7 @@ grpcurl -plaintext -d '{}' localhost:18548 cosmos.base.tendermint.v1beta1.Servic
 | `mode=down` | yes | aborts `UNAVAILABLE` |
 | `mode=hang` | yes | sleeps 30s then `CANCELLED` |
 | `mode=drop_connection` | yes (with caveats) | unary RPCs can't legally stream mid-body, so `mid_body` collapses to the same shape as `after_headers` until streaming support lands |
-| `mode=port_closed` | yes, and only on gRPC | not a status reply. The endpoint's gRPC server is stopped: the listening socket and every open connection are closed, a new TCP connection is refused, and the provider records nothing. The control call returns after the port has changed. See the README section on `port_closed` for what is refused |
+| `mode=port_closed` | yes | not a status reply. The endpoint's gRPC server is stopped: the listening socket and every open connection are closed, a new TCP connection is refused, and the provider records nothing. The control call returns after the port has changed. The mode closes an `http` port and a `ws` port too. See the README section on `port_closed` for what is refused |
 | `mode=rate_limit` | yes | aborts `RESOURCE_EXHAUSTED` |
 | `mode=error` | yes | symbolic `error_message` (e.g. `RESOURCE_EXHAUSTED`) wins over integer `error_code`; unrecognised values fall back to `UNKNOWN` |
 | `latency_ms` / `error_probability` | yes | identical semantics |

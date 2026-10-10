@@ -1,12 +1,13 @@
 """mode="port_closed" through the control API routes, with no socket.
 
 The same style as test_control_api.py: a real Registry, a ControlApi, no
-listener. That is exactly the case these tests are about. With no gRPC listener
+listener. That is exactly the case these tests are about. With no listener
 running there is nothing that could close a port, so the API has to refuse, or
 answer an error, instead of storing a fault nothing performs.
 
 What a running listener does with the mode is in
-test_simulator_grpc_port_closed.py.
+test_simulator_grpc_port_closed.py for a gRPC port, and in
+integration/test_http_and_ws_port_closed.py for an http port and a ws port.
 """
 
 import pytest
@@ -39,23 +40,24 @@ def test_port_closed_is_one_of_the_modes():
     assert "'port_closed'" in resp["error"], "the list of allowed modes must name it"
 
 
-def test_with_no_grpc_listener_it_is_refused_and_not_stored():
+def test_with_no_listener_it_is_refused_and_not_stored():
     api = _api()
     st, resp = api.apply_scenario({"providers": {KEY: {"mode": "port_closed"}}})
     assert st == 409
-    assert "runs no gRPC listener there" in resp["error"]
+    assert "runs no listener there" in resp["error"]
     assert "18548" in resp["error"], "the refusal must name the port"
     assert api.registry.provider("lava-sim-grpc", "1").scenario.snapshot()["mode"] == "success"
 
 
-def test_an_endpoint_that_is_not_grpc_is_a_400_whether_or_not_a_listener_runs():
-    """The reason that can never change comes first. A caller told "no listener"
-    for a JSON-RPC provider would go looking for a listener that cannot exist."""
+def test_an_http_and_ws_provider_with_no_listener_is_refused_and_not_stored():
+    """An http port and a ws port can close, as a gRPC port can. So this API,
+    which has no listener, refuses the mode for the same reason as for a gRPC
+    port: no listener runs on the two ports, so no port would close."""
     api = _api()
     st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "port_closed"}}})
-    assert st == 400
-    assert "only a gRPC endpoint can close its port" in resp["error"]
-    assert "jsonrpc/http :18545" in resp["error"] and "jsonrpc/ws :18557" in resp["error"]
+    assert st == 409
+    assert "runs no listener there" in resp["error"]
+    assert "18545" in resp["error"] and "18557" in resp["error"], "the refusal must name both ports"
     assert api.registry.provider("eth-sim", "1").scenario.snapshot()["mode"] == "success"
 
 
@@ -64,7 +66,7 @@ def test_one_refused_provider_refuses_the_whole_request():
     the refused one must not be applied."""
     api = _api()
     st, _ = api.apply_scenario({"providers": {"btc-sim:1": {"mode": "down"}, "eth-sim:1": {"mode": "port_closed"}}})
-    assert st == 400
+    assert st == 409
     assert api.registry.provider("btc-sim", "1").scenario.snapshot()["mode"] == "success"
 
 
@@ -97,6 +99,17 @@ def test_a_listener_that_never_acts_is_an_error_naming_pool_provider_and_port(mo
         assert named in resp["error"], f"the error must name {named}: {resp['error']!r}"
 
 
+def test_the_error_for_a_port_that_did_not_move_names_the_listener_and_no_grpc_listener(monkeypatch):
+    """An http port and a ws port have a listener too. So the text of the error
+    says "The listener", and not "The gRPC listener"."""
+    monkeypatch.setattr(control_api, "_PORT_SETTLE_S", 0.2)
+    api, _port = _api_with_a_gate_nothing_serves()
+    st, resp = api.apply_scenario({"providers": {KEY: {"mode": "port_closed"}}})
+    assert st == 500
+    assert "The listener did not reach the state the scenario asks for" in resp["error"], resp["error"]
+    assert "gRPC listener" not in resp["error"], resp["error"]
+
+
 @pytest.mark.parametrize("route", ["reset", "reset_all"])
 def test_a_reset_that_cannot_reopen_the_port_is_an_error_too(monkeypatch, route):
     """The gate has no listener, so its port never accepts. A reset that answered
@@ -115,6 +128,18 @@ def test_clearing_history_waits_for_no_port(monkeypatch):
     api, _port = _api_with_a_gate_nothing_serves()
     st, _ = api.clear_history()
     assert st == 200
+
+
+def test_a_write_that_moves_no_port_waits_for_no_gate(monkeypatch):
+    """The gate reported "open", and mode="down" needs the port open. No port
+    has to move, so the call waits for no gate. This gate has no listener: a
+    wait would take the whole settle time and answer 500."""
+    monkeypatch.setattr(control_api, "_PORT_SETTLE_S", 0.2)
+    api, port = _api_with_a_gate_nothing_serves()
+    gate = api.port_gates[port]
+    gate.end_pass(gate.begin_pass(), is_open=True)
+    st, resp = api.apply_scenario({"providers": {KEY: {"mode": "down"}}})
+    assert st == 200, resp
 
 
 def test_the_ports_closed_by_a_scenario_are_read_from_the_scenario():

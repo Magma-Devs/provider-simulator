@@ -26,7 +26,7 @@ from provider_simulator.port_gate import PortGate
 from provider_simulator.resp_proxy import RespProxyRegistry
 
 _MODES = {"success", "error", "rate_limit", "down", "hang", "drop_connection", "port_closed"}
-# How long a call that closes or reopens a gRPC port waits for the port to
+# How long a call that closes or reopens a provider port waits for the port to
 # change before it answers with an error instead of a 200.
 _PORT_SETTLE_S = 5.0
 # What "port_closed" cannot be combined with: the fields that act on one request,
@@ -210,19 +210,19 @@ def _a_port_closed_that_cannot_happen(
     a rule that looked only at this request would miss a ``port_closed`` set in
     one call and a filter moved onto another endpoint in the next.
 
-    Three ways the port would stay open, each refused rather than accepted:
+    Each provider endpoint can close its port: gRPC, ``http`` and ``ws``. Two
+    ways the port would stay open, each refused rather than accepted:
 
-    - The block targets an endpoint that is not gRPC. Only the gRPC listener can
-      stop its own server; the HTTP and WebSocket listeners have no such path.
     - The block targets no endpoint at all.
-    - The block targets a gRPC endpoint this process runs no listener for.
+    - The block targets an endpoint this process runs no listener for. Such a
+      port has no gate, so there is no server to stop.
 
     An accepted fault that does nothing is the worst outcome of the three
     possible ones, and the reason is the same every time in this module: the
     provider answers normally, and a test reads a healthy provider as a router
     that recovered.
 
-    The fourth refusal is a different kind. ``port_closed`` is a state of the
+    The third refusal is a different kind. ``port_closed`` is a state of the
     port and not an answer to a request, so it cannot be combined with a field
     that acts on a request (``_NEEDS_A_REQUEST``).
     """
@@ -251,23 +251,12 @@ def _a_port_closed_that_cannot_happen(
             f"it serves {serves}. A fault that closes nothing leaves the provider answering "
             "normally and the request would look like it had worked"
         )
-    not_grpc = [ep for ep in targeted if ep.interface != "grpc"]
-    if not_grpc:
-        names = ", ".join(f"{ep.interface}/{ep.transport} :{ep.port}" for ep in not_grpc)
-        return 400, (
-            f"mode 'port_closed' would target {names}, and only a gRPC endpoint can close its "
-            "port: the gRPC listener stops its own server, and no other listener has a way to "
-            "stop listening. Accepting it would close nothing, the provider would answer "
-            "normally, and a test would read that as a router that recovered. Use mode 'down' "
-            "or 'drop_connection' for that endpoint, or narrow the block to a gRPC endpoint "
-            f"with 'transports' or 'ports'. This provider serves {serves}"
-        )
     no_listener = sorted(ep.port for ep in targeted if ep.port not in port_gates)
     if no_listener:
         return 409, (
-            f"mode 'port_closed' cannot close port(s) {no_listener}: this simulator runs no gRPC "
-            "listener there (grpcio is not installed, or the listeners were never started), so "
-            "there is no server to stop"
+            f"mode 'port_closed' cannot close port(s) {no_listener}: this simulator runs no "
+            "listener there (the listeners were never started, or grpcio is not installed for a "
+            "gRPC port), so there is no server to stop"
         )
     for field_name, (unset, does) in _NEEDS_A_REQUEST.items():
         value = effective.get(field_name, unset)
@@ -362,12 +351,13 @@ class ControlApi:
         # per-process state exactly like a staged cache entry, and it outlives a
         # test that dies before its teardown. See _perform_reset.
         self.resp_proxies = resp_proxies if resp_proxies is not None else RespProxyRegistry()
-        # One gate per gRPC port that has a running listener, keyed by port.
-        # The socket adapter fills it when it starts the gRPC threads, so an
-        # API built without sockets holds none and refuses mode="port_closed"
-        # instead of storing a fault nothing performs.
+        # One gate per provider port that has a running listener, keyed by
+        # port: a gRPC port, an http port and a ws port. The socket adapter
+        # fills it when it starts the listeners, so an API built without
+        # sockets holds none and refuses mode="port_closed" instead of storing
+        # a fault nothing performs.
         self.port_gates: dict[int, PortGate] = {}
-        # One writer at a time through everything that can move a gRPC port:
+        # One writer at a time through everything that can move a provider port:
         # POST /scenario, the two scenario resets and the scenario time-to-live
         # sweep. Each holds it from its first check until its ports have
         # settled, so the state a caller waits for is the state its own write
@@ -484,16 +474,16 @@ class ControlApi:
             applied[provider.key] = {
                 k: v for k, v in {**scenario_updates, **quirks_updates}.items() if k != "responses"
             }
-        # Answer only once every gRPC port is where its scenario put it, so the
+        # Answer only once every port is where its scenario put it, so the
         # caller's next line can connect, or be refused, without a sleep.
         err = self._settle_ports(wishes)
         if err:
             return 500, {"error": err, "applied": applied}
         return 200, {"status": "ok", "applied": applied}
 
-    # ── gRPC ports a scenario closes ─────────────────────────────────────────
+    # ── ports a scenario closes ──────────────────────────────────────────────
     def _port_wishes(self, provider: object) -> list:
-        """``(gate, want_open)`` for each gRPC port of one provider.
+        """``(gate, want_open)`` for each port of one provider that has a gate.
 
         Read straight after this call's own write, with ``port_lock`` held, so
         the state waited for is the one THIS call asked for. No second caller
@@ -510,13 +500,20 @@ class ControlApi:
     def _settle_ports(self, wishes: list) -> str:
         """Wait until each port is in the state wished for; "" when all are.
 
-        Every gate is asked first and waited on second, so the ports change
-        side by side and the whole call is bounded by one ``_PORT_SETTLE_S``.
-        A port that does not get there is named, with its pool and provider:
-        a 200 for a state that was not reached would let a test connect to a
-        port it believes closed.
+        The call does not ask a gate whose last report is the wished state. It
+        asks for no pass and tries no connection for that gate, so a write that
+        moves no port waits for no port. The call asks a gate that has no
+        report. It also asks a gate whose newest ask has no answer: after a
+        call that got no answer for a port, the next call waits for that port
+        again.
+
+        The call first asks each gate that needs a pass. Then it waits for each
+        one. So the ports change side by side, and one ``_PORT_SETTLE_S``
+        bounds the whole call. A port that does not get there is named, with its
+        pool and provider: a 200 for a state that was not reached would let a
+        test connect to a port it believes closed.
         """
-        asked = [(gate, want_open, gate.ask()) for gate, want_open in wishes]
+        asked = [(gate, want_open, gate.ask()) for gate, want_open in wishes if gate.last_report() != want_open]
         deadline = time.monotonic() + _PORT_SETTLE_S
         stuck = []
         for gate, want_open, ticket in asked:
@@ -531,12 +528,12 @@ class ControlApi:
             return ""
         return (
             f"the scenario is stored, but after {_PORT_SETTLE_S:g}s " + "; ".join(stuck) + ". "
-            "The gRPC listener did not reach the state the scenario asks for, so do not trust "
+            "The listener did not reach the state the scenario asks for, so do not trust "
             "the port to be in it"
         )
 
     def settle_ports_of(self, providers: list) -> str:
-        """Wait for every gRPC port of these providers; "" when each is where its
+        """Wait for every port of these providers; "" when each is where its
         scenario puts it.
 
         For a writer outside this class, which holds ``port_lock`` around its

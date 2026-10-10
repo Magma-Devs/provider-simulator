@@ -155,7 +155,7 @@ A caller chooses a request id. `GET /history?request_id=<id>&pool=<pool>` then r
 Three rules:
 
 - On REST and on gRPC, the id must not be a plain number. A REST call with no id gets a counter value of the simulator (1, 2, 3 and so on), and so does a Tendermint RPC call in the URL form. The filter compares text. So the filter for `request_id=1` matches the caller id `1` and the counter value 1. On JSON-RPC and on a Tendermint RPC POST the id is the `id` of the body, and it can be a number: choose a value that no other caller sends.
-- The row of a provider-wide `down` has the method `*` and no request id on a JSON-RPC, REST, Tendermint RPC or gRPC call. A dead node does not read the request. The row records `latency_ms` 0, and so does a `hang` row: the provider did not wait for the latency. Count those calls with `GET /stats`. A `down` from a `responses` entry is different: the request was read to find the entry, so its row has the method, the request id and the configured `latency_ms`.
+- The row of a provider-wide `down` has the method `*` and no request id on a JSON-RPC, REST, Tendermint RPC or gRPC call. The provider does not read the request. The row records `latency_ms` 0, and so does a `hang` row: the provider did not wait for the latency. Count those calls with `GET /stats`. A `down` from a `responses` entry is different: the request was read to find the entry, so its row has the method, the request id and the configured `latency_ms`.
 - To prove that NO provider received a request, first send a control request with its own id and require one row or more for that id. That proves that the id travels. Then send the request under test and require zero rows for its id. This proof holds only while no provider of the pool is in the mode `down`: the row of a provider-wide `down` has no request id, so a request that reached only a `down` provider also gives zero rows for its id. With a `down` provider in the pool, the history cannot give this proof. The row of a provider-wide `down` has the method `*` on each of the four interfaces, and the smart-router polls each provider all the time, so the `down` row of the request and the `down` row of a poll look the same. Do not filter the rows of a provider-wide `down` by a method name: the filter finds no row and proves nothing.
 
 ```bash
@@ -198,13 +198,13 @@ The fault ladder is evaluated in the order above (first match wins). Only `laten
 
 ### `mode=port_closed` is not in that table
 
-It is not a reply, so it has no rung on the ladder, and it is not parallel across chain families: only a gRPC endpoint can perform it.
+It is not a reply, so it has no rung on the ladder. It works on each provider endpoint: `http`, `ws` and `http2`. With no `transports` filter and no `ports` filter, each port of the provider closes.
 
 | | JSON-RPC, REST, Tendermint-RPC, WebSocket | gRPC |
 |---|---|---|
-| `mode=port_closed` | **refused with HTTP 400.** None of these listeners can stop listening | the endpoint's gRPC server is stopped: the listening socket and every open connection are closed, and a new TCP connection is refused. No status is sent and nothing is recorded in the history |
+| `mode=port_closed` | the simulator stops the server of the endpoint: it closes the listening socket, and it refuses a new TCP connection. Each open connection ends: a request that the provider holds gets no reply, a reply in progress is cut, and a WebSocket connection ends with no close frame. The subscriptions of a closed `ws` port leave `GET /ws/subscriptions` when their connection ends. The history gets no row, and the row of a request in flight stays as the simulator wrote it | the endpoint's gRPC server is stopped: the listening socket and every open connection are closed, and a new TCP connection is refused. No status is sent and nothing is recorded in the history |
 
-On gRPC, `mode=down` and `mode=drop_connection` both answer `UNAVAILABLE`, so a router always gets an answer from them. `port_closed` is the mode to use when the router must get none. The control call returns after the port has changed, in both directions, so no sleep is needed after it. The full list of what is refused is in the README, under `port_closed`.
+`mode=down` answers on an open connection: HTTP 503 on JSON-RPC, REST and Tendermint-RPC, and the status `UNAVAILABLE` on gRPC. So a router gets an answer from it. `port_closed` refuses the connection: it is the mode to use when the router must get no answer. A test chooses. The control call returns after the port has changed, in both directions, so no sleep is needed after it. A control call that asks for the state that the port already has makes no new connection check. The full list of what is refused is in the README, under `port_closed`.
 
 ## Common recipes
 

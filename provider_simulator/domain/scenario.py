@@ -6,10 +6,10 @@ Chain-specific knobs (Solana slot math, ETH logs-lag) live in Quirks instead —
 sending one of those here is rejected, so a typo or a wrong-chain knob fails
 loudly rather than being silently ignored.
 
-One mode does not apply to every chain: ``port_closed`` closes the port of a gRPC
-endpoint, and only a gRPC endpoint can perform it. This class cannot tell which
-endpoints a provider has, so the control API refuses the mode for every other
-endpoint, where the endpoints are known.
+One mode is not a fault on a request: ``port_closed`` closes the port of each
+endpoint that the block targets. This class cannot tell which endpoints a
+provider has, and the control API can. So the control API refuses the mode for
+a block that targets no endpoint, and for a port with no listener.
 
 Two fields scope a block to SOME of a provider's endpoints rather than all of
 them, and both default to None, meaning every endpoint.

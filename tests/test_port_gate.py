@@ -1,14 +1,18 @@
 """The port gate, and the one decision it reads. No simulator, no gRPC.
 
 ``test_simulator_grpc_port_closed.py`` shows the whole path on real gRPC
-servers. This file pins the two rules that path depends on and cannot isolate:
+servers, and ``integration/test_http_and_ws_port_closed.py`` shows it on real
+http and ws servers. This file pins the three rules that path depends on and
+cannot isolate:
 
 - a report from a serve-loop pass that began BEFORE the caller asked is not an
-  answer to the caller, and
+  answer to the caller,
 - a port the serve loop reports closed is only closed when a connection to it is
-  really refused.
+  really refused, and
+- a gate gives no last report while an ask has no answer, so a caller waits for
+  that port again.
 
-Both are about a caller being told the port changed when it had not.
+All three are about a caller being told the port changed when it had not.
 """
 
 import socket
@@ -144,3 +148,36 @@ def test_asking_wakes_the_serve_loop_and_survives_one_that_is_gone():
 
     gate.attach(gone)
     assert gate.ask() == 2, "a dead serve loop must not raise into the control API"
+
+
+# ── the last report ──────────────────────────────────────────────────────────
+
+
+def test_a_gate_with_no_finished_pass_has_no_report():
+    """A new gate gives None, and not False. False says that a pass left the
+    port closed, and no pass ran."""
+    assert _gate(_free_port()).last_report() is None
+
+
+@pytest.mark.parametrize("is_open", [True, False], ids=["open", "closed"])
+def test_the_last_report_is_what_the_newest_pass_left(is_open):
+    gate = _gate(_free_port())
+    gate.end_pass(gate.begin_pass(), is_open=is_open)
+    assert gate.last_report() is is_open
+
+
+def test_a_gate_with_an_ask_that_no_pass_answered_has_no_report():
+    """An ask asks for a new pass. The report of an older pass shows the port
+    before the ask, so the gate gives no report until a newer pass finishes."""
+    gate = _gate(_free_port())
+    gate.end_pass(gate.begin_pass(), is_open=True)
+    assert gate.last_report() is True
+
+    seen_by_the_old_pass = gate.begin_pass()
+    gate.ask()
+    assert gate.last_report() is None
+    gate.end_pass(seen_by_the_old_pass, is_open=True)  # this pass began before the ask
+    assert gate.last_report() is None
+
+    gate.end_pass(gate.begin_pass(), is_open=False)  # a pass that began after the ask
+    assert gate.last_report() is False

@@ -219,9 +219,8 @@ _Avoid_: provider info, provider details, the /topology reply
 
 **Scenario**:
 The fault settings that every provider understands, whatever its chain: outage,
-latency, errors, rate limits, corruption, dropped connections, and the
-fail-first-N sequence. One setting is not for every provider: a closed port,
-which only a gRPC endpoint can perform.
+latency, errors, rate limits, corruption, dropped connections, a closed port,
+and the fail-first-N sequence.
 _Avoid_: config, state, fault config
 
 **Quirks**:
@@ -235,22 +234,32 @@ The one fault shape a provider is in. Exactly one applies at a time: `success`,
 _Avoid_: state, status, behaviour
 
 **Port closed**:
-The mode in which a gRPC endpoint's port is really closed. In every other mode
-the provider receives the request, and on gRPC it also answers it: `down` and
-`drop_connection` both answer with the status `UNAVAILABLE`. With `port_closed`
-the endpoint's gRPC server is stopped, so the listening socket and every open
-connection are closed, a new TCP connection is refused, and nothing reaches the
-provider. Its history stays empty.
+The mode in which the port of a provider endpoint is really closed. It works on
+each provider endpoint: `http`, `ws` and `http2`. With no filter each port of
+the provider closes, and `transports` and `ports` name fewer. In every other
+mode the provider receives the request: `down` answers on an open connection,
+with HTTP 503 on JSON-RPC, REST and Tendermint-RPC, and with the status
+`UNAVAILABLE` on gRPC. With `port_closed` the simulator stops the server of the
+endpoint and closes the listening socket, so it refuses a new TCP connection.
+Each open connection ends, and a WebSocket connection ends with no close frame.
+A request that the provider holds gets no reply, and a reply in progress is
+cut. Nothing reaches the provider, so its history gets no row. The row of a
+request in flight stays as the simulator wrote it. A request that the provider
+did not read before the close gets no row.
 
 It is a state of the port and not a fault on a request. That is why the control
 API refuses it in every place that needs a request to arrive: a per-method
 override, `then_mode`, and together with `fail_first_n`, `error_probability`,
-`latency_ms`, `corruption_mode` or `pause_at`. It is also refused for any
-endpoint that is not gRPC, because no other listener can stop listening.
+`latency_ms`, `corruption_mode` or `pause_at`. The control API also refuses it
+for a block that targets no endpoint, and for a port with no listener. No
+scenario closes the control port, a cache simulator port or a RESP port: they
+have no gate.
 
-The control call returns after the port has changed, in both directions. The
-scenario time-to-live reopens the port too: the sweep that reverts the scenario
-waits for the port, as a control call does.
+The control call returns after the port has changed, in both directions. A call
+that asks for the state that the port already has makes no new connection
+check. The scenario time-to-live reopens the port too: the sweep that reverts
+the scenario waits for the port, as a control call does. The subscriptions of a
+closed `ws` port leave `GET /ws/subscriptions` when their connection ends.
 _Avoid_: unreachable, dead, offline, connection refused (that is what the client
 sees, not the name of the mode)
 

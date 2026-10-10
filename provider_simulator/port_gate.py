@@ -1,10 +1,11 @@
-"""One gRPC port that a scenario can close, and a way to wait until it has.
+"""One provider port that a scenario can close, and a way to wait until it has.
 
 ``mode="port_closed"`` is the one fault that is not a reply. Every other mode
-decides what to answer a request that arrived; this one stops the gRPC server
+decides what to answer a request that arrived; this one stops the server
 of the endpoint, so the listening socket is gone, every open connection is
 closed, and a new TCP connection is refused. Nothing arrives, so nothing is
-recorded in the provider's history.
+recorded in the provider's history. A gRPC port, an ``http`` port and a ``ws``
+port each have one gate.
 
 Three parties meet here, and each owns one thing:
 
@@ -12,16 +13,19 @@ Three parties meet here, and each owns one thing:
   ``fault_policy.port_closed``. Nothing else stores the wish, so a change by
   any writer (a control call, a reset, the scenario time-to-live sweep) is seen
   the same way.
-- **The serve loop owns the server.** It runs on the port's own thread and
-  event loop (``_run_grpc_in_thread`` in server.py) and is the only code that
-  stops or starts the server. It works in passes: read the wish, act, report.
+- **The serve loop owns the server.** It runs on the port's own thread and is
+  the only code that stops or starts the server. For a gRPC port it is
+  ``_run_grpc_in_thread``, on the event loop of that thread. For an ``http``
+  port and for a ``ws`` port it is ``_HttpPortLoop``. Both are in server.py.
+  It works in passes: read the wish, act, report.
   It runs a pass when it is woken and also on a short poll, which is what
   tries a failed bind again.
 - **The control API waits.** ``ask()`` asks for a pass and ``wait()`` blocks
   until a pass that STARTED after the ask has finished. A report from an older
   pass is not accepted: it describes the port before the scenario changed, and
   a caller that trusted it would be told the port had closed while it was
-  still open.
+  still open. The control API asks only a gate whose ``last_report()`` differs
+  from the wish. So a write that moves no port waits for no port.
 
 No grpc import here on purpose: the control API imports this module and has to
 stay importable on a machine without grpcio.
@@ -45,6 +49,7 @@ class PortGate:
         self._asked = 0  # passes asked for so far
         self._done = 0  # the newest ask a FINISHED pass had already seen
         self._open = False  # no server until the first pass starts one
+        self._reported = False  # no pass has finished
         self._wake: Callable[[], object] | None = None
 
     def wants_closed(self) -> bool:
@@ -71,9 +76,25 @@ class PortGate:
         with self._cond:
             self._done = max(self._done, seen)
             self._open = is_open
+            self._reported = True
             self._cond.notify_all()
 
     # ── the control API's side ───────────────────────────────────────────────
+    def last_report(self) -> bool | None:
+        """The state that the newest finished pass left the port in.
+
+        True is open and False is closed. None means that the gate has no
+        report to trust. Either no pass has finished, or an ask has no answer
+        yet: no pass that began after the newest ask has finished.
+
+        The control API waits for a port only when this value differs from the
+        state that the scenario asks for.
+        """
+        with self._cond:
+            if not self._reported or self._done < self._asked:
+                return None
+            return self._open
+
     def ask(self) -> int:
         """Ask the serve loop for a pass at once. Returns the ticket to wait on."""
         with self._cond:

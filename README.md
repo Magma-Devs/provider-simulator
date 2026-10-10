@@ -97,8 +97,7 @@ endpoints of the provider; omit it and the block covers every endpoint. There is
 no `chain_family` field any more — the pool already fixes the chain.
 
 **`down` is provider-wide by default.** A provider set to `down` returns 503 on
-all of its endpoints — a dead node is unreachable on every port. This is the
-natural default now, not a special case.
+all of its endpoints. This is the natural default now, not a special case.
 
 ## Fault primitives
 
@@ -106,7 +105,7 @@ Pick one `mode`; combine it with the orthogonal fields.
 
 | Field | Values | Effect |
 |---|---|---|
-| `mode` | `success` \| `error` \| `rate_limit` \| `down` \| `hang` \| `drop_connection` \| `port_closed` | Primary behaviour. `port_closed` is gRPC only, see below |
+| `mode` | `success` \| `error` \| `rate_limit` \| `down` \| `hang` \| `drop_connection` \| `port_closed` | Primary behaviour. `port_closed` closes the port of the endpoint, see below |
 | `latency_ms` | int | Sleep N ms before responding |
 | `error_probability` | 0.0–1.0 | Random error on top of `success` |
 | `error_code` / `error_message` / `http_status` | int / str / int | Customise the error returned |
@@ -119,45 +118,60 @@ Pick one `mode`; combine it with the orthogonal fields.
 | `fail_first_n` / `then_mode` | int / mode | Fail the first N calls, then switch to `then_mode` |
 | `transports` | list of `http` / `http2` / `ws` | Scope the block to specific endpoints (omit = all) |
 
-### `port_closed`: a gRPC provider whose port is really closed
+### `port_closed`: a provider whose port is really closed
 
-In every other mode the provider receives the request. On gRPC it also answers
-it: `down` and `drop_connection` both answer with the status `UNAVAILABLE`, so
-the router always gets an answer. `port_closed` is the mode where it gets none:
-the gRPC server of the endpoint is stopped, the listening socket is closed,
-every open connection is closed, and a new TCP connection is refused. The
-provider receives nothing, so it records nothing in `/history`.
+In every other mode the provider receives the request. `down` answers it on an
+open connection: HTTP 503 on JSON-RPC, REST and Tendermint-RPC, and the status
+`UNAVAILABLE` on gRPC. `port_closed` is the mode where the provider receives
+nothing. The simulator stops the server of the endpoint and closes the
+listening socket, so it refuses a new TCP connection. A test chooses between
+`down` and `port_closed`.
+
+The mode works on each provider endpoint: `http`, `ws` and `http2` (gRPC).
 
 ```bash
-curl -s -X POST localhost:19000/scenario -d '{"providers":{"lava-sim-grpc:1":{"mode":"port_closed"}}}'
-nc -z localhost 18548   # refused, on the very next line
+curl -s -X POST localhost:19000/scenario -d '{"providers":{"eth-sim:1":{"mode":"port_closed"}}}'
+nc -z localhost 18545   # the http port: refused, on the very next line
+nc -z localhost 18557   # the ws port of the same provider: refused too
 ```
 
+- **With no filter each port of the provider closes.** `transports` and `ports`
+  name fewer ports, as for every other mode. The other providers are untouched.
+- **An open connection ends.** A request that the provider holds gets no
+  reply. A reply that the provider is sending is cut: the caller can get the
+  status line and the headers, and no body or a part of it. A WebSocket
+  connection ends with no close frame.
+- **A closed port stores no row.** The provider receives nothing, so it records
+  nothing in `/history`. The row of a request in flight stays as the simulator
+  wrote it when the request arrived. A request that reached the socket before
+  the close, and that the provider did not read yet, gets no row and no reply.
+- **The subscriptions of a closed `ws` port leave `GET /ws/subscriptions`** when
+  their connection ends. That is a moment after the control call returns.
 - **The control call returns after the port has changed.** Closed after a call
   that sets the mode; accepting connections after a call that removes it
   (another mode, `POST /reset`, `POST /reset/all`). No sleep is needed. When the
   port does not get there within 5 seconds the call answers HTTP 500 and names
   the pool, the provider and the port. It never answers 200 for a state it did
-  not reach.
+  not reach. A call that asks for the state that the port already has makes no
+  new connection check.
 - **The scenario time-to-live reopens it too.** The sweep that reverts the
   scenario waits for the port, as a control call does, so the port accepts when
   the sweep pass ends.
-- **It obeys `transports` and `ports`** like every other mode. The other ports of
-  the provider and the other providers are untouched.
 - **`GET /ready` stays 200.** A port closed by a scenario is left out of the
   readiness check and listed under `closed_by_scenario`.
 - **A gRPC client reconnects with its own back-off.** The port accepts at once
   when it reopens; a client that was refused a moment earlier waits out its
   reconnect delay before its next call succeeds. Measured with the Python
   client over six runs: 0.8 to 1.2 seconds.
+- **No scenario closes a port that is not of a provider.** The control port, the
+  cache simulator ports and the RESP ports have no gate.
 
 It is refused, never accepted and ignored:
 
 | Request | Answer |
 |---|---|
-| It would target an endpoint that is not gRPC (any JSON-RPC, REST, Tendermint-RPC or WebSocket endpoint) | 400. Only the gRPC listener can stop its own server |
 | It would target no endpoint at all (a `transports` filter the provider has no endpoint for) | 400 |
-| The simulator runs no gRPC listener for the port (`grpcio` is not installed) | 409 |
+| The simulator runs no listener for the port (for a gRPC port: `grpcio` is not installed) | 409 |
 | Inside a per-method `responses` override | 400. An override answers a request that already arrived |
 | As a `then_mode` | 400. `then_mode` follows `fail_first_n` requests, and a closed port receives none |
 | Together with `fail_first_n` > 0, `error_probability` > 0, `latency_ms` > 0, `corruption_mode` or `pause_at` | 400. Each acts on a request or on the reply to it |
