@@ -1,0 +1,9 @@
+# CODEOWNERS: who must approve a pull request.
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# GitHub asks the owner for a review. The approval of the owner is a
+# requirement when a ruleset of the branch has "Require review from Code
+# Owners" switched on.
+
+# Victoria owns every file of the repository.
+* @VicSheCodes
