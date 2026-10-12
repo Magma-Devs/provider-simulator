@@ -1,3 +1,4 @@
+import json
 import threading
 
 import pytest
@@ -303,3 +304,20 @@ def test_a_reader_that_cuts_first_takes_the_headers_as_text_and_decodes_the_rows
     # A row that holds the object already stays as it is.
     decode_row_headers(row)
     assert row["headers"] == {"X-Kept": "1"}
+
+
+def test_a_bytes_value_in_lava_headers_is_read_as_base64_text_and_the_rows_are_valid_json():
+    # A row that held bytes could not be written as JSON. So one such row made
+    # every read that returned it fail.
+    log = _log()
+    log.record_arrival(
+        "grpc",
+        "http2",
+        19090,
+        lava_headers={"lava-x-bin": b"\x00\x01", "lava-guid": "g1"},
+        headers={"lava-x-bin": b"\x00\x01"},
+    )
+    row = log.get_history()[0]
+    assert row["lava_headers"] == {"lava-x-bin": "AAE=", "lava-guid": "g1"}
+    assert row["headers"] == {"lava-x-bin": "AAE="}
+    assert json.loads(json.dumps(log.get_history())) == log.get_history()

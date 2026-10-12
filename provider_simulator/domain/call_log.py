@@ -125,7 +125,13 @@ class CallLog:
             "method": method,
             "status": status,
             "latency_ms": latency_ms,
-            "lava_headers": dict(lava_headers) if lava_headers else {},
+            # A bytes value is written as base64 text, as in ``headers``. gRPC
+            # gives the value of a ``-bin`` metadata key as bytes, and a row
+            # that holds bytes cannot be written as JSON.
+            "lava_headers": {
+                name: (_header_value_as_text(value) if isinstance(value, (bytes, bytearray)) else value)
+                for name, value in (lava_headers or {}).items()
+            },
             "deadline_remaining_ms": deadline_remaining_ms,
             "grpc_status": None,
             "pool": self._pool,

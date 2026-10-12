@@ -89,9 +89,11 @@ RESP_STORE_DB = int(os.getenv("SIM_RESP_STORE_DB", "0"))
 #   SIM_HISTORY_MAX=500 python -u run.py     # smaller for memory-constrained dev pods
 #   SIM_HISTORY_MAX=5000 python -u run.py    # larger for very long soak tests
 #
-# Memory is bounded. Measured in one process: an entry takes about 0.9 KB, and
-# the text of its request headers adds about 0.3 KB for 8 headers. So the 2000
-# entries of one provider take about 2.5 MB.
+# The number of rows is bounded, and the size of a row is not: a header value
+# has no cap. Measured in one process: a row takes about 0.9 KB, and the text
+# of its request headers adds about 0.3 KB for 8 headers. So the 2000 rows of
+# one provider take about 2.5 MB, and each provider that receives calls adds
+# as much.
 HISTORY_MAX = int(os.getenv("SIM_HISTORY_MAX", "2000"))
 
 
