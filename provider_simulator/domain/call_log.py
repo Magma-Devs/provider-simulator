@@ -22,15 +22,41 @@ Honest boundaries of the counters:
 - get_history() returns sanitized copies (internal bookkeeping keys removed);
   mutating them never affects the log. Given a ``where`` test it copies only
   the rows that pass it.
+
+What a row says about the request itself:
+- ``lava_headers`` holds the request headers whose name starts with ``lava-``.
+- ``headers`` holds every request header. The log stores them as one compact
+  JSON text and decodes the text for a reader: a full log holds up to
+  ``history_max`` rows for each provider, and a text costs less memory than a
+  dict of small strings.
+- ``deadline_remaining_ms`` and ``grpc_status`` are for gRPC rows. They are
+  None on a row of any other interface.
 """
 
+import base64
 import datetime
+import json
 import threading
 import time
 from collections import deque
 from collections.abc import Callable
 
 from constants import HISTORY_MAX
+
+
+def _header_value_as_text(value: object) -> str:
+    """A header value that JSON cannot hold, as text. gRPC gives the value of a
+    ``-bin`` metadata key as bytes, and the row holds it as base64 text."""
+    if isinstance(value, (bytes, bytearray)):
+        return base64.b64encode(bytes(value)).decode("ascii")
+    return str(value)
+
+
+def _headers_as_json(headers: dict | None) -> str:
+    """Every request header as one compact JSON text."""
+    if not headers:
+        return "{}"
+    return json.dumps(dict(headers), separators=(",", ":"), default=_header_value_as_text)
 
 
 def _now_fields() -> tuple[float, str]:
@@ -79,6 +105,8 @@ class CallLog:
         latency_ms: int,
         request_id: int | str | None,
         lava_headers: dict | None,
+        headers: dict | None = None,
+        deadline_remaining_ms: int | None = None,
     ) -> dict:
         now, stamp = _now_fields()
         return {
@@ -89,12 +117,15 @@ class CallLog:
             "status": status,
             "latency_ms": latency_ms,
             "lava_headers": dict(lava_headers) if lava_headers else {},
+            "deadline_remaining_ms": deadline_remaining_ms,
+            "grpc_status": None,
             "pool": self._pool,
             "pid": self._pid,
             "name": self._name,
             "interface": interface,
             "transport": transport,
             "port": port,
+            "_headers_json": _headers_as_json(headers),
         }
 
     def record_arrival(
@@ -103,11 +134,27 @@ class CallLog:
         transport: str,
         port: int,
         lava_headers: dict | None = None,
+        headers: dict | None = None,
+        deadline_remaining_ms: int | None = None,
     ) -> dict:
         """Append an in_flight stub the moment a request arrives; return it for
         finalize(). The returned dict is the log's own bookkeeping object —
-        treat it as opaque, pass it back to finalize, never edit it directly."""
-        entry = self._new_entry(interface, transport, port, "*", "in_flight", 0, None, lava_headers)
+        treat it as opaque, pass it back to finalize, never edit it directly.
+
+        ``headers`` is every request header. ``deadline_remaining_ms`` is the
+        time that the deadline of a gRPC caller had left at the arrival."""
+        entry = self._new_entry(
+            interface,
+            transport,
+            port,
+            "*",
+            "in_flight",
+            0,
+            None,
+            lava_headers,
+            headers=headers,
+            deadline_remaining_ms=deadline_remaining_ms,
+        )
         with self._lock:
             self._history.append(entry)
             self._total_calls += 1
@@ -158,6 +205,16 @@ class CallLog:
                 self._calls_by_status[status] = self._calls_by_status.get(status, 0) + 1
                 entry["status"] = status
 
+    def set_grpc_status(self, entry: dict, grpc_status: str) -> None:
+        """Write the name of the gRPC status on a row of record_arrival.
+
+        It is not a part of finalize(): a row is finalized before the provider
+        waits, and the status is handed to the gRPC library after the wait. So
+        ``grpc_status`` is None until then, and it stays None for a call whose
+        caller went away during the wait."""
+        with self._lock:
+            entry["grpc_status"] = grpc_status
+
     def push(
         self,
         method: str,
@@ -169,13 +226,16 @@ class CallLog:
         port: int,
         request_id: int | str | None = None,
         lava_headers: dict | None = None,
+        headers: dict | None = None,
     ) -> dict:
         """Append a fully-known record directly (paths with no arrival stub).
         Endpoint identity is required — every row names its listener. Returns
         the entry so a caller may still finalize() it later (e.g. to upgrade
         a provisional status); it carries the generation stamp, so finalize
         updates in place instead of double-counting."""
-        entry = self._new_entry(interface, transport, port, method, status, latency_ms, request_id, lava_headers)
+        entry = self._new_entry(
+            interface, transport, port, method, status, latency_ms, request_id, lava_headers, headers=headers
+        )
         with self._lock:
             entry["_reset_gen"] = self._reset_generation
             self._history.append(entry)
@@ -207,14 +267,26 @@ class CallLog:
         once for each stored row, under the lock of this log, and only a row for
         which it answers true is copied. It is given the stored row itself,
         bookkeeping keys included, so it must only read the row, must be quick,
-        and must not call back into this log (the lock is not reentrant)."""
+        and must not call back into this log (the lock is not reentrant).
+
+        Each copy gets ``headers``, decoded from the stored text. The decode
+        runs after the lock is released, so it does not hold up a provider that
+        records a call."""
         with self._lock:
-            return [
-                {
-                    k: (dict(v) if k == "lava_headers" and isinstance(v, dict) else v)
-                    for k, v in e.items()
-                    if not k.startswith("_")
-                }
+            picked = [
+                (
+                    {
+                        k: (dict(v) if k == "lava_headers" and isinstance(v, dict) else v)
+                        for k, v in e.items()
+                        if not k.startswith("_")
+                    },
+                    e.get("_headers_json", "{}"),
+                )
                 for e in self._history
                 if where is None or where(e)
             ]
+        rows = []
+        for row, headers_json in picked:
+            row["headers"] = json.loads(headers_json)
+            rows.append(row)
+        return rows

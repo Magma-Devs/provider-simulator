@@ -3018,3 +3018,34 @@ class TestMoreOfWhatWebSocketDoesToday:
 
         assert received == b""
         assert [_facts(row) for row in _rows(sim)] == [("*", "in_flight", 0, None)]
+
+
+class TestEveryUpgradeHeaderOnTheFrameRow:
+    def test_the_row_of_a_frame_holds_every_header_of_the_upgrade_request(self, sim):
+        """A frame has no headers of its own. Its row holds every header of the
+        upgrade request that opened the connection, and ``lava_headers`` holds
+        the lava ones only."""
+        sock = _request_upgrade(lava_headers={"lava-stateful-api": "true", "X-Sim-Caller": "ws-test"})
+        try:
+            _read_the_handshake(sock)
+            payload = json.dumps({"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1}).encode()
+            sock.sendall(ws_protocol.encode_frame(ws_protocol.OPCODE_TEXT, payload, mask=True))
+            # Read the reply frame, so the row of the frame is complete.
+            sock.settimeout(2.0)
+            ws_protocol.parse_frame(sock.recv)
+        finally:
+            sock.close()
+
+        _, body = _control(sim, "GET", "/history?pool=eth-sim&pid=1&method=eth_blockNumber&transport=ws")
+        row = body["history"][-1]
+        assert row["headers"] == {
+            "Host": "x",
+            "Upgrade": "websocket",
+            "Connection": "Upgrade",
+            "Sec-WebSocket-Key": _SAMPLE_KEY,
+            "Sec-WebSocket-Version": "13",
+            "lava-stateful-api": "true",
+            "X-Sim-Caller": "ws-test",
+        }
+        assert row["lava_headers"] == {"lava-stateful-api": "true"}
+        assert (row["deadline_remaining_ms"], row["grpc_status"]) == (None, None)

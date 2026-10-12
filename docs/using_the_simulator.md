@@ -124,6 +124,17 @@ curl -s -X POST "$SIM_CONTROL_URL/reset/all"
 
 `GET /history` returns the merged, time-sorted ring buffer across all providers. Every entry carries `call_order` (1 = first attempted), `correlation_group` (groups calls within a 50ms window with the same request id + method), and `lava_headers`.
 
+Every entry also says what the provider received:
+
+| Field | What it holds | When it is empty |
+|---|---|---|
+| `headers` | Every request header, with its name as it came. For gRPC it is the metadata of the call, and a `bytes` value of a `-bin` key is base64 text. A WebSocket frame has no headers of its own, so its entry holds the headers of the upgrade request. | `{}` on the entry of a pushed WebSocket event |
+| `lava_headers` | The headers of `headers` whose name starts with `lava-` | `{}` |
+| `deadline_remaining_ms` | gRPC only: the milliseconds that the deadline of the caller had left when the call arrived. The gRPC library reports it, and the value can be some milliseconds above the deadline that the caller set. | `null` on every other interface, and on a gRPC call with no deadline |
+| `grpc_status` | gRPC only: the name of the status that the simulator sent, `OK` for a reply | `null` on every other interface. On a gRPC entry it is `null` while the provider still holds the call, and it stays `null` when the caller went away during the wait |
+
+`grpc_status` says what the simulator sent. It does not say that the caller received it.
+
 ```bash
 # clean isolation pattern — clear, fire, read
 curl -s -X POST "$SIM_CONTROL_URL/history/clear"

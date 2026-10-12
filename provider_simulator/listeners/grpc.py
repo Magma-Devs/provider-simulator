@@ -214,6 +214,14 @@ class GrpcListener(Listener):
         # ``message``.
         return {"method": request.path, "message": request.message}
 
+    def status_sent(self, entry: dict, status_name: str) -> None:
+        """Write on the row of a call the name of the status that the adapter
+        hands to the gRPC library: ``OK`` for a reply, else the name of the
+        status code. The adapter calls this after the wait of the call, so the
+        row of a call whose caller went away keeps no status. The name says what
+        the simulator sent. It does not say that the caller received it."""
+        self.provider.log.set_grpc_status(entry, status_name)
+
     def build_down(self) -> ServeResult:
         return ServeResult(action="respond", body=GrpcStatus("UNAVAILABLE", "provider down"))
 

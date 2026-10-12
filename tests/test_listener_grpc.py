@@ -1016,3 +1016,17 @@ def test_on_grpc_a_status_waits_for_latency_ms_only_when_the_filters_name_the_en
     decision = _decide(listener)
     assert (decision.code, decision.wait_ms) == ("NOT_FOUND", want_ms)
     assert _row(provider) == ("GetLatestBlock", "error", want_ms, None)
+
+
+def test_arrive_keeps_every_metadata_key_and_the_deadline_and_status_sent_writes_the_status_name():
+    # The adapter gives the listener the metadata of the call and the time that
+    # the deadline had left. It names the status after the wait of the call.
+    listener, provider = _listener()
+    entry = listener.arrive({"lava-guid": "GUID_1", "user-agent": "grpc-go/1.60"}, deadline_remaining_ms=4850)
+    row = provider.log.get_history()[0]
+    assert row["headers"] == {"lava-guid": "GUID_1", "user-agent": "grpc-go/1.60"}
+    assert row["lava_headers"] == {"lava-guid": "GUID_1"}
+    assert (row["deadline_remaining_ms"], row["grpc_status"]) == (4850, None)
+
+    listener.status_sent(entry, "NOT_FOUND")
+    assert provider.log.get_history()[0]["grpc_status"] == "NOT_FOUND"

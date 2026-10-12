@@ -1751,3 +1751,123 @@ class TestGrpcSequencedFaultIsolation:
 
         resp = _call_get_latest_block(_GRPC_ADDRS["1"])
         assert resp.block.header.height > 0, "gRPC must still be healthy after eth's window"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# What the row of a call says about the call: metadata, deadline, status name
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _call_get_latest_block_with_a_deadline(address: str, deadline_s: float) -> None:
+    """Call GetLatestBlock with a gRPC deadline.
+
+    The ``timeout`` of the other helpers stops the caller only: the call that
+    the provider gets has no deadline. This helper gives the timeout to the
+    stub, so the call carries a deadline to the provider."""
+
+    async def _do():
+        channel = grpc.aio.insecure_channel(address)
+        try:
+            stub = query_pb2_grpc.ServiceStub(channel)
+            await stub.GetLatestBlock(query_pb2.GetLatestBlockRequest(), timeout=deadline_s)
+        finally:
+            await channel.close()
+
+    asyncio.run(_do())
+
+
+class TestGrpcRowRecordsWhatTheProviderReceived:
+    """The history row of a gRPC call holds every metadata key of the call, the
+    time that the deadline of the caller had left, and the name of the status
+    that the simulator sent."""
+
+    def test_headers_holds_every_metadata_key_and_lava_headers_the_lava_ones(self, sim):
+        _call_get_latest_block(_GRPC_ADDRS["1"], metadata=(("lava-guid", "abc123"), ("x-sim-caller", "grpc-test")))
+        row = _rows(sim)[-1]
+        assert row["lava_headers"] == {"lava-guid": "abc123"}
+        assert row["headers"]["lava-guid"] == "abc123"
+        assert row["headers"]["x-sim-caller"] == "grpc-test"
+        # The gRPC library of the caller adds a key of its own.
+        assert "user-agent" in row["headers"], sorted(row["headers"])
+
+    def test_a_binary_metadata_value_is_in_headers_as_base64_text(self, sim):
+        _call_get_latest_block(_GRPC_ADDRS["1"], metadata=(("trace-bin", b"\x00\xff\x10"),))
+        assert _rows(sim)[-1]["headers"]["trace-bin"] == "AP8Q"
+
+    def test_a_call_with_a_deadline_records_the_time_that_the_deadline_had_left(self, sim):
+        _call_get_latest_block_with_a_deadline(_GRPC_ADDRS["1"], deadline_s=5.0)
+        remaining = _rows(sim)[-1]["deadline_remaining_ms"]
+        assert isinstance(remaining, int), f"deadline_remaining_ms is {remaining!r}"
+        # The value is what the gRPC library of the simulator reports. The
+        # caller sends its deadline as a time span, and the library of the
+        # simulator makes a clock time of it again. So the value can be some
+        # milliseconds above the 5 s of the caller: 5008 was measured.
+        assert 3000 <= remaining <= 5100, f"a deadline of 5 s left {remaining} ms at the arrival"
+
+    def test_a_call_with_no_deadline_records_none(self, sim):
+        _call_get_latest_block(_GRPC_ADDRS["1"])
+        assert [row["deadline_remaining_ms"] for row in _rows(sim)] == [None]
+
+    @pytest.mark.parametrize(
+        ("scenario", "want"),
+        [
+            pytest.param({}, "OK", id="a-reply-gives-OK"),
+            pytest.param({"mode": "down"}, "UNAVAILABLE", id="down-gives-UNAVAILABLE"),
+            pytest.param({"mode": "rate_limit"}, "RESOURCE_EXHAUSTED", id="rate-limit-gives-RESOURCE_EXHAUSTED"),
+            pytest.param(
+                {"mode": "error", "error_message": "NOT_FOUND"}, "NOT_FOUND", id="a-named-error-gives-NOT_FOUND"
+            ),
+            pytest.param({"mode": "error", "error_message": "INTERNAL"}, "INTERNAL", id="a-named-error-gives-INTERNAL"),
+            pytest.param(
+                {"mode": "error", "error_message": "no status name"}, "UNKNOWN", id="an-unnamed-error-gives-UNKNOWN"
+            ),
+        ],
+    )
+    def test_grpc_status_names_the_status_that_the_caller_reads(self, sim, scenario, want):
+        """The row and the caller name the same status."""
+        if scenario:
+            status, body = _set_grpc(sim, "1", **scenario)
+            assert status == 200, body
+        code, _ = _status_of(_call_get_latest_block, _GRPC_ADDRS["1"])
+        assert code.name == want
+        assert [row["grpc_status"] for row in _rows(sim)] == [want]
+
+    def test_grpc_status_is_none_while_the_provider_holds_the_call_and_ok_after_it(self, sim):
+        """The row is complete before the wait, except for the status name: the
+        simulator has not sent a status yet."""
+        status, body = _set_grpc(sim, "1", latency_ms=1200)
+        assert status == 200, body
+        caller = threading.Thread(target=_call_get_latest_block, args=(_GRPC_ADDRS["1"],))
+        caller.start()
+        try:
+            rows: list[dict] = []
+            deadline = time.monotonic() + 1.0
+            while not rows and time.monotonic() < deadline:
+                rows = _rows(sim, method="GetLatestBlock")
+                if not rows:
+                    time.sleep(0.02)
+            still_held = caller.is_alive()
+        finally:
+            caller.join(timeout=10)
+        assert rows, "the call left no row in its first second, while the provider held it"
+        assert still_held, "the call had ended when the row was read, so the read proves nothing"
+        assert [(row["status"], row["grpc_status"]) for row in rows] == [("success", None)]
+        assert [(row["status"], row["grpc_status"]) for row in _rows(sim)] == [("success", "OK")]
+
+    def test_a_caller_that_goes_away_during_the_wait_leaves_no_status_name_on_the_row(self, sim):
+        """The deadline of the caller ends before the wait of the provider. The
+        gRPC library then stops the call in the simulator, so the simulator
+        sends no status, and the row keeps None."""
+        status, body = _set_grpc(sim, "1", latency_ms=1500)
+        assert status == 200, body
+        with pytest.raises(grpc.RpcError) as left:
+            _call_get_latest_block_with_a_deadline(_GRPC_ADDRS["1"], deadline_s=0.3)
+        assert left.value.code() == grpc.StatusCode.DEADLINE_EXCEEDED
+        # Wait past the end of the 1.5 s hold. A provider that still held the
+        # call would have written OK by now.
+        time.sleep(1.6)
+        rows = _rows(sim)
+        assert [(row["status"], row["grpc_status"]) for row in rows] == [("success", None)]
+        # Some milliseconds above the 0.3 s of the caller are possible: see the
+        # test of the 5 s deadline.
+        assert 0 <= rows[0]["deadline_remaining_ms"] <= 400
