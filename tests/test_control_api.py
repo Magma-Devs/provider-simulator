@@ -1190,3 +1190,55 @@ def test_history_read_copies_exactly_the_rows_that_match(query, monkeypatch):
     assert (
         sum(copies.values()) == matching
     ), f"{sum(copies.values())} rows were copied to answer a read that matches {matching}: {dict(copies)}"
+
+
+def test_history_read_decodes_the_headers_of_the_rows_it_keeps_and_of_no_other_row(monkeypatch):
+    # ``last`` and ``max`` cut the list after the sort. The headers of a row are
+    # decoded after the cut, so a read that keeps 2 rows of a full log decodes 2
+    # texts, and not one text for each row of the log.
+    from provider_simulator import control_api as control_api_module
+    from provider_simulator.domain import call_log as call_log_module
+
+    api = _api()
+    provider = api.registry.provider("eth-sim", "1")
+    for n in range(5):
+        provider.log.push(
+            "eth_call",
+            "success",
+            0,
+            interface="jsonrpc",
+            transport="http",
+            port=18545,
+            request_id=n,
+            headers={"X-N": str(n)},
+        )
+    decoded: list = []
+    real_decode = call_log_module.decode_row_headers
+
+    def _counting_decode(row):
+        # Count a real decode only: a row whose headers are still a text.
+        if isinstance(row.get("headers"), str):
+            decoded.append(row["request_id"])
+        real_decode(row)
+
+    # The log and the control API each call the function by a name of their
+    # own, so the counter replaces both. A decode inside the log counts too.
+    monkeypatch.setattr(call_log_module, "decode_row_headers", _counting_decode)
+    monkeypatch.setattr(control_api_module, "decode_row_headers", _counting_decode)
+
+    # The control: a read with no cut decodes all five. If the counter did not
+    # see that, the counts below would prove nothing.
+    status, body = api.get_history({"pool": "eth-sim", "pid": "1"})
+    assert (status, body["count"], sorted(decoded)) == (200, 5, [0, 1, 2, 3, 4])
+    decoded.clear()
+
+    status, body = api.get_history({"pool": "eth-sim", "pid": "1", "last": "2"})
+    assert status == 200
+    assert [row["headers"] for row in body["history"]] == [{"X-N": "3"}, {"X-N": "4"}]
+    assert decoded == [3, 4], f"the read kept 2 rows, and it decoded the headers of the rows {decoded}"
+    decoded.clear()
+
+    status, body = api.get_history({"pool": "eth-sim", "pid": "1", "max": "1"})
+    assert status == 200
+    assert [row["headers"] for row in body["history"]] == [{"X-N": "4"}]
+    assert decoded == [4], f"the read kept 1 row, and it decoded the headers of the rows {decoded}"

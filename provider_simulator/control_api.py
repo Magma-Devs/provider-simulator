@@ -21,6 +21,7 @@ from provider_simulator.build_info import build_info
 from provider_simulator.cache_sim import DEFAULT_MODE as DEFAULT_CACHE_MODE
 from provider_simulator.cache_sim import CacheEntry, CacheSimRegistry, UnknownMode
 from provider_simulator.chains import CHAINS
+from provider_simulator.domain.call_log import decode_row_headers
 from provider_simulator.domain.registry import Registry
 from provider_simulator.listeners.ws import WsSubscriptions
 from provider_simulator.port_gate import PortGate
@@ -907,7 +908,9 @@ class ControlApi:
         row_filter = self._history_row_filter(query)
         entries: list[dict] = []
         for provider in providers:
-            entries.extend(provider.log.get_history(where=row_filter))
+            # The headers of a row stay a JSON text here. They are decoded at the
+            # end, for the rows that ``last`` and ``max`` keep.
+            entries.extend(provider.log.get_history(where=row_filter, decode_headers=False))
 
         entries.sort(key=lambda e: e.get("ts", 0.0))
 
@@ -936,6 +939,10 @@ class ControlApi:
             # The cap keeps the TAIL — the most recent calls — and the kept
             # entries retain their full-timeline call_order.
             entries = entries[-cap:] if cap > 0 else []
+        # Decode after the cut: a read that keeps 60 rows of a full log decodes
+        # 60 texts, and not one text for each row of the log.
+        for entry in entries:
+            decode_row_headers(entry)
         return 200, {"count": len(entries), "history": entries}
 
     @staticmethod

@@ -2,7 +2,7 @@ import threading
 
 import pytest
 
-from provider_simulator.domain.call_log import CallLog
+from provider_simulator.domain.call_log import CallLog, decode_row_headers
 
 
 def _log() -> CallLog:
@@ -287,3 +287,19 @@ def test_a_grpc_row_keeps_its_deadline_and_gets_its_status_name_after_finalize()
     row = log.get_history()[0]
     assert (row["status"], row["deadline_remaining_ms"], row["grpc_status"]) == ("error", 4850, "NOT_FOUND")
     assert log.stats()["calls_by_status"] == {"error": 1}
+
+
+def test_a_reader_that_cuts_first_takes_the_headers_as_text_and_decodes_the_rows_it_keeps():
+    # GET /history sorts and cuts the rows of many logs before it answers. It
+    # asks for the stored text, and it decodes the rows that it keeps.
+    log = _log()
+    log.record_arrival("jsonrpc", "http", 18545, headers={"X-Kept": "1"})
+    row = log.get_history(decode_headers=False)[0]
+    assert row["headers"] == '{"X-Kept":"1"}'
+    assert all(not key.startswith("_") for key in row)
+
+    decode_row_headers(row)
+    assert row["headers"] == {"X-Kept": "1"}
+    # A row that holds the object already stays as it is.
+    decode_row_headers(row)
+    assert row["headers"] == {"X-Kept": "1"}
