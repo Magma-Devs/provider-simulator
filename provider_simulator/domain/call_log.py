@@ -59,6 +59,15 @@ def _headers_as_json(headers: dict | None) -> str:
     return json.dumps(dict(headers), separators=(",", ":"), default=_header_value_as_text)
 
 
+def decode_row_headers(row: dict) -> None:
+    """Give a row of ``get_history(decode_headers=False)`` its ``headers`` as an
+    object. Such a row holds the stored JSON text under ``headers``. A row that
+    holds the object already stays as it is."""
+    text = row.get("headers")
+    if isinstance(text, str):
+        row["headers"] = json.loads(text)
+
+
 def _now_fields() -> tuple[float, str]:
     now = time.time()
     stamp = (
@@ -258,7 +267,7 @@ class CallLog:
                 "history_entries": len(self._history),
             }
 
-    def get_history(self, where: Callable[[dict], bool] | None = None) -> list[dict]:
+    def get_history(self, where: Callable[[dict], bool] | None = None, decode_headers: bool = True) -> list[dict]:
         """Sanitized copies of the buffered rows: internal bookkeeping keys
         (underscore-prefixed) are stripped and each row is an independent dict,
         so readers can hold, serialize, or edit the result freely.
@@ -271,22 +280,24 @@ class CallLog:
 
         Each copy gets ``headers``, decoded from the stored text. The decode
         runs after the lock is released, so it does not hold up a provider that
-        records a call."""
+        records a call.
+
+        A reader that cuts the list before it uses the rows passes
+        ``decode_headers=False``. Each copy then holds the stored JSON text
+        under ``headers``, and the reader calls ``decode_row_headers`` on each
+        row that it keeps."""
         with self._lock:
-            picked = [
-                (
-                    {
+            rows = []
+            for e in self._history:
+                if where is None or where(e):
+                    row = {
                         k: (dict(v) if k == "lava_headers" and isinstance(v, dict) else v)
                         for k, v in e.items()
                         if not k.startswith("_")
-                    },
-                    e.get("_headers_json", "{}"),
-                )
-                for e in self._history
-                if where is None or where(e)
-            ]
-        rows = []
-        for row, headers_json in picked:
-            row["headers"] = json.loads(headers_json)
-            rows.append(row)
+                    }
+                    row["headers"] = e.get("_headers_json", "{}")
+                    rows.append(row)
+        if decode_headers:
+            for row in rows:
+                decode_row_headers(row)
         return rows
