@@ -43,6 +43,7 @@ import os
 import queue
 import socket
 import socketserver
+import string
 import sys
 import threading
 import time
@@ -239,6 +240,36 @@ def _port_is_closed(server: object) -> bool:
 
 # ── HTTP request/response adapter (jsonrpc / rest / tendermintrpc) ────────────
 
+# The characters of an HTTP ``token`` (RFC 9110, section 5.6.2).
+_HTTP_TOKEN_CHARS = frozenset("!#$%&'*+-.^_`|~" + string.digits + string.ascii_letters)
+
+
+def _content_type_with_provider_name(media_type: str, provider_name: str) -> str:
+    """Return ``media_type`` with the provider name as its ``sim-provider`` parameter.
+
+    A smart-router drops every reply header of a provider except a short list,
+    and ``Content-Type`` is on that list. So this parameter is how the name of
+    the provider that answered reaches a client behind a router, with no change
+    of a reply body. The name is ``Provider.name``, with the spelling and the
+    case that ``GET /providers`` reports. ``_HttpListenerHandler.send_header``
+    is the one caller.
+
+    The parameter comes after each parameter that ``media_type`` has. Its value
+    is a plain token when each character of the name is an HTTP token
+    character. In each other case it is a quoted string, with a backslash
+    before each ``"`` and each backslash of the name.
+
+    An empty name adds no parameter: the result is ``media_type``. A provider
+    that is built outside ``build_registry`` has an empty name.
+    """
+    if not provider_name:
+        return media_type
+    if all(char in _HTTP_TOKEN_CHARS for char in provider_name):
+        value = provider_name
+    else:
+        value = '"' + provider_name.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return f"{media_type}; sim-provider={value}"
+
 
 class _HttpListenerHandler(BaseHTTPRequestHandler):
     """Performs a Listener's ServeResult on a plain HTTP socket.
@@ -258,6 +289,22 @@ class _HttpListenerHandler(BaseHTTPRequestHandler):
     mid_body_bytes = b'{"jsonrpc":"2.0",'
 
     server: _SimThreadingHTTPServer  # narrowed for the wiring attributes
+
+    def send_header(self, keyword: str, value: str) -> None:
+        """Send one reply header. A ``Content-Type`` header also names the provider.
+
+        Every ``Content-Type`` that this port sends passes here: the header of a
+        reply that a listener planned, of a reply that is cut on purpose, of the
+        REST reply to OPTIONS, and of the error page that ``http.server`` writes
+        for a verb that this port does not serve. So one place adds the name, and
+        a new kind of reply cannot leave it out.
+
+        A reply with no ``Content-Type`` gets none. A reply body does not change:
+        a router compares the bodies of two providers.
+        """
+        if keyword.lower() == "content-type":
+            value = _content_type_with_provider_name(value, self.server.listener.provider.name)
+        super().send_header(keyword, value)
 
     def _run(self, verb: str) -> None:
         if _port_is_closed(self.server):

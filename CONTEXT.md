@@ -70,6 +70,15 @@ template is `charts/smart-router/templates/routers_configmap.yaml` in the
 smart-router-helm-chart repository, and it renders
 `{{ $node.name | lower | replace " " "-" }}`. Compare lowercased, always.
 
+The simulator also writes the name on each HTTP reply of the provider, as the
+parameter `sim-provider` of the `Content-Type` header:
+`Content-Type: application/json; sim-provider=EthPrimaryProvider1`. A
+smart-router keeps the `Content-Type` of a provider's reply, on a reply from its
+cache too. So a test behind a router can read which provider produced a reply.
+The value has the spelling of the table, not the lowercased spelling of the
+router's header. A reply with no `Content-Type` has no name, and neither has a
+gRPC reply or a WebSocket frame.
+
 The form also works backwards. A test that has read a name out of a header can
 ask `GET /providers?name=<name>` which slot that was, and the filter lowercases
 both sides for exactly the reason above.
