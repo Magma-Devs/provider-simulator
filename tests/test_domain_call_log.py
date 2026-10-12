@@ -1,3 +1,7 @@
+import threading
+
+import pytest
+
 from provider_simulator.domain.call_log import CallLog
 
 
@@ -133,3 +137,81 @@ def test_a_named_log_carries_the_name_onto_entries_from_both_paths():
     stub = log.record_arrival("jsonrpc", "http", 18560)
     log.finalize(stub, method="eth_getBalance", status="success", latency_ms=1)
     assert [e["name"] for e in log.get_history()] == ["EthBackupProvider4", "EthBackupProvider4"]
+
+
+def _push_calls(log, count):
+    for i in range(count):
+        log.push(
+            "eth_call" if i % 2 else "eth_blockNumber",
+            "success",
+            0,
+            request_id=i,
+            lava_headers={"Lava-Stateful-Api": "true"} if i < 4 else None,
+            interface="jsonrpc",
+            transport="http",
+            port=18545,
+        )
+
+
+def test_get_history_with_a_filter_gives_only_the_rows_that_pass_it_in_buffer_order():
+    log = _log()
+    _push_calls(log, 6)
+    rows = log.get_history(where=lambda row: row["method"] == "eth_call")
+    assert [row["request_id"] for row in rows] == [1, 3, 5]
+    rows = log.get_history(where=lambda row: "Lava-Stateful-Api" in row["lava_headers"] and row["request_id"] > 1)
+    assert [row["request_id"] for row in rows] == [2, 3]
+
+
+def test_rows_read_through_a_filter_are_independent_sanitized_copies():
+    log = _log()
+    _push_calls(log, 4)
+    rows = log.get_history(where=lambda row: row["request_id"] in (1, 2))
+    assert all(not key.startswith("_") for row in rows for key in row)
+    # Editing what the reader got must not reach the log, the headers included.
+    rows[0]["status"] = "vandalized"
+    rows[0]["lava_headers"]["Lava-Stateful-Api"] = "vandalized"
+    again = log.get_history(where=lambda row: row["request_id"] in (1, 2))
+    assert [(row["status"], row["lava_headers"]) for row in again] == [("success", {"Lava-Stateful-Api": "true"})] * 2
+
+
+def test_a_filter_that_passes_no_row_reads_nothing_and_removes_nothing():
+    log = _log()
+    _push_calls(log, 3)
+    assert log.get_history(where=lambda row: False) == []
+    assert log.get_history(where=lambda row: True) == log.get_history()
+    assert len(log.get_history()) == 3
+    assert log.stats()["history_entries"] == 3
+
+
+def test_a_where_test_that_raises_leaves_the_log_usable():
+    """``where`` runs under the lock of the log. If the lock stayed held when it
+    raised, every later call on this log would wait for ever. So the proof is a
+    plain read in a thread with a time limit: a held lock fails this test after
+    two seconds, and does not hang it."""
+
+    class WhereBroke(Exception):
+        pass
+
+    def broken(row):
+        raise WhereBroke
+
+    log = _log()
+    _push_calls(log, 3)
+    with pytest.raises(WhereBroke) as raised:
+        log.get_history(where=broken)
+    assert raised.type is WhereBroke  # the caller gets the error of the test itself, not a wrapper
+
+    reads = []
+    reader = threading.Thread(target=lambda: reads.append(log.get_history()), daemon=True)
+    reader.start()
+    reader.join(timeout=2)
+    assert not reader.is_alive(), "a plain read is still waiting for the lock after where raised"
+    assert [row["request_id"] for row in reads[0]] == [0, 1, 2]
+
+    # The log still takes a call and counts it: the next read holds it.
+    stub = log.record_arrival("jsonrpc", "http", 18545)
+    log.finalize(stub, method="eth_call", status="success", latency_ms=1, request_id=3)
+    assert [row["request_id"] for row in log.get_history()] == [0, 1, 2, 3]
+    assert log.stats()["total_calls"] == 4
+    assert log.stats()["history_entries"] == 4
+    assert log.stats()["calls_by_status"] == {"success": 4}

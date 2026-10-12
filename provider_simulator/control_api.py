@@ -13,6 +13,7 @@ new format — a stale client fails loudly, never silently.
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import fields
 
 from provider_simulator import fault_policy
@@ -892,11 +893,22 @@ class ControlApi:
 
     # ── GET /history ──────────────────────────────────────────────────────────
     def get_history(self, query: dict) -> tuple[int, dict]:
+        # Filter first, copy second. ``pool`` and ``pid`` pick the providers, and
+        # a provider they leave out is not read at all. Every other filter runs
+        # on the stored rows, inside the log, so only a row that passes is
+        # copied. Copying every row and filtering the copies made a read for one
+        # request id cost as much as a read of the whole log.
+        providers = [
+            provider
+            for provider in self.registry.all_providers()
+            if ("pool" not in query or provider.pool.name == query["pool"])
+            and ("pid" not in query or provider.pid == query["pid"])
+        ]
+        row_filter = self._history_row_filter(query)
         entries: list[dict] = []
-        for provider in self.registry.all_providers():
-            entries.extend(provider.log.get_history())
+        for provider in providers:
+            entries.extend(provider.log.get_history(where=row_filter))
 
-        entries = self._filter_history(entries, query)
         entries.sort(key=lambda e: e.get("ts", 0.0))
 
         # call_order (1-based over the merged, ts-sorted timeline) + correlation.
@@ -926,33 +938,47 @@ class ControlApi:
             entries = entries[-cap:] if cap > 0 else []
         return 200, {"count": len(entries), "history": entries}
 
-    def _filter_history(self, entries: list[dict], query: dict) -> list[dict]:
-        for key in ("pool", "pid", "transport", "method", "status", "interface"):
-            if key in query:
-                entries = [e for e in entries if e.get(key) == query[key]]
-        if "request_id" in query:
-            wanted = str(query["request_id"])
-            entries = [e for e in entries if str(e.get("request_id")) == wanted]
-        if "from" in query:
-            lo = _as_float(query["from"], float("-inf"))
-            entries = [e for e in entries if e.get("ts", 0.0) >= lo]
-        if "to" in query:
-            hi = _as_float(query["to"], float("inf"))
-            entries = [e for e in entries if e.get("ts", 0.0) <= hi]
-        for key, value in query.items():
-            if key.startswith("lava_header_"):
-                # Header names are case-insensitive on the wire (clients may
-                # title-case them) — match accordingly.
-                name = key[len("lava_header_") :].lower()
-                entries = [
-                    e
-                    for e in entries
-                    if any(
-                        header.lower() == name and header_value == value
-                        for header, header_value in e.get("lava_headers", {}).items()
-                    )
-                ]
-        return entries
+    @staticmethod
+    def _history_row_filter(query: dict) -> Callable[[dict], bool] | None:
+        """The filters of GET /history that test a row, made once for the query
+        into one test of a stored row. ``pool`` and ``pid`` are not here: they
+        choose the providers to read. None when the query holds no other filter,
+        so such a read copies every row and tests none."""
+        equals = [(key, query[key]) for key in ("transport", "method", "status", "interface") if key in query]
+        # A request id is a number or a string in a row and text in the query, so it is compared as text.
+        wanted_id = str(query["request_id"]) if "request_id" in query else None
+        low = _as_float(query["from"], float("-inf")) if "from" in query else None
+        high = _as_float(query["to"], float("inf")) if "to" in query else None
+        # Header names are case-insensitive on the wire (clients may title-case
+        # them) — match accordingly. The value is compared as it is written.
+        headers = [
+            (key[len("lava_header_") :].lower(), value)
+            for key, value in query.items()
+            if key.startswith("lava_header_")
+        ]
+        if not (equals or wanted_id is not None or low is not None or high is not None or headers):
+            return None
+
+        def matches(row: dict) -> bool:
+            for key, value in equals:
+                if row.get(key) != value:
+                    return False
+            if wanted_id is not None and str(row.get("request_id")) != wanted_id:
+                return False
+            # "not >=" and not "<": a bound that is NaN keeps no row.
+            if low is not None and not row.get("ts", 0.0) >= low:
+                return False
+            if high is not None and not row.get("ts", 0.0) <= high:
+                return False
+            for name, value in headers:
+                if not any(
+                    header.lower() == name and header_value == value
+                    for header, header_value in row.get("lava_headers", {}).items()
+                ):
+                    return False
+            return True
+
+        return matches
 
     # ── /ws/emit, /ws/subscriptions ───────────────────────────────────────────
     def ws_emit(self, body: object) -> tuple[int, dict]:

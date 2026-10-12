@@ -274,7 +274,7 @@ The base class owns the order and a subclass fills the steps. This is the Templa
 | `rest` | The query parameter `request_id`. A caller that talks to the simulator directly can still use the header `X-Request-Id`. | New |
 | `grpc` | The field of the request message that the method names. For `AllBalances` it is `address`. | New |
 
-**One field and one filter.** The history row field stays `request_id`. The filter stays `GET /history?request_id=<id>&pool=<pool>`. `_filter_history` compares the two values as text (`provider_simulator/control_api.py:906-908`).
+**One field and one filter.** The history row field stays `request_id`. The filter stays `GET /history?request_id=<id>&pool=<pool>`. `_history_row_filter` in `provider_simulator/control_api.py` compares the two values as text.
 
 **An id must not be a plain number.** The counter of the simulator gives the numbers 1, 2, 3 to the REST calls that carry no id (`rest.py:52-62`), and it counts the router's own polls. The filter compares text. So the caller id `1` and the counter value 1 are the same for the filter (RAN: the filter for `request_id=1` matches both rows). A caller must send an id that is not a plain number, for example a word and a random part.
 
