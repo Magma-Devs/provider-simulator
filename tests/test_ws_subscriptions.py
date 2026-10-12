@@ -449,3 +449,30 @@ def test_an_unsubscribe_frame_with_an_empty_list_as_its_first_parameter_answers_
         ("eth_subscribe", "success", 0, 1),
         ("eth_unsubscribe", "success", 0, 9),
     ]
+
+
+# ── Every header of the upgrade request, on the rows of the ws endpoint ───────
+
+
+def test_the_row_of_a_refused_upgrade_keeps_every_header_of_the_upgrade_request():
+    listener, provider = _ws_listener()
+    provider.scenario.update({"mode": "rate_limit"})
+
+    listener.decide_upgrade({"Lava-Guid": "GUID_1", "Upgrade": "websocket"})
+
+    row = provider.log.get_history()[0]
+    assert row["headers"] == {"Lava-Guid": "GUID_1", "Upgrade": "websocket"}
+    assert row["lava_headers"] == {"Lava-Guid": "GUID_1"}
+    assert (row["deadline_remaining_ms"], row["grpc_status"]) == (None, None)
+
+
+def test_the_row_of_a_pushed_event_has_no_headers():
+    # A pushed event answers no request, so its row has an empty ``headers``.
+    registry = build_registry()
+    subscriptions = WsSubscriptions(registry)
+    subscriptions.register("0xabc", "eth-sim", "2", "accountSubscribe")
+
+    assert subscriptions.emit("0xabc", {"tag": "A"}) == "emitted"
+
+    row = registry.provider("eth-sim", "2").log.get_history()[0]
+    assert (row["headers"], row["deadline_remaining_ms"], row["grpc_status"]) == ({}, None, None)

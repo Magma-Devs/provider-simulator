@@ -321,7 +321,11 @@ id.
 _Avoid_: log, trace, calls
 
 **History row**:
-One call in the history of a provider.
+One call in the history of a provider. It holds every request header in
+`headers`, and the ones whose name starts with `lava-` in `lava_headers` too. A
+gRPC row also holds `deadline_remaining_ms`, the time that the deadline of the
+caller had left, and `grpc_status`, the name of the status that the simulator
+sent.
 _Avoid_: entry, record, log line
 
 **Request id**:

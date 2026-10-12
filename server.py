@@ -614,12 +614,14 @@ class _WsHandler(BaseHTTPRequestHandler):
             return
 
         client_key = self.headers["Sec-WebSocket-Key"]
-        lava = {k: v for k, v in self.headers.items() if k.lower().startswith("lava-")}
+        # Every header of the upgrade request goes to the listener. It keeps
+        # them all on a history row, and the lava-* ones a second time.
+        headers = dict(self.headers.items())
 
         # The listener decides the upgrade BEFORE the handshake completes, so a
         # faulted provider refuses the upgrade the way it refuses an HTTP
         # request. The status 101 says: complete the handshake.
-        decision = listener.decide_upgrade(lava)
+        decision = listener.decide_upgrade(headers)
         if decision.action != "respond" or decision.status != 101:
             self._refuse_upgrade(decision, client_key)
             return
@@ -643,7 +645,7 @@ class _WsHandler(BaseHTTPRequestHandler):
         )
         writer.start()
         try:
-            self._reader_loop(listener, out_queue, lava)
+            self._reader_loop(listener, out_queue, headers)
         finally:
             try:
                 out_queue.put_nowait(_WS_SENTINEL)
@@ -692,7 +694,9 @@ class _WsHandler(BaseHTTPRequestHandler):
         except OSError:
             pass
 
-    def _reader_loop(self, listener: JsonRpcWsListener, out_queue: "queue.Queue", lava: dict) -> None:
+    def _reader_loop(self, listener: JsonRpcWsListener, out_queue: "queue.Queue", headers: dict) -> None:
+        # ``headers`` is every header of the upgrade request. A frame has no
+        # headers of its own, so the row of each frame holds these.
         # One object for the life of the connection. The listener registers
         # each subscription of the connection on it.
         connection = WsConnection(out_queue)
@@ -730,7 +734,7 @@ class _WsHandler(BaseHTTPRequestHandler):
                 if isinstance(body, dict) and isinstance(body.get("method"), (list, dict)):
                     return
 
-                result = listener.serve(RawRequest(body=frame.payload, headers=lava, connection=connection))
+                result = listener.serve(RawRequest(body=frame.payload, headers=headers, connection=connection))
                 if self._perform_frame(result, out_queue) == "close":
                     return
         finally:
@@ -1187,11 +1191,16 @@ def _run_grpc_in_thread(grpc_listener, port: int, host: str, gate: PortGate) -> 
 
     async def _perform(method: str, request, context):
         metadata = context.invocation_metadata() or []
-        # The flow keeps the lava-* headers for the history row. The listener
-        # gets the request message: it knows which field of which method
-        # carries the request id.
+        # The history row keeps every metadata key, and the lava-* ones a second
+        # time. The listener gets the request message: it knows which field of
+        # which method carries the request id.
         headers = {k: v for (k, v) in metadata}
-        result = grpc_listener.serve(RawRequest(path=method, headers=headers, message=request))
+        # The time that the deadline of the caller has left, read once at the
+        # arrival. None when the caller set no deadline.
+        remaining_s = context.time_remaining()
+        deadline_remaining_ms = None if remaining_s is None else max(0, int(remaining_s * 1000))
+        entry = grpc_listener.arrive(headers, deadline_remaining_ms=deadline_remaining_ms)
+        result = grpc_listener.serve(RawRequest(path=method, headers=headers, message=request), entry=entry)
 
         status = result.body
         if isinstance(status, grpc_wire.GrpcStatus):
@@ -1208,14 +1217,19 @@ def _run_grpc_in_thread(grpc_listener, port: int, host: str, gate: PortGate) -> 
                     await context.send_initial_metadata([])
                 except Exception:
                     pass
+            # The row gets the status name right before the gRPC library gets
+            # the status. A caller that went away during the wait cancels this
+            # coroutine, so its row keeps no status.
+            grpc_listener.status_sent(entry, status.code)
             await context.abort(grpc.StatusCode[status.code], status.text)
             return None  # unreachable — abort raises
 
-        # The history row of the call is finished. A reply that cannot be built
-        # ends the call here, with the row as it is.
+        # The history row of the call is finished, except for the status name.
+        # A reply that cannot be built ends the call here, with the row as it is.
         response = grpc_wire.message_of(result)
         if result.latency_ms > 0:
             await asyncio.sleep(result.latency_ms / 1000.0)
+        grpc_listener.status_sent(entry, "OK")
         return response
 
     # One list gives the check, the registration and the reflection list their

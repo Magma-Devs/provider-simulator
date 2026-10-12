@@ -276,3 +276,14 @@ def test_the_flow_asks_build_content_for_a_success_and_not_for_a_fault_or_a_cann
 
     assert [row["status"] for row in provider.log.get_history()] == ["success", row_status]
     assert len(listener.asked) == 1
+
+
+def test_arrive_keeps_every_header_of_the_call_in_headers():
+    # ``headers`` holds each header, with its name as it came. ``lava_headers``
+    # holds the lava ones only, as before. The two gRPC fields stay empty.
+    listener, provider = _listener()
+    listener.arrive({"Lava-Guid": "GUID_1", "X-Other": "kept"})
+    row = provider.log.get_history()[0]
+    assert row["headers"] == {"Lava-Guid": "GUID_1", "X-Other": "kept"}
+    assert row["lava_headers"] == {"Lava-Guid": "GUID_1"}
+    assert (row["deadline_remaining_ms"], row["grpc_status"]) == (None, None)

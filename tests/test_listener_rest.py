@@ -462,3 +462,14 @@ def test_the_flow_does_not_ask_the_hook_to_corrupt_when_the_filter_does_not_name
     res = listener.serve(_get(_BLOCKS_LATEST))
     assert res.body != {"probe": "corrupted"}
     assert provider.log.get_history()[0]["status"] == "success"
+
+
+def test_arrive_keeps_every_header_of_the_call_in_headers():
+    # ``headers`` holds each header, with its name as it came. ``lava_headers``
+    # holds the lava ones only, as before. The two gRPC fields stay empty.
+    listener, provider = _listener()
+    listener.arrive({"Lava-Guid": "GUID_1", "X-Other": "kept"})
+    row = provider.log.get_history()[0]
+    assert row["headers"] == {"Lava-Guid": "GUID_1", "X-Other": "kept"}
+    assert row["lava_headers"] == {"Lava-Guid": "GUID_1"}
+    assert (row["deadline_remaining_ms"], row["grpc_status"]) == (None, None)

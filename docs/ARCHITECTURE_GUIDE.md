@@ -879,7 +879,7 @@ The `/history` endpoint accepts a dynamic-prefix filter: any query parameter beg
 - `?lava_header_lava_stateful_api=true` → filter where the captured header `lava-stateful-api` equals `true`.
 - `?lava_header_lava_consumer_ip=10.0.0.1&lava_header_lava_session=42` → both must match (AND).
 
-Headers are captured at request time inside `JSONRPCHandler.do_POST`: every inbound header whose name starts with `lava-` (case-insensitive) is recorded in the history entry. Each `/history` entry exposes the full captured dict under `"lava_headers"`.
+Headers are captured at request time inside `JSONRPCHandler.do_POST`: every inbound header whose name starts with `lava-` (case-insensitive) is recorded in the history entry. Each `/history` entry exposes the full captured dict under `"lava_headers"`. Every request header, with or without that prefix, is under `"headers"`; the `lava_header_*` filters read `"lava_headers"` only.
 
 ### `responses` lookup order in the success path
 

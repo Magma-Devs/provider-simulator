@@ -237,8 +237,9 @@ class JsonRpcWsListener(JsonRpcListener):
         The status 101 tells the adapter to complete the handshake. Each other
         result is a refusal: a JSON body with its HTTP status, a hang, or a
         drop with its drop point. A refusal writes one complete history row
-        before this method returns, with the ``lava-`` headers of ``headers``.
-        An upgrade that succeeds writes no row.
+        before this method returns. The row holds every header of ``headers``,
+        and the ``lava-`` ones in ``lava_headers`` too. An upgrade that
+        succeeds writes no row.
 
         The upgrade is not a request of ``serve()``. It applies no latency, no
         corruption and no per-method override, and it has its own reply
@@ -260,6 +261,7 @@ class JsonRpcWsListener(JsonRpcListener):
                 transport=self.endpoint.transport,
                 port=self.endpoint.port,
                 lava_headers=lava,
+                headers=headers,
             )
 
         if verdict.kind == "down":

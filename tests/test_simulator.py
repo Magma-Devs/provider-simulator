@@ -2993,3 +2993,28 @@ class TestCancelDuringResponseRecordsArrival:
         assert entry["method"] == "eth_blockNumber"
         assert entry["request_id"] == 99
         assert entry.get("lava_headers", {}).get("Lava-Guid") == "g-reset-mid"
+
+
+class TestEveryRequestHeaderOnTheRow:
+    def test_headers_holds_every_request_header_and_lava_headers_the_lava_ones(self, sim):
+        """A row of an HTTP request holds every request header in ``headers``.
+        ``lava_headers`` holds the lava ones only, and the two gRPC fields are
+        null. urllib changes the case of a header name that it sends, so this
+        test compares the names in lower case."""
+        _post(_ctrl(sim, "/history/clear"), {})
+        request = urllib.request.Request(
+            _P1,
+            data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []}).encode(),
+            headers={"Content-Type": "application/json", "Lava-Guid": "GUID_1", "X-Sim-Caller": "http-test"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert response.status == 200
+
+        _, hist = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1&method=eth_blockNumber"))
+        row = hist["history"][-1]
+        headers = {name.lower(): value for name, value in row["headers"].items()}
+        assert headers["x-sim-caller"] == "http-test"
+        assert headers["lava-guid"] == "GUID_1"
+        assert headers["content-type"] == "application/json"
+        assert {name.lower(): value for name, value in row["lava_headers"].items()} == {"lava-guid": "GUID_1"}
+        assert (row["deadline_remaining_ms"], row["grpc_status"]) == (None, None)
