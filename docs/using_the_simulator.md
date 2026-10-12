@@ -170,6 +170,17 @@ curl -s "$SIM_CONTROL_URL/history?request_id=mytest-7f3a&pool=lava-sim-grpc"
 
 For the full filter catalogue and example responses, see [`curl_reference.md`](curl_reference.md#history).
 
+## Read the provider name from a reply
+
+Each HTTP reply of a provider names that provider in its `Content-Type` header, as the parameter `sim-provider`. The name is the one that `GET /providers` reports.
+
+```bash
+curl -si -X POST "http://localhost:18545" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' | grep -i '^content-type'
+# Content-Type: application/json; sim-provider=EthPrimaryProvider1
+```
+
+A smart-router keeps this header value, on a reply from its cache too. So a caller behind a router can read which provider produced the reply. The reply body does not change. A reply with no `Content-Type` (`mode=down`), a gRPC reply and a WebSocket frame carry no name.
+
 ## Read aggregate stats
 
 ```bash
