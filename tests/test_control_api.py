@@ -2,10 +2,14 @@
 scenario apply (staged, old-format 400, quirk routing, responses normalization),
 resets, stats/history filters, advance, and ws/emit."""
 
+import json
+from collections import Counter
+
 import pytest
 
 from provider_simulator.chains import CHAINS
 from provider_simulator.control_api import ControlApi
+from provider_simulator.domain.call_log import CallLog
 from provider_simulator.domain.registry import build_registry
 from provider_simulator.listeners.ws import WsSubscriptions
 
@@ -874,3 +878,315 @@ def test_invalid_json_is_accepted_when_one_endpoint_of_the_provider_is_not_grpc(
     api = ControlApi(build_registry(rows), WsSubscriptions())
     st, resp = api.apply_scenario({"providers": {"lava-mixed-sim:1": {"corruption_mode": "invalid_json"}}})
     assert st == 200, resp
+
+
+# ── GET /history: filter first, copy only the rows that match ────────────────
+#
+# A read used to copy every row of every provider and filter the copies, so a
+# read of one request id cost as much as a read of the whole log. Two things are
+# pinned: the answer of each read is the answer of that old algorithm, and a row
+# that a read does not need is never copied.
+
+_HISTORY_TOPOLOGY = (
+    # (pool, chain, pid, name, is_backup, group_label, endpoints)
+    ("alpha-sim", "eth", "1", "AlphaProvider1", False, "", (("jsonrpc", "http", 41001), ("jsonrpc", "ws", 41002))),
+    ("alpha-sim", "eth", "2", "AlphaProvider2", False, "", (("jsonrpc", "http", 41003),)),
+    ("alpha-sim", "eth", "3", "AlphaProvider3", True, "", (("jsonrpc", "http", 41004),)),
+    ("beta-sim", "btc", "1", "BetaProvider1", False, "", (("jsonrpc", "http", 41005),)),
+    ("beta-sim", "btc", "2", "BetaProvider2", False, "", (("grpc", "http2", 41006),)),
+    ("gamma-sim", "solana", "1", "GammaProvider1", False, "", (("jsonrpc", "http", 41007),)),
+    ("gamma-sim", "solana", "2", "GammaProvider2", False, "", (("rest", "http", 41008),)),
+)
+_HISTORY_METHODS = ("eth_blockNumber", "eth_call", "getblockcount", "getSlot", "eth_getLogs")
+_HISTORY_STATUSES = ("success", "error", "rate_limit", "down")
+_HISTORY_HEADERS: tuple[dict[str, str], ...] = (
+    {},
+    {"lava-stateful-api": "true"},
+    {"Lava-Stateful-Api": "false"},
+    {"LAVA-STATEFUL-API": "true", "Lava-Stickiness": "s1"},
+    {"Lava-Stickiness": "s2"},
+)
+_HISTORY_ROWS = 84
+
+
+def _history_api():
+    return ControlApi(build_registry(_HISTORY_TOPOLOGY), WsSubscriptions())
+
+
+def _history_request_id(burst):
+    """A number, the same digits as text, other text, or no id at all."""
+    kind, n = burst % 4, burst // 4
+    if kind == 0:
+        return n
+    if kind == 1:
+        return str(n)
+    if kind == 2:
+        return f"req-{burst}"
+    return None if n % 2 == 0 else 100 + burst
+
+
+def _fill_history(api, monkeypatch):
+    """Push 84 rows over the seven providers of three pools, in 28 bursts of three.
+
+    A burst is one request id and one method on three providers, a few
+    milliseconds apart: the rows of a relay. Some bursts put two rows on the same
+    instant and some spread them past the 50 ms window, so the sort has ties to
+    keep in order and the correlation groups have a border to cross. Returns the
+    (provider key, request id) of each row as pushed."""
+    now = {"ts": 0.0}
+    monkeypatch.setattr("provider_simulator.domain.call_log._now_fields", lambda: (now["ts"], f"{now['ts']:.3f} UTC"))
+    providers = api.registry.all_providers()
+    pushed = []
+    for i in range(_HISTORY_ROWS):
+        burst, slot = divmod(i, 3)
+        if burst % 5 == 0:
+            offsets = (0.0, 0.0, 0.01)
+        elif burst % 4 == 3:
+            offsets = (0.0, 0.08, 0.16)
+        else:
+            offsets = (0.0, 0.01, 0.02)
+        now["ts"] = 1000.0 + burst * 0.5 + offsets[slot]
+        provider = providers[i % 7]
+        endpoint = provider.endpoints[(i // 7) % len(provider.endpoints)]
+        request_id = _history_request_id(burst)
+        provider.log.push(
+            _HISTORY_METHODS[burst % 5],
+            _HISTORY_STATUSES[i % 4],
+            i,
+            interface=endpoint.interface,
+            transport=endpoint.transport,
+            port=endpoint.port,
+            request_id=request_id,
+            lava_headers=_HISTORY_HEADERS[i % 5],
+        )
+        pushed.append((provider.key, request_id))
+    return pushed
+
+
+def _number(text, default, kind):
+    try:
+        return kind(str(text))
+    except (TypeError, ValueError):
+        return default
+
+
+def _history_the_old_way(api, query):
+    """What GET /history answered before it filtered first: copy every row of
+    every provider, filter the copies, sort them by time, then number them.
+    Written out here on purpose, so the new read is held to the old answer."""
+    rows = [row for provider in api.registry.all_providers() for row in provider.log.get_history()]
+    for key in ("pool", "pid", "transport", "method", "status", "interface"):
+        if key in query:
+            rows = [row for row in rows if row.get(key) == query[key]]
+    if "request_id" in query:
+        rows = [row for row in rows if str(row.get("request_id")) == str(query["request_id"])]
+    if "from" in query:
+        low = _number(query["from"], float("-inf"), float)
+        rows = [row for row in rows if row.get("ts", 0.0) >= low]
+    if "to" in query:
+        high = _number(query["to"], float("inf"), float)
+        rows = [row for row in rows if row.get("ts", 0.0) <= high]
+    for key, value in query.items():
+        if key.startswith("lava_header_"):
+            wanted = key[len("lava_header_") :].lower()
+            rows = [
+                row
+                for row in rows
+                if any(name.lower() == wanted and header == value for name, header in row["lava_headers"].items())
+            ]
+    rows.sort(key=lambda row: row.get("ts", 0.0))
+    groups, last_group = {}, 0
+    for order, row in enumerate(rows, start=1):
+        row["call_order"] = order
+        key = (row.get("request_id"), row.get("method"))
+        seen = groups.get(key)
+        if seen is not None and row.get("ts", 0.0) - seen[1] <= 0.050:
+            row["correlation_group"] = seen[0]
+        else:
+            last_group += 1
+            groups[key] = (last_group, row.get("ts", 0.0))
+            row["correlation_group"] = last_group
+    if "last" in query:
+        tail = _number(query["last"], len(rows), int)
+        rows = rows[-tail:] if tail > 0 else []
+    if "max" in query:
+        cap = _number(query["max"], -1, int)
+        if cap < 0:
+            return 400, {"error": "max must be a non-negative integer"}
+        rows = rows[-cap:] if cap > 0 else []
+    return 200, {"count": len(rows), "history": rows}
+
+
+# name -> query. Each filter the read knows is asked alone, then a few together.
+_HISTORY_QUERIES = {
+    "no filter": {},
+    "pool": {"pool": "alpha-sim"},
+    "pool and pid": {"pool": "alpha-sim", "pid": "2"},
+    "pid alone, in three pools": {"pid": "1"},
+    "pool that does not exist": {"pool": "nope-sim"},
+    "pid that the pool does not have": {"pool": "beta-sim", "pid": "3"},
+    "request_id of a number and of the same digits as text": {"request_id": "1"},
+    "request_id of text": {"request_id": "req-2"},
+    "request_id of a row without one": {"request_id": "None"},
+    "method": {"method": "eth_call"},
+    "status": {"status": "rate_limit"},
+    "transport": {"transport": "ws"},
+    "interface": {"interface": "rest"},
+    "from and to": {"from": "1003.0", "to": "1008.0"},
+    "from alone": {"from": "1010.0"},
+    "to alone": {"to": "1002.0"},
+    "from that is not a number": {"from": "abc"},
+    "from that is nan": {"from": "nan"},
+    "lava header, name in another case": {"lava_header_Lava-Stateful-Api": "true"},
+    "lava header, value in another case": {"lava_header_lava-stateful-api": "True"},
+    "two lava headers": {"lava_header_lava-stateful-api": "true", "lava_header_lava-stickiness": "s1"},
+    "last": {"last": "10"},
+    "last 0": {"last": "0"},
+    "last that is not a number": {"last": "abc"},
+    "max": {"max": "7"},
+    "max 0": {"max": "0"},
+    "max below zero": {"max": "-1"},
+    "max that is not a number": {"max": "abc"},
+    "last and max": {"last": "20", "max": "5"},
+    "pool, method and status": {"pool": "alpha-sim", "method": "eth_call", "status": "error"},
+    "pid, time window, lava header and last": {
+        "pid": "1",
+        "from": "1001.0",
+        "to": "1012.0",
+        "lava_header_lava-stateful-api": "true",
+        "last": "3",
+    },
+}
+# How many rows the read gives when it is NOT "some, but not all". A query that
+# is missing here must give some rows and fewer than the 84 pushed, so that no
+# comparison below is between two empty answers or two unfiltered ones.
+_HISTORY_COUNT = {
+    "no filter": _HISTORY_ROWS,
+    "pool that does not exist": 0,
+    "pid that the pool does not have": 0,
+    "from that is not a number": _HISTORY_ROWS,
+    "from that is nan": 0,
+    "lava header, value in another case": 0,  # the value is compared as it is written
+    "last 0": 0,
+    "last that is not a number": _HISTORY_ROWS,
+    "max 0": 0,
+}
+_HISTORY_REFUSED = ("max below zero", "max that is not a number")
+
+
+@pytest.mark.parametrize("name", list(_HISTORY_QUERIES))
+def test_history_read_gives_the_answer_of_the_old_copy_everything_read(name, monkeypatch):
+    api = _history_api()
+    _fill_history(api, monkeypatch)
+    query = _HISTORY_QUERIES[name]
+    expected = _history_the_old_way(api, query)
+    answer = api.get_history(query)
+    assert answer == expected
+    # The wire form too: the same keys in the same order, not only equal values.
+    assert json.dumps(answer) == json.dumps(expected)
+    status, body = answer
+    if name in _HISTORY_REFUSED:
+        assert status == 400
+        return
+    assert status == 200
+    if name in _HISTORY_COUNT:
+        assert body["count"] == _HISTORY_COUNT[name]
+    else:
+        assert 0 < body["count"] < _HISTORY_ROWS, f"{name!r} must keep some rows and drop some: {body['count']}"
+
+
+def _api_that_counts_copies():
+    """A control API whose stored rows count their own copies.
+
+    Returns the API and two counters keyed by "pool:pid": the logs that were
+    read, and the rows that were copied. A copy of a stored row reads its items,
+    which is what the counting row notices. It is counted where the copy happens,
+    so a read that copied every row and kept the matching ones would still show."""
+    reads = Counter()
+    copies = Counter()
+
+    class CountedRow(dict):
+        def items(self):
+            copies[f"{self['pool']}:{self['pid']}"] += 1
+            return super().items()
+
+    class CountingLog(CallLog):
+        def _new_entry(self, *args, **kwargs):
+            return CountedRow(super()._new_entry(*args, **kwargs))
+
+        def get_history(self, *args, **kwargs):
+            reads[f"{self._pool}:{self._pid}"] += 1
+            return super().get_history(*args, **kwargs)
+
+    api = _history_api()
+    for provider in api.registry.all_providers():
+        provider.log = CountingLog(pool=provider.pool.name, pid=provider.pid, name=provider.name)
+    return api, reads, copies
+
+
+@pytest.mark.parametrize(
+    "query, read",
+    [
+        ({"pool": "alpha-sim"}, {"alpha-sim:1", "alpha-sim:2", "alpha-sim:3"}),
+        ({"pool": "alpha-sim", "pid": "2"}, {"alpha-sim:2"}),
+        ({"pid": "1"}, {"alpha-sim:1", "beta-sim:1", "gamma-sim:1"}),
+        ({"pool": "beta-sim", "pid": "3"}, set()),
+        ({"pool": "alpha-sim", "method": "eth_call"}, {"alpha-sim:1", "alpha-sim:2", "alpha-sim:3"}),
+    ],
+    ids=["pool", "pool and pid", "pid in three pools", "pid the pool lacks", "pool and method"],
+)
+def test_history_read_does_not_ask_the_logs_of_providers_the_pool_and_pid_leave_out(query, read, monkeypatch):
+    api, reads, copies = _api_that_counts_copies()
+    pushed = _fill_history(api, monkeypatch)
+    # The control: a read with no filter asks every log and copies every row. If
+    # the counters did not see that, a zero below would prove nothing.
+    api.get_history({})
+    assert set(reads) == {key for key, _ in pushed} and set(reads.values()) == {1}, reads
+    assert sum(copies.values()) == _HISTORY_ROWS, copies
+    reads.clear()
+    copies.clear()
+
+    status, body = api.get_history(query)
+
+    assert status == 200
+    assert set(reads) == read, f"logs read: {sorted(reads)}; only {sorted(read)} may be"
+    assert set(reads.values()) <= {1}, reads
+    assert set(copies) <= read, f"rows copied from logs outside {sorted(read)}: {dict(copies)}"
+    assert sum(copies.values()) == body["count"], f"{sum(copies.values())} rows copied for {body['count']} given"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        {"request_id": "1"},
+        {"request_id": "req-2"},
+        {"request_id": "None"},
+        {"method": "eth_call"},
+        {"status": "rate_limit"},
+        {"transport": "ws"},
+        {"interface": "rest"},
+        {"from": "1003.0", "to": "1008.0"},
+        {"lava_header_Lava-Stateful-Api": "true"},
+        {"pool": "gamma-sim", "request_id": "1"},
+    ],
+    ids=lambda query: "&".join(f"{k}={v}" for k, v in query.items()),
+)
+def test_history_read_copies_exactly_the_rows_that_match(query, monkeypatch):
+    api, reads, copies = _api_that_counts_copies()
+    pushed = _fill_history(api, monkeypatch)
+    matching = _history_the_old_way(api, query)[1]["count"]  # copies everything: counted, then cleared
+    assert 0 < matching < _HISTORY_ROWS, f"{query} must match some rows and not all: {matching}"
+    if query.get("request_id") == "1":
+        # Counted from what was pushed, not from the reference above: a number
+        # and text of the same digits both match, because the id is read as text.
+        assert matching == len([1 for key, rid in pushed if str(rid) == "1" and key.startswith(query.get("pool", ""))])
+    reads.clear()
+    copies.clear()
+
+    status, body = api.get_history(query)
+
+    assert status == 200
+    assert body["count"] == matching
+    assert (
+        sum(copies.values()) == matching
+    ), f"{sum(copies.values())} rows were copied to answer a read that matches {matching}: {dict(copies)}"

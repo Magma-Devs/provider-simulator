@@ -133,3 +133,47 @@ def test_a_named_log_carries_the_name_onto_entries_from_both_paths():
     stub = log.record_arrival("jsonrpc", "http", 18560)
     log.finalize(stub, method="eth_getBalance", status="success", latency_ms=1)
     assert [e["name"] for e in log.get_history()] == ["EthBackupProvider4", "EthBackupProvider4"]
+
+
+def _push_calls(log, count):
+    for i in range(count):
+        log.push(
+            "eth_call" if i % 2 else "eth_blockNumber",
+            "success",
+            0,
+            request_id=i,
+            lava_headers={"Lava-Stateful-Api": "true"} if i < 4 else None,
+            interface="jsonrpc",
+            transport="http",
+            port=18545,
+        )
+
+
+def test_get_history_with_a_filter_gives_only_the_rows_that_pass_it_in_buffer_order():
+    log = _log()
+    _push_calls(log, 6)
+    rows = log.get_history(where=lambda row: row["method"] == "eth_call")
+    assert [row["request_id"] for row in rows] == [1, 3, 5]
+    rows = log.get_history(where=lambda row: "Lava-Stateful-Api" in row["lava_headers"] and row["request_id"] > 1)
+    assert [row["request_id"] for row in rows] == [2, 3]
+
+
+def test_rows_read_through_a_filter_are_independent_sanitized_copies():
+    log = _log()
+    _push_calls(log, 4)
+    rows = log.get_history(where=lambda row: row["request_id"] in (1, 2))
+    assert all(not key.startswith("_") for row in rows for key in row)
+    # Editing what the reader got must not reach the log, the headers included.
+    rows[0]["status"] = "vandalized"
+    rows[0]["lava_headers"]["Lava-Stateful-Api"] = "vandalized"
+    again = log.get_history(where=lambda row: row["request_id"] in (1, 2))
+    assert [(row["status"], row["lava_headers"]) for row in again] == [("success", {"Lava-Stateful-Api": "true"})] * 2
+
+
+def test_a_filter_that_passes_no_row_reads_nothing_and_removes_nothing():
+    log = _log()
+    _push_calls(log, 3)
+    assert log.get_history(where=lambda row: False) == []
+    assert log.get_history(where=lambda row: True) == log.get_history()
+    assert len(log.get_history()) == 3
+    assert log.stats()["history_entries"] == 3

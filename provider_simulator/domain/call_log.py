@@ -20,13 +20,15 @@ Honest boundaries of the counters:
   status still lands in the counters but the row itself is gone from the
   buffer (same trade-off as the legacy simulator).
 - get_history() returns sanitized copies (internal bookkeeping keys removed);
-  mutating them never affects the log.
+  mutating them never affects the log. Given a ``where`` test it copies only
+  the rows that pass it.
 """
 
 import datetime
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 
 from constants import HISTORY_MAX
 
@@ -196,10 +198,16 @@ class CallLog:
                 "history_entries": len(self._history),
             }
 
-    def get_history(self) -> list[dict]:
+    def get_history(self, where: Callable[[dict], bool] | None = None) -> list[dict]:
         """Sanitized copies of the buffered rows: internal bookkeeping keys
         (underscore-prefixed) are stripped and each row is an independent dict,
-        so readers can hold, serialize, or edit the result freely."""
+        so readers can hold, serialize, or edit the result freely.
+
+        ``where`` keeps a read from copying rows it does not need. It is called
+        once for each stored row, under the lock of this log, and only a row for
+        which it answers true is copied. It is given the stored row itself,
+        bookkeeping keys included, so it must only read the row, must be quick,
+        and must not call back into this log (the lock is not reentrant)."""
         with self._lock:
             return [
                 {
@@ -208,4 +216,5 @@ class CallLog:
                     if not k.startswith("_")
                 }
                 for e in self._history
+                if where is None or where(e)
             ]
