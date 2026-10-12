@@ -247,7 +247,7 @@ a tree with uncommitted changes reports `untagged` with `-dirty` in
 `correlation_group` (the calls of one router relay) and `call_order`. Each entry
 carries `pool` / `pid` / `interface` / `transport` / `port`; filter by
 `pool` / `transport` / `method` / `status` / `request_id` / time / `lava_header_*`.
-Each entry also says what the provider received: `headers` (every request
+Each row also says what the provider received: `headers` (every request
 header), `lava_headers`, and for gRPC `deadline_remaining_ms` and `grpc_status`.
 
 ## Deploy

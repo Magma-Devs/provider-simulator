@@ -47,6 +47,7 @@ Run with:
   pytest tests/test_simulator.py -v
 """
 
+import http.client
 import json
 import socket
 import struct
@@ -3018,3 +3019,29 @@ class TestEveryRequestHeaderOnTheRow:
         assert headers["content-type"] == "application/json"
         assert {name.lower(): value for name, value in row["lava_headers"].items()} == {"lava-guid": "GUID_1"}
         assert (row["deadline_remaining_ms"], row["grpc_status"]) == (None, None)
+
+    def test_a_header_that_the_request_repeats_keeps_its_last_value_and_two_spellings_are_two_names(self, sim):
+        """The row keeps the last value of a header name that the request
+        repeats. Two spellings of a name that differ in case stay as two names."""
+        _post(_ctrl(sim, "/history/clear"), {})
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []}).encode()
+        connection = http.client.HTTPConnection("127.0.0.1", urlparse(_P1).port, timeout=5)
+        try:
+            connection.putrequest("POST", "/")
+            connection.putheader("Content-Type", "application/json")
+            connection.putheader("Content-Length", str(len(body)))
+            connection.putheader("X-Multi", "first")
+            connection.putheader("X-Multi", "last")
+            connection.putheader("X-Case", "upper")
+            connection.putheader("x-case", "lower")
+            connection.endheaders(body)
+            response = connection.getresponse()
+            response.read()
+            assert response.status == 200
+        finally:
+            connection.close()
+
+        _, hist = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1&method=eth_blockNumber"))
+        headers = hist["history"][-1]["headers"]
+        assert headers["X-Multi"] == "last"
+        assert (headers["X-Case"], headers["x-case"]) == ("upper", "lower")

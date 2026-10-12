@@ -1173,6 +1173,8 @@ class TestGrpcStatusTexts:
         assert answer == (grpc.StatusCode.CANCELLED, "hang timeout")
         assert 29.5 <= elapsed <= 40.0, f"a hung call must end after 30 s, and it ended after {elapsed:.1f} s"
         assert [(row["status"], row["latency_ms"]) for row in _rows(sim)] == [("hang", 0)]
+        # The simulator sent CANCELLED after the hold, so the row names it.
+        assert [row["grpc_status"] for row in _rows(sim)] == ["CANCELLED"]
 
 
 class TestGrpcWhichCallsWait:
@@ -1821,6 +1823,14 @@ class TestGrpcRowRecordsWhatTheProviderReceived:
             pytest.param(
                 {"mode": "error", "error_message": "no status name"}, "UNKNOWN", id="an-unnamed-error-gives-UNKNOWN"
             ),
+            pytest.param({"mode": "drop_connection"}, "UNAVAILABLE", id="a-drop-gives-UNAVAILABLE"),
+            pytest.param({"corruption_mode": "wrong_type"}, "INTERNAL", id="a-wrong-type-corruption-gives-INTERNAL"),
+            pytest.param({"corruption_mode": "truncated"}, "UNKNOWN", id="a-truncated-reply-gives-UNKNOWN"),
+            pytest.param(
+                {"responses": {"GetLatestBlock": {"error_stub": "NOT_FOUND"}}},
+                "NOT_FOUND",
+                id="an-error-stub-of-one-method-gives-its-name",
+            ),
         ],
     )
     def test_grpc_status_names_the_status_that_the_caller_reads(self, sim, scenario, want):
@@ -1831,6 +1841,18 @@ class TestGrpcRowRecordsWhatTheProviderReceived:
         code, _ = _status_of(_call_get_latest_block, _GRPC_ADDRS["1"])
         assert code.name == want
         assert [row["grpc_status"] for row in _rows(sim)] == [want]
+
+    def test_a_binary_lava_metadata_value_is_base64_text_in_both_fields_and_the_read_answers(self, sim):
+        """A row that held bytes could not be written as JSON. So one call with
+        such a key made every read that returned its row fail."""
+        _call_get_latest_block(_GRPC_ADDRS["1"], metadata=(("lava-x-bin", b"\x00\x01"),))
+        row = _rows(sim)[-1]
+        assert row["lava_headers"] == {"lava-x-bin": "AAE="}
+        assert row["headers"]["lava-x-bin"] == "AAE="
+
+    def test_a_metadata_key_that_the_call_repeats_keeps_its_last_value(self, sim):
+        _call_get_latest_block(_GRPC_ADDRS["1"], metadata=(("x-multi", "first"), ("x-multi", "last")))
+        assert _rows(sim)[-1]["headers"]["x-multi"] == "last"
 
     def test_grpc_status_is_none_while_the_provider_holds_the_call_and_ok_after_it(self, sim):
         """The row is complete before the wait, except for the status name: the
