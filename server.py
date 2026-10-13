@@ -37,6 +37,7 @@ control API from the listeners.
 """
 
 import errno
+import ipaddress
 import json
 import logging
 import os
@@ -255,20 +256,70 @@ def _content_type_with_provider_name(media_type: str, provider_name: str) -> str
     is the one caller.
 
     The parameter comes after each parameter that ``media_type`` has. Its value
-    is a plain token when each character of the name is an HTTP token
-    character. In each other case it is a quoted string, with a backslash
-    before each ``"`` and each backslash of the name.
+    follows the rules of ``_with_media_type_parameter``: a plain token when each
+    character of the name is an HTTP token character, and a quoted string in
+    each other case.
 
     An empty name adds no parameter: the result is ``media_type``. A provider
     that is built outside ``build_registry`` has an empty name.
     """
-    if not provider_name:
+    return _with_media_type_parameter(media_type, "sim-provider", provider_name)
+
+
+def _content_type_with_caller_address(media_type: str, caller_address: str) -> str:
+    """Return ``media_type`` with the address of the caller as its ``sim-caller`` parameter.
+
+    The caller of a provider port is the process that opened the connection.
+    Behind a smart-router that is the router. Where each router pod has an
+    address of its own, the address tells which pod sent the request. A
+    smart-router passes ``Content-Type`` on, so a client behind the router
+    reads the address from the reply, with no change of a reply body.
+
+    A router keeps a reply in its cache with this header. So a reply from the
+    cache carries the address of the pod that asked the provider, and that pod
+    is not always the one that answered the client.
+
+    The value follows the rules of ``_with_media_type_parameter``. An empty
+    address adds no parameter. ``_HttpListenerHandler.send_header`` is the one
+    caller, and it writes this parameter after ``sim-provider``.
+    """
+    return _with_media_type_parameter(media_type, "sim-caller", caller_address)
+
+
+def _with_media_type_parameter(media_type: str, name: str, value: str) -> str:
+    """Return ``media_type`` with the parameter ``name`` after each parameter it has.
+
+    The value is a plain token when each of its characters is an HTTP token
+    character. In each other case it is a quoted string, with a backslash
+    before each ``"`` and each backslash of the value. An empty value adds no
+    parameter: the result is ``media_type``.
+    """
+    if not value:
         return media_type
-    if all(char in _HTTP_TOKEN_CHARS for char in provider_name):
-        value = provider_name
+    if all(char in _HTTP_TOKEN_CHARS for char in value):
+        text = value
     else:
-        value = '"' + provider_name.replace("\\", "\\\\").replace('"', '\\"') + '"'
-    return f"{media_type}; sim-provider={value}"
+        text = '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return f"{media_type}; {name}={text}"
+
+
+def _caller_address(client_address: object) -> str:
+    """The IP address of the peer of a connection, as text. Empty when there is none.
+
+    ``client_address`` is what ``socketserver`` gives a request handler. For a
+    TCP connection it is a tuple that starts with the host. An IPv4 peer of an
+    IPv6 socket has the form ``::ffff:10.42.0.26``. The result is then the IPv4
+    address, so one caller has one spelling on every socket.
+    """
+    if not isinstance(client_address, tuple) or not client_address:
+        return ""
+    host = str(client_address[0])
+    try:
+        parsed = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    mapped = getattr(parsed, "ipv4_mapped", None)
+    return str(mapped) if mapped is not None else str(parsed)
 
 
 class _HttpListenerHandler(BaseHTTPRequestHandler):
@@ -291,19 +342,21 @@ class _HttpListenerHandler(BaseHTTPRequestHandler):
     server: _SimThreadingHTTPServer  # narrowed for the wiring attributes
 
     def send_header(self, keyword: str, value: str) -> None:
-        """Send one reply header. A ``Content-Type`` header also names the provider.
+        """Send one reply header. A ``Content-Type`` header also names the provider and the caller.
 
         Every ``Content-Type`` that this port sends passes here: the header of a
         reply that a listener planned, of a reply that is cut on purpose, of the
         REST reply to OPTIONS, and of the error page that ``http.server`` writes
-        for a verb that this port does not serve. So one place adds the name, and
-        a new kind of reply cannot leave it out.
+        for a verb that this port does not serve. So one place adds the name of
+        the provider and the address of the caller, and a new kind of reply
+        cannot leave them out.
 
         A reply with no ``Content-Type`` gets none. A reply body does not change:
         a router compares the bodies of two providers.
         """
         if keyword.lower() == "content-type":
             value = _content_type_with_provider_name(value, self.server.listener.provider.name)
+            value = _content_type_with_caller_address(value, _caller_address(self.client_address))
         super().send_header(keyword, value)
 
     def _run(self, verb: str) -> None:
