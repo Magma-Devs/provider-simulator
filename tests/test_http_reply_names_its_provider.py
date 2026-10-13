@@ -10,6 +10,9 @@ The name is ``Provider.name``, the one that ``GET /providers`` reports. The
 parameter comes after each parameter that the media type has. The reply body
 stays as it is, a reply with no ``Content-Type`` gets none, and a reply of the
 control API carries no such parameter.
+
+The address of the caller follows the name, as the parameter ``sim-caller``.
+``tests/test_http_reply_names_its_caller.py`` has the tests of that parameter.
 """
 
 import http.client
@@ -24,6 +27,10 @@ _BLOCKS_LATEST = "/cosmos/base/tendermint/v1beta1/blocks/latest"
 
 # The provider that the tests of one eth reply ask.
 _ETH_KEY = "eth-sim:1"
+
+# Each reply of a provider port also carries the address of its caller, after the
+# provider name. The tests of this file send from this machine.
+_CALLER = "; sim-caller=127.0.0.1"
 
 
 def _rpc(method: str) -> dict:
@@ -125,7 +132,7 @@ def test_a_success_reply_carries_the_name_that_get_providers_reports_for_that_pr
             assert status == 200, f"{key} on port {port} did not answer a success: HTTP {status} {raw!r}"
             if interface != "rest":
                 assert "result" in json.loads(raw), f"{key} on port {port} did not answer a success: {raw!r}"
-            expected = f"application/json; sim-provider={provider['name']}"
+            expected = f"application/json; sim-provider={provider['name']}{_CALLER}"
             assert headers["Content-Type"] == expected, f"{key} on port {port}"
             checked += 1
     assert checked, f"GET /providers reports no provider with an http endpoint on {interface}"
@@ -140,7 +147,7 @@ def test_a_provider_with_two_addresses_answers_with_its_name_on_both(sim):
             continue
         for port in ports:
             _, _, headers = _ask(provider, "jsonrpc", port)
-            expected = f"application/json; sim-provider={provider['name']}"
+            expected = f"application/json; sim-provider={provider['name']}{_CALLER}"
             assert headers["Content-Type"] == expected, f"{key} on port {port}"
             asked += 1
     assert asked, "GET /providers reports no provider that serves jsonrpc over http on two ports"
@@ -153,7 +160,7 @@ def test_two_providers_of_one_pool_each_answer_with_their_own_name(sim):
     seen = []
     for provider in (first, second):
         _, _, headers = _ask(provider, "jsonrpc", _http_ports(provider, "jsonrpc")[0])
-        assert headers["Content-Type"] == f"application/json; sim-provider={provider['name']}"
+        assert headers["Content-Type"] == f"application/json; sim-provider={provider['name']}{_CALLER}"
         seen.append(headers["Content-Type"])
     assert seen[0] != seen[1]
 
@@ -170,7 +177,7 @@ def test_an_error_reply_carries_the_provider_name(sim, interface):
     # Tendermint error body is an envelope with an "error" member.
     error_member = "code" if interface == "rest" else "error"
     assert error_member in json.loads(raw), f"{key} did not answer an error: HTTP {status} {raw!r}"
-    assert headers["Content-Type"] == f"application/json; sim-provider={provider['name']}"
+    assert headers["Content-Type"] == f"application/json; sim-provider={provider['name']}{_CALLER}"
 
 
 def test_a_jsonrpc_rate_limit_reply_keeps_its_charset_and_carries_the_provider_name(sim):
@@ -179,7 +186,7 @@ def test_a_jsonrpc_rate_limit_reply_keeps_its_charset_and_carries_the_provider_n
     _set_scenario(sim, _ETH_KEY, mode="rate_limit")
     status, _, headers = _ask(provider, "jsonrpc", port)
     assert status == 429
-    assert headers["Content-Type"] == f"text/plain; charset=utf-8; sim-provider={provider['name']}"
+    assert headers["Content-Type"] == f"text/plain; charset=utf-8; sim-provider={provider['name']}{_CALLER}"
 
 
 def test_a_reply_with_an_http_status_override_carries_the_provider_name(sim):
@@ -187,7 +194,7 @@ def test_a_reply_with_an_http_status_override_carries_the_provider_name(sim):
     _set_scenario(sim, _ETH_KEY, responses={"eth_blockNumber": {"error_stub": "revert", "http_status": 503}})
     status, _, headers = _ask(provider, "jsonrpc", port)
     assert status == 503
-    assert headers["Content-Type"] == f"application/json; sim-provider={provider['name']}"
+    assert headers["Content-Type"] == f"application/json; sim-provider={provider['name']}{_CALLER}"
 
 
 def test_a_reply_with_a_body_that_is_not_json_carries_the_provider_name(sim):
@@ -197,7 +204,7 @@ def test_a_reply_with_a_body_that_is_not_json_carries_the_provider_name(sim):
     assert status == 200
     with pytest.raises(json.JSONDecodeError):
         json.loads(raw)
-    assert headers["Content-Type"] == f"application/json; sim-provider={provider['name']}"
+    assert headers["Content-Type"] == f"application/json; sim-provider={provider['name']}{_CALLER}"
 
 
 def test_a_reply_with_a_null_body_carries_the_provider_name(sim):
@@ -206,7 +213,7 @@ def test_a_reply_with_a_null_body_carries_the_provider_name(sim):
     status, raw, headers = _ask(provider, "jsonrpc", port)
     assert status == 200
     assert raw == b"null"
-    assert headers["Content-Type"] == f"application/json; sim-provider={provider['name']}"
+    assert headers["Content-Type"] == f"application/json; sim-provider={provider['name']}{_CALLER}"
 
 
 @pytest.mark.parametrize("drop_at", ["after_headers", "mid_body"])
@@ -219,7 +226,7 @@ def test_a_reply_that_is_cut_after_its_headers_carries_the_provider_name(sim, dr
         body = json.dumps(_rpc("eth_blockNumber")).encode()
         connection.request("POST", "/", body=body, headers={"Content-Type": "application/json"})
         reply = connection.getresponse()
-        assert reply.headers["Content-Type"] == f"application/json; sim-provider={provider['name']}"
+        assert reply.headers["Content-Type"] == f"application/json; sim-provider={provider['name']}{_CALLER}"
         # The reply is the cut one: it ends before the length that its header promised.
         with pytest.raises(http.client.IncompleteRead):
             reply.read()
@@ -234,7 +241,7 @@ def test_the_error_page_for_a_verb_that_the_port_does_not_serve_carries_the_prov
     assert status == 501
     assert raw, "the error page has a body, so it has a Content-Type"
     page_type = BaseHTTPRequestHandler.error_content_type
-    assert headers["Content-Type"] == f"{page_type}; sim-provider={provider['name']}"
+    assert headers["Content-Type"] == f"{page_type}; sim-provider={provider['name']}{_CALLER}"
 
 
 def test_a_rest_options_reply_with_a_body_carries_the_provider_name(sim):
@@ -243,7 +250,7 @@ def test_a_rest_options_reply_with_a_body_carries_the_provider_name(sim):
     _, provider, port = _first_provider_on(sim, "rest")
     status, _, headers = _send("OPTIONS", f"http://127.0.0.1:{port}/unknown")
     assert status == 404
-    assert headers["Content-Type"] == f"application/json; sim-provider={provider['name']}"
+    assert headers["Content-Type"] == f"application/json; sim-provider={provider['name']}{_CALLER}"
 
 
 # ── What stays as it is ───────────────────────────────────────────────────────
