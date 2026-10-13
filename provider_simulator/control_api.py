@@ -28,6 +28,9 @@ from provider_simulator.port_gate import PortGate
 from provider_simulator.resp_proxy import RespProxyRegistry
 
 _MODES = {"success", "error", "rate_limit", "down", "hang", "drop_connection", "port_closed"}
+# A per-method override may not name "error" (error_stub and error say what the
+# error is) or "port_closed" (a port is closed for the whole provider).
+_PER_METHOD_MODES = _MODES - {"error", "port_closed"}
 # How long a call that closes or reopens a provider port waits for the port to
 # change before it answers with an error instead of a 200.
 _PORT_SETTLE_S = 5.0
@@ -201,6 +204,30 @@ def _an_invalid_json_no_endpoint_can_apply(provider: object, scenario_updates: d
     return ""
 
 
+def _an_invalid_proto_no_endpoint_can_apply(provider: object, scenario_updates: dict) -> str:
+    """Refuse ``corruption_mode="invalid_proto"`` for a provider that has no gRPC
+    endpoint.
+
+    ``invalid_proto`` ends a gRPC call with the status UNKNOWN, and only the gRPC
+    listener applies it. A provider with no gRPC endpoint would store the value
+    and answer each call cleanly: a fault that is accepted and does nothing
+    reads as a router that recovered.
+
+    The mirror of ``_an_invalid_json_no_endpoint_can_apply``, and like it the
+    rule reads the endpoints of the provider and no filter.
+    """
+    if scenario_updates.get("corruption_mode") != "invalid_proto":
+        return ""
+    endpoints = list(provider.endpoints)  # type: ignore[attr-defined]
+    if not any(ep.interface == "grpc" for ep in endpoints):
+        return (
+            "corruption_mode 'invalid_proto' cannot apply: it ends a gRPC call with the status UNKNOWN, "
+            "and this provider has no gRPC endpoint. The value would be stored and would corrupt no "
+            "reply. Use 'invalid_json' to break the bytes of a JSON body"
+        )
+    return ""
+
+
 def _a_port_closed_that_cannot_happen(
     provider: object, scenario_updates: dict, port_gates: "dict[int, PortGate]"
 ) -> tuple[int, str]:
@@ -279,6 +306,21 @@ def _port_closed_per_method(method_name: object) -> str:
     )
 
 
+def _a_per_method_mode_the_simulator_does_not_know(method: object, cfg: dict) -> str:
+    """Refuse a per-method ``mode`` that no listener applies.
+
+    ``fault_policy.ladder`` answers a mode it does not name with no fault, so a
+    misspelt value would be stored and the method would answer as if it had no
+    override: a fault that is accepted and does nothing reads as a router that
+    recovered. ``error`` and ``port_closed`` are refused before this, each with
+    its own reason.
+    """
+    mode = cfg.get("mode")
+    if mode is None or (isinstance(mode, str) and mode in _PER_METHOD_MODES):
+        return ""
+    return f"invalid mode {mode!r} for method {method!r}; a per-method mode is one of {sorted(_PER_METHOD_MODES)}"
+
+
 def _normalise_responses(responses: object) -> object:
     """Normalise the ``responses`` override into the stored form.
 
@@ -299,6 +341,10 @@ def _normalise_responses(responses: object) -> object:
                 raise ValueError("per-method mode='error' not allowed; use error_stub or error")
             if isinstance(cfg, dict) and cfg.get("mode") == "port_closed":
                 raise ValueError(_port_closed_per_method(list(key)))
+            if isinstance(cfg, dict):
+                err = _a_per_method_mode_the_simulator_does_not_know(list(key), cfg)
+                if err:
+                    raise ValueError(err)
             out[(key[0], key[1])] = cfg
         return out
     if isinstance(responses, dict):
@@ -309,6 +355,9 @@ def _normalise_responses(responses: object) -> object:
                 raise ValueError("per-method mode='error' not allowed; use error_stub or error")
             if cfg.get("mode") == "port_closed":
                 raise ValueError(_port_closed_per_method(method_name))
+            err = _a_per_method_mode_the_simulator_does_not_know(method_name, cfg)
+            if err:
+                raise ValueError(err)
             # Canned {status, body} success override (JSON-RPC method entries
             # only — REST re-tupled entries own their body+status semantics).
             # The body must be a JSON object, must not combine with a fault
@@ -429,6 +478,7 @@ class ControlApi:
                 _ports_the_provider_does_not_serve(provider, scenario_updates)
                 or _a_pause_no_named_port_can_serve(provider, scenario_updates)
                 or _an_invalid_json_no_endpoint_can_apply(provider, scenario_updates)
+                or _an_invalid_proto_no_endpoint_can_apply(provider, scenario_updates)
             )
             if err:
                 return 400, {"error": f"{key}: {err}"}

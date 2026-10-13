@@ -11,6 +11,7 @@ from provider_simulator.chains import CHAINS
 from provider_simulator.control_api import ControlApi
 from provider_simulator.domain.call_log import CallLog
 from provider_simulator.domain.registry import build_registry
+from provider_simulator.fault_policy import targets
 from provider_simulator.listeners.ws import WsSubscriptions
 
 
@@ -91,6 +92,43 @@ def test_per_method_mode_error_is_rejected():
     api = _api()
     st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"responses": {"eth_call": {"mode": "error"}}}}})
     assert st == 400
+
+
+def test_a_misspelt_per_method_mode_is_rejected():
+    """A per-method ``mode`` the simulator does not know was stored, and the
+    method answered as if it had no override: the fault never fired. The
+    refusal names the value, the method and the modes that are accepted."""
+    api = _api()
+    block = {"responses": {"eth_call": {"mode": "dwon"}}}
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": block}})
+    assert st == 400
+    assert "eth-sim:1" in resp["error"]
+    assert "invalid mode 'dwon'" in resp["error"]
+    assert "'drop_connection'" in resp["error"]
+    assert "eth_call" in resp["error"]
+    assert api.registry.provider("eth-sim", "1").scenario.snapshot()["responses"] == {}
+
+
+def test_a_misspelt_per_method_mode_is_rejected_in_the_rest_form_too():
+    """REST sends its overrides as ``[[verb, template], cfg]`` pairs, a second
+    path through the same rule."""
+    api = _api()
+    block = {"responses": [[["GET", "/x"], {"mode": "hnag"}]]}
+    st, resp = api.apply_scenario({"providers": {"lava-sim-rest:1": block}})
+    assert st == 400
+    assert "invalid mode 'hnag'" in resp["error"]
+    assert "/x" in resp["error"]
+    assert api.registry.provider("lava-sim-rest", "1").scenario.snapshot()["responses"] == {}
+
+
+@pytest.mark.parametrize("mode", ["success", "rate_limit", "down", "hang", "drop_connection"])
+def test_each_per_method_mode_the_simulator_applies_is_accepted(mode):
+    """The positive control for the two tests above: a rule that refused every
+    per-method mode would pass them."""
+    api = _api()
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"responses": {"eth_call": {"mode": mode}}}}})
+    assert st == 200, resp
+    assert api.registry.provider("eth-sim", "1").scenario.snapshot()["responses"] == {"eth_call": {"mode": mode}}
 
 
 # ── resets ────────────────────────────────────────────────────────────────────
@@ -878,6 +916,83 @@ def test_invalid_json_is_accepted_when_one_endpoint_of_the_provider_is_not_grpc(
     api = ControlApi(build_registry(rows), WsSubscriptions())
     st, resp = api.apply_scenario({"providers": {"lava-mixed-sim:1": {"corruption_mode": "invalid_json"}}})
     assert st == 200, resp
+
+
+# ── invalid_proto on a provider that has no gRPC endpoint ─────────────────────
+
+
+@pytest.mark.parametrize("key", ["eth-sim:1", "lava-sim-rest:1", "lava-sim-tm:1"])
+def test_invalid_proto_on_a_provider_with_no_grpc_endpoint_is_400(key):
+    """``invalid_proto`` ends a gRPC call with the status UNKNOWN, and only the
+    gRPC listener applies it. On a provider with no gRPC endpoint the value was
+    stored and did nothing: each call got a clean reply. The message names the
+    mode that such a provider can apply."""
+    api = _api()
+    st, resp = api.apply_scenario({"providers": {key: {"corruption_mode": "invalid_proto"}}})
+    assert st == 400
+    assert key in resp["error"]
+    assert "'invalid_proto' cannot apply" in resp["error"]
+    assert "no gRPC endpoint" in resp["error"]
+    assert "'invalid_json'" in resp["error"]
+    _, scen = api.get_scenario()
+    assert scen["providers"][key]["corruption_mode"] is None
+
+
+def test_invalid_proto_is_accepted_when_one_endpoint_of_the_provider_is_grpc():
+    """The positive control for the test above, on the shape the rule must not
+    refuse: a gRPC endpoint beside an endpoint of another interface. A provider
+    with only gRPC endpoints is covered by
+    ``test_each_other_corruption_mode_is_accepted_on_a_grpc_provider``."""
+    endpoints = (("grpc", "http2", 40001), ("rest", "http", 40002))
+    rows = (("lava-mixed-sim", "lava", "1", "LavaMixedProvider1", False, "", endpoints),)
+    api = ControlApi(build_registry(rows), WsSubscriptions())
+    st, resp = api.apply_scenario({"providers": {"lava-mixed-sim:1": {"corruption_mode": "invalid_proto"}}})
+    assert st == 200, resp
+    assert resp["applied"]["lava-mixed-sim:1"]["corruption_mode"] == "invalid_proto"
+
+
+def test_an_invalid_proto_refusal_writes_no_provider_of_the_request():
+    api = _api()
+    blocks = {
+        "lava-sim-grpc:1": {"mode": "down"},
+        "eth-sim:1": {"mode": "rate_limit", "corruption_mode": "invalid_proto"},
+    }
+    st, resp = api.apply_scenario({"providers": blocks})
+    assert st == 400, resp
+    _, scen = api.get_scenario()
+    assert scen["providers"]["lava-sim-grpc:1"]["mode"] == "success"
+    assert scen["providers"]["eth-sim:1"]["mode"] == "success"
+
+
+# ── a write with "transports": null clears a stored filter ────────────────────
+
+
+def test_a_write_with_null_transports_clears_a_stored_filter():
+    """A write applies only the fields it names, so a block that leaves out
+    ``transports`` keeps the filter of an earlier write. That is why the
+    automation client sends ``"transports": null`` with every ``down`` and
+    ``port_closed`` write. This pins the simulator's half: null clears the
+    filter, and the fault reaches every endpoint of the provider again."""
+    api = _api()
+    provider = api.registry.provider("eth-sim", "1")
+    by_transport = {ep.transport: ep for ep in provider.endpoints}
+    assert set(by_transport) == {"http", "ws"}, "the test needs a provider with an http and a ws endpoint"
+
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down", "transports": ["ws"]}}})
+    assert st == 200, resp
+    scenario = provider.scenario.snapshot()
+    assert scenario["transports"] == ["ws"]
+    assert [targets(scenario, by_transport[t]) for t in ("http", "ws")] == [False, True]
+
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down"}}})
+    assert st == 200, resp
+    assert provider.scenario.snapshot()["transports"] == ["ws"], "a block without the key keeps the filter"
+
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down", "transports": None}}})
+    assert st == 200, resp
+    scenario = provider.scenario.snapshot()
+    assert scenario["transports"] is None
+    assert [targets(scenario, by_transport[t]) for t in ("http", "ws")] == [True, True]
 
 
 # ── GET /history: filter first, copy only the rows that match ────────────────
