@@ -618,6 +618,9 @@ spec:
             - name: spare-18709
               containerPort: 18709
               protocol: TCP
+            - name: spare-18710
+              containerPort: 18710
+              protocol: TCP
           resources:
             requests:
               cpu: "100m"

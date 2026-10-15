@@ -33,7 +33,7 @@ def test_every_provider_in_the_topology_is_served():
     """One entry per provider, keyed the way stats and scenario already key
     theirs: the pool name, a colon, then the pool slot."""
     providers = _providers()
-    assert len(providers) == 148, sorted(providers)
+    assert len(providers) == 156, sorted(providers)
     assert "eth-sim:1" in providers
     assert "lava-sim-tm:6" in providers
 
@@ -114,10 +114,11 @@ def test_a_provider_with_no_label_reports_an_empty_string():
     # eth-failover-sim (6), eth-failover-solo-sim (1) and btc-failover-sim (3)
     # add 10 more unlabelled, for that reason again, and solana-failover-sim (3)
     # adds 3 more. eth-idle-sim (2) adds 2 more: its router carries no
-    # cross-validation policy either.
+    # cross-validation policy either. eth-failover-backuparchive-sim and
+    # eth-failover-archiveless-sim (4 each) add 8 more, for that reason again.
     # Update both numbers together when a router gains or loses a label.
     assert len(labelled) == 33, f"expected 33 labelled, got {len(labelled)}"
-    assert len(unlabelled) == 115, f"expected 115 unlabelled, got {len(unlabelled)}"
+    assert len(unlabelled) == 123, f"expected 123 unlabelled, got {len(unlabelled)}"
 
 
 # ── Filters ───────────────────────────────────────────────────────────────────
@@ -144,8 +145,10 @@ def test_filter_by_is_backup_returns_the_backup_tier():
     # and lava-failover-grpc-sim, have 3 each as well, and so does
     # eth-failover-sim. Three more failover pools hold four providers each and
     # have 2: eth-failover-excluded-sim, eth-failover-ineligible-sim and
-    # eth-failover-noarchive-sim. Twelve pools of three plus three pools of two.
-    assert len(providers) == 42, sorted(providers)
+    # eth-failover-noarchive-sim. Two more four-provider pools have 2 each:
+    # eth-failover-backuparchive-sim and eth-failover-archiveless-sim. Twelve
+    # pools of three plus five pools of two.
+    assert len(providers) == 46, sorted(providers)
 
 
 def test_filter_by_name_is_the_reverse_lookup():
