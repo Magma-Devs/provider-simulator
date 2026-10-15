@@ -1038,6 +1038,12 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
     ("solana-failover-sim", "solana", "1", "SolanaFailoverPrimaryProvider1", False, "", (("jsonrpc", "http", 18698),)),
     ("solana-failover-sim", "solana", "2", "SolanaFailoverPrimaryProvider2", False, "", (("jsonrpc", "http", 18699),)),
     ("solana-failover-sim", "solana", "3", "SolanaFailoverPrimaryProvider3", False, "", (("jsonrpc", "http", 18700),)),
+    # eth-idle-sim: ports 18701-18702. Two primaries and no backup, for the
+    # router's idle mode. That router pauses its tracker polls after a quiet
+    # time, so these two providers serve that one router and no other: a
+    # test counts every request they receive.
+    ("eth-idle-sim", "eth", "1", "EthIdlePrimaryProvider1", False, "", (("jsonrpc", "http", 18701),)),
+    ("eth-idle-sim", "eth", "2", "EthIdlePrimaryProvider2", False, "", (("jsonrpc", "http", 18702),)),
 )
 
 

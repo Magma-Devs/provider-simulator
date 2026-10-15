@@ -55,6 +55,8 @@ EXPECTED_POOLS = {
     "btc-failover-sim",
     # The failover copy of solana-sim, for the failover tests on the Solana router.
     "solana-failover-sim",
+    # The two providers of the router that runs idle mode.
+    "eth-idle-sim",
 }
 
 
@@ -145,6 +147,23 @@ def test_eth_duo_sim_has_two_dedicated_providers():
     }
     duo_ports = {port for eps in (rows["1"][6], rows["2"][6]) for (_i, _t, port) in eps}
     assert duo_ports.isdisjoint(eth_sim_ports), "eth-duo-sim must not share ports with eth-sim"
+
+
+def test_eth_idle_sim_has_two_providers_of_its_own():
+    """The idle-mode router's test counts every request its two providers get,
+    so no port of this pool may belong to another pool."""
+    rows = {r[2]: r for r in TOPOLOGY if r[0] == "eth-idle-sim"}
+    assert set(rows) == {"1", "2"}
+    assert rows["1"][3] == "EthIdlePrimaryProvider1"
+    assert rows["2"][3] == "EthIdlePrimaryProvider2"
+    assert rows["1"][6] == (("jsonrpc", "http", 18701),)
+    assert rows["2"][6] == (("jsonrpc", "http", 18702),)
+    assert not rows["1"][4] and not rows["2"][4], "the idle pool has no backup"
+    idle_ports = {port for row in rows.values() for (_i, _t, port) in row[6]}
+    other_ports = {
+        port for pool, _c, _pid, _n, _b, _group, eps in TOPOLOGY if pool != "eth-idle-sim" for (_i, _t, port) in eps
+    }
+    assert idle_ports.isdisjoint(other_ports), "eth-idle-sim shares a port with another pool"
 
 
 def test_eth_cv_sim_has_six_dedicated_providers():
@@ -632,6 +651,8 @@ AGREED_NAMES = {
     ("solana-failover-sim", "1"): "SolanaFailoverPrimaryProvider1",
     ("solana-failover-sim", "2"): "SolanaFailoverPrimaryProvider2",
     ("solana-failover-sim", "3"): "SolanaFailoverPrimaryProvider3",
+    ("eth-idle-sim", "1"): "EthIdlePrimaryProvider1",
+    ("eth-idle-sim", "2"): "EthIdlePrimaryProvider2",
 }
 
 # The pools that HAVE a backup tier, and which of their slots it is. The router

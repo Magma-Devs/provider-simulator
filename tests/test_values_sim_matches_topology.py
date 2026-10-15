@@ -430,6 +430,11 @@ POOLS_WITH_NO_ROUTER_HERE = {
     "btc-failover-sim",
     # solana-failover-sim, for the same reason.
     "solana-failover-sim",
+    # eth-idle-sim. Its router runs idle mode on the local k3d cluster and the
+    # throwaway CI clusters, declared in smart_router_automation's
+    # tools/local-cluster/routers.yml. The shared cluster does not run it, so a
+    # router entry in THIS file would claim a deployment nobody makes.
+    "eth-idle-sim",
 }
 
 
