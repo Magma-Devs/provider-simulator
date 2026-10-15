@@ -79,6 +79,14 @@ The value has the spelling of the table, not the lowercased spelling of the
 router's header. A reply with no `Content-Type` has no name, and neither has a
 gRPC reply or a WebSocket frame.
 
+After the name the simulator writes the address of the process that called the
+provider, as the parameter `sim-caller`:
+`Content-Type: application/json; sim-provider=EthPrimaryProvider1; sim-caller=10.42.0.26`.
+Behind a smart-router the caller is the router pod, and each pod has an address
+of its own. So a test reads from a reply which pod of a router sent the request.
+A reply that a router serves from its cache carries the address of the pod that
+fetched the entry.
+
 The form also works backwards. A test that has read a name out of a header can
 ask `GET /providers?name=<name>` which slot that was, and the filter lowercases
 both sides for exactly the reason above.
