@@ -57,6 +57,10 @@ EXPECTED_POOLS = {
     "solana-failover-sim",
     # The two providers of the router that runs idle mode.
     "eth-idle-sim",
+    # Two more four-provider failover pools: the layouts of ineligible and
+    # noarchive again, for routers that start with the default retry limit.
+    "eth-failover-backuparchive-sim",
+    "eth-failover-archiveless-sim",
 }
 
 
@@ -653,6 +657,14 @@ AGREED_NAMES = {
     ("solana-failover-sim", "3"): "SolanaFailoverPrimaryProvider3",
     ("eth-idle-sim", "1"): "EthIdlePrimaryProvider1",
     ("eth-idle-sim", "2"): "EthIdlePrimaryProvider2",
+    ("eth-failover-backuparchive-sim", "1"): "EthFailoverBackuparchivePrimaryProvider1",
+    ("eth-failover-backuparchive-sim", "2"): "EthFailoverBackuparchivePrimaryProvider2",
+    ("eth-failover-backuparchive-sim", "3"): "EthFailoverBackuparchiveBackupProvider3",
+    ("eth-failover-backuparchive-sim", "4"): "EthFailoverBackuparchiveBackupProvider4",
+    ("eth-failover-archiveless-sim", "1"): "EthFailoverArchivelessPrimaryProvider1",
+    ("eth-failover-archiveless-sim", "2"): "EthFailoverArchivelessPrimaryProvider2",
+    ("eth-failover-archiveless-sim", "3"): "EthFailoverArchivelessBackupProvider3",
+    ("eth-failover-archiveless-sim", "4"): "EthFailoverArchivelessBackupProvider4",
 }
 
 # The pools that HAVE a backup tier, and which of their slots it is. The router
@@ -691,6 +703,8 @@ _FOUR_PROVIDER_POOLS_WITH_A_BACKUP_TIER = (
     "eth-failover-excluded-sim",
     "eth-failover-ineligible-sim",
     "eth-failover-noarchive-sim",
+    "eth-failover-backuparchive-sim",
+    "eth-failover-archiveless-sim",
 )
 
 # eth-cache-writer-sim and eth-cache-reader-sim carry a backup tier because the

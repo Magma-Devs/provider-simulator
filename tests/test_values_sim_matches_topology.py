@@ -435,6 +435,14 @@ POOLS_WITH_NO_ROUTER_HERE = {
     # tools/local-cluster/routers.yml. The shared cluster does not run it, so a
     # router entry in THIS file would claim a deployment nobody makes.
     "eth-idle-sim",
+    # eth-failover-backuparchive-sim and eth-failover-archiveless-sim. Their routers run on the
+    # local k3d cluster and the throwaway CI clusters, declared in
+    # smart_router_automation's tools/local-cluster/routers.yml plus its own
+    # config/values_sim.yml, which is where their backup tier comes from. The
+    # shared cluster does not run them, so a router entry in THIS file would
+    # claim a deployment nobody makes.
+    "eth-failover-backuparchive-sim",
+    "eth-failover-archiveless-sim",
 }
 
 

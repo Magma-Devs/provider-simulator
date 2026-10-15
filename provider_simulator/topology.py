@@ -1044,6 +1044,87 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
     # test counts every request they receive.
     ("eth-idle-sim", "eth", "1", "EthIdlePrimaryProvider1", False, "", (("jsonrpc", "http", 18701),)),
     ("eth-idle-sim", "eth", "2", "EthIdlePrimaryProvider2", False, "", (("jsonrpc", "http", 18702),)),
+    # eth-failover-backuparchive-sim: ports 18703-18706. Two primaries that do not declare the
+    # archive add-on and two backups that do: the providers of
+    # eth-failover-ineligible-sim again. That pool's router keeps the chart's
+    # retry limit for the add-on filter tests. The router of this pool starts
+    # with the router's own default retry limit, so the failover tests that need
+    # this layout run on it.
+    (
+        "eth-failover-backuparchive-sim",
+        "eth",
+        "1",
+        "EthFailoverBackuparchivePrimaryProvider1",
+        False,
+        "",
+        (("jsonrpc", "http", 18703),),
+    ),
+    (
+        "eth-failover-backuparchive-sim",
+        "eth",
+        "2",
+        "EthFailoverBackuparchivePrimaryProvider2",
+        False,
+        "",
+        (("jsonrpc", "http", 18704),),
+    ),
+    (
+        "eth-failover-backuparchive-sim",
+        "eth",
+        "3",
+        "EthFailoverBackuparchiveBackupProvider3",
+        True,
+        "",
+        (("jsonrpc", "http", 18705),),
+    ),
+    (
+        "eth-failover-backuparchive-sim",
+        "eth",
+        "4",
+        "EthFailoverBackuparchiveBackupProvider4",
+        True,
+        "",
+        (("jsonrpc", "http", 18706),),
+    ),
+    # eth-failover-archiveless-sim: ports 18707-18710. Two primaries and two backups, none
+    # declaring the archive add-on: the providers of eth-failover-noarchive-sim
+    # again, for a router that starts with the router's own default retry limit.
+    (
+        "eth-failover-archiveless-sim",
+        "eth",
+        "1",
+        "EthFailoverArchivelessPrimaryProvider1",
+        False,
+        "",
+        (("jsonrpc", "http", 18707),),
+    ),
+    (
+        "eth-failover-archiveless-sim",
+        "eth",
+        "2",
+        "EthFailoverArchivelessPrimaryProvider2",
+        False,
+        "",
+        (("jsonrpc", "http", 18708),),
+    ),
+    (
+        "eth-failover-archiveless-sim",
+        "eth",
+        "3",
+        "EthFailoverArchivelessBackupProvider3",
+        True,
+        "",
+        (("jsonrpc", "http", 18709),),
+    ),
+    (
+        "eth-failover-archiveless-sim",
+        "eth",
+        "4",
+        "EthFailoverArchivelessBackupProvider4",
+        True,
+        "",
+        (("jsonrpc", "http", 18710),),
+    ),
 )
 
 

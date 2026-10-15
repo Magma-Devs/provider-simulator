@@ -776,3 +776,7 @@ spec:
       port: 18709
       targetPort: 18709
       protocol: TCP
+    - name: spare-18710
+      port: 18710
+      targetPort: 18710
+      protocol: TCP
