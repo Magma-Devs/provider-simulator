@@ -185,9 +185,17 @@ class Listener(ABC):
             deadline_remaining_ms=deadline_remaining_ms,
         )
 
+    def body_for_history(self, request: RawRequest) -> bytes | None:
+        """The request body whose length and SHA-256 the history row records.
+        Default: none. REST overrides it for a verb that carries a body."""
+        return None
+
     def serve(self, request: RawRequest, entry: dict | None = None) -> ServeResult:
         if entry is None:
             entry = self.arrive(request.headers)
+        recorded_body = self.body_for_history(request)
+        if recorded_body is not None:
+            self.provider.log.record_body(entry, recorded_body)
         scenario = self.provider.scenario.snapshot()
         # One stateful policy step per request: the transports filter plus the
         # fail_first_n window (consumed here, exactly once).
@@ -264,7 +272,7 @@ class Listener(ABC):
             else:
                 status, body = self.build_content(parsed, scenario, request)
                 result = self.build_success(status, body)
-                status_label = self.success_label(status, body)
+                status_label = self.success_label(status, body, parsed)
                 request_id = self.response_id(body) or self.request_id(parsed)
 
         if result.action in ("respond", "drop"):
@@ -346,10 +354,11 @@ class Listener(ABC):
         Only JSON-RPC supports it; the default is no override."""
         return None
 
-    def success_label(self, status: int, body: object) -> str:
+    def success_label(self, status: int, body: object, request: dict | None = None) -> str:
         """History status for a success-path response. Default: ``error`` if the
         body carries an error envelope, else ``success``. REST overrides to label
-        a 404 ``not_found``."""
+        a reply outside 2xx ``error``, and a 404 for a path that the simulator
+        does not serve ``not_found``. ``request`` is the parsed request."""
         return "error" if isinstance(body, dict) and "error" in body else "success"
 
     # Default request/response accessors work for the JSON-RPC dict shape;
