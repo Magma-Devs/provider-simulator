@@ -31,10 +31,14 @@ What a row says about the request itself:
   dict of small strings.
 - ``deadline_remaining_ms`` and ``grpc_status`` are for gRPC rows. They are
   None on a row of any other interface.
+- ``body_len`` and ``body_sha256`` hold the length and the SHA-256 of the body
+  that a REST request carried, for a verb other than GET and HEAD. They are None
+  on every other row. A reader can compare the hash with the body that it sent.
 """
 
 import base64
 import datetime
+import hashlib
 import json
 import threading
 import time
@@ -134,6 +138,8 @@ class CallLog:
             },
             "deadline_remaining_ms": deadline_remaining_ms,
             "grpc_status": None,
+            "body_len": None,
+            "body_sha256": None,
             "pool": self._pool,
             "pid": self._pid,
             "name": self._name,
@@ -229,6 +235,16 @@ class CallLog:
         caller went away during the wait."""
         with self._lock:
             entry["grpc_status"] = grpc_status
+
+    def record_body(self, entry: dict, body: bytes) -> None:
+        """Write the length and the SHA-256 of the request body on a row of record_arrival.
+
+        The arrival is recorded before the body is read, so the row gets the body
+        here, before the provider waits. A reader can then check what the
+        provider received while the request is still in flight."""
+        with self._lock:
+            entry["body_len"] = len(body)
+            entry["body_sha256"] = hashlib.sha256(body).hexdigest()
 
     def push(
         self,

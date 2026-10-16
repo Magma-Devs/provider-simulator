@@ -1,6 +1,8 @@
 """RestListener — Cosmos REST over HTTP. Drives serve() with GET requests and
 checks the wire plan + history, one behaviour per test."""
 
+import hashlib
+
 import pytest
 
 from provider_simulator.domain.endpoint import Endpoint
@@ -223,6 +225,67 @@ def test_a_broadcast_can_hang_while_the_reads_of_the_provider_answer():
     _refuse_the_broadcast(provider, mode="hang")
     assert listener.serve(_post(_TX_BROADCAST, body=_BROADCAST_BODY)).action == "hang"
     assert listener.serve(_get(_BLOCKS_LATEST)).status == 200
+
+
+# ── What the history row says about the body ─────────────────────────────────
+
+
+def test_a_post_row_records_the_length_and_the_hash_of_its_body():
+    listener, provider = _listener()
+    listener.serve(_post(_TX_BROADCAST, body=_BROADCAST_BODY))
+    row = provider.log.get_history()[0]
+    assert row["body_len"] == len(_BROADCAST_BODY)
+    assert row["body_sha256"] == hashlib.sha256(_BROADCAST_BODY).hexdigest()
+
+
+def test_another_body_gives_another_hash():
+    listener, provider = _listener()
+    listener.serve(_post(_TX_BROADCAST, body=_BROADCAST_BODY))
+    listener.serve(_post(_TX_BROADCAST, body=b'{"tx_bytes": "AQ=="}'))
+    first, second = provider.log.get_history()
+    assert first["body_sha256"] != second["body_sha256"]
+
+
+def test_a_post_with_no_body_records_a_length_of_zero_and_the_hash_of_nothing():
+    listener, provider = _listener()
+    listener.serve(_post(_TX_BROADCAST))
+    row = provider.log.get_history()[0]
+    assert (row["body_len"], row["body_sha256"]) == (0, hashlib.sha256(b"").hexdigest())
+
+
+def test_a_get_and_a_head_record_no_body():
+    listener, provider = _listener()
+    listener.serve(_get(_BLOCKS_LATEST))
+    listener.serve(_head(_BLOCKS_LATEST))
+    rows = provider.log.get_history()
+    assert [(row["body_len"], row["body_sha256"]) for row in rows] == [(None, None), (None, None)]
+
+
+def test_the_body_is_on_the_row_while_the_provider_still_holds_the_request():
+    # serve() returns the plan before the socket adapter waits, so the row that
+    # a reader sees during the wait is the row that serve() left.
+    listener, provider = _listener()
+    _refuse_the_broadcast(provider, mode="hang")
+    assert listener.serve(_post(_TX_BROADCAST, body=_BROADCAST_BODY)).action == "hang"
+    assert provider.log.get_history()[0]["body_sha256"] == hashlib.sha256(_BROADCAST_BODY).hexdigest()
+
+
+# ── What the history row says about a refusal ────────────────────────────────
+
+
+@pytest.mark.parametrize("status", [400, 404, 409, 503])
+def test_a_refusal_staged_on_a_known_route_reads_error_in_history(status):
+    listener, provider = _listener()
+    _refuse_the_broadcast(provider, http_status=status, body={"code": 3, "message": "refused"})
+    assert listener.serve(_post(_TX_BROADCAST, body=_BROADCAST_BODY)).status == status
+    assert provider.log.get_history()[0]["status"] == "error"
+
+
+def test_an_accepted_write_and_a_read_still_read_success_in_history():
+    listener, provider = _listener()
+    listener.serve(_post(_TX_BROADCAST, body=_BROADCAST_BODY))
+    listener.serve(_get(_BLOCKS_LATEST))
+    assert [row["status"] for row in provider.log.get_history()] == ["success", "success"]
 
 
 def _head(path, headers=None):

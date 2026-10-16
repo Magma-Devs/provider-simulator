@@ -132,8 +132,12 @@ Every row also says what the provider received:
 | `lava_headers` | The headers of `headers` whose name starts with `lava-`, with the same values | `{}` |
 | `deadline_remaining_ms` | gRPC only: the milliseconds that the deadline of the caller had left when the call arrived. The gRPC library reports it, and the value can be some milliseconds above the deadline that the caller set. | `null` on every other interface, and on a gRPC call with no deadline |
 | `grpc_status` | gRPC only: the name of the status that the simulator sent, `OK` for a reply | `null` on every other interface. On a gRPC row it is `null` in three cases: the provider still holds the call, the caller went away during the wait, or the simulator could not build the reply message |
+| `body_len` | REST only: the length in bytes of the request body, for a verb other than GET and HEAD. An empty body gives 0. | `null` on every other interface, and on a REST GET or HEAD |
+| `body_sha256` | REST only: the SHA-256 of the request body, as hexadecimal text. A test hashes the bytes that it sent and compares. The row holds it from the moment the request arrives, so a test can read it while the provider still holds the request. | `null` on every other interface, and on a REST GET or HEAD |
 
 `grpc_status` says what the simulator sent. It does not say that the caller received it.
+
+On REST the `status` of a row reads `error` for any reply outside 2xx, including a refusal that a test staged on a known route with `http_status` and `body`. A 404 for a path that the simulator does not serve reads `not_found`.
 
 The control API has no authentication. So a secret that a request carries in a header can be read from `GET /history`.
 

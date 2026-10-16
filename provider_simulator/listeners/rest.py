@@ -171,10 +171,23 @@ class RestListener(Listener):
         route_verb = request.get("route_verb") or request.get("verb")
         return (route_verb, template) if template else None
 
-    def success_label(self, status: int, body: object) -> str:
-        if status == 404:
+    def success_label(self, status: int, body: object, request: dict | None = None) -> str:
+        # A 404 for a path that the simulator does not serve has no route
+        # template, and reads ``not_found``. Any other reply outside 2xx, such as
+        # a refusal that a test staged on a known route, reads ``error``.
+        if status == 404 and not (request or {}).get("template"):
             return "not_found"
-        return super().success_label(status, body)
+        if not 200 <= status < 300:
+            return "error"
+        return super().success_label(status, body, request)
+
+    def body_for_history(self, request: RawRequest) -> bytes | None:
+        # GET and HEAD carry no body. Every other verb records the bytes that
+        # arrived, an empty body included, so a reader can tell a POST that sent
+        # nothing from a request that cannot send a body.
+        if request.verb.upper() in ("GET", "HEAD"):
+            return None
+        return request.body or b""
 
     def request_method(self, request: dict) -> str:
         template = request.get("template")

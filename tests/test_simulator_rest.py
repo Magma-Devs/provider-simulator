@@ -30,6 +30,7 @@ Run with:
   pytest tests/test_simulator_rest.py -v
 """
 
+import hashlib
 import http.client
 import json
 import re
@@ -626,6 +627,25 @@ class TestRestPerPathOverrides:
         assert accepted_status == 200
         assert accepted_body["tx_response"]["code"] == 0
         assert read_status == 200
+
+    def test_history_shows_the_hash_of_the_body_and_reads_a_refusal_as_error(self, sim):
+        """A test can read what a provider received, and a refused write does not
+        read as a served one: provider 1 refuses the broadcast, provider 2
+        accepts it, and both rows carry the length and the hash of the body that
+        the caller sent."""
+        broadcast = "/cosmos/tx/v1beta1/txs"
+        body = {"tx_bytes": "AA==", "mode": "BROADCAST_MODE_SYNC"}
+        sent = json.dumps(body).encode()
+        _set_rest(sim, "1", responses=[[["POST", broadcast], {"http_status": 409, "body": {"code": 6}}]])
+        _post(_REST_URLS["1"] + broadcast, body)
+        _post(_REST_URLS["2"] + broadcast, body)
+        rows = {}
+        for pid in ("1", "2"):
+            _, hist, _ = _get(_ctrl(sim, f"/history?pool=lava-sim-rest&pid={pid}"))
+            rows[pid] = [e for e in hist["history"] if e["method"] == f"POST {broadcast}"][0]
+        for row in rows.values():
+            assert (row["body_len"], row["body_sha256"]) == (len(sent), hashlib.sha256(sent).hexdigest())
+        assert (rows["1"]["status"], rows["2"]["status"]) == ("error", "success")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
