@@ -235,6 +235,34 @@ def _simulate_response() -> Dict[str, Any]:
     }
 
 
+def _broadcast_response() -> Dict[str, Any]:
+    """POST /cosmos/tx/v1beta1/txs — what a real Cosmos REST node answers when it
+    accepts a broadcast in the ``BROADCAST_MODE_SYNC`` mode: a ``tx_response``
+    that carries the hash of the transaction and ``code`` 0.
+
+    A node that refuses the transaction answers a non-2xx status, or a 2xx with
+    a non-zero ``code``. The default is the acceptance, so a provider answers a
+    write like a healthy node. A test that wants a refusal sets a status and a
+    body on this route of one provider (``responses`` of ``POST /scenario``)."""
+    return {
+        "tx_response": {
+            "height": "0",
+            "txhash": "EF" * 32,
+            "codespace": "",
+            "code": 0,
+            "data": "",
+            "raw_log": "[]",
+            "logs": [],
+            "info": "",
+            "gas_wanted": "0",
+            "gas_used": "0",
+            "tx": None,
+            "timestamp": "",
+            "events": [],
+        }
+    }
+
+
 # ── Method (path) defaults ────────────────────────────────────────────────────
 #
 # Keyed by (verb, template_str). The template carries ``{var}`` placeholders;
@@ -242,9 +270,10 @@ def _simulate_response() -> Dict[str, Any]:
 # path params as a dict.
 #
 # The GET entries are the original v1 catalogue. Write verbs joined later:
-# real Cosmos REST nodes accept POST on paths like /cosmos/tx/v1beta1/simulate,
-# and the GET-only catalogue made the simulator answer 404 where a real node
-# answers 200 — so POST-path router tests could never run against the sim.
+# real Cosmos REST nodes accept POST on paths like /cosmos/tx/v1beta1/simulate
+# and /cosmos/tx/v1beta1/txs (the broadcast of a transaction), and the GET-only
+# catalogue made the simulator answer 404 where a real node answers 200 — so
+# POST-path router tests could never run against the sim.
 #
 # This table is also the route table: the listener compiles its routes from
 # these keys, so a verb/path absent here matches no route, gets no template,
@@ -267,6 +296,7 @@ REST_METHOD_DEFAULTS: Dict[Tuple[str, str], Any] = {
     ("GET", "/cosmos/bank/v1beta1/balances/{address}"): _balances_response("lava-sim-address"),
     ("GET", "/cosmos/staking/v1beta1/validators"): _validators_response(),
     ("POST", "/cosmos/tx/v1beta1/simulate"): _simulate_response(),
+    ("POST", "/cosmos/tx/v1beta1/txs"): _broadcast_response(),
 }
 
 

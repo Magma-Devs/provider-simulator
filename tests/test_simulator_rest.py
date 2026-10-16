@@ -611,6 +611,22 @@ class TestRestPerPathOverrides:
         assert status == 200
         assert "block" in body
 
+    def test_one_provider_refuses_a_write_while_another_accepts_it(self, sim):
+        """The broadcast of a transaction: provider 1 refuses it with a 409 and
+        its own body, provider 2 keeps the default acceptance, and a read of
+        provider 1 still answers. The router sends a write to every primary at
+        once, so a test needs exactly this split."""
+        broadcast = "/cosmos/tx/v1beta1/txs"
+        refusal = {"code": 6, "message": "tx already exists", "details": []}
+        _set_rest(sim, "1", responses=[[["POST", broadcast], {"http_status": 409, "body": refusal}]])
+        refused_status, refused_body, _ = _post(_REST_URLS["1"] + broadcast, {"tx_bytes": "AA=="})
+        accepted_status, accepted_body, _ = _post(_REST_URLS["2"] + broadcast, {"tx_bytes": "AA=="})
+        read_status, _, _ = _get(_REST_URLS["1"] + "/cosmos/base/tendermint/v1beta1/node_info")
+        assert (refused_status, refused_body) == (409, refusal)
+        assert accepted_status == 200
+        assert accepted_body["tx_response"]["code"] == 0
+        assert read_status == 200
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Named error-stub catalogue — REST_ERROR_STUBS
