@@ -45,8 +45,8 @@ _REST_ROUTES = [(verb.upper(), _compile_route(template), template) for (verb, te
 
 # Verbs served by another verb's routes. HEAD asks for a GET's status and
 # headers without its body, so it is looked up under GET: every GET path gets
-# HEAD for free, and a path with no GET route (the POST-only simulate endpoint,
-# or anything uncatalogued) still answers 404 to a HEAD.
+# HEAD for free, and a path with no GET route (a POST-only endpoint such as
+# simulate or the broadcast, or anything uncatalogued) still answers 404 to a HEAD.
 _ROUTE_VERB = {"HEAD": "GET"}
 
 _ID_LOCK = threading.Lock()

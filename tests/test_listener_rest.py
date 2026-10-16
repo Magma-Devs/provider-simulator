@@ -157,8 +157,7 @@ def _refuse_the_broadcast(provider, **override):
 
 def test_post_tx_broadcast_is_accepted_with_a_hash_and_code_zero():
     # A node that accepts a broadcast answers a tx_response with the hash of
-    # the transaction and code 0. The catalogue had no such route, so every
-    # provider answered 404 to a write.
+    # the transaction and code 0.
     listener, provider = _listener()
     res = listener.serve(_post(_TX_BROADCAST, body=_BROADCAST_BODY))
     assert (res.action, res.status) == ("respond", 200)
@@ -169,7 +168,9 @@ def test_post_tx_broadcast_is_accepted_with_a_hash_and_code_zero():
 
 
 def test_get_on_the_broadcast_path_is_404():
-    # The route is verb-scoped, as /simulate is: no GET twin.
+    # The simulator catalogues the broadcast for POST only, so a GET on this path
+    # is not served. A real node serves the search of transactions (GetTxsEvent)
+    # on GET here, and the simulator has no entry for it.
     listener, _ = _listener()
     assert listener.serve(_get(_TX_BROADCAST)).status == 404
 
@@ -181,6 +182,8 @@ def test_get_on_the_broadcast_path_is_404():
         (404, {"code": 5, "message": "not found", "details": []}),
         (409, {"code": 6, "message": "tx already exists", "details": []}),
         (503, {"code": 14, "message": "try again later", "details": []}),
+        # A Cosmos node can refuse a transaction with a 200 and a non-zero code.
+        (200, {"tx_response": {"code": 32, "raw_log": "account sequence mismatch", "txhash": ""}}),
     ],
 )
 def test_a_provider_refuses_the_broadcast_with_the_status_and_body_it_was_given(status, body):
@@ -205,7 +208,7 @@ def test_a_refused_broadcast_leaves_every_other_route_of_the_provider_answering(
     assert listener.serve(_get(_BLOCKS_LATEST)).status == 200
 
 
-def test_an_accepted_broadcast_can_come_late_so_that_a_refusal_arrives_first():
+def test_an_accepted_broadcast_can_be_delayed_without_changing_its_body():
     # Only the delay is set, so the body is still the acceptance: the delay
     # changes when the reply comes and not what it says.
     listener, provider = _listener()

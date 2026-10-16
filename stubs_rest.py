@@ -243,7 +243,10 @@ def _broadcast_response() -> Dict[str, Any]:
     A node that refuses the transaction answers a non-2xx status, or a 2xx with
     a non-zero ``code``. The default is the acceptance, so a provider answers a
     write like a healthy node. A test that wants a refusal sets a status and a
-    body on this route of one provider (``responses`` of ``POST /scenario``)."""
+    body on this route of one provider (``responses`` of ``POST /scenario``).
+
+    The simulator never reads the body of the request, so the answer does not
+    depend on the transaction that was sent."""
     return {
         "tx_response": {
             "height": "0",
