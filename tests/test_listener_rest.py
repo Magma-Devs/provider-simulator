@@ -141,6 +141,90 @@ def test_get_on_simulate_path_is_404():
     assert res.status == 404
 
 
+# --- The broadcast of a transaction ------------------------------------------
+# POST /cosmos/tx/v1beta1/txs is the write of a Cosmos REST node. The router
+# sends a write to every primary provider at once, so a test needs one provider
+# that refuses it while another accepts it. The refusal is a per-route override
+# of one provider: a status and a body on this route only.
+
+_TX_BROADCAST = "/cosmos/tx/v1beta1/txs"
+_BROADCAST_BODY = b'{"tx_bytes": "AA==", "mode": "BROADCAST_MODE_SYNC"}'
+
+
+def _refuse_the_broadcast(provider, **override):
+    provider.scenario.update({"responses": {("POST", _TX_BROADCAST): override}})
+
+
+def test_post_tx_broadcast_is_accepted_with_a_hash_and_code_zero():
+    # A node that accepts a broadcast answers a tx_response with the hash of
+    # the transaction and code 0.
+    listener, provider = _listener()
+    res = listener.serve(_post(_TX_BROADCAST, body=_BROADCAST_BODY))
+    assert (res.action, res.status) == ("respond", 200)
+    assert res.body["tx_response"]["code"] == 0
+    assert len(res.body["tx_response"]["txhash"]) == 64
+    hist = provider.log.get_history()[0]
+    assert (hist["status"], hist["method"]) == ("success", f"POST {_TX_BROADCAST}")
+
+
+def test_get_on_the_broadcast_path_is_404():
+    # The simulator catalogues the broadcast for POST only, so a GET on this path
+    # is not served. A real node serves the search of transactions (GetTxsEvent)
+    # on GET here, and the simulator has no entry for it.
+    listener, _ = _listener()
+    assert listener.serve(_get(_TX_BROADCAST)).status == 404
+
+
+@pytest.mark.parametrize(
+    "status, body",
+    [
+        (400, {"code": 3, "message": "tx rejected", "details": []}),
+        (404, {"code": 5, "message": "not found", "details": []}),
+        (409, {"code": 6, "message": "tx already exists", "details": []}),
+        (503, {"code": 14, "message": "try again later", "details": []}),
+        # A Cosmos node can refuse a transaction with a 200 and a non-zero code.
+        (200, {"tx_response": {"code": 32, "raw_log": "account sequence mismatch", "txhash": ""}}),
+    ],
+)
+def test_a_provider_refuses_the_broadcast_with_the_status_and_body_it_was_given(status, body):
+    listener, provider = _listener()
+    _refuse_the_broadcast(provider, http_status=status, body=body)
+    res = listener.serve(_post(_TX_BROADCAST, body=_BROADCAST_BODY))
+    assert (res.action, res.status, res.body) == ("respond", status, body)
+
+
+def test_a_refused_broadcast_leaves_every_other_route_of_the_provider_answering():
+    # The router polls each provider with reads. The refusal is keyed by (verb,
+    # template), so a read does not see it, and nor does the other POST route.
+    # A provider that failed every route would be switched off by the router's
+    # polls, and the test would then measure that and not the write.
+    listener, provider = _listener()
+    _refuse_the_broadcast(provider, http_status=409, body={"code": 6})
+    # The control: the refusal is in force. Without it the other two checks
+    # would pass for a route that does not exist, because an override on an
+    # unknown route is ignored.
+    assert listener.serve(_post(_TX_BROADCAST, body=_BROADCAST_BODY)).status == 409
+    assert listener.serve(_post(_TX_SIMULATE, body=b"{}")).status == 200
+    assert listener.serve(_get(_BLOCKS_LATEST)).status == 200
+
+
+def test_an_accepted_broadcast_can_be_delayed_without_changing_its_body():
+    # Only the delay is set, so the body is still the acceptance: the delay
+    # changes when the reply comes and not what it says.
+    listener, provider = _listener()
+    _refuse_the_broadcast(provider, latency_ms=800)
+    res = listener.serve(_post(_TX_BROADCAST, body=_BROADCAST_BODY))
+    assert (res.status, res.latency_ms) == (200, 800)
+    assert res.body["tx_response"]["code"] == 0
+
+
+def test_a_broadcast_can_hang_while_the_reads_of_the_provider_answer():
+    listener, provider = _listener()
+    _refuse_the_broadcast(provider, mode="hang")
+    assert listener.serve(_post(_TX_BROADCAST, body=_BROADCAST_BODY)).action == "hang"
+    assert listener.serve(_get(_BLOCKS_LATEST)).status == 200
+
+
 def _head(path, headers=None):
     return RawRequest(verb="HEAD", path=path, headers=headers or {})
 
@@ -186,6 +270,12 @@ def test_head_on_post_only_path_is_404():
     listener, _ = _listener()
     res = listener.serve(_head(_TX_SIMULATE))
     assert res.status == 404
+
+
+def test_head_on_the_broadcast_path_is_404():
+    # The broadcast is catalogued for POST only, like /simulate.
+    listener, _ = _listener()
+    assert listener.serve(_head(_TX_BROADCAST)).status == 404
 
 
 def test_head_inherits_the_get_routes_fault_override():

@@ -274,7 +274,7 @@ curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" 
 curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" -d '{"providers":{"1":{"chain_family":"eth","responses":{"eth_blockNumber":{"result":"0xdeadbeef"}}}}}'
 ```
 
-A `responses` entry can also hold a fault for one method: `mode`, `latency_ms`, `error_probability`, `error_code`, `error_message`, `http_status` or `drop_at`. The fault reaches the requests of that method only. It works on JSON-RPC, REST, Tendermint RPC and gRPC. `http_status` has no effect on gRPC, because a gRPC status has no HTTP status. It has no effect on a WebSocket frame, because a frame has no HTTP status. The key of the entry is the method name. On REST the key is the `[verb, template]` pair, and `responses` is then a list of pairs: `"responses": [[["GET", "/cosmos/base/tendermint/v1beta1/blocks/latest"], {"mode": "rate_limit"}]]`. An object with a text key is stored for a REST provider and matches no route. The control API refuses `mode=error` and `mode=port_closed` in an entry.
+A `responses` entry can also hold a fault for one method: `mode`, `latency_ms`, `error_probability`, `error_code`, `error_message`, `http_status` or `drop_at`. The fault reaches the requests of that method only. It works on JSON-RPC, REST, Tendermint RPC and gRPC. `http_status` has no effect on gRPC, because a gRPC status has no HTTP status. It has no effect on a WebSocket frame, because a frame has no HTTP status. The key of the entry is the method name. On REST the key is the `[verb, template]` pair, and `responses` is then a list of pairs: `"responses": [[["GET", "/cosmos/base/tendermint/v1beta1/blocks/latest"], {"mode": "rate_limit"}]]`. An object with a text key is stored for a REST provider and matches no route. The control API refuses `mode=error` and `mode=port_closed` in an entry. On REST an entry can also hold a canned reply: `body` is the body of the reply and `http_status` is its status.
 
 A WebSocket subscribe frame and a WebSocket unsubscribe frame go through the same request flow as each other request. Three results of that:
 
@@ -290,9 +290,11 @@ A WebSocket subscribe frame and a WebSocket unsubscribe frame go through the sam
 curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" -d '{"providers":{"1":{"chain_family":"eth","responses":{"eth_call":{"error_stub":"revert"}}}}}'
 ```
 
-## REST surface (planned, not yet on develop)
+## REST surface
 
-`chain_family="rest"` and REST listener ports `18551` / `18552` / `18553` are reserved in `constants.py` and `k8s/service.yml` but the listeners are not bound on develop yet. MAG-1777 (REST sim) merged on a feature branch and is staged to land — this doc will pick up REST recipes once it does.
+The REST listener serves the Cosmos REST routes that `stubs_rest.py` lists in `REST_METHOD_DEFAULTS`, keyed by verb and path template. A provider serves REST on the ports that `provider_simulator/topology.py` lists for its `rest` endpoint. A verb and path that the table does not hold answers `not_found`.
+
+The route `POST /cosmos/tx/v1beta1/txs` accepts a broadcast by default and answers a `tx_response` with `code` 0. To make one provider refuse it, set `http_status` and `body` for the key `["POST", "/cosmos/tx/v1beta1/txs"]` in `responses`. A `latency_ms` delays the answer, and `mode` `hang` holds the request for 30 seconds and then closes the connection. The simulator never reads the body of a REST request, so the answer does not depend on the transaction that was sent.
 
 ## Backup-tier listeners per surface
 
