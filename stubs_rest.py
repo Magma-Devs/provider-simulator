@@ -16,6 +16,11 @@ Method scope (v1)
   GET  /cosmos/bank/v1beta1/balances/{address}
   GET  /cosmos/staking/v1beta1/validators
 
+Two write routes joined later:
+
+  POST /cosmos/tx/v1beta1/simulate
+  POST /cosmos/tx/v1beta1/txs
+
 Adding new path-bundles (staking, governance, Lava-specific) is tracked as
 follow-up tickets per the resolved Q7 decision — keep this file under one
 bundle's worth of entries until the next ticket lands.
@@ -30,10 +35,12 @@ a handful of fields.
 | Path | Shape choice | Why |
 |------|--------------|-----|
 | ``/blocks/latest`` | 1 block_id + 1 block (header, data, evidence, last_commit) | Router's pruning verification reads ``block.header.height`` and ``chain_id`` — keep both. Other fields stubbed minimally. |
-| ``/blocks/{height}`` | Same shape as ``/blocks/latest`` | Path param ``{height}`` overrides ``block.header.height`` at request time in handlers_rest. |
+| ``/blocks/{height}`` | Same shape as ``/blocks/latest`` | Path param ``{height}`` overrides ``block.header.height`` at request time in ``LavaChain._build_rest``. |
 | ``/node_info`` | default_node_info + application_version | Two top-level keys most callers read. Inner fields are minimal but well-typed. |
 | ``/balances/{address}`` | balances list (1 entry) + pagination | Single ulava balance covers the happy-path classifier check; address is echoed via path param. |
 | ``/validators`` | validators list (1 entry) + pagination | One active validator is enough to verify the router decoded the list shape. |
+| ``/simulate`` (POST) | gas_info + result | The gas and the result of a simulated transaction. The body of the request is not read. |
+| ``/txs`` (POST) | tx_response with ``code`` 0 and a hash | What a node answers when it accepts a broadcast. The body of the request is not read. |
 
 Every response carrying a ``pagination`` block also carries
 ``pagination.inbound_key``: the ``?pagination.key=`` cursor the request arrived
@@ -49,7 +56,7 @@ Adding a new path
 2. Note its shape in the table above so future readers know the policy.
 3. If the path needs request-time logic (echo a path param, shift by
    ``blocks_behind``, query-string handling), implement it in
-   ``handlers_rest.handle``.
+   ``LavaChain._build_rest`` (``provider_simulator/chains/lava.py``).
 """
 
 from copy import deepcopy
