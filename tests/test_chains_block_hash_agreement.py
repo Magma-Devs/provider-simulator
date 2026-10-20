@@ -37,12 +37,15 @@ entry is an empty tuple. A missing key fails
 rather than passing in silence.
 """
 
+import json
+
 import pytest
 
 from provider_simulator.chains import CHAINS, chain_for
 from provider_simulator.chains.base import Chain
 from provider_simulator.domain.quirks import known_chains, quirks_for
 from provider_simulator.domain.scenario import ScenarioConfig
+from provider_simulator.graphql_document import parse_graphql_request
 from stubs_btc import btc_block_hash
 
 #: One height both providers have reached. Far below every chain's base head,
@@ -96,6 +99,9 @@ PER_HEIGHT_HASH_PROBES: dict[str, tuple[tuple[str, str, object, bool], ...]] = {
     # LN reports the height of the bitcoin chain beneath it and no block hash
     # at all — ``getinfo`` carries an identity pubkey, which is not one.
     "ln": (),
+    # Sui answers a block lookup in GraphQL. The probe names a query text in the
+    # place of a method name, and its result is read under ``data``.
+    "sui": (("graphql", "{ checkpoint(sequenceNumber: 700000) { digest } }", None, False),),
 }
 
 #: How two providers of this chain are made to sit at different heads. Each
@@ -106,6 +112,7 @@ SECOND_PROVIDER_IS_BEHIND: dict[str, tuple[dict, dict]] = {
     "lava": ({}, {"blocks_behind": LAG}),
     "ln": ({}, {"blocks_behind": LAG}),
     "solana": ({}, {}),  # solana lags through quirks, below
+    "sui": ({}, {"blocks_behind": LAG}),
 }
 
 SECOND_PROVIDER_QUIRKS: dict[str, dict] = {
@@ -127,14 +134,23 @@ LAG_IS_VISIBLE_AT: dict[str, tuple[str, str, object]] = {
     "btc": ("", "getblockcount", []),
     "eth": ("", "eth_blockNumber", []),
     "lava": ("tendermintrpc", "status", {}),
+    "sui": ("graphql", '{ serviceConfig { availableRange(type: "Checkpoint") { last { sequenceNumber } } } }', None),
 }
+
+
+def _names_a_hash(key: object) -> bool:
+    """Does a field with this name hold a block hash? The one rule of the file."""
+    name = str(key).lower()
+    return name.endswith("hash") or name == "digest"
 
 
 def hashes_in(result: object, result_is_itself_a_hash: bool) -> dict[str, str]:
     """Every block hash in one reply, as ``{where it sat: the hash}``.
 
-    The rule is the field's NAME: it counts when the name ends in ``hash``,
-    in any case. Detecting by the shape of the VALUE was tried first and was
+    The rule is the field's NAME: it counts when the name ends in ``hash``, in
+    any case, or is exactly ``digest``, the word that Sui uses for a block hash.
+    ``previousCheckpointDigest`` does not count: only a field that is the digest
+    of its own block does. Detecting by the shape of the VALUE was tried first and was
     worse in both directions — it claimed LN's ``identity_pubkey`` as a block
     hash, and it would have read a hash written in some new shape as prose.
 
@@ -158,7 +174,7 @@ def hashes_in(result: object, result_is_itself_a_hash: bool) -> dict[str, str]:
         if isinstance(value, dict):
             for key, sub in value.items():
                 here = f"{path}.{key}" if path else str(key)
-                if isinstance(sub, str) and str(key).lower().endswith("hash"):
+                if isinstance(sub, str) and _names_a_hash(key):
                     found[here] = sub
                 else:
                     walk(sub, here)
@@ -170,12 +186,28 @@ def hashes_in(result: object, result_is_itself_a_hash: bool) -> dict[str, str]:
     return found
 
 
+def probe_request(chain_name: str, probe: tuple) -> dict:
+    """The request that one probe sends to a chain. A probe is
+    ``(interface, method, params, ...)``. Every chain but sui is asked with a
+    JSON-RPC-shaped request. Sui is asked in GraphQL, and its probe holds the
+    query text where the others hold the method."""
+    _interface, method, params = probe[:3]
+    if chain_name == "sui":
+        return {"graphql": parse_graphql_request(json.dumps({"query": method}).encode())}
+    return {"id": 1, "method": method, "params": params}
+
+
+def reply_of(chain_name: str, body: dict) -> object:
+    """The part of a reply that holds the answer: ``result``, or ``data`` for sui."""
+    return body.get("data") if chain_name == "sui" else body.get("result")
+
+
 def ask(chain: Chain, chain_name: str, probe: tuple, scenario_kw: dict, quirks_kw: dict) -> dict[str, str]:
     """Put one probe to one provider and return the hashes it answered with."""
-    interface, method, params, result_is_hash = probe
-    request = {"id": 1, "method": method, "params": params}
+    interface, _method, _params, result_is_hash = probe
+    request = probe_request(chain_name, probe)
     _status, body = chain.build_success(request, _scenario(**scenario_kw), _quirks(chain_name, **quirks_kw), interface)
-    return hashes_in(body.get("result"), result_is_hash)
+    return hashes_in(reply_of(chain_name, body), result_is_hash)
 
 
 def disagreements(leader: dict[str, str], laggard: dict[str, str]) -> dict[str, tuple[str, str]]:
@@ -209,12 +241,16 @@ def test_two_providers_at_different_heads_agree_on_one_heights_hash(chain_name: 
     # First prove these really are two providers in different places. If this
     # fails, everything below compares one provider with itself and proves
     # nothing, however green it looks.
-    interface, method, params = LAG_IS_VISIBLE_AT[chain_name]
-    request = {"id": 1, "method": method, "params": params}
-    tip_at_head = chain.build_success(request, _scenario(**at_head), _quirks(chain_name), interface)[1]["result"]
-    tip_behind = chain.build_success(request, _scenario(**behind), _quirks(chain_name, **behind_quirks), interface)[1][
-        "result"
-    ]
+    lag_probe = LAG_IS_VISIBLE_AT[chain_name]
+    interface, method, _params = lag_probe
+    request = probe_request(chain_name, lag_probe)
+    tip_at_head = reply_of(
+        chain_name, chain.build_success(request, _scenario(**at_head), _quirks(chain_name), interface)[1]
+    )
+    tip_behind = reply_of(
+        chain_name,
+        chain.build_success(request, _scenario(**behind), _quirks(chain_name, **behind_quirks), interface)[1],
+    )
     assert tip_at_head != tip_behind, (
         f"{chain_name}: the two providers answered {method} identically "
         f"({tip_at_head!r}), so they are at the same head and the hash comparison "
@@ -304,9 +340,10 @@ def test_the_probes_actually_find_hashes() -> None:
     # Recorded, not derived: deriving these from the same call they check would
     # compare the probes with themselves. btc 1 + 2 + 1; eth 2 + 2; lava 14,
     # which is every hash in a Tendermint block header (see ``hashes_in`` for
-    # why that chain contributes so many more than the others).
-    assert per_chain == {"btc": 4, "eth": 4, "lava": 14, "solana": 0, "ln": 0}, per_chain
-    assert sum(per_chain.values()) == 22
+    # why that chain contributes so many more than the others); sui 1, the
+    # ``digest`` of one checkpoint.
+    assert per_chain == {"btc": 4, "eth": 4, "lava": 14, "solana": 0, "ln": 0, "sui": 1}, per_chain
+    assert sum(per_chain.values()) == 23
 
 
 def test_the_guard_notices_a_hash_that_changes_with_the_provider() -> None:
@@ -354,7 +391,7 @@ def test_the_guard_notices_a_hash_that_changes_with_the_provider() -> None:
 #: How many hash fields the control below must see disagree, per chain. The same
 #: numbers ``test_the_probes_actually_find_hashes`` records, for the same reason:
 #: derived from the call they check, they would compare the walk with itself.
-DISAGREEMENTS_THE_CONTROL_MUST_SEE = {"btc": 4, "eth": 4, "lava": 14}
+DISAGREEMENTS_THE_CONTROL_MUST_SEE = {"btc": 4, "eth": 4, "lava": 14, "sui": 1}
 
 
 @pytest.mark.parametrize("chain_name", sorted(DISAGREEMENTS_THE_CONTROL_MUST_SEE))
@@ -377,7 +414,7 @@ def test_the_guard_names_every_hash_field_in_a_real_chains_reply_when_one_differ
 
     What makes this trustworthy is that ``hashes_in`` runs on BOTH sides and the
     two results are required to name the same fields. Nothing else. ``_salted``
-    below restates the field rule for readability, and that restatement is NOT a
+    below reads the field rule from the same ``_names_a_hash``, so it is NOT a
     second opinion that would expose drift: ``hashes_in`` filters by key name
     downstream, so deleting the rule from ``_salted`` changes no result here.
     Verified by deleting it — 11 passed either way. Said plainly because the
@@ -388,10 +425,10 @@ def test_the_guard_names_every_hash_field_in_a_real_chains_reply_when_one_differ
 
     named = 0
     for probe in PER_HEIGHT_HASH_PROBES[chain_name]:
-        interface, method, params, result_is_hash = probe
-        request = {"id": 1, "method": method, "params": params}
+        interface, method, _params, result_is_hash = probe
+        request = probe_request(chain_name, probe)
         _status, body = chain.build_success(request, _scenario(**at_head), _quirks(chain_name), interface)
-        result = body.get("result")
+        result = reply_of(chain_name, body)
 
         leader = hashes_in(result, result_is_hash)
         forked = hashes_in(_salted(result, bare_hash=result_is_hash), result_is_hash)
@@ -433,10 +470,10 @@ def _changed(text: str) -> str:
 def _salted(value: object, *, bare_hash: bool = False) -> object:
     """A copy of one reply with every block hash changed, and nothing else.
 
-    The rule is ``hashes_in``'s rule restated: a field whose name ends in
-    ``hash``, in any case. The restatement buys readability, not a second
-    opinion — ``hashes_in`` filters by the same rule downstream, so no test here
-    can tell whether this one is applied. Do not add a comment claiming it can.
+    The rule is ``hashes_in``'s rule, read from the same ``_names_a_hash``: a field
+    whose name ends in ``hash``, in any case, or is ``digest``. The two share one
+    rule, so no test here can tell whether ``_salted`` applies it. Do not add a
+    comment claiming it can.
 
     ``bare_hash`` is for btc's ``getblockhash``, whose whole reply is a hash with
     no key to read. The caller names that case because it is the only place that
@@ -450,7 +487,7 @@ def _salted(value: object, *, bare_hash: bool = False) -> object:
     if isinstance(value, dict):
         out: dict = {}
         for key, sub in value.items():
-            if isinstance(sub, str) and str(key).lower().endswith("hash"):
+            if isinstance(sub, str) and _names_a_hash(key):
                 out[key] = _changed(sub)
             else:
                 out[key] = _salted(sub)
@@ -469,3 +506,24 @@ def test_a_reply_carrying_no_hash_is_not_mistaken_for_agreement() -> None:
     assert hashes_in({"block_height": 1, "identity_pubkey": "02ab" * 16}, False) == {}
     assert hashes_in(None, True) == {}
     assert hashes_in({"merkleroot": "ab" * 32, "stateRoot": "0x" + "cd" * 32}, False) == {}
+
+
+def test_the_walk_reads_the_digest_key_sui_uses():
+    assert hashes_in({"checkpoint": {"digest": "x"}}, False) == {"checkpoint.digest": "x"}
+    # Only the field that is the digest of its own block counts.
+    assert hashes_in({"checkpoint": {"previousCheckpointDigest": "x", "sequenceNumber": 1}}, False) == {}
+
+
+def test_the_guard_sees_a_provider_that_lies_about_a_digest():
+    """The control for sui. A provider with a digest salt answers another digest
+    for the same checkpoint than a provider without one, and the comparison that
+    the guard runs must name the field. Without this the sui entry would pass
+    for a chain whose providers could never disagree."""
+    chain = chain_for("sui")
+    probe = PER_HEIGHT_HASH_PROBES["sui"][0]
+    honest = ask(chain, "sui", probe, {}, {})
+    liar = ask(chain, "sui", probe, {}, {"digest_salt": "x"})
+    assert set(honest) == {"checkpoint.digest"}
+    assert disagreements(honest, liar) == {
+        "checkpoint.digest": (honest["checkpoint.digest"], liar["checkpoint.digest"])
+    }
