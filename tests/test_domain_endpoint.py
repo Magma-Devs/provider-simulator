@@ -38,6 +38,8 @@ def test_graphql_is_an_interface_and_not_a_transport():
 
 
 def test_the_registry_accepts_a_graphql_row():
-    registry = build_registry((("sui-x", "eth", "1", "SuiXPrimaryProvider1", False, "", (("graphql", "http", 18999),)),))
+    registry = build_registry(
+        (("sui-x", "eth", "1", "SuiXPrimaryProvider1", False, "", (("graphql", "http", 18999),)),)
+    )
     provider = registry.provider("sui-x", "1")
     assert [(e.interface, e.transport, e.port) for e in provider.endpoints] == [("graphql", "http", 18999)]
