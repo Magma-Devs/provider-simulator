@@ -237,6 +237,45 @@ def test_clear_history_one_pool_leaves_another_pools_history():
     assert [e["method"] for e in hist["history"]] == ["getblockcount"]
 
 
+def _provider_that_ran_a_transaction(api):
+    provider = api.registry.provider("eth-sim", "1")
+    provider.remember_executed("d1", 1.0)
+    return provider
+
+
+def test_the_scenario_reset_and_the_full_reset_empty_the_memory_of_executed_transactions():
+    api = _api()
+    for route in (api.reset, api.reset_all):
+        provider = _provider_that_ran_a_transaction(api)
+        status, _ = route()
+        assert status == 200
+        assert provider.executed_snapshot() == {}
+
+
+def test_a_pool_scoped_reset_empties_the_memory_of_that_pool_only():
+    api = _api()
+    one = _provider_that_ran_a_transaction(api)
+    other = api.registry.provider("btc-sim", "1")
+    other.remember_executed("d2", 2.0)
+    status, _ = api.reset("eth-sim")
+    assert status == 200
+    assert one.executed_snapshot() == {}
+    assert other.executed_snapshot() == {"d2": 2.0}
+
+
+def test_clearing_the_history_and_a_scenario_update_leave_the_memory_of_executed_transactions():
+    api = _api()
+    provider = _provider_that_ran_a_transaction(api)
+    status, _ = api.clear_history()
+    assert status == 200
+    assert provider.executed_snapshot() == {"d1": 1.0}
+    status, _ = api.apply_scenario(
+        {"providers": {"eth-sim:1": {"mode": "success", "latency_ms": 5, "fail_first_n": 2}}}
+    )
+    assert status == 200
+    assert provider.executed_snapshot() == {"d1": 1.0}
+
+
 def test_reset_of_another_pool_leaves_this_chains_head_where_it_was():
     """The nightly failure this scoping fixes: one test's clean-up rewound a
     chain height a different router was being measured against. eth is the only

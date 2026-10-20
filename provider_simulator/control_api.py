@@ -672,6 +672,7 @@ class ControlApi:
                 provider.scenario.reset()
                 provider.quirks.reset()
                 provider.reset_fail()
+                provider.forget_executed()
                 wishes.extend(self._port_wishes(provider))
             if history:
                 provider.log.clear()
