@@ -19,6 +19,10 @@ SUI_TESTNET_CHAIN_ID = "69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD"
 # The checkpoint that a provider at the chain head reports before a test moves the head.
 SUI_BASE_CHECKPOINT = 200_000_000
 
+# The largest checkpoint number. The Sui scalar ``UInt53`` holds no more, and a
+# tip above it would not fit in the eight bytes that a checkpoint digest is made of.
+SUI_MAX_CHECKPOINT = 2**53 - 1
+
 SUI_EPOCH_ID = 1286
 
 # The seven codes that the real Sui server puts in ``extensions.code``.

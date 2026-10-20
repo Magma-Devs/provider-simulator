@@ -67,6 +67,15 @@ def test_an_alias_is_the_response_key_and_never_the_name():
     assert request.roots[0].response_key == "cheap"
 
 
+def test_an_alias_that_is_the_name_of_another_root_does_not_confuse_the_names():
+    request = parse_graphql_request(_body("{ epoch: chainIdentifier chainIdentifier: epoch { epochId } }"))
+    assert request.method == "chainIdentifier&epoch"
+    assert [(root.name, root.response_key) for root in request.roots] == [
+        ("chainIdentifier", "epoch"),
+        ("epoch", "chainIdentifier"),
+    ]
+
+
 def test_two_root_fields_join_with_an_ampersand_in_document_order():
     request = parse_graphql_request(_body("{ epoch { epochId } chainIdentifier }"))
     assert request.method == "epoch&chainIdentifier"
@@ -177,6 +186,16 @@ UNREADABLE_BODIES = [
         None,
         None,
         id="JSON nested 100000 deep",
+    ),
+    pytest.param(
+        b'{"query": "{ chainIdentifier }", "variables": {"x": ' + b"9" * 5000 + b"}}",
+        "not_json",
+        400,
+        'InvalidRequest(Error("number out of range", line: 1, column: 0))',
+        None,
+        None,
+        None,
+        id="JSON integer of 5000 digits",
     ),
     pytest.param(b"{}", "parse", 200, None, None, "GRAPHQL_PARSE_FAILED", None, id="no query"),
     pytest.param(b'{"query": ""}', "parse", 200, None, None, "GRAPHQL_PARSE_FAILED", None, id="empty query"),

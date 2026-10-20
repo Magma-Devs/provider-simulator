@@ -15,7 +15,7 @@ from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.provider import Pool
 from provider_simulator.graphql_document import GraphQLRequestError, default_error_reply, parse_graphql_request
 from provider_simulator.listeners import GraphQLListener, RawRequest
-from stubs_sui_graphql import SUI_CHAIN_ID, SUI_ERROR_CODES
+from stubs_sui_graphql import SUI_CHAIN_ID, SUI_EPOCH_ID, SUI_ERROR_CODES
 from tests.test_graphql_document import UNREADABLE_BODIES
 
 GRAPHQL = Endpoint("graphql", "http", 18999)
@@ -86,6 +86,13 @@ def test_two_roots_and_an_alias_are_named_by_field_names():
     result = listener.serve(_post("{ a: epoch { epochId } chainIdentifier }"))
     assert _row(provider)["method"] == "epoch&chainIdentifier"
     assert set(result.body["data"]) == {"a", "chainIdentifier"}
+
+
+def test_an_alias_equal_to_another_roots_name_names_the_request_by_field_names():
+    listener, provider = _listener()
+    result = listener.serve(_post("{ epoch: chainIdentifier chainIdentifier: epoch { epochId } }"))
+    assert _row(provider)["method"] == "chainIdentifier&epoch"
+    assert result.body == {"data": {"epoch": SUI_CHAIN_ID, "chainIdentifier": {"epochId": SUI_EPOCH_ID}}}
 
 
 def test_a_skipped_root_field_is_not_in_the_reply_or_in_the_history_method():

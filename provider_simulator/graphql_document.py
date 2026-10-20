@@ -102,6 +102,11 @@ def _read_object(body: bytes) -> dict:
         raise GraphQLRequestError("not_json", _invalid_request(exc.msg, exc.lineno, exc.colno)) from None
     except RecursionError:
         raise GraphQLRequestError("not_json", _invalid_request("recursion limit exceeded", 1, 129)) from None
+    except ValueError:
+        # The one ValueError that ``json.loads`` raises besides the syntax error is the
+        # limit of Python on the digits of an integer (4300). The real server reads
+        # such a number as a float and refuses it as out of range.
+        raise GraphQLRequestError("not_json", _invalid_request("number out of range", 1, 0)) from None
     if isinstance(value, list):
         raise GraphQLRequestError("batch", _BATCH)
     if not isinstance(value, dict):

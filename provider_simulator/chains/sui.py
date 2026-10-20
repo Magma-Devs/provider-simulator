@@ -36,7 +36,7 @@ from provider_simulator.chains.base import AdvancingHead, Chain
 from provider_simulator.chains.sui_digest import base58_encode, transaction_digest
 from provider_simulator.domain.quirks import SuiQuirks
 from provider_simulator.graphql_document import GraphQLRequest, RootField, project
-from stubs_sui_graphql import SUI_BASE_CHECKPOINT, SUI_EPOCH_ID, SUI_ERROR_STUBS
+from stubs_sui_graphql import SUI_BASE_CHECKPOINT, SUI_EPOCH_ID, SUI_ERROR_STUBS, SUI_MAX_CHECKPOINT
 
 # The digest of a checkpoint is not the digest that a real checkpoint has. The
 # prefix keeps the simulated digests apart from real ones, so that no test can
@@ -53,7 +53,10 @@ def _as_height(value: object) -> int | None:
     if isinstance(value, int):
         return value
     if isinstance(value, str) and _WHOLE_NUMBER.fullmatch(value.strip()):
-        return int(value.strip())
+        try:
+            return int(value.strip())
+        except ValueError:  # Python refuses to read an integer of more than 4300 digits
+            return None
     return None
 
 
@@ -69,8 +72,8 @@ class SuiChain(Chain):
 
     def tip(self, scenario: dict) -> int:
         """The latest checkpoint of one provider: the head, minus ``blocks_behind``
-        (which is signed), and never below 0."""
-        return max(0, self.head.current() - scenario.get("blocks_behind", 0))
+        (which is signed), never below 0 and never above ``SUI_MAX_CHECKPOINT``."""
+        return min(SUI_MAX_CHECKPOINT, max(0, self.head.current() - scenario.get("blocks_behind", 0)))
 
     @staticmethod
     def checkpoint_digest(sequence_number: int, salt: str = "") -> str:

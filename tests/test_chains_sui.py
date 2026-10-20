@@ -24,6 +24,7 @@ from stubs_sui_graphql import (
     SUI_EPOCH_ID,
     SUI_ERROR_CODES,
     SUI_ERROR_STUBS,
+    SUI_MAX_CHECKPOINT,
     SUI_TESTNET_CHAIN_ID,
 )
 
@@ -159,6 +160,32 @@ def test_a_checkpoint_number_may_be_a_variable_or_a_text_of_digits_and_a_word_gi
     assert as_text["data"]["checkpoint"] == {"sequenceNumber": 12}
     as_word, _ = _ask(chain, '{ checkpoint(sequenceNumber: "abc") { sequenceNumber } }')
     assert as_word == {"data": {"checkpoint": None}}
+
+
+def test_a_checkpoint_number_of_thousands_of_digits_is_null_and_not_a_crash():
+    chain = SuiChain()
+    as_text, _ = _ask(chain, '{ checkpoint(sequenceNumber: "%s") { digest } }' % ("9" * 5000))
+    assert as_text == {"data": {"checkpoint": None}}
+    as_variable, _ = _ask(
+        chain,
+        "query($n: UInt53!) { checkpoint(sequenceNumber: $n) { digest } }",
+        variables={"n": 10**4000},
+    )
+    assert as_variable == {"data": {"checkpoint": None}}
+
+
+@pytest.mark.parametrize(
+    "bump, scenario",
+    [(2**70, {}), (0, {"blocks_behind": -(2**70)})],
+    ids=["head advanced past 2**64", "provider ahead by more than 2**64"],
+)
+def test_the_tip_never_passes_the_largest_checkpoint_number_of_sui(bump, scenario):
+    chain = SuiChain()
+    chain.head.bump(bump)
+    assert _head_of(chain, **scenario) == SUI_MAX_CHECKPOINT
+    body, _ = _ask(chain, "{ checkpoint { sequenceNumber digest } }", scenario=scenario)
+    assert body["data"]["checkpoint"]["sequenceNumber"] == SUI_MAX_CHECKPOINT
+    assert is_valid_transaction_digest(body["data"]["checkpoint"]["digest"])
 
 
 def test_the_checkpoint_digest_is_the_same_for_two_providers_at_different_heads():
