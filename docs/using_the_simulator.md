@@ -132,8 +132,9 @@ Every row also says what the provider received:
 | `lava_headers` | The headers of `headers` whose name starts with `lava-`, with the same values | `{}` |
 | `deadline_remaining_ms` | gRPC only: the milliseconds that the deadline of the caller had left when the call arrived. The gRPC library reports it, and the value can be some milliseconds above the deadline that the caller set. | `null` on every other interface, and on a gRPC call with no deadline |
 | `grpc_status` | gRPC only: the name of the status that the simulator sent, `OK` for a reply | `null` on every other interface. On a gRPC row it is `null` in three cases: the provider still holds the call, the caller went away during the wait, or the simulator could not build the reply message |
-| `body_len` | REST only: the length in bytes of the request body, for a verb other than GET and HEAD. An empty body gives 0. | `null` on every other interface, and on a REST GET or HEAD |
-| `body_sha256` | REST only: the SHA-256 of the request body, as hexadecimal text. A test hashes the bytes that it sent and compares. The row holds it from the moment the request arrives, so a test can read it while the provider still holds the request. | `null` on every other interface, and on a REST GET or HEAD |
+| `body_len` | REST and GraphQL: the length in bytes of the request body. On REST it is set for a verb other than GET and HEAD. On GraphQL it is set for every request, a request with no body and a body that cannot be read included. An empty body gives 0. | `null` on every other interface, and on a REST GET or HEAD |
+| `body_sha256` | REST and GraphQL: the SHA-256 of the request body, as hexadecimal text. A test hashes the bytes that it sent and compares. The row holds it from the moment the request arrives, so a test can read it while the provider still holds the request. | `null` on every other interface, and on a REST GET or HEAD |
+| `path` | GraphQL only: the URL path that the request was sent to. A GraphQL provider answers at any path, so a test reads which one the router used. | `null` on every other interface |
 
 `grpc_status` says what the simulator sent. It does not say that the caller received it.
 
@@ -156,7 +157,10 @@ curl -s "$SIM_CONTROL_URL/history?provider=2&status=error"
 curl -s "$SIM_CONTROL_URL/history?method=eth_getBlockByNumber"
 curl -s "$SIM_CONTROL_URL/history?request_id=1"
 curl -s "$SIM_CONTROL_URL/history?last=120&lava_header_lava_stateful_api=true"
+curl -s "$SIM_CONTROL_URL/history?pool=<pool>&pid=1&body_sha256=<the SHA-256 of the body that you sent>&body_len=<its length>"
 ```
+
+`body_sha256` (hexadecimal, in any letter case) and `body_len` find the rows of one request body: a row must equal each filter that the query gives. A `body_len` that is not an integer gets HTTP 400. Only a row that holds a body has a hash and a length: a REST request that carries a body, and each GraphQL request.
 
 ### Read the rows of one request
 
@@ -299,6 +303,26 @@ curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" 
 The REST listener serves the Cosmos REST routes that `stubs_rest.py` lists in `REST_METHOD_DEFAULTS`, keyed by verb and path template. A provider serves REST on the ports that `provider_simulator/topology.py` lists for its `rest` endpoint. A verb and path that the table does not hold answers `not_found`.
 
 The route `POST /cosmos/tx/v1beta1/txs` accepts a broadcast by default and answers a `tx_response` with `code` 0. To make one provider refuse it, set `http_status` and `body` for the key `["POST", "/cosmos/tx/v1beta1/txs"]` in `responses`. A `latency_ms` delays the answer, and `mode` `hang` holds the request for 30 seconds and then closes the connection. The simulator never reads the body of a REST request, so the answer does not depend on the transaction that was sent.
+
+## GraphQL surface (Sui)
+
+The `graphql` interface is served over `http`: one POST, at any path. Its chain is `sui`, which imitates Sui mainnet. A provider answers six root fields: `chainIdentifier`, `serviceConfig` (the head poll of the router), `checkpoint` (the block lookup), `epoch`, `transaction` and `executeTransaction`. Every other root field answers `null`. A reply holds only the fields that the request asks for, under the aliases that it gives, and `@skip` and `@include` remove fields as the real server does. `executeTransaction` answers the real digest of the bytes that it receives.
+
+The name of a request is the names of its root fields, joined with `&`, in document order. An alias never counts. That name is the `method` of its history row and the key of a `responses` entry. The request id is `variables.request_id`.
+
+What a test sets on one provider:
+
+| Setting | Effect |
+|---|---|
+| `mode=error` with a text `error_code` | `data` null and one error whose `extensions.code` is the text. The empty text gives an error with no `extensions`. An integer gives `INTERNAL_SERVER_ERROR`. `http_status` is the status of the reply. |
+| `mode=rate_limit` with `rate_limit_style` `body` | HTTP 200, `data` null, and one error with the code `RESOURCE_EXHAUSTED`. The default, `status`, is the HTTP 429 with plain text. |
+| `error_body` | With `mode=error`, the whole reply, of any shape, sent with `http_status`. |
+| `unreadable_reply` | `{"status": 502, "body": "..."}`: the reply to every request body that cannot be read. The default is the reply of the real Sui server. A body that is not JSON, a batch, and a body whose `query`, `variables` or `operationName` has the wrong type get HTTP 400 and plain text. A document that cannot be answered gets HTTP 200 and `data` null with the code `GRAPHQL_PARSE_FAILED` or `GRAPHQL_VALIDATION_FAILED`. Two operations with no name, and an unknown operation name, get HTTP 200 and an error with no code. |
+| a `responses` entry, keyed by a root field name | `result` replaces the value of that root. `error_stub` (the lower-case name of one of the seven Sui codes) or `error` fails that root only, so the reply holds `data` beside `errors`. |
+| `blocks_behind` | The tip of the provider is the head minus this number, and a checkpoint above the tip is `null`. `POST /advance` with `"chain": "sui"` moves the head. |
+| quirk `chain_id` | The answer of `chainIdentifier`. The default is the id of Sui mainnet. |
+| quirk `transaction_index_lag_ms` | Above 0, `transaction` finds only a digest that this provider executed, and only after the delay has passed. 0 finds any digest. A scenario reset forgets the executed transactions. |
+| quirk `digest_salt` | This provider answers other checkpoint digests than its peers, as a provider that lies about the chain does. |
 
 ## Backup-tier listeners per surface
 
