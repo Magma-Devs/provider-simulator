@@ -33,7 +33,7 @@ def test_every_provider_in_the_topology_is_served():
     """One entry per provider, keyed the way stats and scenario already key
     theirs: the pool name, a colon, then the pool slot."""
     providers = _providers()
-    assert len(providers) == 156, sorted(providers)
+    assert len(providers) == 165, sorted(providers)
     assert "eth-sim:1" in providers
     assert "lava-sim-tm:6" in providers
 
@@ -116,9 +116,11 @@ def test_a_provider_with_no_label_reports_an_empty_string():
     # adds 3 more. eth-idle-sim (2) adds 2 more: its router carries no
     # cross-validation policy either. eth-failover-backuparchive-sim and
     # eth-failover-archiveless-sim (4 each) add 8 more, for that reason again.
+    # sui-graphql-sim (3) and sui-failover-graphql-sim (6) add 9 more unlabelled: neither
+    # router carries a cross-validation policy.
     # Update both numbers together when a router gains or loses a label.
     assert len(labelled) == 33, f"expected 33 labelled, got {len(labelled)}"
-    assert len(unlabelled) == 123, f"expected 123 unlabelled, got {len(unlabelled)}"
+    assert len(unlabelled) == 132, f"expected 132 unlabelled, got {len(unlabelled)}"
 
 
 # ── Filters ───────────────────────────────────────────────────────────────────
@@ -146,9 +148,10 @@ def test_filter_by_is_backup_returns_the_backup_tier():
     # eth-failover-sim. Three more failover pools hold four providers each and
     # have 2: eth-failover-excluded-sim, eth-failover-ineligible-sim and
     # eth-failover-noarchive-sim. Two more four-provider pools have 2 each:
-    # eth-failover-backuparchive-sim and eth-failover-archiveless-sim. Twelve
-    # pools of three plus five pools of two.
-    assert len(providers) == 46, sorted(providers)
+    # eth-failover-backuparchive-sim and eth-failover-archiveless-sim.
+    # sui-failover-graphql-sim has 3 as well. Thirteen pools of three plus five
+    # pools of two.
+    assert len(providers) == 49, sorted(providers)
 
 
 def test_filter_by_name_is_the_reverse_lookup():

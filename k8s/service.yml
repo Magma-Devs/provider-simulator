@@ -780,3 +780,40 @@ spec:
       port: 18710
       targetPort: 18710
       protocol: TCP
+    # 18711-18719: the providers of sui-graphql-sim (18711-18713) and sui-failover-graphql-sim (18714-18719).
+    - name: spare-18711
+      port: 18711
+      targetPort: 18711
+      protocol: TCP
+    - name: spare-18712
+      port: 18712
+      targetPort: 18712
+      protocol: TCP
+    - name: spare-18713
+      port: 18713
+      targetPort: 18713
+      protocol: TCP
+    - name: spare-18714
+      port: 18714
+      targetPort: 18714
+      protocol: TCP
+    - name: spare-18715
+      port: 18715
+      targetPort: 18715
+      protocol: TCP
+    - name: spare-18716
+      port: 18716
+      targetPort: 18716
+      protocol: TCP
+    - name: spare-18717
+      port: 18717
+      targetPort: 18717
+      protocol: TCP
+    - name: spare-18718
+      port: 18718
+      targetPort: 18718
+      protocol: TCP
+    - name: spare-18719
+      port: 18719
+      targetPort: 18719
+      protocol: TCP

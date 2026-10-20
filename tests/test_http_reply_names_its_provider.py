@@ -46,9 +46,13 @@ _SUCCESS_REQUEST = {
     ("solana", "jsonrpc"): ("POST", "", _rpc("getSlot")),
     ("lava", "rest"): ("GET", _BLOCKS_LATEST, None),
     ("lava", "tendermintrpc"): ("POST", "", {"jsonrpc": "2.0", "id": 1, "method": "status"}),
+    ("sui", "graphql"): ("POST", "", {"query": "{ chainIdentifier }"}),
 }
 
-_HTTP_INTERFACES = ["jsonrpc", "rest", "tendermintrpc"]
+_HTTP_INTERFACES = ["jsonrpc", "rest", "tendermintrpc", "graphql"]
+
+# The member of the body that holds a success, for each interface. A REST success has no such member.
+_SUCCESS_MEMBER = {"jsonrpc": "result", "tendermintrpc": "result", "graphql": "data"}
 
 
 def _send(method: str, url: str, body: dict | None = None):
@@ -130,8 +134,9 @@ def test_a_success_reply_carries_the_name_that_get_providers_reports_for_that_pr
         for port in _http_ports(provider, interface):
             status, raw, headers = _ask(provider, interface, port)
             assert status == 200, f"{key} on port {port} did not answer a success: HTTP {status} {raw!r}"
-            if interface != "rest":
-                assert "result" in json.loads(raw), f"{key} on port {port} did not answer a success: {raw!r}"
+            if interface in _SUCCESS_MEMBER:
+                member = _SUCCESS_MEMBER[interface]
+                assert member in json.loads(raw), f"{key} on port {port} did not answer a success: {raw!r}"
             expected = f"application/json; sim-provider={provider['name']}{_CALLER}"
             assert headers["Content-Type"] == expected, f"{key} on port {port}"
             checked += 1
@@ -174,8 +179,9 @@ def test_an_error_reply_carries_the_provider_name(sim, interface):
     _set_scenario(sim, key, mode="error")
     status, raw, headers = _ask(provider, interface, port)
     # A REST error body is {"code": ..., "message": ...}. A JSON-RPC and a
-    # Tendermint error body is an envelope with an "error" member.
-    error_member = "code" if interface == "rest" else "error"
+    # Tendermint error body is an envelope with an "error" member. A GraphQL
+    # fault is reported inside a 200, in a list under "errors".
+    error_member = {"rest": "code", "graphql": "errors"}.get(interface, "error")
     assert error_member in json.loads(raw), f"{key} did not answer an error: HTTP {status} {raw!r}"
     assert headers["Content-Type"] == f"application/json; sim-provider={provider['name']}{_CALLER}"
 

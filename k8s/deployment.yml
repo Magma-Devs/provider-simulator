@@ -621,6 +621,34 @@ spec:
             - name: spare-18710
               containerPort: 18710
               protocol: TCP
+            # 18711-18719: the providers of sui-graphql-sim (18711-18713) and sui-failover-graphql-sim (18714-18719).
+            - name: spare-18711
+              containerPort: 18711
+              protocol: TCP
+            - name: spare-18712
+              containerPort: 18712
+              protocol: TCP
+            - name: spare-18713
+              containerPort: 18713
+              protocol: TCP
+            - name: spare-18714
+              containerPort: 18714
+              protocol: TCP
+            - name: spare-18715
+              containerPort: 18715
+              protocol: TCP
+            - name: spare-18716
+              containerPort: 18716
+              protocol: TCP
+            - name: spare-18717
+              containerPort: 18717
+              protocol: TCP
+            - name: spare-18718
+              containerPort: 18718
+              protocol: TCP
+            - name: spare-18719
+              containerPort: 18719
+              protocol: TCP
           resources:
             requests:
               cpu: "100m"
