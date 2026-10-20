@@ -48,6 +48,7 @@ on an open port.
 
 import datetime
 from dataclasses import dataclass
+from typing import cast
 
 import grpc
 from google.protobuf import descriptor_pool
@@ -235,7 +236,10 @@ class GrpcListener(Listener):
             # The verdict also carries an HTTP status and a body text. gRPC has
             # no place for them.
             return ServeResult(action="respond", body=GrpcStatus("RESOURCE_EXHAUSTED", "Too many requests"))
-        status = GrpcStatus(_status_name(verdict.error_message, verdict.error_code), verdict.error_message)
+        # The verdict holds a text code for a GraphQL error and an integer for every other
+        # interface. A text code finds no status by number, so the status is UNKNOWN.
+        error_code = cast(int, verdict.error_code)
+        status = GrpcStatus(_status_name(verdict.error_message, error_code), verdict.error_message)
         return ServeResult(action="respond", body=status)
 
     def build_success(self, status: int, body: object) -> ServeResult:

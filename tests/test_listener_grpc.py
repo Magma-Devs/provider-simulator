@@ -97,6 +97,16 @@ def test_error_defaults_to_unknown():
     assert _serve(listener, "GetLatestBlock").body.code == "UNKNOWN"
 
 
+def test_error_with_a_text_code_is_unknown_because_a_text_code_names_no_grpc_status():
+    """A text ``error_code`` is the form of a GraphQL error. On gRPC it names no
+    status, and a status that ``error_message`` names still wins."""
+    listener, _ = _listener()
+    _upd(listener, {"mode": "error", "error_message": "not a status", "error_code": "REQUEST_TIMEOUT"})
+    assert _serve(listener, "GetLatestBlock").body.code == "UNKNOWN"
+    _upd(listener, {"mode": "error", "error_message": "NOT_FOUND", "error_code": "REQUEST_TIMEOUT"})
+    assert _serve(listener, "GetLatestBlock").body.code == "NOT_FOUND"
+
+
 def test_per_method_error_stub_is_a_status():
     listener, _ = _listener()
     _upd(listener, {"responses": {"GetLatestBlock": {"error_stub": "NOT_FOUND"}}})

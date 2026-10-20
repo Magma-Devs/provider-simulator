@@ -41,7 +41,11 @@ class ScenarioConfig(IntrospectiveConfig):
     mode: str = "success"  # success | error | rate_limit | down | drop_connection | hang | port_closed
     latency_ms: int = 0
     error_probability: float = 0.0
-    error_code: int = -32000
+    # The code of an error reply. It is an integer for JSON-RPC, REST, Tendermint
+    # RPC and gRPC. A GraphQL provider reads a string: the ``extensions.code`` of
+    # the error, such as "REQUEST_TIMEOUT". The empty string gives an error with no
+    # ``extensions`` at all, and any integer gives INTERNAL_SERVER_ERROR.
+    error_code: int | str = -32000
     error_message: str = "Internal error"
     http_status: int = 200
     # JSON-RPC-listener-only: the plain-text body a ``rate_limit`` fault sends.
@@ -50,6 +54,20 @@ class ScenarioConfig(IntrospectiveConfig):
     # reuse of it — REST/Tendermint/gRPC still build their rate_limit envelope
     # from error_code/error_message and are unaffected by this field.
     rate_limit_body: str = "Rate limit exceeded. Reduce your request rate, or use an API key for a higher limit."
+    # GraphQL-listener-only: how a ``rate_limit`` fault answers. "status" is the
+    # HTTP 429 with plain text that every interface sends. "body" is the form of a
+    # GraphQL server that reports the limit inside a 200: ``data`` null and one
+    # error with the code RESOURCE_EXHAUSTED.
+    rate_limit_style: str = "status"  # status | body
+    # GraphQL-listener-only: with ``mode="error"``, the whole reply body, sent with
+    # ``http_status``. None means the error that the listener builds from
+    # ``error_code`` and ``error_message``. A test uses it for a reply of any
+    # shape, such as an HTTP 400 with a JSON-RPC body.
+    error_body: object = None
+    # GraphQL-listener-only: the reply to every request body that cannot be read as
+    # a GraphQL request, as ``{"status": 100..599, "body": any JSON value or text}``.
+    # None means the reply that the real Sui server gives for that kind of body.
+    unreadable_reply: object = None
     responses: dict = field(default_factory=dict)  # per-method overrides
     corruption_mode: str | None = None
     missing_field: str | None = None
@@ -80,10 +98,39 @@ class ScenarioConfig(IntrospectiveConfig):
     # GET /scenario — and does nothing.
     _MODES_THAT_NEVER_REACH_A_PAUSE = ("down", "hang", "drop_connection", "port_closed")
 
+    _RATE_LIMIT_STYLES = ("status", "body")
+
     def _validate(self, cfg: dict) -> None:
         self._validate_transports(cfg)
         self._validate_ports(cfg)
         self._validate_pause(cfg)
+        self._validate_rate_limit_style(cfg)
+        self._validate_unreadable_reply(cfg)
+
+    def _validate_rate_limit_style(self, cfg: dict) -> None:
+        style = cfg.get("rate_limit_style")
+        if "rate_limit_style" in cfg and style not in self._RATE_LIMIT_STYLES:
+            raise ValueError(f"rate_limit_style must be one of {list(self._RATE_LIMIT_STYLES)}, got {style!r}")
+
+    def _validate_unreadable_reply(self, cfg: dict) -> None:
+        """The reply to a body that is not a request must be one that can be sent:
+        a status that HTTP can carry, and a body. An unknown key is refused, so a
+        typo such as ``bodyy`` fails loudly and does not send an empty reply."""
+        if "unreadable_reply" not in cfg or cfg["unreadable_reply"] is None:
+            return
+        reply = cfg["unreadable_reply"]
+        status = reply.get("status") if isinstance(reply, dict) else None
+        if (
+            not isinstance(reply, dict)
+            or set(reply) - {"status", "body"}
+            or isinstance(status, bool)
+            or not isinstance(status, int)
+            or not 100 <= status <= 599
+        ):
+            raise ValueError(
+                'unreadable_reply must be null or {"status": an integer from 100 to 599, "body": any JSON value or '
+                f"text}}, got {reply!r}"
+            )
 
     def _validate_transports(self, cfg: dict) -> None:
         transports = cfg.get("transports")
