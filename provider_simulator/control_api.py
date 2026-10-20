@@ -228,6 +228,39 @@ def _an_invalid_proto_no_endpoint_can_apply(provider: object, scenario_updates: 
     return ""
 
 
+# The fields that only the GraphQL listener reads, each with the value that it has
+# when it is not set.
+_GRAPHQL_ONLY_FIELDS = {"rate_limit_style": "status", "error_body": None, "unreadable_reply": None}
+
+
+def _a_graphql_field_no_endpoint_can_apply(provider: object, scenario_updates: dict) -> str:
+    """Refuse a field that only the GraphQL listener reads, for a provider that has
+    no GraphQL endpoint.
+
+    ``rate_limit_style``, ``error_body`` and ``unreadable_reply`` shape the reply
+    to a GraphQL request. No other listener reads them, so a value on a provider
+    of another interface was stored and each call got its normal reply: a fault
+    that is accepted and does nothing reads as a router that recovered.
+
+    The value that a field has when it is not set is accepted on every provider,
+    because it changes no reply, and a caller that resets every field does not
+    know the interface. Like its neighbours, the rule reads the endpoints of the
+    provider and no filter.
+    """
+    endpoints = list(provider.endpoints)  # type: ignore[attr-defined]
+    if any(ep.interface == "graphql" for ep in endpoints):
+        return ""
+    for field_name, default in _GRAPHQL_ONLY_FIELDS.items():
+        if field_name in scenario_updates and scenario_updates[field_name] != default:
+            serves = ", ".join(f"{ep.interface}/{ep.transport} :{ep.port}" for ep in endpoints)
+            return (
+                f"{field_name} cannot apply: only the GraphQL listener reads it, and this provider has "
+                f"no GraphQL endpoint (it serves {serves}). The value would be stored and would change "
+                "no reply"
+            )
+    return ""
+
+
 def _a_port_closed_that_cannot_happen(
     provider: object, scenario_updates: dict, port_gates: "dict[int, PortGate]"
 ) -> tuple[int, str]:
@@ -479,6 +512,7 @@ class ControlApi:
                 or _a_pause_no_named_port_can_serve(provider, scenario_updates)
                 or _an_invalid_json_no_endpoint_can_apply(provider, scenario_updates)
                 or _an_invalid_proto_no_endpoint_can_apply(provider, scenario_updates)
+                or _a_graphql_field_no_endpoint_can_apply(provider, scenario_updates)
             )
             if err:
                 return 400, {"error": f"{key}: {err}"}

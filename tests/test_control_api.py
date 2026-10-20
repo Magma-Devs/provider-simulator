@@ -1044,6 +1044,66 @@ def test_an_invalid_proto_refusal_writes_no_provider_of_the_request():
     assert scen["providers"]["eth-sim:1"]["mode"] == "success"
 
 
+# ── the fields only the GraphQL listener reads, on a provider with no GraphQL endpoint ──
+
+_GRAPHQL_ONLY = [
+    ("rate_limit_style", "body", "status"),
+    ("error_body", {"errors": [{"message": "refused"}]}, None),
+    ("unreadable_reply", {"status": 502, "body": "bad gateway"}, None),
+]
+
+
+@pytest.mark.parametrize("field_name, value, default", _GRAPHQL_ONLY, ids=[row[0] for row in _GRAPHQL_ONLY])
+@pytest.mark.parametrize("key", ["eth-sim:1", "lava-sim-rest:1", "lava-sim-grpc:1"])
+def test_a_graphql_only_field_on_a_provider_with_no_graphql_endpoint_is_400(key, field_name, value, default):
+    """Only the GraphQL listener reads ``rate_limit_style``, ``error_body`` and
+    ``unreadable_reply``. On a provider of another interface each value was stored
+    and did nothing: every call got its normal reply, and a test that had armed
+    the fault read a healthy provider as a router that recovered."""
+    api = _api()
+    st, resp = api.apply_scenario({"providers": {key: {field_name: value}}})
+    assert st == 400, resp
+    assert key in resp["error"]
+    assert f"{field_name} cannot apply" in resp["error"]
+    assert "no GraphQL endpoint" in resp["error"]
+    _, scen = api.get_scenario()
+    assert scen["providers"][key][field_name] == default
+
+
+@pytest.mark.parametrize("field_name, value, default", _GRAPHQL_ONLY, ids=[row[0] for row in _GRAPHQL_ONLY])
+def test_a_graphql_only_field_is_accepted_when_the_provider_has_a_graphql_endpoint(field_name, value, default):
+    """The positive control for the test above: the same value on a provider that
+    has a GraphQL endpoint is stored, and the reply says so."""
+    rows = (("sui-graphql-x-sim", "sui", "1", "SuiGraphqlX1", False, "", (("graphql", "http", 40003),)),)
+    api = ControlApi(build_registry(rows), WsSubscriptions())
+    st, resp = api.apply_scenario({"providers": {"sui-graphql-x-sim:1": {field_name: value}}})
+    assert st == 200, resp
+    assert resp["applied"]["sui-graphql-x-sim:1"][field_name] == value
+
+
+def test_the_default_of_each_graphql_only_field_is_accepted_on_a_provider_with_no_graphql_endpoint():
+    """A caller that resets every field of a provider does not know its interface.
+    The value that a field has when it is not set changes no reply, so the rule
+    leaves it alone."""
+    api = _api()
+    block = {"rate_limit_style": "status", "error_body": None, "unreadable_reply": None}
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": block}})
+    assert st == 200, resp
+
+
+def test_a_graphql_only_refusal_writes_no_provider_of_the_request():
+    api = _api()
+    blocks = {
+        "lava-sim-grpc:1": {"mode": "down"},
+        "eth-sim:1": {"mode": "rate_limit", "rate_limit_style": "body"},
+    }
+    st, resp = api.apply_scenario({"providers": blocks})
+    assert st == 400, resp
+    _, scen = api.get_scenario()
+    assert scen["providers"]["lava-sim-grpc:1"]["mode"] == "success"
+    assert scen["providers"]["eth-sim:1"]["mode"] == "success"
+
+
 # ── a write with "transports": null clears a stored filter ────────────────────
 
 

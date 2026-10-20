@@ -326,6 +326,30 @@ def test_the_error_stubs_are_the_seven_codes_of_suis_server():
     assert SuiChain().error_stub("internal_server_error") is SUI_ERROR_STUBS["internal_server_error"]
 
 
+@pytest.mark.parametrize("code", sorted(SUI_ERROR_CODES))
+def test_an_error_stub_is_found_by_the_code_in_either_case(code):
+    """``error_code`` takes the code in capitals and ``error_stub`` took it in small
+    letters, so a caller who gave the code as Sui writes it crashed the request
+    thread of the provider and left the history row in flight."""
+    assert SuiChain().error_stub(code) is SUI_ERROR_STUBS[code.lower()]
+    assert SuiChain().error_stub(code.lower()) is SUI_ERROR_STUBS[code.lower()]
+
+
+def test_a_per_root_error_stub_given_in_capitals_gives_the_same_partial_reply():
+    body, _ = _ask(
+        SuiChain(),
+        "{ chainIdentifier checkpoint { digest } }",
+        scenario={"responses": {"checkpoint": {"error_stub": "REQUEST_TIMEOUT"}}},
+    )
+    assert body["data"] == {"chainIdentifier": SUI_CHAIN_ID, "checkpoint": None}
+    assert body["errors"][0]["extensions"] == {"code": "REQUEST_TIMEOUT"}
+
+
+def test_an_error_stub_that_names_no_code_is_refused_with_the_names_that_exist():
+    with pytest.raises(KeyError, match="resource_exhausted"):
+        SuiChain().error_stub("nope")
+
+
 def test_the_reply_does_not_change_the_stub_that_it_copies():
     chain = SuiChain()
     before = json.dumps(SUI_ERROR_STUBS, sort_keys=True)

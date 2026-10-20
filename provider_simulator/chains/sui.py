@@ -68,7 +68,12 @@ class SuiChain(Chain):
         self.head = AdvancingHead(SUI_BASE_CHECKPOINT)
 
     def error_stub(self, name: str) -> dict:
-        return SUI_ERROR_STUBS[name]
+        """The error entry of a Sui error code. The name is the code in small letters
+        (the key of ``SUI_ERROR_STUBS``) or in capitals, as ``error_code`` takes it."""
+        try:
+            return SUI_ERROR_STUBS[str(name).lower()]
+        except KeyError:
+            raise KeyError(f"unknown error_stub {name!r}; the Sui codes are {sorted(SUI_ERROR_STUBS)}") from None
 
     def tip(self, scenario: dict) -> int:
         """The latest checkpoint of one provider: the head, minus ``blocks_behind``

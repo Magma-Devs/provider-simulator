@@ -6,7 +6,7 @@ response builders, the per-transport Listeners, and the control API. This
 module is the wire layer on top of them — it binds one socket per endpoint in
 the registry and PERFORMS each listener's plan:
 
-- HTTP request/response endpoints (jsonrpc / rest / tendermintrpc) run a
+- HTTP request/response endpoints (jsonrpc / rest / tendermintrpc / graphql) run a
   ``BaseHTTPRequestHandler`` that builds a ``RawRequest``, calls
   ``Listener.serve()``, and turns the returned ``ServeResult`` into wire bytes
   (via ``listeners.wire.serialize``), a hang, or a connection drop.
@@ -240,7 +240,7 @@ def _port_is_closed(server: object) -> bool:
     return bool(getattr(server, "closed_by_scenario", False))
 
 
-# ── HTTP request/response adapter (jsonrpc / rest / tendermintrpc) ────────────
+# ── HTTP request/response adapter (jsonrpc / rest / tendermintrpc / graphql) ───
 
 # The characters of an HTTP ``token`` (RFC 9110, section 5.6.2).
 _HTTP_TOKEN_CHARS = frozenset("!#$%&'*+-.^_`|~" + string.digits + string.ascii_letters)

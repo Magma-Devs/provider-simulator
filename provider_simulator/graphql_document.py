@@ -10,8 +10,11 @@ The listener asks it three things:
   field names, joined with ``&``, in document order. An alias never counts.
   Fragments expand in place. A field that ``@skip`` or ``@include`` removes is
   not a root.
-- ``default_error_reply`` gives the reply that the real Sui server gives for a
-  body that cannot be read, for each kind of fault.
+- ``default_error_reply`` gives a reply that imitates the one of the real Sui server
+  for a body that cannot be read, for each kind of fault. The status and the code
+  match what Sui answered. The message matches too, except for a body that is not
+  JSON (Python's JSON reader words it) and for a document with a syntax error
+  (``graphql-core`` words it).
 - ``project`` shapes a Python value by the selection set of a field: only the
   requested fields, under their aliases.
 
@@ -75,7 +78,9 @@ class GraphQLRequestError(Exception):
 
     ``kind`` is one of ``not_json``, ``batch``, ``bad_shape``, ``parse``,
     ``validation`` and ``operation``. ``message`` is the text that the real Sui
-    server gives for this fault."""
+    server gives for this fault, except for a body that is not JSON (the text of
+    Python's JSON reader) and for a document with a syntax error (the text of
+    ``graphql-core``)."""
 
     def __init__(self, kind: str, message: str) -> None:
         super().__init__(message)

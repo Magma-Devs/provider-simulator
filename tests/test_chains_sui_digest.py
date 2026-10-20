@@ -6,6 +6,7 @@ reported. Ten are at checkpoint 200,000,000 and ten at a recent checkpoint.
 """
 
 import base64
+import hashlib
 import json
 import random
 from pathlib import Path
@@ -45,7 +46,7 @@ def test_a_real_transaction_hashes_to_the_digest_its_provider_reported(vector):
 
 def test_without_the_type_tag_no_real_transaction_matches_its_digest():
     # Negative control: the same bytes hashed with no "TransactionData::" prefix.
-    plain = [base58_encode(__import__("hashlib").blake2b(_bytes(v), digest_size=32).digest()) for v in _VECTORS]
+    plain = [base58_encode(hashlib.blake2b(_bytes(v), digest_size=32).digest()) for v in _VECTORS]
     assert [p == v["digest"] for p, v in zip(plain, _VECTORS)] == [False] * len(_VECTORS)
 
 

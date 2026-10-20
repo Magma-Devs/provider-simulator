@@ -338,7 +338,8 @@ def test_a_query_of_300_nodes_is_read_and_one_more_is_refused_with_the_message_o
 
 
 def test_a_fragment_spread_is_a_node_and_its_fields_count_again_at_each_spread():
-    assert parse_graphql_request(_body("{ ...F ...F } fragment F on Query { " + _FIELD * 149 + "}"))
+    request = parse_graphql_request(_body("{ ...F ...F } fragment F on Query { " + _FIELD * 149 + "}"))
+    assert len(request.roots) == 298  # 2 spreads and 298 fields are 300 nodes
     error = _node_error("{ ...F ...F } fragment F on Query { " + _FIELD * 150 + "}")
     assert error.message == "Query has over 300 nodes"
 
@@ -347,7 +348,8 @@ def test_an_inline_fragment_is_a_node():
     def two_inline_fragments(fields: int) -> str:
         return "{ " + ("... on Query { " + _FIELD * fields + "} ") * 2 + "}"
 
-    assert parse_graphql_request(_body(two_inline_fragments(149)))
+    request = parse_graphql_request(_body(two_inline_fragments(149)))
+    assert len(request.roots) == 298  # 2 inline fragments and 298 fields are 300 nodes
     assert _node_error(two_inline_fragments(150)).message == "Query has over 300 nodes"
 
 

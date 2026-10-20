@@ -155,6 +155,20 @@ def test_the_history_route_shows_method_path_request_id_and_body_hash_and_finds_
     assert (status, none["history"]) == (200, [])
 
 
+def test_a_path_that_starts_with_two_slashes_is_recorded_with_one():
+    """Python's HTTP server reads a request target that starts with ``//`` as one
+    that starts with ``/`` (a guard against open redirects) before the simulator
+    sees it. The history row cannot tell ``//graphql`` from ``/graphql``, and it
+    never reads the first segment as a host. The docs name this limit, and this
+    test keeps the docs true."""
+    sent = json.dumps({"query": "{ chainIdentifier }", "variables": {"request_id": "double-slash"}}).encode()
+    assert _send(sent, "//graphql/v1?x=1")[0] == 200
+    last = _history()[-1]
+    assert (last["request_id"], last["path"]) == ("double-slash", "/graphql/v1")
+    assert _send(sent, "//graphql")[0] == 200
+    assert _history()[-1]["path"] == "/graphql"
+
+
 def test_advance_moves_the_tip_over_the_wire():
     try:
         status, moved = _control_post("/advance", {"chain": "sui", "blocks": 5})
