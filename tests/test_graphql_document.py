@@ -149,6 +149,17 @@ def test_the_request_id_is_read_from_the_variables():
 
 # ── a body that cannot be read ────────────────────────────────────────────────
 
+
+def _exponential_fragments(levels: int, below: str = "") -> str:
+    """A small document that expands to 2**(levels - 1) fields: each fragment spreads the next one twice.
+    ``below`` puts the expansion under a root field, as ``epoch``."""
+    spread = "...F1" if not below else f"{below} {{ ...F1 }}"
+    on = "Query" if not below else "Epoch"
+    leaf = "chainIdentifier" if not below else "epochId"
+    fragments = [f"fragment F{i} on {on} {{ ...F{i + 1} ...F{i + 1} }}" for i in range(1, levels)]
+    return f"query {{ {spread} }} " + " ".join(fragments) + f" fragment F{levels} on {on} {{ {leaf} }}"
+
+
 _DEEP = json.dumps({"query": "{ a " * 5000 + "}" * 5000}).encode()
 _BODY_NOT_AN_OBJECT = b'{"query": "{ chainIdentifier }", "variables": %s}'
 
@@ -196,6 +207,26 @@ UNREADABLE_BODIES = [
         None,
         None,
         id="JSON integer of 5000 digits",
+    ),
+    pytest.param(
+        json.dumps({"query": "{ " + "chainIdentifier " * 301 + "}"}).encode(),
+        "validation",
+        200,
+        None,
+        None,
+        "GRAPHQL_VALIDATION_FAILED",
+        "Query has over 300 nodes",
+        id="301 fields",
+    ),
+    pytest.param(
+        json.dumps({"query": _exponential_fragments(20)}).encode(),
+        "validation",
+        200,
+        None,
+        None,
+        "GRAPHQL_VALIDATION_FAILED",
+        "Query has over 300 nodes",
+        id="fragments that expand to half a million fields",
     ),
     pytest.param(b"{}", "parse", 200, None, None, "GRAPHQL_PARSE_FAILED", None, id="no query"),
     pytest.param(b'{"query": ""}', "parse", 200, None, None, "GRAPHQL_PARSE_FAILED", None, id="empty query"),
@@ -282,6 +313,68 @@ def test_a_fragment_cycle_is_found_at_the_second_visit_and_not_by_running_out_of
     error = _error_of(_body("query { ...A } fragment A on Query { ...A }"))
     assert error.message == _RECURSION
     assert len(calls) <= 3
+
+
+# ── the number of nodes ───────────────────────────────────────────────────────
+
+_FIELD = "chainIdentifier "
+
+
+def _node_error(query: str) -> GraphQLRequestError:
+    return _error_of(_body(query))
+
+
+def test_a_query_of_300_nodes_is_read_and_one_more_is_refused_with_the_message_of_sui():
+    assert len(parse_graphql_request(_body("{ " + _FIELD * 300 + "}")).roots) == 300
+    error = _node_error("{ " + _FIELD * 301 + "}")
+    assert (error.kind, error.message) == ("validation", "Query has over 300 nodes")
+    assert default_error_reply(error) == (
+        200,
+        {
+            "data": None,
+            "errors": [{"message": "Query has over 300 nodes", "extensions": {"code": "GRAPHQL_VALIDATION_FAILED"}}],
+        },
+    )
+
+
+def test_a_fragment_spread_is_a_node_and_its_fields_count_again_at_each_spread():
+    assert parse_graphql_request(_body("{ ...F ...F } fragment F on Query { " + _FIELD * 149 + "}"))
+    error = _node_error("{ ...F ...F } fragment F on Query { " + _FIELD * 150 + "}")
+    assert error.message == "Query has over 300 nodes"
+
+
+def test_an_inline_fragment_is_a_node():
+    def two_inline_fragments(fields: int) -> str:
+        return "{ " + ("... on Query { " + _FIELD * fields + "} ") * 2 + "}"
+
+    assert parse_graphql_request(_body(two_inline_fragments(149)))
+    assert _node_error(two_inline_fragments(150)).message == "Query has over 300 nodes"
+
+
+def test_fields_below_a_root_field_count_as_nodes():
+    pair = "epoch { epochId } "
+    assert len(parse_graphql_request(_body("{ " + pair * 150 + "}")).roots) == 150
+    assert _node_error("{ " + pair * 151 + "}").message == "Query has over 300 nodes"
+
+
+def test_a_document_that_expands_to_billions_of_nodes_is_refused_before_any_expansion(monkeypatch):
+    """Fragments that spread each other twice make 2**29 fields from 30 small fragments. The count
+    adds up each fragment once, so the answer costs a few dozen steps, and the expansion of the roots
+    never starts."""
+
+    def never(*args):
+        raise AssertionError("the roots were expanded")
+
+    monkeypatch.setattr(graphql_document, "_roots_of", never)
+    assert _node_error(_exponential_fragments(30)).message == "Query has over 300 nodes"
+
+
+def test_an_expansion_below_a_root_field_is_refused_too():
+    assert _node_error(_exponential_fragments(25, below="epoch")).message == "Query has over 300 nodes"
+
+
+def test_a_cycle_is_still_a_recursion_error_and_the_count_does_not_run_on_it():
+    assert _node_error("query { ...A } fragment A on Query { ...A ...A }").message == _RECURSION
 
 
 def _nested(levels: int) -> str:

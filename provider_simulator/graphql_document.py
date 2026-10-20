@@ -31,6 +31,13 @@ from typing import Any
 MAX_DEPTH = 32
 RECURSION_MESSAGE = f"The recursion depth of the query cannot be greater than `{MAX_DEPTH}`"
 
+# The most nodes that the real server accepts in one query. Each field, each fragment spread and
+# each inline fragment is one node, wherever it sits, and a fragment counts again at each spread.
+# A document of small fragments that spread each other makes billions of nodes, so the server
+# refuses it by this count and never expands it.
+MAX_NODES = 300
+NODE_LIMIT_MESSAGE = f"Query has over {MAX_NODES} nodes"
+
 _EMPTY_BODY = 'InvalidRequest(Error("EOF while parsing a value", line: 1, column: 0))'
 _BAD_SHAPE = 'InvalidRequest(Error("data did not match any variant of untagged enum BatchRequest", line: 0, column: 0))'
 _BATCH = "UnsupportedBatch"
@@ -189,6 +196,30 @@ def _depth_of(selection_set: Any, fragments: dict, memo: dict, stack: tuple[str,
     return 1 + deepest
 
 
+def _nodes_of(selection_set: Any, fragments: dict, memo: dict) -> int:
+    """How many nodes a selection set holds once its fragments are spread. Each fragment is
+    added up once and the sum is reused, so the work follows the size of the document and not
+    the size of what it expands to. The caller has checked that no fragment is undefined or
+    spreads itself."""
+    graphql, _undefined, _value_of = _library()
+    total = 0
+    for selection in selection_set.selections:
+        total += 1
+        if isinstance(selection, graphql.FragmentSpreadNode):
+            name = selection.name.value
+            if name not in memo:
+                memo[name] = _nodes_of(fragments[name].selection_set, fragments, memo)
+            total += memo[name]
+        elif selection.selection_set is not None:
+            total += _nodes_of(selection.selection_set, fragments, memo)
+    return total
+
+
+def _check_nodes(operation: Any, fragments: dict) -> None:
+    if _nodes_of(operation.selection_set, fragments, {}) > MAX_NODES:
+        raise GraphQLRequestError("validation", NODE_LIMIT_MESSAGE)
+
+
 def _check_depth(operation: Any, fragments: dict) -> None:
     try:
         depth = _depth_of(operation.selection_set, fragments, {}, ())
@@ -255,8 +286,8 @@ def parse_graphql_request(body: bytes) -> GraphQLRequest:
     object whose ``query``, ``variables`` or ``operationName`` has the wrong
     type, is ``bad_shape``. An object with no ``query``, an empty query, a syntax
     error, a document with no operation, a fragment cycle, and a nesting deeper
-    than 32 levels are ``parse``. A spread of an undefined fragment is
-    ``validation``. Two operations with no ``operationName``, and an
+    than 32 levels are ``parse``. A spread of an undefined fragment, and a query of
+    more than 300 nodes, are ``validation``. Two operations with no ``operationName``, and an
     ``operationName`` that matches none, are ``operation``."""
     graphql, _undefined, _value_of = _library()
     payload = _read_object(body)
@@ -268,6 +299,7 @@ def parse_graphql_request(body: bytes) -> GraphQLRequest:
     operation = _choose_operation(document, payload.get("operationName"))
     fragments = {d.name.value: d for d in document.definitions if isinstance(d, graphql.FragmentDefinitionNode)}
     _check_depth(operation, fragments)
+    _check_nodes(operation, fragments)
     variables = _variables_of(operation, payload.get("variables") or {})
     roots = tuple(_roots_of(operation.selection_set, fragments, variables))
     candidate = variables.get("request_id")
