@@ -443,6 +443,13 @@ POOLS_WITH_NO_ROUTER_HERE = {
     # claim a deployment nobody makes.
     "eth-failover-backuparchive-sim",
     "eth-failover-archiveless-sim",
+    # sui-graphql-sim and sui-failover-graphql-sim. Their routers run on the local
+    # k3d cluster, declared in smart_router_automation's tools/local-cluster/routers.yml
+    # plus its own config/values_sim.yml, which is where the backup tier of the failover
+    # router comes from. The shared cluster does not run them, so a router entry in THIS
+    # file would claim a deployment nobody makes.
+    "sui-graphql-sim",
+    "sui-failover-graphql-sim",
 }
 
 

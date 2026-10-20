@@ -82,6 +82,10 @@ second. Both pools carry a backup tier because the router answers from either
 cache tier before it picks any provider, primary tier and backup tier alike,
 and without a backup tier a test cannot tell "never reached the backup" from
 "there was no backup to reach".
+sui-graphql-sim and sui-failover-graphql-sim are the two pools of the Sui GraphQL
+routers, on the ``graphql`` interface over http. They are k3d-only like the pools
+above: their routers are declared in routers.yml in smart_router_automation, and
+the backup tier of the failover router comes from config/values_sim.yml there.
 The listener ports live here and nowhere else. constants.py holds no ports, so
 there is nothing to cross-check them against; the sentence that used to claim
 such a test described a check removed with those duplicate port tables.
@@ -1124,6 +1128,91 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
         True,
         "",
         (("jsonrpc", "http", 18710),),
+    ),
+    # sui-graphql-sim: ports 18711-18713. The providers of the basic Sui GraphQL router:
+    # three primaries that nothing tells apart, and no backup tier.
+    (
+        "sui-graphql-sim",
+        "sui",
+        "1",
+        "SuiGraphqlPrimaryProvider1",
+        False,
+        "",
+        (("graphql", "http", 18711),),
+    ),
+    (
+        "sui-graphql-sim",
+        "sui",
+        "2",
+        "SuiGraphqlPrimaryProvider2",
+        False,
+        "",
+        (("graphql", "http", 18712),),
+    ),
+    (
+        "sui-graphql-sim",
+        "sui",
+        "3",
+        "SuiGraphqlPrimaryProvider3",
+        False,
+        "",
+        (("graphql", "http", 18713),),
+    ),
+    # sui-failover-graphql-sim: ports 18714-18719. The failover copy of sui-graphql-sim, for
+    # the failover tests on the Sui GraphQL router: three primaries, then three backups.
+    (
+        "sui-failover-graphql-sim",
+        "sui",
+        "1",
+        "SuiFailoverGraphqlPrimaryProvider1",
+        False,
+        "",
+        (("graphql", "http", 18714),),
+    ),
+    (
+        "sui-failover-graphql-sim",
+        "sui",
+        "2",
+        "SuiFailoverGraphqlPrimaryProvider2",
+        False,
+        "",
+        (("graphql", "http", 18715),),
+    ),
+    (
+        "sui-failover-graphql-sim",
+        "sui",
+        "3",
+        "SuiFailoverGraphqlPrimaryProvider3",
+        False,
+        "",
+        (("graphql", "http", 18716),),
+    ),
+    (
+        "sui-failover-graphql-sim",
+        "sui",
+        "4",
+        "SuiFailoverGraphqlBackupProvider4",
+        True,
+        "",
+        (("graphql", "http", 18717),),
+    ),
+    (
+        "sui-failover-graphql-sim",
+        "sui",
+        "5",
+        "SuiFailoverGraphqlBackupProvider5",
+        True,
+        "",
+        (("graphql", "http", 18718),),
+    ),
+    (
+        "sui-failover-graphql-sim",
+        "sui",
+        "6",
+        "SuiFailoverGraphqlBackupProvider6",
+        True,
+        "",
+        (("graphql", "http", 18719),),
     ),
 )
 

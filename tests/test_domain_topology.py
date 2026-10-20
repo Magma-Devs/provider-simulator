@@ -61,6 +61,9 @@ EXPECTED_POOLS = {
     # noarchive again, for routers that start with the default retry limit.
     "eth-failover-backuparchive-sim",
     "eth-failover-archiveless-sim",
+    # The two pools of the Sui GraphQL routers: the basic router, and its failover copy.
+    "sui-graphql-sim",
+    "sui-failover-graphql-sim",
 }
 
 
@@ -665,6 +668,17 @@ AGREED_NAMES = {
     ("eth-failover-archiveless-sim", "2"): "EthFailoverArchivelessPrimaryProvider2",
     ("eth-failover-archiveless-sim", "3"): "EthFailoverArchivelessBackupProvider3",
     ("eth-failover-archiveless-sim", "4"): "EthFailoverArchivelessBackupProvider4",
+    # The Sui GraphQL routers. The basic pool has three providers and nothing to tell
+    # them apart, so Primary. Its failover copy has three primaries, then three backups.
+    ("sui-graphql-sim", "1"): "SuiGraphqlPrimaryProvider1",
+    ("sui-graphql-sim", "2"): "SuiGraphqlPrimaryProvider2",
+    ("sui-graphql-sim", "3"): "SuiGraphqlPrimaryProvider3",
+    ("sui-failover-graphql-sim", "1"): "SuiFailoverGraphqlPrimaryProvider1",
+    ("sui-failover-graphql-sim", "2"): "SuiFailoverGraphqlPrimaryProvider2",
+    ("sui-failover-graphql-sim", "3"): "SuiFailoverGraphqlPrimaryProvider3",
+    ("sui-failover-graphql-sim", "4"): "SuiFailoverGraphqlBackupProvider4",
+    ("sui-failover-graphql-sim", "5"): "SuiFailoverGraphqlBackupProvider5",
+    ("sui-failover-graphql-sim", "6"): "SuiFailoverGraphqlBackupProvider6",
 }
 
 # The pools that HAVE a backup tier, and which of their slots it is. The router
@@ -694,6 +708,8 @@ _SIX_PROVIDER_POOLS_WITH_A_BACKUP_TIER = (
     "lava-failover-grpc-sim",
     # The failover copy of eth-sim: three primaries, then three backups.
     "eth-failover-sim",
+    # The failover pool of the Sui GraphQL router: three primaries, then three backups.
+    "sui-failover-graphql-sim",
 )
 
 # Four-provider failover pools (MAG-3916): two primaries, then two backups. Two
