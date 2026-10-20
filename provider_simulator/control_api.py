@@ -955,7 +955,10 @@ class ControlApi:
             if ("pool" not in query or provider.pool.name == query["pool"])
             and ("pid" not in query or provider.pid == query["pid"])
         ]
-        row_filter = self._history_row_filter(query)
+        try:
+            row_filter = self._history_row_filter(query)
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
         entries: list[dict] = []
         for provider in providers:
             # The headers of a row stay a JSON text here. They are decoded at the
@@ -1004,6 +1007,9 @@ class ControlApi:
         equals = [(key, query[key]) for key in ("transport", "method", "status", "interface") if key in query]
         # A request id is a number or a string in a row and text in the query, so it is compared as text.
         wanted_id = str(query["request_id"]) if "request_id" in query else None
+        # The body of a request is found by its SHA-256, in any letter case, and by its length.
+        wanted_hash = str(query["body_sha256"]).lower() if "body_sha256" in query else None
+        wanted_len = _strict_int("body_len", query["body_len"]) if "body_len" in query else None
         low = _as_float(query["from"], float("-inf")) if "from" in query else None
         high = _as_float(query["to"], float("inf")) if "to" in query else None
         # Header names are case-insensitive on the wire (clients may title-case
@@ -1013,7 +1019,15 @@ class ControlApi:
             for key, value in query.items()
             if key.startswith("lava_header_")
         ]
-        if not (equals or wanted_id is not None or low is not None or high is not None or headers):
+        if not (
+            equals
+            or wanted_id is not None
+            or wanted_hash is not None
+            or wanted_len is not None
+            or low is not None
+            or high is not None
+            or headers
+        ):
             return None
 
         def matches(row: dict) -> bool:
@@ -1021,6 +1035,10 @@ class ControlApi:
                 if row.get(key) != value:
                     return False
             if wanted_id is not None and str(row.get("request_id")) != wanted_id:
+                return False
+            if wanted_hash is not None and row.get("body_sha256") != wanted_hash:
+                return False
+            if wanted_len is not None and row.get("body_len") != wanted_len:
                 return False
             # "not >=" and not "<": a bound that is NaN keeps no row.
             if low is not None and not row.get("ts", 0.0) >= low:
@@ -1308,6 +1326,16 @@ def _bad_enum(field_name: str, value: object) -> str:
     if allowed is not None and value is not None and value not in allowed:
         return f"invalid {field_name} {value!r}; allowed: {sorted(allowed)}"
     return ""
+
+
+def _strict_int(name: str, value: object) -> int:
+    """A query value that must be a whole number. Unlike ``_as_int`` it refuses
+    anything else, because a filter that reads junk as a default would answer a
+    different question than the one that was asked."""
+    try:
+        return int(str(value))
+    except ValueError:
+        raise ValueError(f"{name} must be an integer, got {value!r}") from None
 
 
 def _as_int(value: object, default: int) -> int:

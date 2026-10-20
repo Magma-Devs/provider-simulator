@@ -2,6 +2,7 @@
 scenario apply (staged, old-format 400, quirk routing, responses normalization),
 resets, stats/history filters, advance, and ws/emit."""
 
+import hashlib
 import json
 from collections import Counter
 
@@ -292,6 +293,46 @@ def test_history_merges_filters_and_orders():
     _, only1 = api.get_history({"request_id": "1"})
     assert only1["count"] == 1
     assert only1["history"][0]["method"] == "eth_blockNumber"
+
+
+def _row_with_body(provider, body: bytes, request_id: int) -> None:
+    """One finished row whose request body is ``body``, as a listener leaves it."""
+    entry = provider.log.record_arrival("graphql", "http", 18999)
+    provider.log.record_body(entry, body)
+    provider.log.finalize(entry, method="m", status="success", latency_ms=0, request_id=request_id)
+
+
+def test_history_can_be_filtered_by_body_hash_and_length():
+    api = _api()
+    first, second = b'{"query":"{ a }"}', b'{"query":"{ b }"} '
+    assert len(first) != len(second)
+    provider, other = api.registry.provider("eth-sim", "1"), api.registry.provider("eth-sim", "2")
+    _row_with_body(provider, first, 1)
+    _row_with_body(provider, second, 2)
+    _row_with_body(other, first, 3)  # the same body on another provider
+    digest = hashlib.sha256(first).hexdigest()
+    one = {"pool": "eth-sim", "pid": "1"}
+
+    def ids(extra: dict) -> list:
+        status, reply = api.get_history({**one, **extra})
+        assert status == 200
+        return [row["request_id"] for row in reply["history"]]
+
+    assert ids({"body_sha256": digest}) == [1]
+    assert ids({"body_sha256": digest.upper()}) == [1]
+    assert ids({"body_sha256": "0" * 64}) == []
+    assert ids({"body_len": str(len(first))}) == [1]
+    assert ids({"body_len": str(len(second))}) == [2]
+    assert ids({"body_sha256": digest, "body_len": str(len(first) + 1)}) == []
+    assert ids({"body_sha256": digest, "body_len": str(len(first))}) == [1]
+    assert ids({}) == [1, 2]
+
+
+def test_a_body_len_that_is_not_an_integer_is_a_400():
+    api = _api()
+    status, reply = api.get_history({"body_len": "many"})
+    assert status == 400
+    assert "body_len" in reply["error"]
 
 
 def test_history_max_caps_and_rejects_negative():

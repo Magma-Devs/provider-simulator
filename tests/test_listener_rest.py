@@ -626,3 +626,9 @@ def test_arrive_keeps_every_header_of_the_call_in_headers():
     assert row["headers"] == {"Lava-Guid": "GUID_1", "X-Other": "kept"}
     assert row["lava_headers"] == {"Lava-Guid": "GUID_1"}
     assert (row["deadline_remaining_ms"], row["grpc_status"]) == (None, None)
+
+
+def test_a_rest_row_keeps_the_path_empty():
+    listener, provider = _listener()
+    listener.serve(_get(_BLOCKS_LATEST))
+    assert provider.log.get_history()[0]["path"] is None

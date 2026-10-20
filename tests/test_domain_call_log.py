@@ -321,3 +321,11 @@ def test_a_bytes_value_in_lava_headers_is_read_as_base64_text_and_the_rows_are_v
     assert row["lava_headers"] == {"lava-x-bin": "AAE=", "lava-guid": "g1"}
     assert row["headers"] == {"lava-x-bin": "AAE="}
     assert json.loads(json.dumps(log.get_history())) == log.get_history()
+
+
+def test_a_row_has_no_path_until_one_is_recorded():
+    log = _log()
+    entry = log.record_arrival("graphql", "http", 18999)
+    assert log.get_history()[0]["path"] is None
+    log.record_path(entry, "/graphql")
+    assert log.get_history()[0]["path"] == "/graphql"
