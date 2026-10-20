@@ -17,8 +17,9 @@ Four GraphQL rules, which differ from the other interfaces:
   rate limit the same, with the code RESOURCE_EXHAUSTED. The default rate limit
   is still the HTTP 429 with plain text. ``error_body`` replaces the whole error
   reply, with the ``http_status`` of the scenario.
-- A reply that holds ``errors`` is labelled ``error`` in the history, also when it
-  holds ``data`` beside them (a partial reply).
+- A reply that the chain builds, and that holds ``errors``, is labelled ``error`` in
+  the history, also when it holds ``data`` beside them (a partial reply). A canned
+  ``body`` of a ``responses`` entry is labelled ``success``, as on JSON-RPC.
 - A body that cannot be read as a request gets the reply of the real Sui server
   for that kind of body, and a history row with the method ``unknown`` and the
   status ``error``. The row holds the length and the hash of the body, because

@@ -108,7 +108,10 @@ Pick one `mode`; combine it with the orthogonal fields.
 | `mode` | `success` \| `error` \| `rate_limit` \| `down` \| `hang` \| `drop_connection` \| `port_closed` | Primary behaviour. `port_closed` closes the port of the endpoint, see below |
 | `latency_ms` | int | Sleep N ms before responding |
 | `error_probability` | 0.0–1.0 | Random error on top of `success` |
-| `error_code` / `error_message` / `http_status` | int / str / int | Customise the error returned |
+| `error_code` / `error_message` / `http_status` | int or str / str / int | Customise the error returned. A GraphQL provider reads a text `error_code`: the `extensions.code` of its error |
+| `rate_limit_style` | `status` \| `body` | GraphQL only. `status` is the HTTP 429 with plain text. `body` is a 200 with a `RESOURCE_EXHAUSTED` error |
+| `error_body` | any JSON value or text | GraphQL only. With `mode=error`, the whole reply, sent with `http_status` |
+| `unreadable_reply` | `{"status": int, "body": any}` | GraphQL only. The reply to every request body that cannot be read. The default is the reply of the real Sui server |
 | `corruption_mode` | `truncated` \| `invalid_json` \| `empty_response` \| `missing_field` \| `wrong_type` | Break the response body |
 | `missing_field` | str | Which field to drop or retype |
 | `blocks_behind` | int | Report a stale head (`eth_blockNumber` / `eth_getBlockByNumber` / gRPC `GetLatestBlock`) |
