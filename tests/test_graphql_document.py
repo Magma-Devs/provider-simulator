@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from provider_simulator import graphql_document
 from provider_simulator.graphql_document import (
     GraphQLRequestError,
     default_error_reply,
@@ -245,6 +246,23 @@ def test_a_fragment_cycle_and_an_undefined_fragment():
             "errors": [{"message": 'Unknown fragment: "Nope"', "extensions": {"code": "GRAPHQL_VALIDATION_FAILED"}}],
         },
     )
+
+
+def test_a_fragment_cycle_is_found_at_the_second_visit_and_not_by_running_out_of_stack(monkeypatch):
+    """The walk keeps the names of the fragments that it is inside, so a spread of
+    one of them is a cycle. Without that rule the walk recurses until Python's own
+    limit stops it, and that gives the same message a thousand calls later."""
+    calls: list[int] = []
+    original = graphql_document._depth_of
+
+    def counting(*args):
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(graphql_document, "_depth_of", counting)
+    error = _error_of(_body("query { ...A } fragment A on Query { ...A }"))
+    assert error.message == _RECURSION
+    assert len(calls) <= 3
 
 
 def _nested(levels: int) -> str:
