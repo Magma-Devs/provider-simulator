@@ -206,3 +206,24 @@ def test_targets_is_the_predicate_and_it_reads_both_filters():
     assert fault_policy.targets({"ports": [18638]}, ADDR_B) is False
     assert fault_policy.targets({"transports": ["ws"]}, ADDR_A) is False
     assert fault_policy.targets({"transports": ["http"], "ports": [18639]}, ADDR_A) is False
+
+
+# ── the GraphQL forms of a rate limit and an error ────────────────────────────
+
+
+def test_ladder_carries_the_rate_limit_style_and_keeps_the_status_429():
+    assert fault_policy.ladder("rate_limit", {}).rate_limit_style == "status"
+    verdict = fault_policy.ladder("rate_limit", {"rate_limit_style": "body"})
+    assert (verdict.kind, verdict.status, verdict.rate_limit_style) == ("rate_limit", 429, "body")
+
+
+def test_ladder_carries_the_error_body_and_the_http_status():
+    verdict = fault_policy.ladder("error", {"error_body": {"x": 1}, "http_status": 400})
+    assert (verdict.kind, verdict.status, verdict.error_body) == ("error", 400, {"x": 1})
+    assert fault_policy.ladder("error", {}).error_body is None
+
+
+def test_ladder_keeps_a_string_error_code_and_the_integer_default_for_the_other_interfaces():
+    assert fault_policy.ladder("error", {"error_code": "REQUEST_TIMEOUT"}).error_code == "REQUEST_TIMEOUT"
+    assert fault_policy.ladder("error", {"error_code": ""}).error_code == ""
+    assert fault_policy.ladder("error", {}).error_code == -32000

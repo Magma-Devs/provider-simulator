@@ -16,12 +16,18 @@ through the Pool<->Provider cycle and make both types unhashable.
 """
 
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 from provider_simulator.domain.call_log import CallLog
 from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.quirks import Quirks, quirks_for
 from provider_simulator.domain.scenario import ScenarioConfig
+
+# The most executed transactions that one provider remembers. The oldest is dropped
+# first. A transaction that fell off the end ran so long ago that the delay of
+# the index of a real server is over, and the lookup of it answers as one that never ran.
+EXECUTED_MEMORY_CAP = 10_000
 
 
 @dataclass(eq=False)
@@ -87,6 +93,11 @@ class Provider:
     # the control API resets it when a new fail_first_n scenario is applied.
     _fail_count: int = field(default=0, init=False, repr=False)
     _fail_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    # The transactions that this provider executed: digest -> the time (epoch
+    # seconds) of the first run. Only a scenario reset empties it: a test that
+    # changes a fault in the middle of a read-after-write scenario keeps what ran.
+    _executed: "OrderedDict[str, float]" = field(default_factory=OrderedDict, init=False, repr=False)
+    _executed_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     @property
     def key(self) -> str:
@@ -107,3 +118,24 @@ class Provider:
         """Reset the fail_first_n counter (a fresh fail_first_n scenario / reset)."""
         with self._fail_lock:
             self._fail_count = 0
+
+    def remember_executed(self, digest: str, at: float) -> None:
+        """Record that a transaction ran at time ``at``. A digest that ran before
+        keeps the time of its first run. At most ``EXECUTED_MEMORY_CAP`` digests
+        are kept, and the oldest is dropped first."""
+        with self._executed_lock:
+            if digest in self._executed:
+                return
+            self._executed[digest] = at
+            if len(self._executed) > EXECUTED_MEMORY_CAP:
+                self._executed.popitem(last=False)
+
+    def executed_snapshot(self) -> dict[str, float]:
+        """A copy of the executed digests and their times (a reader may edit it)."""
+        with self._executed_lock:
+            return dict(self._executed)
+
+    def forget_executed(self) -> None:
+        """Empty the memory of executed transactions (a scenario reset)."""
+        with self._executed_lock:
+            self._executed.clear()

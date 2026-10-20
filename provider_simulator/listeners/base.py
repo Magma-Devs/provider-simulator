@@ -190,12 +190,21 @@ class Listener(ABC):
         Default: none. REST overrides it for a verb that carries a body."""
         return None
 
+    def path_for_history(self, request: RawRequest) -> str | None:
+        """The URL path that the history row records. Default: none. The GraphQL
+        listener overrides it, because a GraphQL provider answers at any path and
+        a test needs to see which one the router used."""
+        return None
+
     def serve(self, request: RawRequest, entry: dict | None = None) -> ServeResult:
         if entry is None:
             entry = self.arrive(request.headers)
         recorded_body = self.body_for_history(request)
         if recorded_body is not None:
             self.provider.log.record_body(entry, recorded_body)
+        recorded_path = self.path_for_history(request)
+        if recorded_path is not None:
+            self.provider.log.record_path(entry, recorded_path)
         scenario = self.provider.scenario.snapshot()
         # One stateful policy step per request: the transports filter plus the
         # fail_first_n window (consumed here, exactly once).

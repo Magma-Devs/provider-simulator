@@ -51,13 +51,22 @@ from provider_simulator.domain.provider import Provider
 class Verdict:
     kind: str  # none | down | hang | drop | rate_limit | error
     status: int = 200
-    error_code: int = 0
+    # An integer for every interface but GraphQL, which reads a string (the
+    # ``extensions.code`` of its error, or "" for an error with none).
+    error_code: int | str = 0
     error_message: str = ""
     drop_at: str = "before_headers"
     # rate_limit kind only: the plain-text body the JSON-RPC listener sends.
     # REST/Tendermint/gRPC keep building their rate_limit shape from
     # error_code/error_message above — only jsonrpc.py reads this field.
     rate_limit_body: str = ""
+    # rate_limit kind only, GraphQL listener only: "status" is the HTTP 429 with
+    # plain text, and "body" is a 200 with a RESOURCE_EXHAUSTED error. The status
+    # of the verdict stays 429 either way: the listener decides what to send.
+    rate_limit_style: str = "status"
+    # error kind only, GraphQL listener only: the whole reply body, or None for the
+    # error that the listener builds.
+    error_body: object = None
 
 
 NONE_VERDICT = Verdict(kind="none")
@@ -145,6 +154,7 @@ def ladder(mode: str, scenario: dict) -> Verdict:
                 "rate_limit_body",
                 "Rate limit exceeded. Reduce your request rate, or use an API key for a higher limit.",
             ),
+            rate_limit_style=scenario.get("rate_limit_style", "status"),
         )
     if mode == "error" or random.random() < scenario.get("error_probability", 0.0):
         return Verdict(
@@ -152,6 +162,7 @@ def ladder(mode: str, scenario: dict) -> Verdict:
             status=scenario.get("http_status", 200),
             error_code=scenario.get("error_code", -32000),
             error_message=scenario.get("error_message", "Internal error"),
+            error_body=scenario.get("error_body"),
         )
     return NONE_VERDICT
 

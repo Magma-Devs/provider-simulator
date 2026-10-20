@@ -18,6 +18,7 @@ from provider_simulator.chains.eth import EthChain
 from provider_simulator.chains.lava import LavaChain
 from provider_simulator.chains.ln import LnChain
 from provider_simulator.chains.solana import SolanaChain
+from provider_simulator.chains.sui import SuiChain
 
 _BTC = BtcChain()
 
@@ -30,6 +31,7 @@ CHAINS: dict[str, Chain] = {
     "ln": LnChain(btc_head=_BTC.head),
     "solana": SolanaChain(),
     "lava": LavaChain(),
+    "sui": SuiChain(),
 }
 
 
@@ -48,6 +50,7 @@ __all__ = [
     "BtcChain",
     "LnChain",
     "SolanaChain",
+    "SuiChain",
     "LavaChain",
     "CHAINS",
     "chain_for",

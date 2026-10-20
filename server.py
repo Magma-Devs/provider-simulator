@@ -6,7 +6,7 @@ response builders, the per-transport Listeners, and the control API. This
 module is the wire layer on top of them — it binds one socket per endpoint in
 the registry and PERFORMS each listener's plan:
 
-- HTTP request/response endpoints (jsonrpc / rest / tendermintrpc) run a
+- HTTP request/response endpoints (jsonrpc / rest / tendermintrpc / graphql) run a
   ``BaseHTTPRequestHandler`` that builds a ``RawRequest``, calls
   ``Listener.serve()``, and turns the returned ``ServeResult`` into wire bytes
   (via ``listeners.wire.serialize``), a hang, or a connection drop.
@@ -68,6 +68,7 @@ from provider_simulator.cache_sim import CacheSimRegistry
 from provider_simulator.control_api import ControlApi
 from provider_simulator.domain.registry import Registry, build_registry
 from provider_simulator.listeners import (
+    GraphQLListener,
     JsonRpcListener,
     JsonRpcWsListener,
     Listener,
@@ -239,7 +240,7 @@ def _port_is_closed(server: object) -> bool:
     return bool(getattr(server, "closed_by_scenario", False))
 
 
-# ── HTTP request/response adapter (jsonrpc / rest / tendermintrpc) ────────────
+# ── HTTP request/response adapter (jsonrpc / rest / tendermintrpc / graphql) ───
 
 # The characters of an HTTP ``token`` (RFC 9110, section 5.6.2).
 _HTTP_TOKEN_CHARS = frozenset("!#$%&'*+-.^_`|~" + string.digits + string.ascii_letters)
@@ -580,6 +581,18 @@ class _RestHttpHandler(_HttpListenerHandler):
         self.send_header("Allow", ", ".join(allowed))
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+
+class _GraphQLHttpHandler(_HttpListenerHandler):
+    """GraphQL answers a POST at any path. A GET gets the 501 that ``http.server``
+    writes for a verb that this port does not serve."""
+
+    # A ``missing_field`` path reaches nested keys, such as ``data.chainIdentifier``.
+    dotted = True
+    mid_body_bytes = b'{"data":'
+
+    def do_POST(self):
+        self._run("POST")
 
 
 # ── WebSocket adapter ─────────────────────────────────────────────────────────
@@ -1516,6 +1529,7 @@ _HTTP_ADAPTERS: dict = {
     ("jsonrpc", "ws"): (_WsHandler, JsonRpcWsListener),
     ("rest", "http"): (_RestHttpHandler, RestListener),
     ("tendermintrpc", "http"): (_TendermintHttpHandler, TendermintListener),
+    ("graphql", "http"): (_GraphQLHttpHandler, GraphQLListener),
 }
 
 

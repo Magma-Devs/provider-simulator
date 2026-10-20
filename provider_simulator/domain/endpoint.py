@@ -3,7 +3,8 @@
 An endpoint pairs an application protocol (interface) with the transport that
 carries it and the TCP port it is served on. JSON-RPC is served over two
 transports — http for request/response and ws for subscriptions — so a JSON-RPC
-provider has two endpoints; REST and gRPC providers have one each.
+provider has two endpoints; REST and gRPC providers have one each. GraphQL is an
+interface on http: a GraphQL provider has one endpoint.
 
 INTERFACES and TRANSPORTS are the closed vocabularies. Everything that names an
 interface or a transport (the topology table, a scenario's transports filter)
@@ -13,7 +14,7 @@ config time instead of silently matching zero endpoints.
 
 from dataclasses import dataclass
 
-INTERFACES = ("jsonrpc", "rest", "grpc", "tendermintrpc")
+INTERFACES = ("jsonrpc", "rest", "grpc", "tendermintrpc", "graphql")
 TRANSPORTS = ("http", "http2", "ws")
 
 

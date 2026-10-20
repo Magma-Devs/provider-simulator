@@ -6,8 +6,8 @@ simulator instead of real nodes, so a test can make a provider go **down**,
 then check how the router reacts.
 
 It runs as **one Python process**: many listeners (JSON-RPC, REST, gRPC,
-Tendermint RPC, WebSocket) plus a control API, all over one in-memory registry
-of providers.
+Tendermint RPC, GraphQL, WebSocket) plus a control API, all over one in-memory
+registry of providers.
 
 ## Architecture
 
@@ -21,7 +21,7 @@ flowchart TD
     R["smart-router (SUT)"] -->|"provider ports 18545-18585"| LIS["Listeners (daemon threads)"]
     CTRL -->|"writes scenario"| REG["Registry: pool:pid -> Provider"]
     LIS -->|"reads snapshot"| REG
-    LIS --> CH["Chains: eth / btc / ln / solana / lava"]
+    LIS --> CH["Chains: eth / btc / ln / solana / lava / sui"]
     LIS --> FP["fault_policy (one decision function)"]
 ```
 
@@ -108,7 +108,10 @@ Pick one `mode`; combine it with the orthogonal fields.
 | `mode` | `success` \| `error` \| `rate_limit` \| `down` \| `hang` \| `drop_connection` \| `port_closed` | Primary behaviour. `port_closed` closes the port of the endpoint, see below |
 | `latency_ms` | int | Sleep N ms before responding |
 | `error_probability` | 0.0–1.0 | Random error on top of `success` |
-| `error_code` / `error_message` / `http_status` | int / str / int | Customise the error returned |
+| `error_code` / `error_message` / `http_status` | int or str / str / int | Customise the error returned. A GraphQL provider reads a text `error_code`: the `extensions.code` of its error |
+| `rate_limit_style` | `status` \| `body` | GraphQL only. `status` is the HTTP 429 with plain text. `body` is a 200 with a `RESOURCE_EXHAUSTED` error |
+| `error_body` | any JSON value or text | GraphQL only. With `mode=error`, the whole reply, sent with `http_status` |
+| `unreadable_reply` | `{"status": int, "body": any}` | GraphQL only. The reply to every request body that cannot be read. The default imitates the reply of Sui; `docs/using_the_simulator.md` says where its text differs |
 | `corruption_mode` | `truncated` \| `invalid_json` \| `empty_response` \| `missing_field` \| `wrong_type` | Break the response body |
 | `missing_field` | str | Which field to drop or retype |
 | `blocks_behind` | int | Report a stale head (`eth_blockNumber` / `eth_getBlockByNumber` / gRPC `GetLatestBlock`) |

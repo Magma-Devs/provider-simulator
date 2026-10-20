@@ -10,3 +10,5 @@
 grpcio>=1.80,<1.82
 grpcio-reflection>=1.80,<1.82
 protobuf>=5.27,<7
+# The simulator reads the root fields of a GraphQL request with this library. It is pure Python and is imported only when a request is read.
+graphql-core>=3.2,<3.3

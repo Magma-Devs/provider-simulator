@@ -12,6 +12,7 @@ A multi-transport JSON-RPC / BTC RPC / REST / gRPC / WebSocket simulator used to
 - gRPC providers on `18548`/`18549`/`18550` (chain_family="grpc"; cosmos-tendermint servicer in handlers_grpc).
 - REST providers on `18551`/`18552`/`18553` (chain_family="rest"; handlers_rest).
 - WebSocket providers on `18557`/`18558`/`18559` (the `ws` endpoint of the providers `eth-sim:1` to `eth-sim:3`; `JsonRpcWsListener` — supports the subscribe/unsubscribe lifecycle plus request/response over a single frame; each other method gets the content of the chain, as on the http endpoint).
+- GraphQL: the `graphql` interface on `http` (`GraphQLListener` in `provider_simulator/listeners/graphql.py`) and the `sui` chain (`provider_simulator/chains/sui.py`) answer a Sui GraphQL provider. No pool serves them yet: the pools and the routers come with the next change.
 - Control API on `19000` (scenario config, reset, history, /ws/emit, /ws/subscriptions).
 
 ## Common commands

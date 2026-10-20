@@ -118,3 +118,72 @@ def test_ports_not_given_is_not_the_same_as_ports_empty():
     s = ScenarioConfig()
     s.update({"mode": "down"})
     assert s.snapshot()["ports"] is None
+
+
+# ── the GraphQL forms of a rate limit, an error and an unreadable body ────────
+
+
+def test_the_graphql_fields_default_to_the_status_style_a_generated_error_and_the_default_reply():
+    snap = ScenarioConfig().snapshot()
+    assert snap["rate_limit_style"] == "status"
+    assert snap["error_body"] is None
+    assert snap["unreadable_reply"] is None
+
+
+def test_rate_limit_style_accepts_status_and_body_and_refuses_another_word():
+    s = ScenarioConfig()
+    s.update({"rate_limit_style": "body"})
+    assert s.snapshot()["rate_limit_style"] == "body"
+    with pytest.raises(ValueError) as raised:
+        s.update({"rate_limit_style": "loud"})
+    assert "status" in str(raised.value) and "body" in str(raised.value)
+    assert s.snapshot()["rate_limit_style"] == "body"  # a refused update writes nothing
+
+
+def test_error_body_accepts_any_json_value_or_text():
+    s = ScenarioConfig()
+    for value in ({"error": "Invalid API key"}, [1, 2], "plain text", 5, None):
+        s.update({"error_body": value})
+        assert s.snapshot()["error_body"] == value
+
+
+def test_unreadable_reply_accepts_a_status_with_a_body_and_none():
+    s = ScenarioConfig()
+    s.update({"unreadable_reply": {"status": 502, "body": "bad gateway"}})
+    assert s.snapshot()["unreadable_reply"] == {"status": 502, "body": "bad gateway"}
+    s.update({"unreadable_reply": {"status": 200, "body": {"data": None}}})
+    s.update({"unreadable_reply": {"status": 100, "body": ""}})
+    s.update({"unreadable_reply": {"status": 599}})
+    s.update({"unreadable_reply": None})
+    assert s.snapshot()["unreadable_reply"] is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "bad gateway",
+        502,
+        [502],
+        {},
+        {"body": "x"},
+        {"status": "502", "body": "x"},
+        {"status": True, "body": "x"},
+        {"status": 502.0, "body": "x"},
+        {"status": 99, "body": "x"},
+        {"status": 600, "body": "x"},
+        {"status": 502, "bodyy": "x"},
+    ],
+)
+def test_unreadable_reply_refuses_anything_but_a_status_from_100_to_599_and_a_body(bad):
+    s = ScenarioConfig()
+    with pytest.raises(ValueError, match="unreadable_reply"):
+        s.update({"unreadable_reply": bad})
+    assert s.snapshot()["unreadable_reply"] is None
+
+
+def test_reset_restores_the_three_graphql_fields():
+    s = ScenarioConfig()
+    s.update({"rate_limit_style": "body", "error_body": {"x": 1}, "unreadable_reply": {"status": 502, "body": "x"}})
+    s.reset()
+    snap = s.snapshot()
+    assert (snap["rate_limit_style"], snap["error_body"], snap["unreadable_reply"]) == ("status", None, None)

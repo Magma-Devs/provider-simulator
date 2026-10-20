@@ -228,6 +228,39 @@ def _an_invalid_proto_no_endpoint_can_apply(provider: object, scenario_updates: 
     return ""
 
 
+# The fields that only the GraphQL listener reads, each with the value that it has
+# when it is not set.
+_GRAPHQL_ONLY_FIELDS = {"rate_limit_style": "status", "error_body": None, "unreadable_reply": None}
+
+
+def _a_graphql_field_no_endpoint_can_apply(provider: object, scenario_updates: dict) -> str:
+    """Refuse a field that only the GraphQL listener reads, for a provider that has
+    no GraphQL endpoint.
+
+    ``rate_limit_style``, ``error_body`` and ``unreadable_reply`` shape the reply
+    to a GraphQL request. No other listener reads them, so a value on a provider
+    of another interface was stored and each call got its normal reply: a fault
+    that is accepted and does nothing reads as a router that recovered.
+
+    The value that a field has when it is not set is accepted on every provider,
+    because it changes no reply, and a caller that resets every field does not
+    know the interface. Like its neighbours, the rule reads the endpoints of the
+    provider and no filter.
+    """
+    endpoints = list(provider.endpoints)  # type: ignore[attr-defined]
+    if any(ep.interface == "graphql" for ep in endpoints):
+        return ""
+    for field_name, default in _GRAPHQL_ONLY_FIELDS.items():
+        if field_name in scenario_updates and scenario_updates[field_name] != default:
+            serves = ", ".join(f"{ep.interface}/{ep.transport} :{ep.port}" for ep in endpoints)
+            return (
+                f"{field_name} cannot apply: only the GraphQL listener reads it, and this provider has "
+                f"no GraphQL endpoint (it serves {serves}). The value would be stored and would change "
+                "no reply"
+            )
+    return ""
+
+
 def _a_port_closed_that_cannot_happen(
     provider: object, scenario_updates: dict, port_gates: "dict[int, PortGate]"
 ) -> tuple[int, str]:
@@ -479,6 +512,7 @@ class ControlApi:
                 or _a_pause_no_named_port_can_serve(provider, scenario_updates)
                 or _an_invalid_json_no_endpoint_can_apply(provider, scenario_updates)
                 or _an_invalid_proto_no_endpoint_can_apply(provider, scenario_updates)
+                or _a_graphql_field_no_endpoint_can_apply(provider, scenario_updates)
             )
             if err:
                 return 400, {"error": f"{key}: {err}"}
@@ -672,6 +706,7 @@ class ControlApi:
                 provider.scenario.reset()
                 provider.quirks.reset()
                 provider.reset_fail()
+                provider.forget_executed()
                 wishes.extend(self._port_wishes(provider))
             if history:
                 provider.log.clear()
@@ -955,7 +990,10 @@ class ControlApi:
             if ("pool" not in query or provider.pool.name == query["pool"])
             and ("pid" not in query or provider.pid == query["pid"])
         ]
-        row_filter = self._history_row_filter(query)
+        try:
+            row_filter = self._history_row_filter(query)
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
         entries: list[dict] = []
         for provider in providers:
             # The headers of a row stay a JSON text here. They are decoded at the
@@ -1004,6 +1042,9 @@ class ControlApi:
         equals = [(key, query[key]) for key in ("transport", "method", "status", "interface") if key in query]
         # A request id is a number or a string in a row and text in the query, so it is compared as text.
         wanted_id = str(query["request_id"]) if "request_id" in query else None
+        # The body of a request is found by its SHA-256, in any letter case, and by its length.
+        wanted_hash = str(query["body_sha256"]).lower() if "body_sha256" in query else None
+        wanted_len = _strict_int("body_len", query["body_len"]) if "body_len" in query else None
         low = _as_float(query["from"], float("-inf")) if "from" in query else None
         high = _as_float(query["to"], float("inf")) if "to" in query else None
         # Header names are case-insensitive on the wire (clients may title-case
@@ -1013,7 +1054,15 @@ class ControlApi:
             for key, value in query.items()
             if key.startswith("lava_header_")
         ]
-        if not (equals or wanted_id is not None or low is not None or high is not None or headers):
+        if not (
+            equals
+            or wanted_id is not None
+            or wanted_hash is not None
+            or wanted_len is not None
+            or low is not None
+            or high is not None
+            or headers
+        ):
             return None
 
         def matches(row: dict) -> bool:
@@ -1021,6 +1070,10 @@ class ControlApi:
                 if row.get(key) != value:
                     return False
             if wanted_id is not None and str(row.get("request_id")) != wanted_id:
+                return False
+            if wanted_hash is not None and row.get("body_sha256") != wanted_hash:
+                return False
+            if wanted_len is not None and row.get("body_len") != wanted_len:
                 return False
             # "not >=" and not "<": a bound that is NaN keeps no row.
             if low is not None and not row.get("ts", 0.0) >= low:
@@ -1308,6 +1361,16 @@ def _bad_enum(field_name: str, value: object) -> str:
     if allowed is not None and value is not None and value not in allowed:
         return f"invalid {field_name} {value!r}; allowed: {sorted(allowed)}"
     return ""
+
+
+def _strict_int(name: str, value: object) -> int:
+    """A query value that must be a whole number. Unlike ``_as_int`` it refuses
+    anything else, because a filter that reads junk as a default would answer a
+    different question than the one that was asked."""
+    try:
+        return int(str(value))
+    except ValueError:
+        raise ValueError(f"{name} must be an integer, got {value!r}") from None
 
 
 def _as_int(value: object, default: int) -> int:

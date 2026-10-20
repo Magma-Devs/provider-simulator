@@ -31,9 +31,12 @@ What a row says about the request itself:
   dict of small strings.
 - ``deadline_remaining_ms`` and ``grpc_status`` are for gRPC rows. They are
   None on a row of any other interface.
-- ``body_len`` and ``body_sha256`` hold the length and the SHA-256 of the body
-  that a REST request carried, for a verb other than GET and HEAD. They are None
-  on every other row. A reader can compare the hash with the body that it sent.
+- ``body_len`` and ``body_sha256`` hold the length and the SHA-256 of the request
+  body. A REST row holds them for a verb other than GET and HEAD, and a GraphQL
+  row holds them for every request, a body that cannot be read included. They are
+  None on every other row. A reader can compare the hash with the body that it sent.
+- ``path`` holds the URL path that the request was sent to, for an interface whose
+  listener records it. It is None on every other row.
 """
 
 import base64
@@ -140,6 +143,7 @@ class CallLog:
             "grpc_status": None,
             "body_len": None,
             "body_sha256": None,
+            "path": None,
             "pool": self._pool,
             "pid": self._pid,
             "name": self._name,
@@ -245,6 +249,14 @@ class CallLog:
         with self._lock:
             entry["body_len"] = len(body)
             entry["body_sha256"] = hashlib.sha256(body).hexdigest()
+
+    def record_path(self, entry: dict, path: str) -> None:
+        """Write the URL path of the request on a row of record_arrival.
+
+        It is written beside the body, before the provider waits, so a reader sees
+        where the request was sent while it is still in flight."""
+        with self._lock:
+            entry["path"] = path
 
     def push(
         self,

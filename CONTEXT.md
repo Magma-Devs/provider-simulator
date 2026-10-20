@@ -178,8 +178,8 @@ a TCP port. A JSON-RPC provider has two, one for http and one for ws.
 _Avoid_: port, listener, socket, URL
 
 **Interface**:
-The application protocol an endpoint speaks: `jsonrpc`, `rest`, `grpc` or
-`tendermintrpc`.
+The application protocol an endpoint speaks: `jsonrpc`, `rest`, `grpc`,
+`tendermintrpc` or `graphql`.
 _Avoid_: protocol, API type, surface
 
 **Transport**:
@@ -187,7 +187,7 @@ What carries the interface: `http`, `ws` or `http2`.
 _Avoid_: scheme, connection type
 
 **Chain**:
-The blockchain a pool imitates: `eth`, `btc`, `ln`, `solana` or `lava`. One pool
+The blockchain a pool imitates: `eth`, `btc`, `ln`, `solana`, `lava` or `sui`. One pool
 serves exactly one chain.
 _Avoid_: network, chain id, chain family
 

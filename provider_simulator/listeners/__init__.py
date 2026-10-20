@@ -9,6 +9,7 @@ server cut-over.
 """
 
 from provider_simulator.listeners.base import Listener, ParseError, RawRequest, ServeResult
+from provider_simulator.listeners.graphql import GraphQLListener
 from provider_simulator.listeners.jsonrpc import JsonRpcListener
 from provider_simulator.listeners.rest import RestListener
 from provider_simulator.listeners.tendermint import TendermintListener
@@ -19,6 +20,7 @@ __all__ = [
     "ParseError",
     "RawRequest",
     "ServeResult",
+    "GraphQLListener",
     "JsonRpcListener",
     "JsonRpcWsListener",
     "RestListener",

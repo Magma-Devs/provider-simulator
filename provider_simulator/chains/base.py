@@ -13,6 +13,11 @@ Never from the provider — not its name, not its pool slot, not a quirk it
 carries, not how far behind it is. Two of our providers asked about the same
 height must answer with the same hash, even when they sit at different heads.
 
+The one exception is a quirk whose job is to make a provider lie about the
+chain. Sui derives a checkpoint digest from the height and from ``digest_salt``.
+The default salt is empty, so providers agree unless a test sets a salt on one
+of them on purpose, to play a provider that has forked.
+
 The reason is not tidiness. The router watches for forks, and two providers
 giving different hashes for one height is exactly how a real chain announces
 that it has split. A hash that changed with the provider would make the router
@@ -126,6 +131,6 @@ class Chain(ABC):
         """Return (http_status, response_body) for the success path.
 
         ``interface`` is the application protocol of the serving endpoint
-        (jsonrpc / rest / grpc / tendermintrpc). Single-interface chains ignore
+        (jsonrpc / rest / grpc / tendermintrpc / graphql). Single-interface chains ignore
         it; multi-interface chains (lava) branch on it.
         """

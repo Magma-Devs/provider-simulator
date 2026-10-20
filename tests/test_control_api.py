@@ -2,6 +2,7 @@
 scenario apply (staged, old-format 400, quirk routing, responses normalization),
 resets, stats/history filters, advance, and ws/emit."""
 
+import hashlib
 import json
 from collections import Counter
 
@@ -236,6 +237,45 @@ def test_clear_history_one_pool_leaves_another_pools_history():
     assert [e["method"] for e in hist["history"]] == ["getblockcount"]
 
 
+def _provider_that_ran_a_transaction(api):
+    provider = api.registry.provider("eth-sim", "1")
+    provider.remember_executed("d1", 1.0)
+    return provider
+
+
+def test_the_scenario_reset_and_the_full_reset_empty_the_memory_of_executed_transactions():
+    api = _api()
+    for route in (api.reset, api.reset_all):
+        provider = _provider_that_ran_a_transaction(api)
+        status, _ = route()
+        assert status == 200
+        assert provider.executed_snapshot() == {}
+
+
+def test_a_pool_scoped_reset_empties_the_memory_of_that_pool_only():
+    api = _api()
+    one = _provider_that_ran_a_transaction(api)
+    other = api.registry.provider("btc-sim", "1")
+    other.remember_executed("d2", 2.0)
+    status, _ = api.reset("eth-sim")
+    assert status == 200
+    assert one.executed_snapshot() == {}
+    assert other.executed_snapshot() == {"d2": 2.0}
+
+
+def test_clearing_the_history_and_a_scenario_update_leave_the_memory_of_executed_transactions():
+    api = _api()
+    provider = _provider_that_ran_a_transaction(api)
+    status, _ = api.clear_history()
+    assert status == 200
+    assert provider.executed_snapshot() == {"d1": 1.0}
+    status, _ = api.apply_scenario(
+        {"providers": {"eth-sim:1": {"mode": "success", "latency_ms": 5, "fail_first_n": 2}}}
+    )
+    assert status == 200
+    assert provider.executed_snapshot() == {"d1": 1.0}
+
+
 def test_reset_of_another_pool_leaves_this_chains_head_where_it_was():
     """The nightly failure this scoping fixes: one test's clean-up rewound a
     chain height a different router was being measured against. eth is the only
@@ -292,6 +332,46 @@ def test_history_merges_filters_and_orders():
     _, only1 = api.get_history({"request_id": "1"})
     assert only1["count"] == 1
     assert only1["history"][0]["method"] == "eth_blockNumber"
+
+
+def _row_with_body(provider, body: bytes, request_id: int) -> None:
+    """One finished row whose request body is ``body``, as a listener leaves it."""
+    entry = provider.log.record_arrival("graphql", "http", 18999)
+    provider.log.record_body(entry, body)
+    provider.log.finalize(entry, method="m", status="success", latency_ms=0, request_id=request_id)
+
+
+def test_history_can_be_filtered_by_body_hash_and_length():
+    api = _api()
+    first, second = b'{"query":"{ a }"}', b'{"query":"{ b }"} '
+    assert len(first) != len(second)
+    provider, other = api.registry.provider("eth-sim", "1"), api.registry.provider("eth-sim", "2")
+    _row_with_body(provider, first, 1)
+    _row_with_body(provider, second, 2)
+    _row_with_body(other, first, 3)  # the same body on another provider
+    digest = hashlib.sha256(first).hexdigest()
+    one = {"pool": "eth-sim", "pid": "1"}
+
+    def ids(extra: dict) -> list:
+        status, reply = api.get_history({**one, **extra})
+        assert status == 200
+        return [row["request_id"] for row in reply["history"]]
+
+    assert ids({"body_sha256": digest}) == [1]
+    assert ids({"body_sha256": digest.upper()}) == [1]
+    assert ids({"body_sha256": "0" * 64}) == []
+    assert ids({"body_len": str(len(first))}) == [1]
+    assert ids({"body_len": str(len(second))}) == [2]
+    assert ids({"body_sha256": digest, "body_len": str(len(first) + 1)}) == []
+    assert ids({"body_sha256": digest, "body_len": str(len(first))}) == [1]
+    assert ids({}) == [1, 2]
+
+
+def test_a_body_len_that_is_not_an_integer_is_a_400():
+    api = _api()
+    status, reply = api.get_history({"body_len": "many"})
+    assert status == 400
+    assert "body_len" in reply["error"]
 
 
 def test_history_max_caps_and_rejects_negative():
@@ -956,6 +1036,66 @@ def test_an_invalid_proto_refusal_writes_no_provider_of_the_request():
     blocks = {
         "lava-sim-grpc:1": {"mode": "down"},
         "eth-sim:1": {"mode": "rate_limit", "corruption_mode": "invalid_proto"},
+    }
+    st, resp = api.apply_scenario({"providers": blocks})
+    assert st == 400, resp
+    _, scen = api.get_scenario()
+    assert scen["providers"]["lava-sim-grpc:1"]["mode"] == "success"
+    assert scen["providers"]["eth-sim:1"]["mode"] == "success"
+
+
+# ── the fields only the GraphQL listener reads, on a provider with no GraphQL endpoint ──
+
+_GRAPHQL_ONLY = [
+    ("rate_limit_style", "body", "status"),
+    ("error_body", {"errors": [{"message": "refused"}]}, None),
+    ("unreadable_reply", {"status": 502, "body": "bad gateway"}, None),
+]
+
+
+@pytest.mark.parametrize("field_name, value, default", _GRAPHQL_ONLY, ids=[row[0] for row in _GRAPHQL_ONLY])
+@pytest.mark.parametrize("key", ["eth-sim:1", "lava-sim-rest:1", "lava-sim-grpc:1"])
+def test_a_graphql_only_field_on_a_provider_with_no_graphql_endpoint_is_400(key, field_name, value, default):
+    """Only the GraphQL listener reads ``rate_limit_style``, ``error_body`` and
+    ``unreadable_reply``. On a provider of another interface each value was stored
+    and did nothing: every call got its normal reply, and a test that had armed
+    the fault read a healthy provider as a router that recovered."""
+    api = _api()
+    st, resp = api.apply_scenario({"providers": {key: {field_name: value}}})
+    assert st == 400, resp
+    assert key in resp["error"]
+    assert f"{field_name} cannot apply" in resp["error"]
+    assert "no GraphQL endpoint" in resp["error"]
+    _, scen = api.get_scenario()
+    assert scen["providers"][key][field_name] == default
+
+
+@pytest.mark.parametrize("field_name, value, default", _GRAPHQL_ONLY, ids=[row[0] for row in _GRAPHQL_ONLY])
+def test_a_graphql_only_field_is_accepted_when_the_provider_has_a_graphql_endpoint(field_name, value, default):
+    """The positive control for the test above: the same value on a provider that
+    has a GraphQL endpoint is stored, and the reply says so."""
+    rows = (("sui-graphql-x-sim", "sui", "1", "SuiGraphqlX1", False, "", (("graphql", "http", 40003),)),)
+    api = ControlApi(build_registry(rows), WsSubscriptions())
+    st, resp = api.apply_scenario({"providers": {"sui-graphql-x-sim:1": {field_name: value}}})
+    assert st == 200, resp
+    assert resp["applied"]["sui-graphql-x-sim:1"][field_name] == value
+
+
+def test_the_default_of_each_graphql_only_field_is_accepted_on_a_provider_with_no_graphql_endpoint():
+    """A caller that resets every field of a provider does not know its interface.
+    The value that a field has when it is not set changes no reply, so the rule
+    leaves it alone."""
+    api = _api()
+    block = {"rate_limit_style": "status", "error_body": None, "unreadable_reply": None}
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": block}})
+    assert st == 200, resp
+
+
+def test_a_graphql_only_refusal_writes_no_provider_of_the_request():
+    api = _api()
+    blocks = {
+        "lava-sim-grpc:1": {"mode": "down"},
+        "eth-sim:1": {"mode": "rate_limit", "rate_limit_style": "body"},
     }
     st, resp = api.apply_scenario({"providers": blocks})
     assert st == 400, resp
