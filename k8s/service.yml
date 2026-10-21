@@ -830,3 +830,28 @@ spec:
       port: 18722
       targetPort: 18722
       protocol: TCP
+    # 18723-18728: the providers of sui-cv-graphql-sim.
+    - name: spare-18723
+      port: 18723
+      targetPort: 18723
+      protocol: TCP
+    - name: spare-18724
+      port: 18724
+      targetPort: 18724
+      protocol: TCP
+    - name: spare-18725
+      port: 18725
+      targetPort: 18725
+      protocol: TCP
+    - name: spare-18726
+      port: 18726
+      targetPort: 18726
+      protocol: TCP
+    - name: spare-18727
+      port: 18727
+      targetPort: 18727
+      protocol: TCP
+    - name: spare-18728
+      port: 18728
+      targetPort: 18728
+      protocol: TCP

@@ -82,12 +82,14 @@ second. Both pools carry a backup tier because the router answers from either
 cache tier before it picks any provider, primary tier and backup tier alike,
 and without a backup tier a test cannot tell "never reached the backup" from
 "there was no backup to reach".
-sui-graphql-sim, sui-failover-graphql-sim and sui-cache-graphql-sim are the three pools
-of the Sui GraphQL routers, on the ``graphql`` interface over http. They are k3d-only
-like the pools above: their routers are declared in routers.yml in smart_router_automation,
-and the backup tier of the failover router comes from config/values_sim.yml there. The
-router of sui-cache-graphql-sim names a key prefix of its own on the shared router
-cache, so no other router reads its entries.
+sui-graphql-sim, sui-failover-graphql-sim, sui-cache-graphql-sim and sui-cv-graphql-sim
+are the four pools of the Sui GraphQL routers, on the ``graphql`` interface over http.
+They are k3d-only like the pools above: their routers are declared in routers.yml in
+smart_router_automation, and the backup tier of the failover router comes from
+config/values_sim.yml there. The router of sui-cache-graphql-sim names a key prefix of
+its own on the shared router cache, so no other router reads its entries. The router of
+sui-cv-graphql-sim carries cross-validation policies, so its six providers sit in three
+groups of two, like the providers of eth-cv-sim.
 The listener ports live here and nowhere else. constants.py holds no ports, so
 there is nothing to cross-check them against; the sentence that used to claim
 such a test described a check removed with those duplicate port tables.
@@ -1245,6 +1247,63 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
         False,
         "",
         (("graphql", "http", 18722),),
+    ),
+    # sui-cv-graphql-sim: ports 18723-18728. The providers of the Sui GraphQL router that
+    # carries cross-validation policies, for the cross-validation tests: six primaries in
+    # three groups of two, like eth-cv-sim, and no backup tier.
+    (
+        "sui-cv-graphql-sim",
+        "sui",
+        "1",
+        "SuiCvGraphqlPrimaryProvider1",
+        False,
+        "voting-group-1",
+        (("graphql", "http", 18723),),
+    ),
+    (
+        "sui-cv-graphql-sim",
+        "sui",
+        "2",
+        "SuiCvGraphqlPrimaryProvider2",
+        False,
+        "voting-group-1",
+        (("graphql", "http", 18724),),
+    ),
+    (
+        "sui-cv-graphql-sim",
+        "sui",
+        "3",
+        "SuiCvGraphqlPrimaryProvider3",
+        False,
+        "voting-group-2",
+        (("graphql", "http", 18725),),
+    ),
+    (
+        "sui-cv-graphql-sim",
+        "sui",
+        "4",
+        "SuiCvGraphqlPrimaryProvider4",
+        False,
+        "voting-group-2",
+        (("graphql", "http", 18726),),
+    ),
+    (
+        "sui-cv-graphql-sim",
+        "sui",
+        "5",
+        "SuiCvGraphqlPrimaryProvider5",
+        False,
+        "voting-group-3",
+        (("graphql", "http", 18727),),
+    ),
+    (
+        "sui-cv-graphql-sim",
+        "sui",
+        "6",
+        "SuiCvGraphqlPrimaryProvider6",
+        False,
+        "voting-group-3",
+        (("graphql", "http", 18728),),
     ),
 )
 
