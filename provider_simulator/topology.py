@@ -82,10 +82,11 @@ second. Both pools carry a backup tier because the router answers from either
 cache tier before it picks any provider, primary tier and backup tier alike,
 and without a backup tier a test cannot tell "never reached the backup" from
 "there was no backup to reach".
-sui-graphql-sim and sui-failover-graphql-sim are the two pools of the Sui GraphQL
-routers, on the ``graphql`` interface over http. They are k3d-only like the pools
-above: their routers are declared in routers.yml in smart_router_automation, and
-the backup tier of the failover router comes from config/values_sim.yml there.
+sui-graphql-sim, sui-failover-graphql-sim and sui-cache-graphql-sim are the three pools
+of the Sui GraphQL routers, on the ``graphql`` interface over http. They are k3d-only
+like the pools above: their routers are declared in routers.yml in smart_router_automation,
+and the backup tier of the failover router comes from config/values_sim.yml there. The
+router of sui-cache-graphql-sim carries a cache of its own, so the cache tests have it alone.
 The listener ports live here and nowhere else. constants.py holds no ports, so
 there is nothing to cross-check them against; the sentence that used to claim
 such a test described a check removed with those duplicate port tables.
@@ -1213,6 +1214,36 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
         True,
         "",
         (("graphql", "http", 18719),),
+    ),
+    # sui-cache-graphql-sim: ports 18720-18722. The providers of the Sui GraphQL router that
+    # carries a cache of its own, for the cache tests: three primaries that nothing tells
+    # apart, and no backup tier.
+    (
+        "sui-cache-graphql-sim",
+        "sui",
+        "1",
+        "SuiCacheGraphqlPrimaryProvider1",
+        False,
+        "",
+        (("graphql", "http", 18720),),
+    ),
+    (
+        "sui-cache-graphql-sim",
+        "sui",
+        "2",
+        "SuiCacheGraphqlPrimaryProvider2",
+        False,
+        "",
+        (("graphql", "http", 18721),),
+    ),
+    (
+        "sui-cache-graphql-sim",
+        "sui",
+        "3",
+        "SuiCacheGraphqlPrimaryProvider3",
+        False,
+        "",
+        (("graphql", "http", 18722),),
     ),
 )
 

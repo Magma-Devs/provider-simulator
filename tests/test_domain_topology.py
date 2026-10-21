@@ -61,9 +61,11 @@ EXPECTED_POOLS = {
     # noarchive again, for routers that start with the default retry limit.
     "eth-failover-backuparchive-sim",
     "eth-failover-archiveless-sim",
-    # The two pools of the Sui GraphQL routers: the basic router, and its failover copy.
+    # The three pools of the Sui GraphQL routers: the basic router, its failover copy, and
+    # the router that carries a cache of its own.
     "sui-graphql-sim",
     "sui-failover-graphql-sim",
+    "sui-cache-graphql-sim",
 }
 
 
@@ -679,6 +681,10 @@ AGREED_NAMES = {
     ("sui-failover-graphql-sim", "4"): "SuiFailoverGraphqlBackupProvider4",
     ("sui-failover-graphql-sim", "5"): "SuiFailoverGraphqlBackupProvider5",
     ("sui-failover-graphql-sim", "6"): "SuiFailoverGraphqlBackupProvider6",
+    # The cache router's pool has three providers and nothing to tell them apart, so Primary.
+    ("sui-cache-graphql-sim", "1"): "SuiCacheGraphqlPrimaryProvider1",
+    ("sui-cache-graphql-sim", "2"): "SuiCacheGraphqlPrimaryProvider2",
+    ("sui-cache-graphql-sim", "3"): "SuiCacheGraphqlPrimaryProvider3",
 }
 
 # The pools that HAVE a backup tier, and which of their slots it is. The router
