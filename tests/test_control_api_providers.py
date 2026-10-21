@@ -95,11 +95,11 @@ def test_a_provider_with_no_label_reports_an_empty_string():
     unlabelled = [k for k, v in providers.items() if v["group_label"] == ""]
     labelled = [k for k, v in providers.items() if v["group_label"] != ""]
     assert len(unlabelled) + len(labelled) == len(providers)
-    # 39 labelled today: eth-sim 3, eth-cv-sim 6, the three lava-sim routers 3
+    # 33 labelled before sui-cv-graphql-sim: eth-sim 3, eth-cv-sim 6, the three lava-sim routers 3
     # each (MAG-2791), lava-cv-rest-sim 6 (MAG-3046), lava-cv-tm-sim 6, and
     # eth-failover-cv-sim 3 (MAG-3916).
-    # sui-cv-graphql-sim adds 6 more labelled: its router carries a cross-validation
-    # policy, so its providers sit in three groups of two.
+    # sui-cv-graphql-sim adds 6 more labelled, so 39 today: its router carries a
+    # cross-validation policy, so its providers sit in three groups of two.
     # The two cache pools add 12 unlabelled and eth-resp-sim adds 3: none of
     # those three routers carries a cross-validation policy, so a label there
     # would name a bloc nothing counts (MAG-3541). NINE of the ten failover

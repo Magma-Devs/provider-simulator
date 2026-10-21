@@ -744,10 +744,10 @@ _FOUR_PROVIDER_POOLS_WITH_A_BACKUP_TIER = (
 # tier and backup tier alike. Without a backup tier a test cannot tell "the
 # router never reached the backup" from "there was no backup to reach".
 #
-# eth-cv-sim, lava-cv-rest-sim and lava-cv-tm-sim are six-provider pools too and
-# are absent on purpose: all three are cross-validation topologies,
-# cross-validation never reaches a backup, and a provider labelled backup there
-# would claim a group the router can never count. Their slots 4 to 6 are
+# eth-cv-sim, lava-cv-rest-sim, lava-cv-tm-sim and sui-cv-graphql-sim are
+# six-provider pools too and are absent on purpose: all four are cross-validation
+# topologies, cross-validation never reaches a backup, and a provider labelled
+# backup there would claim a group the router can never count. Their slots 4 to 6 are
 # ordinary primaries. eth-failover-cv-sim is absent for the same reason, and it
 # holds three providers rather than six.
 #

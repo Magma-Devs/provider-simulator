@@ -40,12 +40,13 @@ that reads them is ``ControlApi.get_providers``, which serves them on GET
     label are one bloc that would cast the same wrong vote together, so the
     router only counts agreement that spans different blocs. The number
     identifies the bloc and means nothing else; no policy and no test names a
-    particular one. Seven pools label their providers today. eth-sim,
+    particular one. Nine pools label their providers today. eth-sim,
     lava-sim-rest, lava-sim-grpc and lava-sim-tm each put pids 1 and 2 in
     ``voting-group-1`` and pid 3 in ``voting-group-2``, and label no backup.
-    eth-cv-sim, lava-cv-rest-sim and lava-cv-tm-sim each put six providers in
-    three blocs of two, the smallest set a per-group quorum across three groups
-    can run on. Every other row carries the
+    eth-cv-sim, lava-cv-rest-sim, lava-cv-tm-sim and sui-cv-graphql-sim each put
+    six providers in three blocs of two, the smallest set a per-group quorum
+    across three groups can run on. eth-failover-cv-sim puts each of its three
+    providers in a bloc of its own. Every other row carries the
     empty string rather than nothing at all, so a caller grouping by label
     gets one bucket of unlabelled providers instead of a missing key.
 
@@ -88,8 +89,9 @@ They are k3d-only like the pools above: their routers are declared in routers.ym
 smart_router_automation, and the backup tier of the failover router comes from
 config/values_sim.yml there. The router of sui-cache-graphql-sim names a key prefix of
 its own on the shared router cache, so no other router reads its entries. The router of
-sui-cv-graphql-sim carries cross-validation policies, so its six providers sit in three
-groups of two, like the providers of eth-cv-sim.
+sui-cv-graphql-sim carries a cross-validation policy. Its six providers sit in three
+groups of two, the shape of eth-cv-sim, so a policy that asks for a per-group quorum
+across three groups can be added without a new pool.
 The listener ports live here and nowhere else. constants.py holds no ports, so
 there is nothing to cross-check them against; the sentence that used to claim
 such a test described a check removed with those duplicate port tables.
@@ -144,7 +146,7 @@ the universal exception (MAG-2092) and fires on every listener regardless of
     18608-18613  Lava Tendermint-RPC cross-validation
     18614-18619  ETH cache writer (3 primary, 3 backup)
     18620-18625  ETH cache reader (3 primary, 3 backup)
-    (next free: 18629)
+    (this list stops at 18625; the table below is the only source of ports, and its next free port is 18729)
 
 The ETH backup block sits at 18560-18562 rather than next to its primaries
 because 18548-18559 were already claimed by the gRPC / REST / Tendermint /
