@@ -457,7 +457,7 @@ POOLS_WITH_NO_ROUTER_HERE = {
     "sui-cache-graphql-sim",
     # sui-cv-graphql-sim. Its router runs on the local k3d cluster, declared in
     # smart_router_automation's tools/local-cluster/routers.yml, which carries its
-    # cross-validation policy, plus its own config/values_sim.yml, which is where its
+    # cross-validation policies, plus its own config/values_sim.yml, which is where its
     # providers and their group labels come from. The shared cluster does not run it,
     # so a router entry in THIS file would claim a deployment nobody makes.
     "sui-cv-graphql-sim",

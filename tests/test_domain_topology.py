@@ -62,8 +62,8 @@ EXPECTED_POOLS = {
     "eth-failover-backuparchive-sim",
     "eth-failover-archiveless-sim",
     # The four pools of the Sui GraphQL routers: the basic router, its failover copy, the
-    # router that carries a cache of its own, and the router that carries a cross-validation
-    # policy.
+    # router that carries a cache of its own, and the router that carries cross-validation
+    # policies.
     "sui-graphql-sim",
     "sui-failover-graphql-sim",
     "sui-cache-graphql-sim",

@@ -90,7 +90,7 @@ They are k3d-only like the pools above: their routers are declared in routers.ym
 smart_router_automation, and the backup tier of the failover router comes from
 config/values_sim.yml there. The router of sui-cache-graphql-sim names a key prefix of
 its own on the shared router cache, so no other router reads its entries. The router of
-sui-cv-graphql-sim carries a cross-validation policy. Its six providers sit in three
+sui-cv-graphql-sim carries cross-validation policies. Its six providers sit in three
 groups of two, the shape of eth-cv-sim, so a policy that asks for a per-group quorum
 across three groups can be added without a new pool.
 The listener ports live here and nowhere else. constants.py holds no ports, so
@@ -1254,7 +1254,7 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
         (("graphql", "http", 18722),),
     ),
     # sui-cv-graphql-sim: ports 18723-18728. The providers of the Sui GraphQL router that
-    # carries a cross-validation policy, for the cross-validation tests: six primaries in
+    # carries cross-validation policies, for the cross-validation tests: six primaries in
     # three groups of two, like eth-cv-sim, and no backup tier.
     (
         "sui-cv-graphql-sim",
