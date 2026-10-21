@@ -649,6 +649,16 @@ spec:
             - name: spare-18719
               containerPort: 18719
               protocol: TCP
+            # 18720-18722: the providers of sui-cache-graphql-sim.
+            - name: spare-18720
+              containerPort: 18720
+              protocol: TCP
+            - name: spare-18721
+              containerPort: 18721
+              protocol: TCP
+            - name: spare-18722
+              containerPort: 18722
+              protocol: TCP
           resources:
             requests:
               cpu: "100m"

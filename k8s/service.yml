@@ -817,3 +817,16 @@ spec:
       port: 18719
       targetPort: 18719
       protocol: TCP
+    # 18720-18722: the providers of sui-cache-graphql-sim.
+    - name: spare-18720
+      port: 18720
+      targetPort: 18720
+      protocol: TCP
+    - name: spare-18721
+      port: 18721
+      targetPort: 18721
+      protocol: TCP
+    - name: spare-18722
+      port: 18722
+      targetPort: 18722
+      protocol: TCP
