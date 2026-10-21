@@ -147,9 +147,11 @@ label are one bloc that would cast the same wrong vote together, because they
 share a source, so the router only counts agreement that spans different blocs.
 The number identifies the bloc and means nothing else. A cross-validation policy
 never names a label. It only counts groups, through `min_groups` and
-`per_group_quorum` in the router's values file. One test does write the labels
-out, `tests/test_control_api_providers.py`, and it does that to check that
-`GET /providers` serves the table as written.
+`per_group_quorum` in the router's values file. Tests write the labels out only
+to pin the table: `tests/test_control_api_providers.py` checks that
+`GET /providers` serves it as written, and the pool tests in
+`tests/test_domain_registry.py` pin the labels of the cross-validation pools
+they cover.
 
 Nine pools carry a label today, and 39 providers between them. Read the count
 rather than trusting this sentence, which said "only two" for months after the

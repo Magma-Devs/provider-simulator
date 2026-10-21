@@ -332,8 +332,12 @@ def test_sui_cv_graphql_sim_pool_builds_with_six_graphql_providers_in_three_grou
     """
     reg = build_registry()
 
-    providers = [reg.provider("sui-cv-graphql-sim", pid) for pid in ("1", "2", "3", "4", "5", "6")]
+    pids = ("1", "2", "3", "4", "5", "6")
+    providers = [reg.provider("sui-cv-graphql-sim", pid) for pid in pids]
 
+    assert (
+        tuple(sorted(reg.pools["sui-cv-graphql-sim"].providers)) == pids
+    ), "the pool holds exactly the six providers that the cross-validation rules count"
     assert [p.key for p in providers] == [f"sui-cv-graphql-sim:{n}" for n in range(1, 7)]
     assert [p.name for p in providers] == [f"SuiCvGraphqlPrimaryProvider{n}" for n in range(1, 7)]
     assert not any(p.is_backup for p in providers), (
@@ -366,10 +370,11 @@ def test_sui_cv_graphql_sim_shares_no_state_with_sui_graphql_sim():
     """The two Sui GraphQL pools are separate Provider objects on separate ports.
 
     Same chain and same interface, and a scenario call addressed by family alone
-    resolves to sui-graphql-sim. If the cross-validation router reused those
-    listeners, one provider would sit under two pool keys, and a fault armed for a
-    cross-validation test would land in the traffic of the tests of the basic
-    router, reading as a router bug.
+    resolves to sui-graphql-sim. A fault armed for a cross-validation test must not
+    land in the traffic of the tests of the basic router, which would read as a
+    router bug. The registry already refuses a port that two providers share, so a
+    clash stops build_registry() before the assertions below run: they state the
+    separation of the two pools in one place and cannot fail on their own.
     """
     reg = build_registry()
 

@@ -39,8 +39,9 @@ that reads them is ``ControlApi.get_providers``, which serves them on GET
     ``voting-group-<n>``: cross-validation is a vote, and providers sharing a
     label are one bloc that would cast the same wrong vote together, so the
     router only counts agreement that spans different blocs. The number
-    identifies the bloc and means nothing else; no policy and no test names a
-    particular one. Nine pools label their providers today. eth-sim,
+    identifies the bloc and means nothing else; no policy names a particular
+    one, and tests write the labels out only to pin this table. Nine pools
+    label their providers today. eth-sim,
     lava-sim-rest, lava-sim-grpc and lava-sim-tm each put pids 1 and 2 in
     ``voting-group-1`` and pid 3 in ``voting-group-2``, and label no backup.
     eth-cv-sim, lava-cv-rest-sim, lava-cv-tm-sim and sui-cv-graphql-sim each put
@@ -146,7 +147,9 @@ the universal exception (MAG-2092) and fires on every listener regardless of
     18608-18613  Lava Tendermint-RPC cross-validation
     18614-18619  ETH cache writer (3 primary, 3 backup)
     18620-18625  ETH cache reader (3 primary, 3 backup)
-    (this list stops at 18625; the table below is the only source of ports, and its next free port is 18729)
+    (this list stops at 18625; the table below is the only source of ports. Its highest
+    port plus one is the next free port, and this prints it:
+    python3 -c 'from provider_simulator.topology import TOPOLOGY as T; print(max(e[2] for r in T for e in r[6]) + 1)')
 
 The ETH backup block sits at 18560-18562 rather than next to its primaries
 because 18548-18559 were already claimed by the gRPC / REST / Tendermint /
@@ -1251,7 +1254,7 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
         (("graphql", "http", 18722),),
     ),
     # sui-cv-graphql-sim: ports 18723-18728. The providers of the Sui GraphQL router that
-    # carries cross-validation policies, for the cross-validation tests: six primaries in
+    # carries a cross-validation policy, for the cross-validation tests: six primaries in
     # three groups of two, like eth-cv-sim, and no backup tier.
     (
         "sui-cv-graphql-sim",
