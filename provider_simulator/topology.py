@@ -86,7 +86,8 @@ sui-graphql-sim, sui-failover-graphql-sim and sui-cache-graphql-sim are the thre
 of the Sui GraphQL routers, on the ``graphql`` interface over http. They are k3d-only
 like the pools above: their routers are declared in routers.yml in smart_router_automation,
 and the backup tier of the failover router comes from config/values_sim.yml there. The
-router of sui-cache-graphql-sim carries a cache of its own, so the cache tests have it alone.
+router of sui-cache-graphql-sim names a key prefix of its own on the shared router
+cache, so no other router reads its entries.
 The listener ports live here and nowhere else. constants.py holds no ports, so
 there is nothing to cross-check them against; the sentence that used to claim
 such a test described a check removed with those duplicate port tables.
