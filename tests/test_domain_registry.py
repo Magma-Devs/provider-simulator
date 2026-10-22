@@ -325,10 +325,10 @@ def test_sui_cv_graphql_sim_pool_builds_with_six_graphql_providers_in_three_grou
     """The GraphQL cross-validation pool is built exactly as its rows declare.
 
     Six primaries, no backup, each on its own GraphQL port, labelled three groups
-    of two. Those facts are what every cross-validation rule on this router rests
-    on: the router counts distinct groups, so a row that lost its group label, or a
-    seventh provider, or a backup counted as a candidate, would change what the
-    router can be asked for while the pool still looked fine.
+    of two. The router reads its group labels from its own values file, not from
+    this table, and guard tests compare the values files with this table. A row
+    that lost its label, a seventh provider or a backup flag would break those
+    guards. This test fails first.
     """
     reg = build_registry()
 
@@ -366,15 +366,16 @@ def test_sui_cv_graphql_sim_pool_builds_with_six_graphql_providers_in_three_grou
     assert reg.pools["sui-cv-graphql-sim"].chain == "sui"
 
 
-def test_sui_cv_graphql_sim_shares_no_state_with_sui_graphql_sim():
+def test_sui_cv_graphql_sim_has_providers_and_ports_of_its_own():
     """The two Sui GraphQL pools are separate Provider objects on separate ports.
 
-    Same chain and same interface, and a scenario call addressed by family alone
-    resolves to sui-graphql-sim. A fault armed for a cross-validation test must not
-    land in the traffic of the tests of the basic router, which would read as a
-    router bug. The registry already refuses a port that two providers share, so a
-    clash stops build_registry() before the assertions below run: they state the
-    separation of the two pools in one place and cannot fail on their own.
+    A scenario armed on a provider of one pool does not reach a provider of the
+    other. The pools do share one thing: every Sui pool serves the one SuiChain
+    object in CHAINS, so there is one checkpoint head, and a reset addressed to one
+    Sui pool rewinds that head for all of them. The registry already refuses a port
+    that two providers share, so a clash stops build_registry() before the
+    assertions below run: they state the separation of the two pools in one place
+    and cannot fail on their own.
     """
     reg = build_registry()
 

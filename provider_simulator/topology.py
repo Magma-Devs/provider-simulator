@@ -41,9 +41,9 @@ that reads them is ``ControlApi.get_providers``, which serves them on GET
     router only counts agreement that spans different blocs. The number
     identifies the bloc and means nothing else; no policy names a particular
     one, and tests write the labels out only to pin this table. Nine pools
-    label their providers today. eth-sim,
-    lava-sim-rest, lava-sim-grpc and lava-sim-tm each put pids 1 and 2 in
-    ``voting-group-1`` and pid 3 in ``voting-group-2``, and label no backup.
+    label their providers today. eth-sim, lava-sim-rest, lava-sim-grpc and
+    lava-sim-tm each put pids 1 and 2 in ``voting-group-1`` and pid 3 in
+    ``voting-group-2``, and label no backup.
     eth-cv-sim, lava-cv-rest-sim, lava-cv-tm-sim and sui-cv-graphql-sim each put
     six providers in three blocs of two, the smallest set a per-group quorum
     across three groups can run on. eth-failover-cv-sim puts each of its three
@@ -147,7 +147,7 @@ the universal exception (MAG-2092) and fires on every listener regardless of
     18608-18613  Lava Tendermint-RPC cross-validation
     18614-18619  ETH cache writer (3 primary, 3 backup)
     18620-18625  ETH cache reader (3 primary, 3 backup)
-    (this list stops at 18625; the table below is the only source of ports. Its highest
+    (this list stops at 18625; the table below is the only source of provider ports. Its highest
     port plus one is the next free port, and this prints it:
     python3 -c 'from provider_simulator.topology import TOPOLOGY as T; print(max(e[2] for r in T for e in r[6]) + 1)')
 
