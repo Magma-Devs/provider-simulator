@@ -659,6 +659,25 @@ spec:
             - name: spare-18722
               containerPort: 18722
               protocol: TCP
+            # 18723-18728: the providers of sui-cv-graphql-sim.
+            - name: spare-18723
+              containerPort: 18723
+              protocol: TCP
+            - name: spare-18724
+              containerPort: 18724
+              protocol: TCP
+            - name: spare-18725
+              containerPort: 18725
+              protocol: TCP
+            - name: spare-18726
+              containerPort: 18726
+              protocol: TCP
+            - name: spare-18727
+              containerPort: 18727
+              protocol: TCP
+            - name: spare-18728
+              containerPort: 18728
+              protocol: TCP
           resources:
             requests:
               cpu: "100m"

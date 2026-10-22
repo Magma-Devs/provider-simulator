@@ -39,13 +39,15 @@ that reads them is ``ControlApi.get_providers``, which serves them on GET
     ``voting-group-<n>``: cross-validation is a vote, and providers sharing a
     label are one bloc that would cast the same wrong vote together, so the
     router only counts agreement that spans different blocs. The number
-    identifies the bloc and means nothing else; no policy and no test names a
-    particular one. Seven pools label their providers today. eth-sim,
-    lava-sim-rest, lava-sim-grpc and lava-sim-tm each put pids 1 and 2 in
-    ``voting-group-1`` and pid 3 in ``voting-group-2``, and label no backup.
-    eth-cv-sim, lava-cv-rest-sim and lava-cv-tm-sim each put six providers in
-    three blocs of two, the smallest set a per-group quorum across three groups
-    can run on. Every other row carries the
+    identifies the bloc and means nothing else; no policy names a particular
+    one, and tests write the labels out only to pin this table. Nine pools
+    label their providers today. eth-sim, lava-sim-rest, lava-sim-grpc and
+    lava-sim-tm each put pids 1 and 2 in ``voting-group-1`` and pid 3 in
+    ``voting-group-2``, and label no backup.
+    eth-cv-sim, lava-cv-rest-sim, lava-cv-tm-sim and sui-cv-graphql-sim each put
+    six providers in three blocs of two, the smallest set a per-group quorum
+    across three groups can run on. eth-failover-cv-sim puts each of its three
+    providers in a bloc of its own. Every other row carries the
     empty string rather than nothing at all, so a caller grouping by label
     gets one bucket of unlabelled providers instead of a missing key.
 
@@ -82,12 +84,15 @@ second. Both pools carry a backup tier because the router answers from either
 cache tier before it picks any provider, primary tier and backup tier alike,
 and without a backup tier a test cannot tell "never reached the backup" from
 "there was no backup to reach".
-sui-graphql-sim, sui-failover-graphql-sim and sui-cache-graphql-sim are the three pools
-of the Sui GraphQL routers, on the ``graphql`` interface over http. They are k3d-only
-like the pools above: their routers are declared in routers.yml in smart_router_automation,
-and the backup tier of the failover router comes from config/values_sim.yml there. The
-router of sui-cache-graphql-sim names a key prefix of its own on the shared router
-cache, so no other router reads its entries.
+sui-graphql-sim, sui-failover-graphql-sim, sui-cache-graphql-sim and sui-cv-graphql-sim
+are the four pools of the Sui GraphQL routers, on the ``graphql`` interface over http.
+They are k3d-only like the pools above: their routers are declared in routers.yml in
+smart_router_automation, and the backup tier of the failover router comes from
+config/values_sim.yml there. The router of sui-cache-graphql-sim names a key prefix of
+its own on the shared router cache, so no other router reads its entries. The router of
+sui-cv-graphql-sim carries cross-validation policies. Its six providers sit in three
+groups of two, the shape of eth-cv-sim, so a policy that asks for a per-group quorum
+across three groups can be added without a new pool.
 The listener ports live here and nowhere else. constants.py holds no ports, so
 there is nothing to cross-check them against; the sentence that used to claim
 such a test described a check removed with those duplicate port tables.
@@ -142,7 +147,9 @@ the universal exception (MAG-2092) and fires on every listener regardless of
     18608-18613  Lava Tendermint-RPC cross-validation
     18614-18619  ETH cache writer (3 primary, 3 backup)
     18620-18625  ETH cache reader (3 primary, 3 backup)
-    (next free: 18629)
+    (this list stops at 18625; the table below is the only source of provider ports. Its highest
+    port plus one is the next free port, and this prints it:
+    python3 -c 'from provider_simulator.topology import TOPOLOGY as T; print(max(e[2] for r in T for e in r[6]) + 1)')
 
 The ETH backup block sits at 18560-18562 rather than next to its primaries
 because 18548-18559 were already claimed by the gRPC / REST / Tendermint /
@@ -1245,6 +1252,63 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
         False,
         "",
         (("graphql", "http", 18722),),
+    ),
+    # sui-cv-graphql-sim: ports 18723-18728. The providers of the Sui GraphQL router that
+    # carries cross-validation policies, for the cross-validation tests: six primaries in
+    # three groups of two, like eth-cv-sim, and no backup tier.
+    (
+        "sui-cv-graphql-sim",
+        "sui",
+        "1",
+        "SuiCvGraphqlPrimaryProvider1",
+        False,
+        "voting-group-1",
+        (("graphql", "http", 18723),),
+    ),
+    (
+        "sui-cv-graphql-sim",
+        "sui",
+        "2",
+        "SuiCvGraphqlPrimaryProvider2",
+        False,
+        "voting-group-1",
+        (("graphql", "http", 18724),),
+    ),
+    (
+        "sui-cv-graphql-sim",
+        "sui",
+        "3",
+        "SuiCvGraphqlPrimaryProvider3",
+        False,
+        "voting-group-2",
+        (("graphql", "http", 18725),),
+    ),
+    (
+        "sui-cv-graphql-sim",
+        "sui",
+        "4",
+        "SuiCvGraphqlPrimaryProvider4",
+        False,
+        "voting-group-2",
+        (("graphql", "http", 18726),),
+    ),
+    (
+        "sui-cv-graphql-sim",
+        "sui",
+        "5",
+        "SuiCvGraphqlPrimaryProvider5",
+        False,
+        "voting-group-3",
+        (("graphql", "http", 18727),),
+    ),
+    (
+        "sui-cv-graphql-sim",
+        "sui",
+        "6",
+        "SuiCvGraphqlPrimaryProvider6",
+        False,
+        "voting-group-3",
+        (("graphql", "http", 18728),),
     ),
 )
 

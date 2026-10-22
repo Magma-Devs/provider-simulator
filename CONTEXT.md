@@ -147,28 +147,30 @@ label are one bloc that would cast the same wrong vote together, because they
 share a source, so the router only counts agreement that spans different blocs.
 The number identifies the bloc and means nothing else. A cross-validation policy
 never names a label. It only counts groups, through `min_groups` and
-`per_group_quorum` in the router's values file. One test does write the labels
-out, `tests/test_control_api_providers.py`, and it does that to check that
-`GET /providers` serves the table as written.
+`per_group_quorum` in the router's values file. Tests write the labels out only
+to pin the table: `tests/test_control_api_providers.py` checks that
+`GET /providers` serves it as written, and the pool tests in
+`tests/test_domain_registry.py` pin the labels of the cross-validation pools
+they cover.
 
-Seven pools carry a label today, and 30 providers between them. Read the count
+Nine pools carry a label today, and 39 providers between them. Read the count
 rather than trusting this sentence, which said "only two" for months after the
 fourth pool gained one:
 
     python3 -c "from provider_simulator.topology import TOPOLOGY; \
       print(len({r[0] for r in TOPOLOGY if r[5]}))"
 
-Two shapes are in use. `eth-sim`, `lava-sim-grpc`, `lava-sim-rest` and
+Three shapes are in use. `eth-sim`, `lava-sim-grpc`, `lava-sim-rest` and
 `lava-sim-tm` each split their providers across TWO blocs. `eth-cv-sim`,
-`lava-cv-rest-sim` and `lava-cv-tm-sim` each use THREE, with six providers in
-blocs of two. Every other row carries the empty string, which means the
-deployment put that provider in no group at all.
+`lava-cv-rest-sim`, `lava-cv-tm-sim` and `sui-cv-graphql-sim` each use THREE,
+with six providers in blocs of two. `eth-failover-cv-sim` has three providers,
+each in a bloc of its own. Every other row carries the empty string, which means
+the deployment put that provider in no group at all.
 
-A pool named for cross-validation does not automatically carry labels.
-`eth-failover-cv-sim` carries none: no router deploys a policy for it yet, and a
-label with no policy names a bloc nothing counts. The labels arrive with the
-policy, in every copy of the values file at once. It is an empty string and not
-a missing value, so a caller grouping by label gets one bucket of unlabelled
+A pool named for cross-validation does not automatically carry labels. A label
+with no policy names a bloc nothing counts, so the labels arrive with the policy,
+in every copy of the values file that carries the router, at once. It is an empty
+string and not a missing value, so a caller grouping by label gets one bucket of unlabelled
 providers instead of a key that is not there.
 _Avoid_: tier, class, provider set
 

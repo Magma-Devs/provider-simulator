@@ -321,6 +321,84 @@ def test_lava_cv_tm_sim_shares_no_state_with_lava_sim_tm():
     assert len(cv_ports) == 6 and len(shared_ports) == 6
 
 
+def test_sui_cv_graphql_sim_pool_builds_with_six_graphql_providers_in_three_groups():
+    """The GraphQL cross-validation pool is built exactly as its rows declare.
+
+    Six primaries, no backup, each on its own GraphQL port, labelled three groups
+    of two. The router reads its group labels from its own values file, not from
+    this table, and guard tests compare the values files with this table. A row
+    that lost its label, a seventh provider or a backup flag would break those
+    guards. This test fails first.
+    """
+    reg = build_registry()
+
+    pids = ("1", "2", "3", "4", "5", "6")
+    providers = [reg.provider("sui-cv-graphql-sim", pid) for pid in pids]
+
+    assert (
+        tuple(sorted(reg.pools["sui-cv-graphql-sim"].providers)) == pids
+    ), "the pool holds exactly the six providers that the cross-validation rules count"
+    assert [p.key for p in providers] == [f"sui-cv-graphql-sim:{n}" for n in range(1, 7)]
+    assert [p.name for p in providers] == [f"SuiCvGraphqlPrimaryProvider{n}" for n in range(1, 7)]
+    assert not any(p.is_backup for p in providers), (
+        "cross-validation never reaches a backup, so a provider labelled backup "
+        "here would claim a group the router can never count"
+    )
+    assert [p.group_label for p in providers] == [
+        "voting-group-1",
+        "voting-group-1",
+        "voting-group-2",
+        "voting-group-2",
+        "voting-group-3",
+        "voting-group-3",
+    ]
+    assert len({p.group_label for p in providers}) == 3
+
+    # One GraphQL endpoint each, on its own port, contiguous and in order.
+    ports = []
+    for provider in providers:
+        assert len(provider.endpoints) == 1, f"{provider.key} should serve exactly one endpoint"
+        endpoint = provider.endpoints[0]
+        assert (endpoint.interface, endpoint.transport) == ("graphql", "http")
+        ports.append(endpoint.port)
+    assert ports == [18723, 18724, 18725, 18726, 18727, 18728]
+
+    assert reg.pools["sui-cv-graphql-sim"].chain == "sui"
+
+
+def test_sui_cv_graphql_sim_has_providers_and_ports_of_its_own():
+    """The two Sui GraphQL pools are separate Provider objects on separate ports.
+
+    A scenario armed on a provider of one pool does not reach a provider of the
+    other. The pools do share one thing: every Sui pool serves the one SuiChain
+    object in CHAINS, so there is one checkpoint head, and a reset addressed to one
+    Sui pool rewinds that head for all of them. The registry already refuses a port
+    that two providers share, so a clash stops build_registry() before the
+    assertions below run: they state the separation of the two pools in one place
+    and cannot fail on their own.
+    """
+    reg = build_registry()
+
+    for pid in ("1", "2", "3"):
+        cv_provider = reg.provider("sui-cv-graphql-sim", pid)
+        shared_provider = reg.provider("sui-graphql-sim", pid)
+        assert cv_provider is not shared_provider
+        assert cv_provider.endpoints[0].port != shared_provider.endpoints[0].port
+
+    cv_ports = {
+        endpoint.port
+        for pid in ("1", "2", "3", "4", "5", "6")
+        for endpoint in reg.provider("sui-cv-graphql-sim", pid).endpoints
+    }
+    shared_ports = {
+        endpoint.port for pid in ("1", "2", "3") for endpoint in reg.provider("sui-graphql-sim", pid).endpoints
+    }
+    assert cv_ports.isdisjoint(shared_ports)
+    # Positive control: both sets are non-empty, so the disjointness above is
+    # not two empty sets agreeing with each other.
+    assert len(cv_ports) == 6 and len(shared_ports) == 3
+
+
 def test_eth_cache_writer_and_reader_pools_build_with_three_primaries_and_three_backups():
     """The two-tier cache pools are built exactly as their rows declare.
 

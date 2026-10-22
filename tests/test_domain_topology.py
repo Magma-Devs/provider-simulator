@@ -61,11 +61,13 @@ EXPECTED_POOLS = {
     # noarchive again, for routers that start with the default retry limit.
     "eth-failover-backuparchive-sim",
     "eth-failover-archiveless-sim",
-    # The three pools of the Sui GraphQL routers: the basic router, its failover copy, and
-    # the router that carries a cache of its own.
+    # The four pools of the Sui GraphQL routers: the basic router, its failover copy, the
+    # router that carries a cache of its own, and the router that carries cross-validation
+    # policies.
     "sui-graphql-sim",
     "sui-failover-graphql-sim",
     "sui-cache-graphql-sim",
+    "sui-cv-graphql-sim",
 }
 
 
@@ -685,6 +687,14 @@ AGREED_NAMES = {
     ("sui-cache-graphql-sim", "1"): "SuiCacheGraphqlPrimaryProvider1",
     ("sui-cache-graphql-sim", "2"): "SuiCacheGraphqlPrimaryProvider2",
     ("sui-cache-graphql-sim", "3"): "SuiCacheGraphqlPrimaryProvider3",
+    # The cross-validation router's pool has six providers and nothing to tell them apart
+    # but their group, so Primary.
+    ("sui-cv-graphql-sim", "1"): "SuiCvGraphqlPrimaryProvider1",
+    ("sui-cv-graphql-sim", "2"): "SuiCvGraphqlPrimaryProvider2",
+    ("sui-cv-graphql-sim", "3"): "SuiCvGraphqlPrimaryProvider3",
+    ("sui-cv-graphql-sim", "4"): "SuiCvGraphqlPrimaryProvider4",
+    ("sui-cv-graphql-sim", "5"): "SuiCvGraphqlPrimaryProvider5",
+    ("sui-cv-graphql-sim", "6"): "SuiCvGraphqlPrimaryProvider6",
 }
 
 # The pools that HAVE a backup tier, and which of their slots it is. The router
@@ -734,10 +744,10 @@ _FOUR_PROVIDER_POOLS_WITH_A_BACKUP_TIER = (
 # tier and backup tier alike. Without a backup tier a test cannot tell "the
 # router never reached the backup" from "there was no backup to reach".
 #
-# eth-cv-sim, lava-cv-rest-sim and lava-cv-tm-sim are six-provider pools too and
-# are absent on purpose: all three are cross-validation topologies,
-# cross-validation never reaches a backup, and a provider labelled backup there
-# would claim a group the router can never count. Their slots 4 to 6 are
+# eth-cv-sim, lava-cv-rest-sim, lava-cv-tm-sim and sui-cv-graphql-sim are
+# six-provider pools too and are absent on purpose: all four are cross-validation
+# topologies, cross-validation never reaches a backup, and a provider labelled
+# backup there would claim a group the router can never count. Their slots 4 to 6 are
 # ordinary primaries. eth-failover-cv-sim is absent for the same reason, and it
 # holds three providers rather than six.
 #

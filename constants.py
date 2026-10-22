@@ -27,10 +27,9 @@ CONTROL_PORT = 19000
 # setting. Tests reach the same one by name, on the control port.
 #
 # Chosen above the provider block and the control port so a new provider pool can
-# be added without walking into a cache's port. The provider block is 18545-18710
-# as of eth-failover-archiveless-sim, and the Service publishes spares to 18710, so
-# the gap to 19000 is what protects this port. Read the block's real end from the
-# topology rather than from this comment, which has been wrong once already:
+# be added without walking into a cache's port. The gap between the end of the
+# provider block and 19000 is what protects this port. Read the block's bounds from
+# the topology, not from a comment:
 #   python3 -c "from provider_simulator.topology import TOPOLOGY; \
 #     p=sorted({e[2] for r in TOPOLOGY for e in r[6]}); print(p[0], p[-1])"
 CACHE_SIM_PORTS = {"secondary": 19100}
