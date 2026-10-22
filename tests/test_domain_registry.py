@@ -163,6 +163,52 @@ def test_build_registry_rejects_unknown_interface_and_transport():
         build_registry([("btc-sim", "btc", "1", "BtcProvider1", False, "", [("jsonrpc", "grpc", 19997)])])
 
 
+def test_eth_cv_sim_slot_pairs_12_34_56_sit_in_voting_groups_1_2_3():
+    """Each of the six providers of eth-cv-sim sits in the group that this test names.
+
+    Slots 1 and 2 share the first group, slots 3 and 4 the second, slots 5 and 6
+    the third. Cross-validation is a vote, and the router counts agreement that
+    spans different groups. A provider that moves from one group to another
+    changes which answers count as agreement, and it leaves six providers in
+    three groups. A check of those counts does not see it, so this test names the
+    group of every provider and compares each one.
+    """
+    reg = build_registry()
+    pool = reg.pools["eth-cv-sim"]
+
+    groups = {p.key: p.group_label for p in pool.providers.values()}
+
+    assert groups == {
+        "eth-cv-sim:1": "voting-group-1",
+        "eth-cv-sim:2": "voting-group-1",
+        "eth-cv-sim:3": "voting-group-2",
+        "eth-cv-sim:4": "voting-group-2",
+        "eth-cv-sim:5": "voting-group-3",
+        "eth-cv-sim:6": "voting-group-3",
+    }, "the group of a provider decides which answers count as agreement from different groups"
+
+
+def test_eth_failover_cv_sim_slots_1_2_3_sit_in_voting_groups_1_2_3_one_each():
+    """Each of the three providers of eth-failover-cv-sim sits in a group of its own.
+
+    Slot 1 is in the first group, slot 2 in the second, slot 3 in the third. With
+    one provider per group, any two providers that agree form an agreement across
+    two groups. A provider that moves into the group of another leaves two
+    providers in one group, and the agreement of that pair spans only one group.
+    The pool still holds three providers, so a count of providers does not see it.
+    """
+    reg = build_registry()
+    pool = reg.pools["eth-failover-cv-sim"]
+
+    groups = {p.key: p.group_label for p in pool.providers.values()}
+
+    assert groups == {
+        "eth-failover-cv-sim:1": "voting-group-1",
+        "eth-failover-cv-sim:2": "voting-group-2",
+        "eth-failover-cv-sim:3": "voting-group-3",
+    }, "each provider sits in a group of its own, so any two agreeing providers span two groups"
+
+
 def test_lava_cv_rest_sim_pool_builds_with_six_rest_providers_in_three_groups():
     """The REST cross-validation pool is built exactly as its rows declare.
 
