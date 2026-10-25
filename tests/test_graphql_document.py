@@ -251,6 +251,36 @@ UNREADABLE_BODIES = [
         id="no operation",
     ),
     pytest.param(_DEEP, "parse", 200, None, None, "GRAPHQL_PARSE_FAILED", _RECURSION, id="5000 nested braces"),
+    pytest.param(
+        json.dumps({"query": "query { ...A } fragment A on Query { ...A }"}).encode(),
+        "parse",
+        200,
+        None,
+        None,
+        "GRAPHQL_PARSE_FAILED",
+        _RECURSION,
+        id="fragment that spreads itself",
+    ),
+    pytest.param(
+        json.dumps({"query": "query { ...A } fragment A on Query { ...B } fragment B on Query { ...A }"}).encode(),
+        "parse",
+        200,
+        None,
+        None,
+        "GRAPHQL_PARSE_FAILED",
+        _RECURSION,
+        id="two fragments that spread each other",
+    ),
+    pytest.param(
+        json.dumps({"query": "query { ...Nope }"}).encode(),
+        "validation",
+        200,
+        None,
+        None,
+        "GRAPHQL_VALIDATION_FAILED",
+        'Unknown fragment: "Nope"',
+        id="spread of an undefined fragment",
+    ),
 ]
 
 
