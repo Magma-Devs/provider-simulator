@@ -1047,7 +1047,7 @@ def test_a_canned_body_on_a_provider_with_only_grpc_endpoints_is_400(status):
     assert st == 400, resp
     assert "lava-sim-grpc:1" in resp["error"]
     assert "'GetLatestBlock'" in resp["error"]
-    assert "only gRPC endpoints" in resp["error"]
+    assert "no endpoint of this provider serves one" in resp["error"]
     assert "'result', 'error' and 'error_stub'" in resp["error"]
 
 
@@ -1067,6 +1067,40 @@ def test_a_canned_body_on_a_provider_with_a_json_endpoint_is_accepted(key, metho
     api = _api()
     responses = {method: {"status": 503, "body": {"busy": True}}}
     st, resp = api.apply_scenario({"providers": {key: {"responses": responses}}})
+    assert st == 200, resp
+
+
+def test_a_canned_body_under_a_method_name_is_400_on_a_provider_with_grpc_and_rest_endpoints():
+    """A canned body under a method name is served by a JSON-RPC, GraphQL or
+    Tendermint RPC endpoint. A REST endpoint reads a ``[verb, template]`` pair, and
+    the gRPC endpoint reads no body, so on this provider the body would change no
+    reply."""
+    endpoints = (("grpc", "http2", 40001), ("rest", "http", 40002))
+    rows = (("lava-mixed-sim", "lava", "1", "LavaMixedProvider1", False, "", endpoints),)
+    api = ControlApi(build_registry(rows), WsSubscriptions())
+    responses = {"GetLatestBlock": {"body": {"x": 1}}}
+    st, resp = api.apply_scenario({"providers": {"lava-mixed-sim:1": {"responses": responses}}})
+    assert st == 400, resp
+    assert "'GetLatestBlock'" in resp["error"]
+
+
+@pytest.mark.parametrize("http_status", [302, 100, "503", True])
+def test_a_canned_http_status_outside_2xx_and_the_error_statuses_is_400(http_status):
+    """Tendermint RPC reads ``http_status`` as the status of a canned reply, as it
+    reads ``status``, so the two keys get the same rule. Without it a text "503"
+    fell back to HTTP 200 and changed no reply, and a 302 was sent."""
+    api = _api()
+    responses = {"status": {"http_status": http_status, "body": {"busy": True}}}
+    st, resp = api.apply_scenario({"providers": {"lava-sim-tm:1": {"responses": responses}}})
+    assert st == 400, resp
+    assert "http_status" in resp["error"]
+
+
+def test_a_canned_http_status_of_503_is_accepted():
+    """The control for the test above: an error status is a legal value of either key."""
+    api = _api()
+    responses = {"status": {"http_status": 503, "body": {"busy": True}}}
+    st, resp = api.apply_scenario({"providers": {"lava-sim-tm:1": {"responses": responses}}})
     assert st == 200, resp
 
 

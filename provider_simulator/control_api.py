@@ -229,29 +229,38 @@ def _an_invalid_proto_no_endpoint_can_apply(provider: object, scenario_updates: 
     return ""
 
 
-def _a_canned_body_no_endpoint_can_serve(provider: object, scenario_updates: dict) -> str:
-    """Refuse a canned ``body`` in a ``responses`` entry for a provider that has
-    only gRPC endpoints.
+# The interfaces that serve a canned body kept under a method name.
+_SERVES_A_CANNED_BODY_BY_METHOD_NAME = {"jsonrpc", "graphql", "tendermintrpc"}
 
-    The gRPC listener builds its reply from ``result``, ``error`` or
-    ``error_stub``, and it never reads ``body``. Before this rule a canned body
-    was stored and each call got its normal reply: a reply that is accepted and
-    changes nothing reads as a router that recovered. Like its neighbours, the
-    rule reads the endpoints of the provider and no filter.
+
+def _a_canned_body_no_endpoint_can_serve(provider: object, scenario_updates: dict) -> str:
+    """Refuse a canned ``body`` under a method name for a provider that has a gRPC
+    endpoint and no endpoint that serves such a body.
+
+    A JSON-RPC, GraphQL or Tendermint RPC endpoint serves a canned body kept under
+    a method name. A REST endpoint reads a ``[verb, template]`` pair, and the gRPC
+    listener builds its reply from ``result``, ``error`` or ``error_stub`` and never
+    reads ``body``. Before this rule such a body was stored and each call got its
+    normal reply: a reply that is accepted and changes nothing reads as a router
+    that recovered. Like its neighbours, the rule reads the endpoints of the
+    provider and no filter. A provider with no gRPC endpoint is left as it is: a
+    REST provider stores a text key and matches no route, as the user guide says.
     """
     responses = scenario_updates.get("responses")
     if not isinstance(responses, dict):
         return ""
     endpoints = list(provider.endpoints)  # type: ignore[attr-defined]
-    if not endpoints or not all(ep.interface == "grpc" for ep in endpoints):
+    interfaces = {ep.interface for ep in endpoints}
+    if "grpc" not in interfaces or interfaces & _SERVES_A_CANNED_BODY_BY_METHOD_NAME:
         return ""
     for method, cfg in responses.items():
-        if isinstance(cfg, dict) and "body" in cfg:
+        if isinstance(method, str) and isinstance(cfg, dict) and "body" in cfg:
+            serves = ", ".join(f"{ep.interface}/{ep.transport} :{ep.port}" for ep in endpoints)
             return (
-                f"responses[{method!r}] holds a canned body, and this provider has only gRPC "
-                "endpoints, whose replies are protobuf messages. The gRPC listener reads 'result', "
-                "'error' and 'error_stub', and never 'body', so the body would be stored and would "
-                "change no reply"
+                f"responses[{method!r}] holds a canned body under a method name, and no endpoint of "
+                f"this provider serves one (it serves {serves}). A gRPC endpoint reads 'result', "
+                "'error' and 'error_stub', and never 'body', and a REST endpoint reads a [verb, "
+                "template] pair. The body would be stored and would change no reply"
             )
     return ""
 
@@ -420,29 +429,32 @@ def _normalise_responses(responses: object) -> object:
             if err:
                 raise ValueError(err)
             # Canned {status, body} override (entries keyed by a method name,
-            # served on JSON-RPC, GraphQL and Tendermint RPC, and refused for a
-            # provider with only gRPC endpoints by
-            # _a_canned_body_no_endpoint_can_serve — REST re-tupled entries own
-            # their body+status semantics).
+            # served on JSON-RPC, GraphQL and Tendermint RPC, and refused by
+            # _a_canned_body_no_endpoint_can_serve for a gRPC provider that has
+            # none of those — REST re-tupled entries own their body+status
+            # semantics).
             # The body must be a JSON object, must not combine with a fault
             # mode (they describe different outcomes), and the status must be
             # 2xx or an error status from 400 to 599 — a 1xx is not a final
-            # reply, and a 3xx is neither a success nor an error.
+            # reply, and a 3xx is neither a success nor an error. Tendermint RPC
+            # reads http_status as the status of a canned reply too, so both
+            # keys get the rule.
             if isinstance(method_name, str) and "body" in cfg:
                 if not isinstance(cfg["body"], dict):
                     raise ValueError(f"per-method body override must be a dict (method={method_name!r})")
                 if "mode" in cfg:
                     raise ValueError(f"per-method body and mode are mutually exclusive (method={method_name!r})")
-                status_val = cfg.get("status", 200)
-                if not (
-                    isinstance(status_val, int)
-                    and not isinstance(status_val, bool)
-                    and (200 <= status_val <= 299 or 400 <= status_val <= 599)
-                ):
-                    raise ValueError(
-                        f"per-method body override status must be an int from 200 to 299 or from 400 to 599 "
-                        f"(method={method_name!r}), got {status_val!r}"
-                    )
+                for status_key in ("status", "http_status"):
+                    status_val = cfg.get(status_key, 200)
+                    if not (
+                        isinstance(status_val, int)
+                        and not isinstance(status_val, bool)
+                        and (200 <= status_val <= 299 or 400 <= status_val <= 599)
+                    ):
+                        raise ValueError(
+                            f"per-method body override {status_key} must be an int from 200 to 299 or from "
+                            f"400 to 599 (method={method_name!r}), got {status_val!r}"
+                        )
         return responses
     raise ValueError("responses must be an object (or a list of pairs for REST)")
 

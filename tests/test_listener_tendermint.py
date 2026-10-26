@@ -107,6 +107,19 @@ def test_a_canned_reply_outside_2xx_is_labelled_error(status_key):
     assert provider.log.get_history()[0]["status"] == "error"
 
 
+@pytest.mark.parametrize("http_status, want_label", [(302, "error"), (503, "error"), (200, "success")])
+def test_a_reply_with_a_provider_wide_http_status_is_labelled_by_that_status(http_status, want_label):
+    """The rule covers every reply of this listener, and not only a canned one: a
+    provider-wide ``http_status`` sends a result with that status, and a status
+    outside 2xx reads ``error``, a 3xx too."""
+    listener, provider = _listener()
+    provider.scenario.update({"http_status": http_status})
+    res = listener.serve(_post("status"))
+    assert res.status == http_status
+    assert "result" in res.body
+    assert provider.log.get_history()[0]["status"] == want_label
+
+
 def test_a_canned_reply_inside_2xx_is_labelled_success():
     """The control for the test above, at the edge of 2xx: a rule that labelled
     each canned reply ``error`` would pass that test."""
