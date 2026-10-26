@@ -256,7 +256,8 @@ class Listener(ABC):
         override = self.build_body_override(method_cfg) if method_cfg else None
         if override is not None:
             result = override
-            status_label = "success"
+            # The status of the canned reply decides its label, never its body.
+            status_label = "success" if 200 <= override.status < 300 else "error"
             request_id = self.request_id(parsed)
         else:
             verdict = fault_policy.ladder(mode, merged) if targeted else fault_policy.NONE_VERDICT
@@ -360,7 +361,7 @@ class Listener(ABC):
 
     def build_body_override(self, method_cfg: dict) -> "ServeResult | None":
         """Per-method canned {status, body} response, bypassing fault + chain.
-        Only JSON-RPC supports it; the default is no override."""
+        JSON-RPC and GraphQL support it; the default is no override."""
         return None
 
     def success_label(self, status: int, body: object, request: dict | None = None) -> str:

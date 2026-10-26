@@ -19,7 +19,8 @@ Four GraphQL rules, which differ from the other interfaces:
   reply, with the ``http_status`` of the scenario.
 - A reply that the chain builds, and that holds ``errors``, is labelled ``error`` in
   the history, also when it holds ``data`` beside them (a partial reply). A canned
-  ``body`` of a ``responses`` entry is labelled ``success``, as on JSON-RPC.
+  ``body`` of a ``responses`` entry is labelled by its status, as on JSON-RPC:
+  ``success`` inside 2xx and ``error`` outside it, whatever the body holds.
 - A body that cannot be read as a request gets a reply that imitates the one of the
   real Sui server for that kind of body (``graphql_document`` says where its text
   differs), and a history row with the method ``unknown`` and the

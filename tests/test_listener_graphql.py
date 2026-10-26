@@ -268,6 +268,20 @@ def test_a_per_method_canned_body_and_fault_keys_follow_the_root_field_name():
     assert listener.serve(_post("{ epoch { epochId } }")).status == 200
 
 
+def test_a_canned_body_is_labelled_by_its_status_and_not_by_its_body():
+    listener, provider = _listener()
+    errors_body = {"data": None, "errors": [{"message": "busy"}]}
+    _scenario(provider, responses={"checkpoint": {"body": errors_body}})
+    accepted = listener.serve(_post("{ checkpoint { digest } }"))
+    assert (accepted.status, accepted.body) == (200, errors_body)
+    assert _row(provider, 0)["status"] == "success"
+
+    _scenario(provider, responses={"checkpoint": {"status": 503, "body": errors_body}})
+    refused = listener.serve(_post("{ checkpoint { digest } }"))
+    assert (refused.status, refused.body) == (503, errors_body)
+    assert _row(provider, 1)["status"] == "error"
+
+
 def test_a_partial_reply_keeps_data_beside_errors_and_is_labelled_error():
     listener, provider = _listener()
     _scenario(provider, responses={"checkpoint": {"error_stub": "internal_server_error"}})
