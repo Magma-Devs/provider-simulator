@@ -13,7 +13,8 @@ from provider_simulator.control_api import ControlApi
 from provider_simulator.domain.call_log import CallLog
 from provider_simulator.domain.registry import build_registry
 from provider_simulator.fault_policy import targets
-from provider_simulator.listeners.ws import WsSubscriptions
+from provider_simulator.listeners import JsonRpcListener, RawRequest, TendermintListener
+from provider_simulator.listeners.ws import JsonRpcWsListener, WsSubscriptions
 
 
 def _api():
@@ -1348,6 +1349,79 @@ def test_history_read_gives_the_answer_of_the_old_copy_everything_read(name, mon
         assert body["count"] == _HISTORY_COUNT[name]
     else:
         assert 0 < body["count"] < _HISTORY_ROWS, f"{name!r} must keep some rows and drop some: {body['count']}"
+
+
+# A client can send a JSON-RPC id that is a list or an object. The provider answers
+# the call, and the row keeps the id as it came.
+_CALLERS = (
+    pytest.param("eth-sim", "jsonrpc", "http", "eth_blockNumber", id="json-rpc over http"),
+    pytest.param("lava-sim-tm", "tendermintrpc", "http", "status", id="tendermint rpc over http"),
+    pytest.param("eth-sim", "jsonrpc", "ws", "eth_blockNumber", id="json-rpc over ws"),
+)
+
+
+def _listener_for(api, provider, endpoint):
+    if endpoint.transport == "ws":
+        return JsonRpcWsListener(provider, endpoint, WsSubscriptions(api.registry))
+    if endpoint.interface == "tendermintrpc":
+        return TendermintListener(provider, endpoint)
+    return JsonRpcListener(provider, endpoint)
+
+
+@pytest.mark.parametrize(("pool", "interface", "transport", "method"), _CALLERS)
+@pytest.mark.parametrize("wrong_id", [[1], {"a": 1}], ids=["list", "object"])
+def test_history_read_answers_after_a_call_whose_id_is_a_list_or_an_object(
+    pool, interface, transport, method, wrong_id
+):
+    """The row of such a call is read, and it shows the id as it came.
+
+    The read numbers the rows of one relay by the pair (request id, method) and
+    uses the pair as a dictionary key. A list or an object cannot be a key, so the
+    read raised TypeError, and the control port closed the connection with no
+    answer, until a reset.
+    """
+    api = _api()
+    provider = api.registry.provider(pool, "1")
+    endpoint = next(e for e in provider.endpoints if (e.interface, e.transport) == (interface, transport))
+    body = json.dumps({"jsonrpc": "2.0", "id": wrong_id, "method": method}).encode()
+    assert _listener_for(api, provider, endpoint).serve(RawRequest(body=body, headers={})).status == 200
+    status, payload = api.get_history({"pool": pool})
+    assert status == 200
+    assert [row["request_id"] for row in payload["history"]] == [wrong_id]
+
+
+def test_history_read_groups_rows_of_an_equal_list_or_object_id_and_keeps_other_ids_apart(monkeypatch):
+    """Rows of one method, less than 50 ms apart, with an equal list id are one relay.
+
+    Two different lists and two different objects are two relays. The text "[1]"
+    and the number 1 are other ids than the list [1]. The order of the keys of an
+    object does not make another id.
+    """
+    api = _api()
+    clock = {"ts": 0.0}
+    monkeypatch.setattr(
+        "provider_simulator.domain.call_log._now_fields", lambda: (clock["ts"], f"{clock['ts']:.3f} UTC")
+    )
+    provider = api.registry.all_providers()[0]
+    endpoint = provider.endpoints[0]
+    for i, request_id in enumerate([[1], [1], [2], "[1]", 1, {"a": 1, "b": 2}, {"b": 2, "a": 1}, {"a": 2, "b": 2}]):
+        clock["ts"] = 1000.0 + i * 0.01
+        provider.log.push(
+            "m",
+            "success",
+            0,
+            interface=endpoint.interface,
+            transport=endpoint.transport,
+            port=endpoint.port,
+            request_id=request_id,
+        )
+    status, payload = api.get_history({})
+    assert status == 200
+    groups = [row["correlation_group"] for row in payload["history"]]
+    assert groups[0] == groups[1]
+    assert groups[5] == groups[6]
+    # Six ids: [1], [2], "[1]", 1, {"a": 1, "b": 2} and {"a": 2, "b": 2}.
+    assert len({groups[0], groups[2], groups[3], groups[4], groups[5], groups[7]}) == 6
 
 
 def _api_that_counts_copies():

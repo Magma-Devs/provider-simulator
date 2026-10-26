@@ -11,6 +11,7 @@ key (a bare pid, or a block carrying ``chain_family``) gets a 400 that names the
 new format — a stale client fails loudly, never silently.
 """
 
+import json
 import threading
 import time
 from collections.abc import Callable
@@ -1007,7 +1008,7 @@ class ControlApi:
         next_group = 0
         for order, entry in enumerate(entries, start=1):
             entry["call_order"] = order
-            gkey = (entry.get("request_id"), entry.get("method"))
+            gkey = (_request_id_as_key(entry.get("request_id")), entry.get("method"))
             prev = groups.get(gkey)
             if prev is not None and entry.get("ts", 0.0) - prev[1] <= _CORRELATION_WINDOW_S:
                 entry["correlation_group"] = prev[0]
@@ -1378,6 +1379,22 @@ def _as_int(value: object, default: int) -> int:
         return int(str(value))
     except (TypeError, ValueError):
         return default
+
+
+def _request_id_as_key(request_id: object) -> object:
+    """A request id that can be a dictionary key.
+
+    A JSON-RPC client can send an id that is a list or an object, and the row
+    keeps it as it came. Such a value cannot be a key. It is keyed by its JSON
+    text, in a tuple that no text and no number equals, so the list ``[1]``, the
+    text ``"[1]"`` and the number 1 stay three ids. The order of the keys of an
+    object does not make another id.
+    """
+    try:
+        hash(request_id)
+    except TypeError:
+        return ("json", json.dumps(request_id, sort_keys=True))
+    return request_id
 
 
 def _cache_head(body: dict) -> int | None:
