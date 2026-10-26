@@ -229,6 +229,33 @@ def _an_invalid_proto_no_endpoint_can_apply(provider: object, scenario_updates: 
     return ""
 
 
+def _a_canned_body_no_endpoint_can_serve(provider: object, scenario_updates: dict) -> str:
+    """Refuse a canned ``body`` in a ``responses`` entry for a provider that has
+    only gRPC endpoints.
+
+    The gRPC listener builds its reply from ``result``, ``error`` or
+    ``error_stub``, and it never reads ``body``. Before this rule a canned body
+    was stored and each call got its normal reply: a reply that is accepted and
+    changes nothing reads as a router that recovered. Like its neighbours, the
+    rule reads the endpoints of the provider and no filter.
+    """
+    responses = scenario_updates.get("responses")
+    if not isinstance(responses, dict):
+        return ""
+    endpoints = list(provider.endpoints)  # type: ignore[attr-defined]
+    if not endpoints or not all(ep.interface == "grpc" for ep in endpoints):
+        return ""
+    for method, cfg in responses.items():
+        if isinstance(cfg, dict) and "body" in cfg:
+            return (
+                f"responses[{method!r}] holds a canned body, and this provider has only gRPC "
+                "endpoints, whose replies are protobuf messages. The gRPC listener reads 'result', "
+                "'error' and 'error_stub', and never 'body', so the body would be stored and would "
+                "change no reply"
+            )
+    return ""
+
+
 # The fields that only the GraphQL listener reads, each with the value that it has
 # when it is not set.
 _GRAPHQL_ONLY_FIELDS = {"rate_limit_style": "status", "error_body": None, "unreadable_reply": None}
@@ -393,8 +420,10 @@ def _normalise_responses(responses: object) -> object:
             if err:
                 raise ValueError(err)
             # Canned {status, body} override (entries keyed by a method name,
-            # served on JSON-RPC and GraphQL — REST re-tupled entries own their
-            # body+status semantics).
+            # served on JSON-RPC, GraphQL and Tendermint RPC, and refused for a
+            # provider with only gRPC endpoints by
+            # _a_canned_body_no_endpoint_can_serve — REST re-tupled entries own
+            # their body+status semantics).
             # The body must be a JSON object, must not combine with a fault
             # mode (they describe different outcomes), and the status must be
             # 2xx or an error status from 400 to 599 — a 1xx is not a final
@@ -520,6 +549,7 @@ class ControlApi:
                 or _an_invalid_json_no_endpoint_can_apply(provider, scenario_updates)
                 or _an_invalid_proto_no_endpoint_can_apply(provider, scenario_updates)
                 or _a_graphql_field_no_endpoint_can_apply(provider, scenario_updates)
+                or _a_canned_body_no_endpoint_can_serve(provider, scenario_updates)
             )
             if err:
                 return 400, {"error": f"{key}: {err}"}

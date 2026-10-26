@@ -11,13 +11,14 @@ rate limit that looked like a JSON-RPC error would exercise a path a real
 429 never reaches. See ``ScenarioConfig.rate_limit_body`` for the
 per-provider override.
 
-Two JSON-RPC-only wire rules:
+Two wire rules:
 - A batch body (top-level JSON array) is not supported: it answers a single
   -32600 envelope and is logged as method ``batch`` / status ``error``.
 - A per-method ``responses`` entry may pin a canned ``{status, body}``
-  response (2xx, or an error status from 400 to 599, validated at /scenario
-  time); it bypasses the fault ladder and the chain. The history labels it
-  ``success`` inside 2xx and ``error`` outside it, whatever the body holds.
+  response, as on GraphQL (2xx, or an error status from 400 to 599, validated
+  at /scenario time); it bypasses the fault ladder and the chain. The history
+  labels it ``success`` inside 2xx and ``error`` outside it, whatever the body
+  holds.
 """
 
 import json

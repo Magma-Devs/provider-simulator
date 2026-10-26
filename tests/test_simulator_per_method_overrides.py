@@ -25,6 +25,9 @@ What they cover
     9. body+latency composes               — latency first, then body.
    10. body+mode mutually exclusive        — 400 from /scenario.
    11. body bypasses healthy stub          — no stub fields leak through.
+   12. the label follows the status        — never the body: a 503 with no
+                                              error reads error, a 299 with
+                                              an error reads success.
 
 Runs against the shared in-process simulator (see conftest.py).
 
@@ -412,10 +415,12 @@ class TestPerMethodBodyOverride:
     composes with ``latency_ms`` in the documented order (latency first,
     then body).
 
-    Why: lets a test pin a provider to "200 OK with this exact body" without
-    routing through the chain-specific success-shape builder — e.g. a router
-    test that needs a 200 carrying an application-level failure body
-    (``{"success": false, ...}``).
+    Why: lets a test pin a provider to an exact reply without routing through
+    the chain-specific success-shape builder — e.g. a router test that needs a
+    200 carrying an application-level failure body (``{"success": false, ...}``),
+    or a 503 whose body holds both a ``result`` and an ``error``, which
+    ``mode: "error"`` cannot build. The status of the reply decides its history
+    label: ``success`` inside 2xx, ``error`` outside it.
     """
 
     @pytest.mark.timeout(10)
@@ -584,7 +589,7 @@ class TestPerMethodBodyOverride:
         """Setting both ``body`` and ``mode`` on the same method entry is
         rejected at /scenario POST time with HTTP 400.
 
-        ``body`` describes a custom success response; ``mode`` describes a
+        ``body`` describes a canned reply; ``mode`` describes a
         fault primitive. They describe different outcomes, and the wire can
         only emit one — the config is rejected up front instead of silently
         picking.
@@ -693,7 +698,7 @@ class TestPerMethodBodyOverride:
         for entry in entries:
             assert entry["status"] == "success", (
                 f"body-override history status must be 'success' regardless "
-                f"of body shape (HTTP-2xx by construction). Got status="
+                f"of body shape (these entries set no status, so the reply is HTTP 200). Got status="
                 f"{entry['status']!r} on method={entry['method']!r}. If "
                 f"'error': body-content inference has been re-introduced."
             )
@@ -710,3 +715,56 @@ class TestPerMethodBodyOverride:
         assert error_entries == [], (
             f"/history?status=error must not match HTTP-200 body overrides; " f"got {error_entries!r}"
         )
+
+    @pytest.mark.timeout(10)
+    @pytest.mark.parametrize(
+        "status, override_body, want_label",
+        [
+            pytest.param(
+                503,
+                {"jsonrpc": "2.0", "id": 1, "result": "0x10"},
+                "error",
+                id="a-503-whose-body-holds-no-error",
+            ),
+            pytest.param(
+                299,
+                {"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "node is syncing"}},
+                "success",
+                id="a-299-whose-body-holds-an-error",
+            ),
+        ],
+    )
+    def test_body_override_history_status_follows_the_status_and_not_the_body(
+        self, sim, status, override_body, want_label
+    ):
+        """The status of a body override decides its history label, and the body
+        never does: a 503 whose body holds no error reads ``error``, and a 299 whose
+        body holds an error reads ``success``.
+
+        The other tests of a body override use bodies whose content agrees with
+        their status, so a rule that also read the body, or that called only 200
+        a success, would pass them.
+        """
+        scenario_status, scenario_body = _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "eth-sim:1": {
+                        "mode": "success",
+                        "responses": {
+                            "eth_blockNumber": {"status": status, "body": override_body},
+                        },
+                    }
+                }
+            },
+        )
+        assert scenario_status == 200, f"expected /scenario to accept status {status}, got {scenario_body!r}"
+
+        got_status, got_body = _rpc(_P1, "eth_blockNumber")
+        assert (got_status, got_body) == (status, override_body)
+
+        with urllib.request.urlopen(_ctrl(sim, "/history?pool=eth-sim&pid=1"), timeout=5) as resp:
+            entries = json.loads(resp.read())["history"]
+        rows = [(entry["method"], entry["status"]) for entry in entries]
+        expected_rows = [("eth_blockNumber", want_label)]
+        assert rows == expected_rows, f"expected the row {expected_rows!r} for status {status}, got {entries!r}"

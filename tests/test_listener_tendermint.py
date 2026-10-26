@@ -94,6 +94,29 @@ def test_error_fault_is_jsonrpc_error_envelope():
     assert provider.log.get_history()[0]["status"] == "error"
 
 
+@pytest.mark.parametrize("status_key", ["status", "http_status"])
+def test_a_canned_reply_outside_2xx_is_labelled_error(status_key):
+    """A canned ``body`` with a status outside 2xx is a refusal that a test staged.
+    Its row reads ``error``, as on REST, JSON-RPC and GraphQL, also when the body
+    holds no error. Both keys set the status of a canned reply, so both are
+    pinned."""
+    listener, provider = _listener()
+    provider.scenario.update({"responses": {"status": {status_key: 503, "body": {"busy": True}}}})
+    res = listener.serve(_post("status", req_id=7))
+    assert (res.status, res.body) == (503, {"jsonrpc": "2.0", "id": 7, "result": {"busy": True}})
+    assert provider.log.get_history()[0]["status"] == "error"
+
+
+def test_a_canned_reply_inside_2xx_is_labelled_success():
+    """The control for the test above, at the edge of 2xx: a rule that labelled
+    each canned reply ``error`` would pass that test."""
+    listener, provider = _listener()
+    provider.scenario.update({"responses": {"status": {"status": 299, "body": {"busy": True}}}})
+    res = listener.serve(_post("status"))
+    assert res.status == 299
+    assert provider.log.get_history()[0]["status"] == "success"
+
+
 @pytest.mark.parametrize("mode", ["down", "hang"])
 def test_latency_ms_of_the_row_of_a_call_that_the_provider_did_not_wait_for(mode):
     # A down provider answers at once, and a hung call waits its own 30
