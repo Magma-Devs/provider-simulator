@@ -1393,8 +1393,9 @@ def test_history_read_answers_after_a_call_whose_id_is_a_list_or_an_object(
 def test_history_read_groups_rows_of_an_equal_list_or_object_id_and_keeps_other_ids_apart(monkeypatch):
     """Rows of one method, less than 50 ms apart, with an equal list id are one relay.
 
-    The text "[1]" and the number 1 are other ids than the list [1]. The order of
-    the keys of an object does not make another id.
+    Two different lists and two different objects are two relays. The text "[1]"
+    and the number 1 are other ids than the list [1]. The order of the keys of an
+    object does not make another id.
     """
     api = _api()
     clock = {"ts": 0.0}
@@ -1403,7 +1404,7 @@ def test_history_read_groups_rows_of_an_equal_list_or_object_id_and_keeps_other_
     )
     provider = api.registry.all_providers()[0]
     endpoint = provider.endpoints[0]
-    for i, request_id in enumerate([[1], [1], "[1]", 1, {"a": 1, "b": 2}, {"b": 2, "a": 1}]):
+    for i, request_id in enumerate([[1], [1], [2], "[1]", 1, {"a": 1, "b": 2}, {"b": 2, "a": 1}, {"a": 2, "b": 2}]):
         clock["ts"] = 1000.0 + i * 0.01
         provider.log.push(
             "m",
@@ -1418,9 +1419,9 @@ def test_history_read_groups_rows_of_an_equal_list_or_object_id_and_keeps_other_
     assert status == 200
     groups = [row["correlation_group"] for row in payload["history"]]
     assert groups[0] == groups[1]
-    assert len({groups[0], groups[2], groups[3]}) == 3
-    assert groups[4] == groups[5]
-    assert groups[4] not in {groups[0], groups[2], groups[3]}
+    assert groups[5] == groups[6]
+    # Six ids: [1], [2], "[1]", 1, {"a": 1, "b": 2} and {"a": 2, "b": 2}.
+    assert len({groups[0], groups[2], groups[3], groups[4], groups[5], groups[7]}) == 6
 
 
 def _api_that_counts_copies():
