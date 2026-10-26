@@ -1032,6 +1032,90 @@ def test_invalid_proto_is_accepted_when_one_endpoint_of_the_provider_is_grpc():
     assert resp["applied"]["lava-mixed-sim:1"]["corruption_mode"] == "invalid_proto"
 
 
+# ── a canned body on a provider that has only gRPC endpoints ──────────────────
+
+
+@pytest.mark.parametrize("status", [200, 503])
+def test_a_canned_body_on_a_provider_with_only_grpc_endpoints_is_400(status):
+    """The gRPC listener builds its reply from ``result``, ``error`` or
+    ``error_stub``, and it never reads ``body``. Before this rule a canned body was
+    stored and did nothing: each call got the normal reply. The message names the
+    entry and the keys that a gRPC provider reads."""
+    api = _api()
+    responses = {"GetLatestBlock": {"status": status, "body": {"busy": True}}}
+    st, resp = api.apply_scenario({"providers": {"lava-sim-grpc:1": {"responses": responses}}})
+    assert st == 400, resp
+    assert "lava-sim-grpc:1" in resp["error"]
+    assert "'GetLatestBlock'" in resp["error"]
+    assert "no endpoint of this provider serves one" in resp["error"]
+    assert "'result', 'error' and 'error_stub'" in resp["error"]
+
+
+def test_a_result_on_a_provider_with_only_grpc_endpoints_is_accepted():
+    """The positive control for the test above: the rule refuses a body, and not
+    each per-method entry of a gRPC provider."""
+    api = _api()
+    responses = {"GetLatestBlock": {"result": {"block": {}}}}
+    st, resp = api.apply_scenario({"providers": {"lava-sim-grpc:1": {"responses": responses}}})
+    assert st == 200, resp
+
+
+@pytest.mark.parametrize("key, method", [("eth-sim:1", "eth_getBalance"), ("lava-sim-tm:1", "status")])
+def test_a_canned_body_on_a_provider_with_a_json_endpoint_is_accepted(key, method):
+    """The control on the other side: JSON-RPC and Tendermint RPC serve a canned
+    body, with an error status too."""
+    api = _api()
+    responses = {method: {"status": 503, "body": {"busy": True}}}
+    st, resp = api.apply_scenario({"providers": {key: {"responses": responses}}})
+    assert st == 200, resp
+
+
+def test_a_canned_body_under_a_method_name_is_400_on_a_provider_with_grpc_and_rest_endpoints():
+    """A canned body under a method name is served by a JSON-RPC, GraphQL or
+    Tendermint RPC endpoint. A REST endpoint reads a ``[verb, template]`` pair, and
+    the gRPC endpoint reads no body, so on this provider the body would change no
+    reply."""
+    endpoints = (("grpc", "http2", 40001), ("rest", "http", 40002))
+    rows = (("lava-mixed-sim", "lava", "1", "LavaMixedProvider1", False, "", endpoints),)
+    api = ControlApi(build_registry(rows), WsSubscriptions())
+    responses = {"GetLatestBlock": {"body": {"x": 1}}}
+    st, resp = api.apply_scenario({"providers": {"lava-mixed-sim:1": {"responses": responses}}})
+    assert st == 400, resp
+    assert "'GetLatestBlock'" in resp["error"]
+
+
+@pytest.mark.parametrize("http_status", [302, 100, "503", True])
+def test_a_canned_http_status_outside_2xx_and_the_error_statuses_is_400(http_status):
+    """Tendermint RPC reads ``http_status`` as the status of a canned reply, as it
+    reads ``status``, so the two keys get the same rule. Without it a text "503"
+    fell back to HTTP 200 and changed no reply, and a 302 was sent."""
+    api = _api()
+    responses = {"status": {"http_status": http_status, "body": {"busy": True}}}
+    st, resp = api.apply_scenario({"providers": {"lava-sim-tm:1": {"responses": responses}}})
+    assert st == 400, resp
+    assert "http_status" in resp["error"]
+
+
+def test_a_canned_http_status_of_503_is_accepted():
+    """The control for the test above: an error status is a legal value of either key."""
+    api = _api()
+    responses = {"status": {"http_status": 503, "body": {"busy": True}}}
+    st, resp = api.apply_scenario({"providers": {"lava-sim-tm:1": {"responses": responses}}})
+    assert st == 200, resp
+
+
+def test_a_canned_body_is_accepted_when_one_endpoint_of_the_provider_is_not_grpc():
+    """Like the two corruption rules, this rule reads the endpoints of the provider
+    and no filter: a provider with a REST endpoint beside its gRPC one can serve a
+    canned body there."""
+    endpoints = (("grpc", "http2", 40001), ("rest", "http", 40002))
+    rows = (("lava-mixed-sim", "lava", "1", "LavaMixedProvider1", False, "", endpoints),)
+    api = ControlApi(build_registry(rows), WsSubscriptions())
+    responses = [[["GET", "/cosmos/base/tendermint/v1beta1/blocks/latest"], {"http_status": 503, "body": {"x": 1}}]]
+    st, resp = api.apply_scenario({"providers": {"lava-mixed-sim:1": {"responses": responses}}})
+    assert st == 200, resp
+
+
 def test_an_invalid_proto_refusal_writes_no_provider_of_the_request():
     api = _api()
     blocks = {

@@ -12,7 +12,8 @@ the key, as on JSON-RPC. LavaChain reads its content keys in the success path:
 ``error_stub``, ``error`` and ``body``, and ``status`` or ``http_status`` for
 the HTTP status of that canned reply. So ``http_status`` has two readers: the
 flow uses it for the status of an error fault, and the chain uses it for the
-status of a canned reply.
+status of a canned reply. A reply outside 2xx reads ``error`` in the history,
+as on REST and GraphQL.
 """
 
 import json
@@ -106,3 +107,12 @@ class TendermintListener(Listener):
 
     def build_success(self, status: int, body: object) -> ServeResult:
         return ServeResult(action="respond", status=status, body=body)
+
+    def success_label(self, status: int, body: object, request: dict | None = None) -> str:
+        # A reply outside 2xx, such as a canned reply with a ``status`` or an
+        # ``http_status`` that a test staged, reads ``error``, as on REST and
+        # GraphQL. The chain wraps a canned body as the ``result``, so the body
+        # alone would read ``success``.
+        if not 200 <= status < 300:
+            return "error"
+        return super().success_label(status, body, request)
