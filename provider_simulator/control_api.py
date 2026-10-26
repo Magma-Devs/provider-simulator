@@ -392,20 +392,26 @@ def _normalise_responses(responses: object) -> object:
             err = _a_per_method_mode_the_simulator_does_not_know(method_name, cfg)
             if err:
                 raise ValueError(err)
-            # Canned {status, body} success override (JSON-RPC method entries
-            # only — REST re-tupled entries own their body+status semantics).
+            # Canned {status, body} override (entries keyed by a method name,
+            # served on JSON-RPC and GraphQL — REST re-tupled entries own their
+            # body+status semantics).
             # The body must be a JSON object, must not combine with a fault
             # mode (they describe different outcomes), and the status must be
-            # 2xx — non-2xx shapes are what mode='error' + http_status is for.
+            # 2xx or an error status from 400 to 599 — a 1xx is not a final
+            # reply, and a 3xx is neither a success nor an error.
             if isinstance(method_name, str) and "body" in cfg:
                 if not isinstance(cfg["body"], dict):
                     raise ValueError(f"per-method body override must be a dict (method={method_name!r})")
                 if "mode" in cfg:
                     raise ValueError(f"per-method body and mode are mutually exclusive (method={method_name!r})")
                 status_val = cfg.get("status", 200)
-                if not (isinstance(status_val, int) and not isinstance(status_val, bool) and 200 <= status_val <= 299):
+                if not (
+                    isinstance(status_val, int)
+                    and not isinstance(status_val, bool)
+                    and (200 <= status_val <= 299 or 400 <= status_val <= 599)
+                ):
                     raise ValueError(
-                        f"per-method body override status must be a 2xx int "
+                        f"per-method body override status must be an int from 200 to 299 or from 400 to 599 "
                         f"(method={method_name!r}), got {status_val!r}"
                     )
         return responses

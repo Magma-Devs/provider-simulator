@@ -14,9 +14,10 @@ per-provider override.
 Two JSON-RPC-only wire rules:
 - A batch body (top-level JSON array) is not supported: it answers a single
   -32600 envelope and is logged as method ``batch`` / status ``error``.
-- A per-method ``responses`` entry may pin a canned ``{status, body}`` success
-  response (2xx only, validated at /scenario time); it bypasses the fault
-  ladder and the chain.
+- A per-method ``responses`` entry may pin a canned ``{status, body}``
+  response (2xx, or an error status from 400 to 599, validated at /scenario
+  time); it bypasses the fault ladder and the chain. The history labels it
+  ``success`` inside 2xx and ``error`` outside it, whatever the body holds.
 """
 
 import json

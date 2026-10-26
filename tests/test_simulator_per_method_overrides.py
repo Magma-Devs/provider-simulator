@@ -6,7 +6,8 @@ These tests exercise the per-method override path on the simulator's
 ``rate_limit`` (and the keys those modes need) for one specific JSON-RPC
 method on a provider, while every other method on the same provider keeps
 the provider-wide config. The ``body`` + ``status`` override keys emit a
-custom 2xx response and bypass the chain entirely.
+custom response (2xx, or an error status from 400 to 599) and bypass the
+chain entirely.
 
 What they cover
 ---------------
@@ -19,7 +20,8 @@ What they cover
     6. body+status returns custom shape    — exact wire bytes, no chain
                                               involvement.
     7. status defaults to 200              — omitting ``status`` is fine.
-    8. non-2xx status is rejected          — 4xx/5xx via mode=error path.
+    8. an error status is sent as given    — 400-599, history ``error``;
+                                              1xx / 3xx are rejected.
     9. body+latency composes               — latency first, then body.
    10. body+mode mutually exclusive        — 400 from /scenario.
    11. body bypasses healthy stub          — no stub fields leak through.
@@ -400,7 +402,8 @@ class TestPerMethodBodyOverride:
 
     Extends the per-method ``responses`` dict with two optional keys:
 
-      * ``status`` — HTTP status code, must be 2xx (200-299), default 200.
+      * ``status`` — HTTP status code, 2xx (200-299) or an error status
+        (400-599), default 200.
       * ``body``   — response body dict, JSON-encoded onto the wire.
 
     When ``body`` is set on a method entry, the sim returns ``{status, body}``
@@ -470,14 +473,58 @@ class TestPerMethodBodyOverride:
         assert body == override_body, f"expected {override_body!r}, got {body!r}"
 
     @pytest.mark.timeout(10)
-    def test_body_override_rejects_non_2xx_status(self, sim):
-        """Setting ``status`` outside the 2xx band is rejected at /scenario
-        POST time with HTTP 400.
+    @pytest.mark.parametrize("error_status", [400, 503, 599])
+    def test_body_override_with_an_error_status_is_sent_as_given_and_recorded_as_error(self, sim, error_status):
+        """A body override may carry an error status, from 400 to 599. The sim
+        sends that status and the body verbatim, and the history records the
+        reply as ``error``.
 
-        The body override is for "this 200 OK response with a custom body"
-        scenarios. Non-2xx response shapes (4xx / 5xx) are already covered
-        by ``mode: "error"`` + ``http_status`` / ``error_code`` /
-        ``error_message`` — that path owns the error-envelope wire shape.
+        Why: a real node can answer an error status with a body that
+        ``mode: "error"`` cannot build, for example a 503 whose body holds
+        both ``result`` and ``error``. A router test needs that exact reply to
+        check what the router passes to its caller.
+        """
+        override_body = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": "0x10",
+            "error": {"code": -32000, "message": "node is syncing"},
+        }
+        scenario_status, scenario_body = _post(
+            _ctrl(sim, "/scenario"),
+            {
+                "providers": {
+                    "eth-sim:1": {
+                        "mode": "success",
+                        "responses": {
+                            "eth_blockNumber": {"status": error_status, "body": override_body},
+                        },
+                    }
+                }
+            },
+        )
+        assert (
+            scenario_status == 200
+        ), f"expected /scenario to accept status {error_status}, got {scenario_status}: {scenario_body!r}"
+
+        status, body = _rpc(_P1, "eth_blockNumber")
+        assert status == error_status, f"expected override status {error_status}, got {status}"
+        assert body == override_body, f"expected exact override body {override_body!r}, got {body!r}"
+
+        with urllib.request.urlopen(_ctrl(sim, "/history?pool=eth-sim&pid=1"), timeout=5) as resp:
+            entries = json.loads(resp.read())["history"]
+        rows = [(entry["method"], entry["status"]) for entry in entries]
+        expected_rows = [("eth_blockNumber", "error")]
+        assert rows == expected_rows, f"expected one eth_blockNumber row with status 'error', got {entries!r}"
+
+    @pytest.mark.timeout(10)
+    @pytest.mark.parametrize("bad_status", [199, 300, 399, 600, "503"])
+    def test_body_override_rejects_a_status_outside_2xx_and_the_error_statuses(self, sim, bad_status):
+        """A body override status that is not an int from 200 to 299 or from
+        400 to 599 is rejected at /scenario POST time with HTTP 400.
+
+        A 1xx is not a final reply, and a 3xx is neither a success nor an
+        error.
         """
         status, body = _post(
             _ctrl(sim, "/scenario"),
@@ -486,7 +533,7 @@ class TestPerMethodBodyOverride:
                     "eth-sim:1": {
                         "responses": {
                             "eth_blockNumber": {
-                                "status": 500,
+                                "status": bad_status,
                                 "body": {"oops": True},
                             },
                         },
@@ -494,10 +541,9 @@ class TestPerMethodBodyOverride:
                 }
             },
         )
-        assert status == 400, f"expected 400 for non-2xx body override status, got {status}"
+        assert status == 400, f"expected 400 for body override status {bad_status!r}, got {status}: {body!r}"
         assert "error" in body, f"expected error payload, got {body!r}"
-        err_msg = body["error"].lower()
-        assert "status" in err_msg or "2xx" in err_msg, f"error should mention status / 2xx, got {body['error']!r}"
+        assert "status" in body["error"].lower(), f"error should mention the status, got {body['error']!r}"
 
     @pytest.mark.timeout(10)
     def test_body_override_with_latency_applies_latency_first(self, sim):
@@ -602,11 +648,11 @@ class TestPerMethodBodyOverride:
 
     @pytest.mark.timeout(10)
     def test_body_override_history_status_is_success_regardless_of_body_shape(self, sim):
-        """Body-override responses always record status="success" in /history,
+        """A 2xx body override always records status="success" in /history,
         regardless of body content.
 
-        The body override is validated 2xx-only at /scenario time, so by
-        HTTP semantics the request always succeeds. The body itself is
+        The status of a body override decides its history label: a 2xx is
+        an HTTP success. The body itself is
         arbitrary test-supplied content — a body of
         {"success": false, "error": "rate limit"} is still an HTTP-200
         success from the simulator's perspective. Inferring history status
