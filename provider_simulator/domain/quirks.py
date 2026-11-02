@@ -3,8 +3,9 @@
 Only a few chains need extra settings. Ethereum can model a provider whose head
 is fresh but whose log index lags. Solana models the slot vs
 lastValidBlockHeight gap and per-provider slot offsets. Sui models the chain id,
-the delay of its GraphQL index, and a provider that lies about a digest. Every
-other chain uses the empty base. Keeping these typed and separate means a Solana-only knob sent
+the delay of its GraphQL index, and a provider that lies about a digest. Sui
+testnet has the same settings, with the chain id of the testnet as the default.
+Every other chain uses the empty base. Keeping these typed and separate means a Solana-only knob sent
 to a Bitcoin provider is rejected, not silently dropped.
 
 quirks_for(chain) is the ONE authority for both "which chains exist" and
@@ -19,7 +20,7 @@ from types import MappingProxyType
 
 from provider_simulator.domain.introspective_config import IntrospectiveConfig
 from stubs_solana import SOLANA_DEFAULT_SLOT_BLOCK_GAP
-from stubs_sui_graphql import SUI_CHAIN_ID
+from stubs_sui_graphql import SUI_CHAIN_ID, SUI_TESTNET_CHAIN_ID
 
 
 @dataclass
@@ -68,6 +69,19 @@ class SuiQuirks(Quirks):
                 raise ValueError(f"transaction_index_lag_ms must be a non-negative integer, got {lag!r}")
 
 
+@dataclass
+class SuiTestnetQuirks(SuiQuirks):
+    """Settings of a simulated Sui testnet GraphQL provider.
+
+    The settings of ``SuiQuirks``. Only the default of ``chain_id`` differs: a provider
+    of a testnet pool answers the chain identifier of Sui testnet. A reset of the pool
+    writes the defaults back, so the provider keeps answering the testnet identifier,
+    and a router configured for Sui testnet passes its chain-id check at every start.
+    """
+
+    chain_id: str = SUI_TESTNET_CHAIN_ID
+
+
 _QUIRKS_BY_CHAIN: dict[str, type[Quirks]] = {
     "eth": EthQuirks,
     "btc": Quirks,
@@ -75,6 +89,7 @@ _QUIRKS_BY_CHAIN: dict[str, type[Quirks]] = {
     "solana": SolanaQuirks,
     "lava": Quirks,
     "sui": SuiQuirks,
+    "suit": SuiTestnetQuirks,
 }
 
 # Read-only view: callers can't mutate the known-chain set (which drives

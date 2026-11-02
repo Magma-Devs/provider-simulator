@@ -33,7 +33,7 @@ def test_every_provider_in_the_topology_is_served():
     """One entry per provider, keyed the way stats and scenario already key
     theirs: the pool name, a colon, then the pool slot."""
     providers = _providers()
-    assert len(providers) == 174, sorted(providers)
+    assert len(providers) == 177, sorted(providers)
     assert "eth-sim:1" in providers
     assert "lava-sim-tm:6" in providers
 
@@ -120,10 +120,10 @@ def test_a_provider_with_no_label_reports_an_empty_string():
     # eth-failover-archiveless-sim (4 each) add 8 more, for that reason again.
     # sui-graphql-sim (3) and sui-failover-graphql-sim (6) add 9 more unlabelled: neither
     # router carries a cross-validation policy. sui-cache-graphql-sim (3) adds 3 more, for
-    # that reason again.
+    # that reason again, and so does sui-testnet-graphql-sim (3).
     # Update both numbers together when a router gains or loses a label.
     assert len(labelled) == 39, f"expected 39 labelled, got {len(labelled)}"
-    assert len(unlabelled) == 135, f"expected 135 unlabelled, got {len(unlabelled)}"
+    assert len(unlabelled) == 138, f"expected 138 unlabelled, got {len(unlabelled)}"
 
 
 # ── Filters ───────────────────────────────────────────────────────────────────

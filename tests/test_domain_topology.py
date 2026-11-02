@@ -68,6 +68,8 @@ EXPECTED_POOLS = {
     "sui-failover-graphql-sim",
     "sui-cache-graphql-sim",
     "sui-cv-graphql-sim",
+    # The pool of the Sui testnet GraphQL router, on the chain suit.
+    "sui-testnet-graphql-sim",
 }
 
 
@@ -695,6 +697,10 @@ AGREED_NAMES = {
     ("sui-cv-graphql-sim", "4"): "SuiCvGraphqlPrimaryProvider4",
     ("sui-cv-graphql-sim", "5"): "SuiCvGraphqlPrimaryProvider5",
     ("sui-cv-graphql-sim", "6"): "SuiCvGraphqlPrimaryProvider6",
+    # The Sui testnet router's pool has three providers that nothing tells apart, so Primary.
+    ("sui-testnet-graphql-sim", "1"): "SuiTestnetGraphqlPrimaryProvider1",
+    ("sui-testnet-graphql-sim", "2"): "SuiTestnetGraphqlPrimaryProvider2",
+    ("sui-testnet-graphql-sim", "3"): "SuiTestnetGraphqlPrimaryProvider3",
 }
 
 # The pools that HAVE a backup tier, and which of their slots it is. The router

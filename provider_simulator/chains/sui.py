@@ -34,7 +34,7 @@ import time
 
 from provider_simulator.chains.base import AdvancingHead, Chain
 from provider_simulator.chains.sui_digest import base58_encode, transaction_digest
-from provider_simulator.domain.quirks import SuiQuirks
+from provider_simulator.domain.quirks import SuiQuirks, SuiTestnetQuirks
 from provider_simulator.graphql_document import GraphQLRequest, RootField, project
 from stubs_sui_graphql import SUI_BASE_CHECKPOINT, SUI_EPOCH_ID, SUI_ERROR_STUBS, SUI_MAX_CHECKPOINT
 
@@ -189,3 +189,18 @@ class SuiChain(Chain):
         request.setdefault("executed_now", []).append(digest)
         effects = {"effects": {"status": "SUCCESS", "digest": digest, "transaction": {"digest": digest}}}
         return project(effects, root.selection, graphql), None
+
+
+class SuiTestnetChain(SuiChain):
+    """Sui testnet: the replies of the Sui chain, under the chain name ``suit``.
+
+    The Sui testnet spec imports the root fields of Sui mainnet and changes only the
+    chain identifier that a router checks, so the replies are the ones of ``SuiChain``.
+    Two things are the testnet's own. Its settings class, ``SuiTestnetQuirks``, has
+    the testnet chain identifier as its default. And it has a head of its own,
+    because ``SuiChain.__init__`` makes one for each chain object, so moving the head
+    of Sui mainnet does not move the head of Sui testnet.
+    """
+
+    name = "suit"
+    quirks_type = SuiTestnetQuirks
