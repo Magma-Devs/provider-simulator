@@ -85,7 +85,7 @@ cache tier before it picks any provider, primary tier and backup tier alike,
 and without a backup tier a test cannot tell "never reached the backup" from
 "there was no backup to reach".
 sui-graphql-sim, sui-failover-graphql-sim, sui-cache-graphql-sim and sui-cv-graphql-sim
-are the four pools of the Sui GraphQL routers, on the ``graphql`` interface over http.
+are the four pools of the Sui mainnet GraphQL routers (``graphql`` over http).
 They are k3d-only like the pools above: their routers are declared in routers.yml in
 smart_router_automation, and the backup tier of the failover router comes from
 config/values_sim.yml there. The router of sui-cache-graphql-sim names a key prefix of

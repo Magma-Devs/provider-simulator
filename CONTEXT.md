@@ -189,8 +189,9 @@ What carries the interface: `http`, `ws` or `http2`.
 _Avoid_: scheme, connection type
 
 **Chain**:
-The blockchain a pool imitates: `eth`, `btc`, `ln`, `solana`, `lava` or `sui`. One pool
-serves exactly one chain.
+The blockchain a pool imitates: `eth`, `btc`, `ln`, `solana`, `lava`, `sui` or `suit`.
+`suit` is Sui testnet. A testnet is a chain of its own here, because it answers its own
+chain id and keeps its own head. One pool serves exactly one chain.
 _Avoid_: network, chain id, chain family
 
 ## The table and the live objects
