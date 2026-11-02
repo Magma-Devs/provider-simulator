@@ -41,7 +41,7 @@ import json
 
 import pytest
 
-from provider_simulator.chains import CHAINS, chain_for
+from provider_simulator.chains import CHAINS, SuiChain, chain_for
 from provider_simulator.chains.base import Chain
 from provider_simulator.domain.quirks import known_chains, quirks_for
 from provider_simulator.domain.scenario import ScenarioConfig
@@ -100,8 +100,10 @@ PER_HEIGHT_HASH_PROBES: dict[str, tuple[tuple[str, str, object, bool], ...]] = {
     # at all — ``getinfo`` carries an identity pubkey, which is not one.
     "ln": (),
     # Sui answers a block lookup in GraphQL. The probe names a query text in the
-    # place of a method name, and its result is read under ``data``.
+    # place of a method name, and its result is read under ``data``. Sui testnet
+    # answers with the code of Sui mainnet, so it takes the same probe.
     "sui": (("graphql", "{ checkpoint(sequenceNumber: 700000) { digest } }", None, False),),
+    "suit": (("graphql", "{ checkpoint(sequenceNumber: 700000) { digest } }", None, False),),
 }
 
 #: How two providers of this chain are made to sit at different heads. Each
@@ -113,6 +115,7 @@ SECOND_PROVIDER_IS_BEHIND: dict[str, tuple[dict, dict]] = {
     "ln": ({}, {"blocks_behind": LAG}),
     "solana": ({}, {}),  # solana lags through quirks, below
     "sui": ({}, {"blocks_behind": LAG}),
+    "suit": ({}, {"blocks_behind": LAG}),
 }
 
 SECOND_PROVIDER_QUIRKS: dict[str, dict] = {
@@ -135,6 +138,7 @@ LAG_IS_VISIBLE_AT: dict[str, tuple[str, str, object]] = {
     "eth": ("", "eth_blockNumber", []),
     "lava": ("tendermintrpc", "status", {}),
     "sui": ("graphql", '{ serviceConfig { availableRange(type: "Checkpoint") { last { sequenceNumber } } } }', None),
+    "suit": ("graphql", '{ serviceConfig { availableRange(type: "Checkpoint") { last { sequenceNumber } } } }', None),
 }
 
 
@@ -188,18 +192,18 @@ def hashes_in(result: object, result_is_itself_a_hash: bool) -> dict[str, str]:
 
 def probe_request(chain_name: str, probe: tuple) -> dict:
     """The request that one probe sends to a chain. A probe is
-    ``(interface, method, params, ...)``. Every chain but sui is asked with a
-    JSON-RPC-shaped request. Sui is asked in GraphQL, and its probe holds the
-    query text where the others hold the method."""
+    ``(interface, method, params, ...)``. A chain that is not a Sui chain is asked
+    with a JSON-RPC-shaped request. A Sui chain, mainnet or testnet, is asked in
+    GraphQL, and its probe holds the query text where the others hold the method."""
     _interface, method, params = probe[:3]
-    if chain_name == "sui":
+    if isinstance(chain_for(chain_name), SuiChain):
         return {"graphql": parse_graphql_request(json.dumps({"query": method}).encode())}
     return {"id": 1, "method": method, "params": params}
 
 
 def reply_of(chain_name: str, body: dict) -> object:
-    """The part of a reply that holds the answer: ``result``, or ``data`` for sui."""
-    return body.get("data") if chain_name == "sui" else body.get("result")
+    """The part of a reply that holds the answer: ``result``, or ``data`` for a Sui chain."""
+    return body.get("data") if isinstance(chain_for(chain_name), SuiChain) else body.get("result")
 
 
 def ask(chain: Chain, chain_name: str, probe: tuple, scenario_kw: dict, quirks_kw: dict) -> dict[str, str]:
@@ -341,9 +345,9 @@ def test_the_probes_actually_find_hashes() -> None:
     # compare the probes with themselves. btc 1 + 2 + 1; eth 2 + 2; lava 14,
     # which is every hash in a Tendermint block header (see ``hashes_in`` for
     # why that chain contributes so many more than the others); sui 1, the
-    # ``digest`` of one checkpoint.
-    assert per_chain == {"btc": 4, "eth": 4, "lava": 14, "solana": 0, "ln": 0, "sui": 1}, per_chain
-    assert sum(per_chain.values()) == 23
+    # ``digest`` of one checkpoint; suit 1, the same digest on Sui testnet.
+    assert per_chain == {"btc": 4, "eth": 4, "lava": 14, "solana": 0, "ln": 0, "sui": 1, "suit": 1}, per_chain
+    assert sum(per_chain.values()) == 24
 
 
 def test_the_guard_notices_a_hash_that_changes_with_the_provider() -> None:
@@ -391,7 +395,7 @@ def test_the_guard_notices_a_hash_that_changes_with_the_provider() -> None:
 #: How many hash fields the control below must see disagree, per chain. The same
 #: numbers ``test_the_probes_actually_find_hashes`` records, for the same reason:
 #: derived from the call they check, they would compare the walk with itself.
-DISAGREEMENTS_THE_CONTROL_MUST_SEE = {"btc": 4, "eth": 4, "lava": 14, "sui": 1}
+DISAGREEMENTS_THE_CONTROL_MUST_SEE = {"btc": 4, "eth": 4, "lava": 14, "sui": 1, "suit": 1}
 
 
 @pytest.mark.parametrize("chain_name", sorted(DISAGREEMENTS_THE_CONTROL_MUST_SEE))

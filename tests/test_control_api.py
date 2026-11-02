@@ -12,9 +12,12 @@ from provider_simulator.chains import CHAINS
 from provider_simulator.control_api import ControlApi
 from provider_simulator.domain.call_log import CallLog
 from provider_simulator.domain.registry import build_registry
+from provider_simulator.domain.scenario import ScenarioConfig
 from provider_simulator.fault_policy import targets
+from provider_simulator.graphql_document import parse_graphql_request
 from provider_simulator.listeners import JsonRpcListener, RawRequest, TendermintListener
 from provider_simulator.listeners.ws import JsonRpcWsListener, WsSubscriptions
+from stubs_sui_graphql import SUI_CHAIN_ID, SUI_TESTNET_CHAIN_ID
 
 
 def _api():
@@ -294,6 +297,55 @@ def test_reset_of_another_pool_leaves_this_chains_head_where_it_was():
         assert st == 200
         assert resp["chains"] == ["eth"]
         assert CHAINS["eth"].head.current() == base
+    finally:
+        api.reset()  # heads are a shared singleton — don't leak into other tests
+
+
+def _chain_identifier_of(registry, pool: str, pid: str) -> str:
+    """The answer of one provider to ``{ chainIdentifier }``, built by its chain from its own quirks."""
+    provider = registry.provider(pool, pid)
+    chain = CHAINS[registry.pools[pool].chain]
+    request = {"graphql": parse_graphql_request(json.dumps({"query": "{ chainIdentifier }"}).encode())}
+    status, body = chain.build_success(request, ScenarioConfig().snapshot(), provider.quirks.snapshot())
+    assert status == 200, body
+    return body["data"]["chainIdentifier"]
+
+
+def test_the_testnet_pool_answers_the_testnet_identifier_and_a_pool_reset_restores_it():
+    """The router of the Sui testnet spec refuses a provider that answers another chain's identifier.
+    So a provider of sui-testnet-graphql-sim answers the identifier of Sui testnet, and a reset of its
+    pool puts that identifier back after a test changed it. A chain suit registered with the mainnet
+    quirks would answer the mainnet identifier, and the router would refuse all three providers."""
+    registry = build_registry()
+    api = ControlApi(registry, WsSubscriptions())
+    assert _chain_identifier_of(registry, "sui-testnet-graphql-sim", "1") == SUI_TESTNET_CHAIN_ID
+    assert _chain_identifier_of(registry, "sui-graphql-sim", "1") == SUI_CHAIN_ID
+    st, _ = api.apply_scenario({"providers": {"sui-testnet-graphql-sim:1": {"chain_id": SUI_CHAIN_ID}}})
+    assert st == 200
+    assert _chain_identifier_of(registry, "sui-testnet-graphql-sim", "1") == SUI_CHAIN_ID
+    st, _ = api.reset("sui-testnet-graphql-sim")
+    assert st == 200
+    assert _chain_identifier_of(registry, "sui-testnet-graphql-sim", "1") == SUI_TESTNET_CHAIN_ID
+
+
+def test_moving_the_testnet_head_leaves_the_mainnet_head_where_it_was():
+    """sui and suit keep separate heads. A test that moves the head of the testnet pool does not move
+    the head that the mainnet routers are measured against, and a reset of one pool rewinds its own
+    chain only."""
+    api = _api()
+    try:
+        sui, suit = CHAINS["sui"].head.current(), CHAINS["suit"].head.current()
+        api.advance({"chain": "suit", "blocks": 5})
+        assert CHAINS["suit"].head.current() == suit + 5
+        assert CHAINS["sui"].head.current() == sui
+        st, resp = api.reset("sui-graphql-sim")
+        assert st == 200
+        assert resp["chains"] == ["sui"]
+        assert CHAINS["suit"].head.current() == suit + 5
+        st, resp = api.reset("sui-testnet-graphql-sim")
+        assert st == 200
+        assert resp["chains"] == ["suit"]
+        assert CHAINS["suit"].head.current() == suit
     finally:
         api.reset()  # heads are a shared singleton — don't leak into other tests
 

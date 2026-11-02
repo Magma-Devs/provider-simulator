@@ -47,6 +47,7 @@ _SUCCESS_REQUEST = {
     ("lava", "rest"): ("GET", _BLOCKS_LATEST, None),
     ("lava", "tendermintrpc"): ("POST", "", {"jsonrpc": "2.0", "id": 1, "method": "status"}),
     ("sui", "graphql"): ("POST", "", {"query": "{ chainIdentifier }"}),
+    ("suit", "graphql"): ("POST", "", {"query": "{ chainIdentifier }"}),
 }
 
 _HTTP_INTERFACES = ["jsonrpc", "rest", "tendermintrpc", "graphql"]

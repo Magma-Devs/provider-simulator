@@ -21,7 +21,7 @@ flowchart TD
     R["smart-router (SUT)"] -->|"provider ports 18545-18585"| LIS["Listeners (daemon threads)"]
     CTRL -->|"writes scenario"| REG["Registry: pool:pid -> Provider"]
     LIS -->|"reads snapshot"| REG
-    LIS --> CH["Chains: eth / btc / ln / solana / lava / sui"]
+    LIS --> CH["Chains: eth / btc / ln / solana / lava / sui / suit"]
     LIS --> FP["fault_policy (one decision function)"]
 ```
 

@@ -678,6 +678,16 @@ spec:
             - name: spare-18728
               containerPort: 18728
               protocol: TCP
+            # 18729-18731: the providers of sui-testnet-graphql-sim.
+            - name: spare-18729
+              containerPort: 18729
+              protocol: TCP
+            - name: spare-18730
+              containerPort: 18730
+              protocol: TCP
+            - name: spare-18731
+              containerPort: 18731
+              protocol: TCP
           resources:
             requests:
               cpu: "100m"

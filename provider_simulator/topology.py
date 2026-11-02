@@ -85,7 +85,7 @@ cache tier before it picks any provider, primary tier and backup tier alike,
 and without a backup tier a test cannot tell "never reached the backup" from
 "there was no backup to reach".
 sui-graphql-sim, sui-failover-graphql-sim, sui-cache-graphql-sim and sui-cv-graphql-sim
-are the four pools of the Sui GraphQL routers, on the ``graphql`` interface over http.
+are the four pools of the Sui mainnet GraphQL routers (``graphql`` over http).
 They are k3d-only like the pools above: their routers are declared in routers.yml in
 smart_router_automation, and the backup tier of the failover router comes from
 config/values_sim.yml there. The router of sui-cache-graphql-sim names a key prefix of
@@ -93,6 +93,9 @@ its own on the shared router cache, so no other router reads its entries. The ro
 sui-cv-graphql-sim carries cross-validation policies. Its six providers sit in three
 groups of two, the shape of eth-cv-sim, so a policy that asks for a per-group quorum
 across three groups can be added without a new pool.
+sui-testnet-graphql-sim is the pool of the Sui testnet GraphQL router, k3d-only too. Its
+providers are on the chain ``suit``, so they answer the chain identifier of Sui testnet,
+and a reset of the pool keeps that identifier.
 The listener ports live here and nowhere else. constants.py holds no ports, so
 there is nothing to cross-check them against; the sentence that used to claim
 such a test described a check removed with those duplicate port tables.
@@ -1309,6 +1312,36 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
         False,
         "voting-group-3",
         (("graphql", "http", 18728),),
+    ),
+    # sui-testnet-graphql-sim: ports 18729-18731. The providers of the Sui testnet GraphQL
+    # router: three primaries that nothing tells apart, and no backup tier. They are on the
+    # chain suit, so they answer the chain identifier of Sui testnet.
+    (
+        "sui-testnet-graphql-sim",
+        "suit",
+        "1",
+        "SuiTestnetGraphqlPrimaryProvider1",
+        False,
+        "",
+        (("graphql", "http", 18729),),
+    ),
+    (
+        "sui-testnet-graphql-sim",
+        "suit",
+        "2",
+        "SuiTestnetGraphqlPrimaryProvider2",
+        False,
+        "",
+        (("graphql", "http", 18730),),
+    ),
+    (
+        "sui-testnet-graphql-sim",
+        "suit",
+        "3",
+        "SuiTestnetGraphqlPrimaryProvider3",
+        False,
+        "",
+        (("graphql", "http", 18731),),
     ),
 )
 

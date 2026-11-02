@@ -49,7 +49,7 @@ def test_quirks_for_maps_every_chain():
 def test_quirks_for_unknown_chain_lists_the_valid_ones():
     with pytest.raises(ValueError, match="dogecoin"):
         quirks_for("dogecoin")
-    assert known_chains() == ["btc", "eth", "lava", "ln", "solana", "sui"]
+    assert known_chains() == ["btc", "eth", "lava", "ln", "solana", "sui", "suit"]
 
 
 def test_sui_quirks_defaults_are_the_mainnet_id_no_lag_and_no_salt():

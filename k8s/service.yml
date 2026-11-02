@@ -855,3 +855,16 @@ spec:
       port: 18728
       targetPort: 18728
       protocol: TCP
+    # 18729-18731: the providers of sui-testnet-graphql-sim.
+    - name: spare-18729
+      port: 18729
+      targetPort: 18729
+      protocol: TCP
+    - name: spare-18730
+      port: 18730
+      targetPort: 18730
+      protocol: TCP
+    - name: spare-18731
+      port: 18731
+      targetPort: 18731
+      protocol: TCP

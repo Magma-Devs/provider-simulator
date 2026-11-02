@@ -18,7 +18,7 @@ from provider_simulator.chains.eth import EthChain
 from provider_simulator.chains.lava import LavaChain
 from provider_simulator.chains.ln import LnChain
 from provider_simulator.chains.solana import SolanaChain
-from provider_simulator.chains.sui import SuiChain
+from provider_simulator.chains.sui import SuiChain, SuiTestnetChain
 
 _BTC = BtcChain()
 
@@ -32,6 +32,9 @@ CHAINS: dict[str, Chain] = {
     "solana": SolanaChain(),
     "lava": LavaChain(),
     "sui": SuiChain(),
+    # Sui testnet answers with the code of Sui mainnet. It is a chain of its own
+    # for its default chain identifier and for a head of its own.
+    "suit": SuiTestnetChain(),
 }
 
 
@@ -51,6 +54,7 @@ __all__ = [
     "LnChain",
     "SolanaChain",
     "SuiChain",
+    "SuiTestnetChain",
     "LavaChain",
     "CHAINS",
     "chain_for",

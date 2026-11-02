@@ -5,10 +5,11 @@ Companion to ``stubs_btc.py``. The reply of each root field is built by
 beside the code: the chain ids, the first checkpoint, the epoch, and the error
 replies that a test can ask for by name.
 
-The chain id and the epoch are what the public Sui server answered when they
-were measured. The default chain id is the id of Sui mainnet, because the
-routers of the simulator imitate mainnet. A test sets another id through the
-``chain_id`` setting of the provider.
+The chain id and the epoch are what the public Sui servers answered when they
+were measured. The default chain id of the ``sui`` chain is the id of Sui
+mainnet, and the default of the ``suit`` chain is the id of Sui testnet, so a
+router of either spec accepts the providers of its pool. A test sets another id
+through the ``chain_id`` setting of the provider.
 """
 
 from provider_simulator.graphql_document import graphql_error
