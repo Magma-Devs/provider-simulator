@@ -120,7 +120,7 @@ Pick one `mode`; combine it with the orthogonal fields.
 | `pause_ms` | int | How long the hold lasts. Measured complete at 240s; the handler's 30s socket timeout governs the request READ, not the response write |
 | `fail_first_n` / `then_mode` | int / mode | Fail the first N calls, then switch to `then_mode` |
 | `transports` | list of `http` / `http2` / `ws` | Scope the block to specific endpoints (omit = all) |
-| `reply_headers` | object of header name → text | Headers that each reply of a targeted `http` endpoint carries: a success, a fault, the 503 of `down` and the headers of a reply that `drop_connection` cuts. A chosen header replaces the simulator's own header of that name, such as `Date`. `Connection`, `Content-Length`, `Content-Type` and `Transfer-Encoding` are refused. HTTP transports only |
+| `reply_headers` | object of header name → text | Headers that each reply with a status line carries on a targeted endpoint. On `http`: a success, a fault, the 503 of `down` and the headers of a reply that `drop_connection` cuts. On `ws`: the answer to the upgrade, the 101 reply or a refusal; a frame carries none. A chosen header replaces the simulator's own header of that name, such as `Date`. `Connection`, `Content-Length`, `Content-Type`, `Sec-WebSocket-Accept`, `Transfer-Encoding` and `Upgrade` are refused. Not on gRPC |
 
 ### `port_closed`: a provider whose port is really closed
 

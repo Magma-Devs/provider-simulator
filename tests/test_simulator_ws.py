@@ -1907,6 +1907,80 @@ class TestTheUpgradeRequest:
         assert third == _HANDSHAKE_OF_PROVIDER_1
         assert [_facts(row) for row in _rows(sim)] == [("ws_upgrade", "rate_limit", 0, None)] * 2
 
+    # ── the chosen reply headers on the answer to an upgrade ─────────────────
+
+    def test_a_refused_upgrade_carries_the_chosen_headers(self, sim):
+        """A rate-limited upgrade answers 429, and its refusal carries the chosen
+        headers, such as the Retry-After that a router reads on a refused dial."""
+        _set_scenario(sim, {"mode": "rate_limit", "transports": ["ws"], "reply_headers": {"Retry-After": "7"}})
+
+        sock = _request_upgrade()
+        try:
+            raw = _read_until_the_close(sock)
+        finally:
+            sock.close()
+
+        head, _, body = raw.partition(b"\r\n\r\n")
+        assert head.startswith(b"HTTP/1.0 429 ") or head.startswith(b"HTTP/1.1 429 "), raw
+        assert b"\r\nRetry-After: 7\r\n" in head + b"\r\n", raw
+        assert json.loads(body) == {"error": "rate limited"}
+
+    def test_the_101_reply_carries_the_chosen_headers_after_the_provider_address(self, sim):
+        _set_scenario(sim, {"transports": ["ws"], "reply_headers": {"Retry-After": "7"}})
+
+        sock = _request_upgrade()
+        try:
+            head = _read_the_handshake(sock)
+        finally:
+            sock.close()
+
+        assert head == _HANDSHAKE_OF_PROVIDER_1[: -len(b"\r\n")] + b"Retry-After: 7\r\n\r\n"
+
+    def test_a_chosen_provider_address_replaces_the_one_of_the_simulator_on_the_101_reply(self, sim):
+        """As on an HTTP reply, a chosen header replaces the simulator's header of the same name."""
+        _set_scenario(sim, {"transports": ["ws"], "reply_headers": {"lava-provider-address": "chosen"}})
+
+        sock = _request_upgrade()
+        try:
+            head = _read_the_handshake(sock)
+        finally:
+            sock.close()
+
+        assert head == _HANDSHAKE_OF_PROVIDER_1.replace(
+            b"Lava-Provider-Address: sim-provider-eth-sim:1", b"lava-provider-address: chosen"
+        )
+
+    def test_the_101_reply_of_a_drop_after_the_headers_carries_the_chosen_headers(self, sim):
+        _set_scenario(
+            sim,
+            {
+                "mode": "drop_connection",
+                "drop_at": "after_headers",
+                "transports": ["ws"],
+                "reply_headers": {"Retry-After": "7"},
+            },
+        )
+
+        sock = _request_upgrade()
+        try:
+            received = _read_until_the_close(sock)
+        finally:
+            sock.close()
+
+        assert received == _HANDSHAKE_OF_PROVIDER_1[: -len(b"\r\n")] + b"Retry-After: 7\r\n\r\n"
+
+    def test_a_block_whose_filter_leaves_out_the_ws_endpoint_adds_nothing_to_the_upgrade(self, sim):
+        """The control: the headers reach only the endpoints that the block targets."""
+        _set_scenario(sim, {"transports": ["http"], "reply_headers": {"Retry-After": "7"}})
+
+        sock = _request_upgrade()
+        try:
+            head = _read_the_handshake(sock)
+        finally:
+            sock.close()
+
+        assert head == _HANDSHAKE_OF_PROVIDER_1
+
 
 class TestSubscribeAndUnsubscribeFrames:
     """A subscribe frame and an unsubscribe frame.

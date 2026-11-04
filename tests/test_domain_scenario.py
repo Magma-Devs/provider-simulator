@@ -71,6 +71,8 @@ def test_reply_headers_default_to_none_and_take_text_headers_and_an_empty_object
         pytest.param({"content-type": "text/html"}, "writes it itself", id="content-type"),
         pytest.param({"Transfer-Encoding": "chunked"}, "writes it itself", id="transfer-encoding"),
         pytest.param({"Connection": "close"}, "writes it itself", id="connection"),
+        pytest.param({"Upgrade": "h2c"}, "writes it itself", id="upgrade"),
+        pytest.param({"Sec-WebSocket-Accept": "x"}, "writes it itself", id="sec-websocket-accept"),
     ],
 )
 def test_reply_headers_that_could_not_be_sent_as_written_are_rejected(headers, words):
@@ -82,13 +84,14 @@ def test_reply_headers_that_could_not_be_sent_as_written_are_rejected(headers, w
     assert s.snapshot()["reply_headers"] is None
 
 
-def test_reply_headers_with_a_transports_filter_without_http_are_rejected():
+def test_reply_headers_with_a_transports_filter_of_grpc_only_are_rejected():
     s = ScenarioConfig()
-    with pytest.raises(ValueError, match="HTTP adapter"):
-        s.update({"reply_headers": {"Retry-After": "5"}, "transports": ["ws"]})
-    # The positive control: a filter that holds http takes the same headers.
-    s.update({"reply_headers": {"Retry-After": "5"}, "transports": ["http", "ws"]})
-    assert s.snapshot()["reply_headers"] == {"Retry-After": "5"}
+    with pytest.raises(ValueError, match="gRPC wire"):
+        s.update({"reply_headers": {"Retry-After": "5"}, "transports": ["http2"]})
+    # The positive controls: the HTTP adapter and the WebSocket adapter write them.
+    for transports in (["http"], ["ws"], ["http2", "ws"]):
+        s.update({"reply_headers": {"Retry-After": "5"}, "transports": transports})
+        assert s.snapshot()["transports"] == transports
 
 
 def test_reset_clears_the_reply_headers():

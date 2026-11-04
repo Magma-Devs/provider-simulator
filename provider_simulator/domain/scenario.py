@@ -30,9 +30,10 @@ When both are set they AND together: an endpoint must match the transport list
 AND the port list to be targeted.
 
 One field changes no fault and no body: ``reply_headers`` adds chosen headers to
-each reply that the provider writes on a targeted ``http`` endpoint, such as a
-``Retry-After`` on a 429. The HTTP adapter writes them, so a block that reaches
-no ``http`` endpoint is refused.
+each reply that the provider writes with a status line on a targeted ``http`` or
+``ws`` endpoint, such as a ``Retry-After`` on a 429. The HTTP adapter and the
+WebSocket adapter write them, and the gRPC adapter writes none, so a block that
+reaches no ``http`` and no ``ws`` endpoint is refused.
 """
 
 import string
@@ -99,17 +100,27 @@ class ScenarioConfig(IntrospectiveConfig):
     # Address filter, ANDed with transports. The field that makes a provider
     # serving one interface and one transport at two ports separable at all.
     ports: list[int] | None = None  # endpoint filter; None = all endpoints
-    # Headers that the provider adds to each reply it writes on a targeted
-    # ``http`` endpoint, as {name: value}: a success, a fault, the bodiless 503 of
-    # ``down`` and the headers of a reply that ``drop_connection`` cuts. None or
-    # {} means none. A chosen header replaces the header of the same name that the
+    # Headers that the provider adds to each reply it writes with a status line on
+    # a targeted endpoint, as {name: value}. On an ``http`` endpoint: a success, a
+    # fault, the bodiless 503 of ``down`` and the headers of a reply that
+    # ``drop_connection`` cuts. On a ``ws`` endpoint: the answer to the upgrade
+    # request, the 101 reply or a refusal; a frame carries none. None or {} means
+    # none. A chosen header replaces the header of the same name that the
     # simulator writes itself, such as ``Date``. A ``hang`` writes no reply, and
-    # the gRPC and WebSocket adapters write none of these headers.
+    # the gRPC adapter writes none of these headers.
     reply_headers: dict[str, str] | None = None
 
-    # The headers that frame a reply, and the Content-Type that names the provider.
-    # A chosen value would break the reply or the name, so it is refused.
-    _HEADERS_THE_SIMULATOR_OWNS = ("connection", "content-length", "content-type", "transfer-encoding")
+    # The headers that frame a reply or the WebSocket handshake, and the
+    # Content-Type that names the provider. A chosen value would break the reply,
+    # the handshake or the name, so it is refused.
+    _HEADERS_THE_SIMULATOR_OWNS = (
+        "connection",
+        "content-length",
+        "content-type",
+        "sec-websocket-accept",
+        "transfer-encoding",
+        "upgrade",
+    )
 
     # Modes that answer, or refuse to answer, before the write path a pause acts
     # on is ever reached. ``down`` returns a bodiless 503 pre-parse, ``hang``
@@ -138,9 +149,10 @@ class ScenarioConfig(IntrospectiveConfig):
         header, so the pair is refused. ``_HEADERS_THE_SIMULATOR_OWNS`` are refused
         too.
 
-        Like a pause, the headers are written by the HTTP adapter, which serves the
-        'http' transport. So a ``transports`` filter without 'http' is refused here.
-        A ``ports`` filter is checked by the control API, which knows the endpoints.
+        The HTTP adapter ('http') and the WebSocket adapter ('ws') write the
+        headers, and the gRPC adapter ('http2') writes none. So a ``transports``
+        filter with neither 'http' nor 'ws' is refused here. A ``ports`` filter is
+        checked by the control API, which knows the endpoints.
         """
         if "reply_headers" not in cfg or cfg["reply_headers"] is None:
             return
@@ -165,7 +177,8 @@ class ScenarioConfig(IntrospectiveConfig):
             if lowered in self._HEADERS_THE_SIMULATOR_OWNS:
                 raise ValueError(
                     f"reply_headers cannot set {name!r}: the simulator writes it itself. Connection, "
-                    "Content-Length and Transfer-Encoding frame the reply, and Content-Type names the provider"
+                    "Content-Length and Transfer-Encoding frame the reply, Upgrade and Sec-WebSocket-Accept "
+                    "frame the WebSocket handshake, and Content-Type names the provider"
                 )
             if lowered in seen:
                 raise ValueError(
@@ -175,10 +188,10 @@ class ScenarioConfig(IntrospectiveConfig):
             seen.add(lowered)
 
         transports = cfg.get("transports")
-        if headers and transports is not None and "http" not in transports:
+        if headers and transports is not None and not {"http", "ws"} & set(transports):
             raise ValueError(
-                f"reply_headers cannot apply with transports={transports!r}: the HTTP adapter, which "
-                "serves the 'http' transport, writes them. The WebSocket and gRPC wires write none of "
+                f"reply_headers cannot apply with transports={transports!r}: the HTTP adapter ('http') "
+                "and the WebSocket adapter ('ws') write them. The gRPC wire ('http2') writes none of "
                 "them, so the headers would reach no reply"
             )
 

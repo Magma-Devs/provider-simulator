@@ -153,8 +153,8 @@ class ServeResult:
     dead-node 503: no Content-Type, no Content-Length, nothing to size.
 
     ``reply_headers`` are the chosen headers of the scenario, for a targeted
-    endpoint. The HTTP adapter writes them on each reply that has a status line.
-    Empty means none.
+    endpoint. The HTTP adapter and the WebSocket adapter write them on each
+    reply that has a status line. Empty means none.
     """
 
     action: str  # respond | no_body | hang | drop
@@ -170,7 +170,7 @@ class ServeResult:
     reply_headers: dict = field(default_factory=dict)
 
 
-def _with_reply_headers(result: ServeResult, chosen: dict) -> ServeResult:
+def with_reply_headers(result: ServeResult, chosen: dict) -> ServeResult:
     """Return ``result`` with the chosen headers of the scenario. Empty headers return it as it is.
 
     The headers go on a copy: a listener can raise one shared ServeResult for
@@ -228,7 +228,7 @@ class Listener(ABC):
         targeted, mode = fault_policy.resolve_mode(scenario, self.endpoint, self.provider)
         latency = scenario.get("latency_ms", 0) if targeted else 0
         # The chosen headers go on every reply of a targeted endpoint, whatever
-        # its kind, so each return below passes through _with_reply_headers.
+        # its kind, so each return below passes through with_reply_headers.
         chosen = (scenario.get("reply_headers") or {}) if targeted else {}
 
         # Provider-wide down is pre-parse: no body is read, so the row records
@@ -236,7 +236,7 @@ class Listener(ABC):
         # not wait for the latency, so the row records 0.
         if targeted and mode == "down":
             self.provider.log.finalize(entry, method="*", status="down", latency_ms=0)
-            return _with_reply_headers(self.build_down(), chosen)
+            return with_reply_headers(self.build_down(), chosen)
 
         try:
             parsed = self.parse_request(request)
@@ -248,10 +248,10 @@ class Listener(ABC):
                 latency_ms=0,
                 request_id=direct.request_id,
             )
-            return _with_reply_headers(direct.result, chosen)
+            return with_reply_headers(direct.result, chosen)
         except ParseError as exc:
             self.provider.log.finalize(entry, method="*", status="parse_error", latency_ms=0)
-            return _with_reply_headers(self.build_parse_error(exc), chosen)
+            return with_reply_headers(self.build_parse_error(exc), chosen)
 
         # Per-method override merge (targeted endpoints only — the transports
         # filter scopes the whole block, overrides included).
@@ -293,7 +293,7 @@ class Listener(ABC):
                 )
                 result = self.build_down()
                 result.latency_ms = latency
-                return _with_reply_headers(result, chosen)
+                return with_reply_headers(result, chosen)
             if verdict.kind != "none":
                 result = self.build_fault(verdict, parsed)
                 status_label = _STATUS_LABEL[verdict.kind]
@@ -324,7 +324,7 @@ class Listener(ABC):
             latency_ms=latency if waited else 0,
             request_id=request_id,
         )
-        return _with_reply_headers(result, chosen)
+        return with_reply_headers(result, chosen)
 
     @abstractmethod
     def parse_request(self, request: RawRequest) -> dict: ...

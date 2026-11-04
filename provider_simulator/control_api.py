@@ -198,21 +198,22 @@ def _a_filter_scenario_config_refuses(effective: dict) -> bool:
     return effective.get("ports") is not None and not effective["ports"]
 
 
-def _reply_headers_no_http_endpoint_can_send(provider: object, scenario_updates: dict) -> str:
-    """Refuse chosen reply headers when the block targets no ``http`` endpoint.
+def _reply_headers_no_endpoint_can_send(provider: object, scenario_updates: dict) -> str:
+    """Refuse chosen reply headers when the block targets no endpoint that writes them.
 
-    Only the HTTP adapter writes the headers. ``ScenarioConfig`` refuses a
-    ``transports`` filter without "http", and it cannot judge a ``ports``
-    filter or a provider that has no ``http`` endpoint at all, such as a gRPC
-    provider: it holds no endpoints. Here the provider is in hand. Without this
-    rule the headers would be stored, ``GET /scenario`` would echo them, and no
-    reply would carry them: a test would read their absence as the router
-    dropping them.
+    The HTTP adapter writes the headers on an ``http`` endpoint, and the
+    WebSocket adapter on its answer to the upgrade of a ``ws`` endpoint. The gRPC
+    adapter writes none. ``ScenarioConfig`` refuses a ``transports`` filter with
+    neither, and it cannot judge a ``ports`` filter or a provider that has
+    neither endpoint at all, such as a gRPC provider: it holds no endpoints. Here
+    the provider is in hand. Without this rule the headers would be stored,
+    ``GET /scenario`` would echo them, and no reply would carry them: a test
+    would read their absence as the router dropping them.
 
     Every field is read EFFECTIVELY, merged over what is already stored, for the
     reason ``_a_pause_no_named_port_can_serve`` gives: a POST merges, so headers
-    set in one call and a filter moved off the ``http`` endpoint in the next
-    would slip past a rule that read one request.
+    set in one call and a filter moved off those endpoints in the next would
+    slip past a rule that read one request.
     """
     stored = provider.scenario.snapshot()  # type: ignore[attr-defined]
     effective = {**stored, **scenario_updates}
@@ -224,13 +225,13 @@ def _reply_headers_no_http_endpoint_can_send(provider: object, scenario_updates:
     if _a_filter_scenario_config_refuses(effective):
         return ""
     endpoints = list(provider.endpoints)  # type: ignore[attr-defined]
-    if any(ep.transport == "http" and fault_policy.targets(effective, ep) for ep in endpoints):
+    if any(ep.transport in ("http", "ws") and fault_policy.targets(effective, ep) for ep in endpoints):
         return ""
     return (
-        f"reply_headers cannot apply: only an http endpoint writes them, and with "
+        f"reply_headers cannot apply: only an http endpoint and a ws endpoint write them, and with "
         f"transports={effective.get('transports')!r} and ports={effective.get('ports')!r} this block "
-        f"targets none (the provider serves {_endpoints_text(endpoints)}). The headers would be stored "
-        "and would reach no reply"
+        f"targets neither (the provider serves {_endpoints_text(endpoints)}). The headers would be "
+        "stored and would reach no reply"
     )
 
 
@@ -606,7 +607,7 @@ class ControlApi:
             err = (
                 _ports_the_provider_does_not_serve(provider, scenario_updates)
                 or _a_pause_no_named_port_can_serve(provider, scenario_updates)
-                or _reply_headers_no_http_endpoint_can_send(provider, scenario_updates)
+                or _reply_headers_no_endpoint_can_send(provider, scenario_updates)
                 or _an_invalid_json_no_endpoint_can_apply(provider, scenario_updates)
                 or _an_invalid_proto_no_endpoint_can_apply(provider, scenario_updates)
                 or _a_graphql_field_no_endpoint_can_apply(provider, scenario_updates)

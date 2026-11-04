@@ -984,31 +984,31 @@ def test_a_pause_armed_earlier_still_refuses_a_non_http_ports_filter_later():
     "key, block",
     [
         pytest.param("lava-sim-grpc:1", {}, id="a-provider-with-only-grpc-endpoints"),
-        pytest.param("eth-sim:1", {"ports": "ws"}, id="a-ports-filter-that-names-only-the-ws-port"),
-        pytest.param("eth-sim:1", {"transports": ["ws"]}, id="a-transports-filter-without-http"),
+        pytest.param("eth-sim:1", {"transports": ["http2"]}, id="a-transports-filter-of-grpc-only"),
     ],
 )
-def test_reply_headers_on_a_block_that_targets_no_http_endpoint_are_400(key, block):
-    """Only the HTTP adapter writes the chosen headers. A block that reaches no
-    http endpoint would store them, echo them, and send them on no reply. A test
-    would then read their absence as the router dropping them."""
+def test_reply_headers_on_a_block_that_targets_no_endpoint_that_writes_them_are_400(key, block):
+    """The HTTP adapter and the WebSocket adapter write the chosen headers, and
+    the gRPC adapter writes none. A block that reaches no http and no ws endpoint
+    would store them, echo them, and send them on no reply. A test would then
+    read their absence as the router dropping them."""
     api = _api()
-    if block.get("ports") == "ws":
-        block = {"ports": [_port_of(api, key, "ws")]}
     st, resp = api.apply_scenario({"providers": {key: {"reply_headers": {"Retry-After": "5"}, **block}}})
-    assert st == 400, f"reply_headers that no http endpoint can send must be refused, got {st}: {resp}"
+    assert st == 400, f"reply_headers that no endpoint can send must be refused, got {st}: {resp}"
     assert key in resp["error"] and "reply_headers cannot apply" in resp["error"], resp
     _, scen = api.get_scenario()
     assert scen["providers"][key]["reply_headers"] is None
 
 
-def test_reply_headers_on_a_block_that_targets_the_http_endpoint_are_accepted():
+@pytest.mark.parametrize("transport", ["http", "ws"])
+def test_reply_headers_on_a_block_that_targets_one_endpoint_that_writes_them_are_accepted(transport):
     """The positive control. Without it, a rule that refused every reply_headers
-    block would pass the test above."""
+    block would pass the test above. A ws endpoint writes them on its answer to
+    the upgrade."""
     api = _api()
-    http_port = _port_of(api, "eth-sim:1", "http")
+    port = _port_of(api, "eth-sim:1", transport)
     st, resp = api.apply_scenario(
-        {"providers": {"eth-sim:1": {"reply_headers": {"Retry-After": "5"}, "ports": [http_port]}}}
+        {"providers": {"eth-sim:1": {"reply_headers": {"Retry-After": "5"}, "ports": [port]}}}
     )
     assert st == 200, resp
     assert resp["applied"]["eth-sim:1"]["reply_headers"] == {"Retry-After": "5"}
@@ -1016,14 +1016,14 @@ def test_reply_headers_on_a_block_that_targets_the_http_endpoint_are_accepted():
     assert scen["providers"]["eth-sim:1"]["reply_headers"] == {"Retry-After": "5"}
 
 
-def test_reply_headers_set_earlier_still_refuse_a_non_http_ports_filter_later():
+def test_reply_headers_set_earlier_still_refuse_a_grpc_only_filter_later():
     """Read EFFECTIVELY, merged over what is stored: a POST merges. Headers set in
-    one call and a ws-only ports filter set in the next would otherwise slip past
-    a rule that looked at one request only."""
+    one call and a filter moved to the gRPC wire in the next would otherwise slip
+    past a rule that looked at one request only."""
     api = _api()
     st, _ = api.apply_scenario({"providers": {"eth-sim:1": {"reply_headers": {"Retry-After": "5"}}}})
-    assert st == 200, "reply_headers with no filter reach the http endpoint"
-    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"ports": [_port_of(api, "eth-sim:1", "ws")]}}})
+    assert st == 200, "reply_headers with no filter reach the http and the ws endpoint"
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"transports": ["http2"]}}})
     assert st == 400, f"the stored reply_headers must still be considered, got {st}"
     assert "reply_headers cannot apply" in resp["error"]
 
