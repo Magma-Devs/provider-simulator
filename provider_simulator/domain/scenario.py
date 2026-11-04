@@ -53,7 +53,12 @@ HTTP_TOKEN_CHARS = frozenset("!#$%&'*+-.^_`|~" + string.digits + string.ascii_le
 # character. The gRPC adapter lowercases a chosen name, so capitals are allowed.
 _CHOSEN_NAME_CHARS = frozenset("-_." + string.digits + string.ascii_letters)
 
-_WHOLE_NUMBER = re.compile(r"-?[0-9]+")
+# A grpc-retry-pushback-ms value that reaches the caller as written: a whole number
+# with no leading zero, in the signed 64-bit range. The gRPC library parses the name
+# itself and sends any other value as -9223372036854775808, or rewrites it ("0007"
+# arrives as "7").
+_WHOLE_NUMBER = re.compile(r"0|-?[1-9][0-9]*")
+_SIGNED_64_BIT = range(-(2**63), 2**63)
 
 
 @dataclass
@@ -182,8 +187,9 @@ class ScenarioConfig(IntrospectiveConfig):
         letter case are one header, so the pair is refused. So are the names that
         the simulator writes itself on HTTP (``reply_headers`` only), the names
         that its gRPC library owns, a name that ends in ``-bin``, and a
-        ``grpc-retry-pushback-ms`` that is not a whole number: the gRPC library
-        sends any other value as -9223372036854775808.
+        ``grpc-retry-pushback-ms`` that is not a whole number in the signed 64-bit
+        range with no leading zero: the gRPC library sends another value as
+        -9223372036854775808 or rewrites it.
 
         Only the gRPC adapter ('http2') writes trailers, so ``reply_trailers``
         with a ``transports`` filter without 'http2' is refused here. A ``ports``
@@ -223,10 +229,14 @@ class ScenarioConfig(IntrospectiveConfig):
                     f"{field_name} cannot set {name!r}: a gRPC name that ends in '-bin' carries bytes, and a "
                     "text value ends the call"
                 )
-            if lowered == "grpc-retry-pushback-ms" and not _WHOLE_NUMBER.fullmatch(value):
+            if lowered == "grpc-retry-pushback-ms" and not (
+                _WHOLE_NUMBER.fullmatch(value) and int(value) in _SIGNED_64_BIT
+            ):
                 raise ValueError(
-                    f"{field_name}[{name!r}] must be a whole number of milliseconds, such as '5000', got "
-                    f"{value!r}: the gRPC library sends any other value as -9223372036854775808"
+                    f"{field_name}[{name!r}] must be a whole number of milliseconds from "
+                    f"-9223372036854775808 to 9223372036854775807 with no leading zero, such as "
+                    f"'5000', got {value!r}: the gRPC library sends another value as "
+                    "-9223372036854775808 or rewrites it"
                 )
             if lowered in seen:
                 raise ValueError(

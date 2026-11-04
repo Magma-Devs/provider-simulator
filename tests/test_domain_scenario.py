@@ -152,6 +152,19 @@ _REFUSED_ON_THE_GRPC_WIRE = [
     pytest.param({"X-Trace-Bin": "abc"}, "-bin", id="a-binary-name"),
     pytest.param({"grpc-retry-pushback-ms": "1.5"}, "whole number of milliseconds", id="a-pushback-of-a-fraction"),
     pytest.param({"grpc-retry-pushback-ms": "soon"}, "whole number of milliseconds", id="a-pushback-of-words"),
+    pytest.param(
+        {"grpc-retry-pushback-ms": "9223372036854775808"},
+        "whole number of milliseconds",
+        id="a-pushback-above-the-signed-64-bit-range",
+    ),
+    pytest.param(
+        {"grpc-retry-pushback-ms": "-9223372036854775809"},
+        "whole number of milliseconds",
+        id="a-pushback-below-the-signed-64-bit-range",
+    ),
+    pytest.param(
+        {"grpc-retry-pushback-ms": "0007"}, "whole number of milliseconds", id="a-pushback-with-a-leading-zero"
+    ),
 ]
 
 
@@ -167,10 +180,11 @@ def test_chosen_metadata_that_a_grpc_reply_cannot_carry_is_rejected(field_name, 
 
 
 def test_a_pushback_of_whole_milliseconds_is_taken_by_both_fields():
-    """The positive control of the two pushback rows above: a whole number, a
-    zero and a negative number each reach the caller as written."""
+    """The positive control of the pushback rows above: a whole number, a zero, a
+    negative number and both ends of the signed 64-bit range each reach the caller
+    as written."""
     for field_name in ("reply_headers", "reply_trailers"):
-        for value in ("5000", "0", "-1"):
+        for value in ("5000", "0", "-1", "9223372036854775807", "-9223372036854775808"):
             s = ScenarioConfig()
             s.update({field_name: {"grpc-retry-pushback-ms": value}})
             assert s.snapshot()[field_name] == {"grpc-retry-pushback-ms": value}
