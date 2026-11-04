@@ -47,6 +47,57 @@ def test_unknown_transport_value_is_rejected():
     assert s.snapshot()["mode"] == "success"
 
 
+def test_reply_headers_default_to_none_and_take_text_headers_and_an_empty_object():
+    s = ScenarioConfig()
+    assert s.snapshot()["reply_headers"] is None
+    s.update({"reply_headers": {"Retry-After": "5", "X-Quota-Note": "a b\tc"}})
+    assert s.snapshot()["reply_headers"] == {"Retry-After": "5", "X-Quota-Note": "a b\tc"}
+    s.update({"reply_headers": {}})
+    assert s.snapshot()["reply_headers"] == {}
+
+
+@pytest.mark.parametrize(
+    "headers, words",
+    [
+        pytest.param(["Retry-After", "5"], "must be an object", id="a-list"),
+        pytest.param({"Retry After": "5"}, "not an HTTP header name", id="a-space-in-the-name"),
+        pytest.param({"Retry-After:": "5"}, "not an HTTP header name", id="a-colon-in-the-name"),
+        pytest.param({"": "5"}, "not an HTTP header name", id="an-empty-name"),
+        pytest.param({"Retry-After": 5}, "Write a number as text", id="a-number-for-a-value"),
+        pytest.param({"Retry-After": "5\r\nX-Added: 1"}, "visible ASCII", id="a-line-break-in-the-value"),
+        pytest.param({"X-Note": "café"}, "visible ASCII", id="a-character-outside-ascii"),
+        pytest.param({"Retry-After": "5", "retry-after": "6"}, "twice", id="one-name-in-two-letter-cases"),
+        pytest.param({"Content-Length": "0"}, "writes it itself", id="content-length"),
+        pytest.param({"content-type": "text/html"}, "writes it itself", id="content-type"),
+        pytest.param({"Transfer-Encoding": "chunked"}, "writes it itself", id="transfer-encoding"),
+        pytest.param({"Connection": "close"}, "writes it itself", id="connection"),
+    ],
+)
+def test_reply_headers_that_could_not_be_sent_as_written_are_rejected(headers, words):
+    s = ScenarioConfig()
+    with pytest.raises(ValueError, match=words):
+        s.update({"mode": "rate_limit", "reply_headers": headers})
+    # the whole update aborted
+    assert s.snapshot()["mode"] == "success"
+    assert s.snapshot()["reply_headers"] is None
+
+
+def test_reply_headers_with_a_transports_filter_without_http_are_rejected():
+    s = ScenarioConfig()
+    with pytest.raises(ValueError, match="HTTP adapter"):
+        s.update({"reply_headers": {"Retry-After": "5"}, "transports": ["ws"]})
+    # The positive control: a filter that holds http takes the same headers.
+    s.update({"reply_headers": {"Retry-After": "5"}, "transports": ["http", "ws"]})
+    assert s.snapshot()["reply_headers"] == {"Retry-After": "5"}
+
+
+def test_reset_clears_the_reply_headers():
+    s = ScenarioConfig()
+    s.update({"reply_headers": {"Retry-After": "5"}})
+    s.reset()
+    assert s.snapshot()["reply_headers"] is None
+
+
 def test_reset_clears_a_prior_fault():
     s = ScenarioConfig()
     s.update({"mode": "hang", "latency_ms": 500, "responses": {"eth_call": {"result": "0x1"}}})
