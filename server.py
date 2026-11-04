@@ -1326,18 +1326,24 @@ def _run_grpc_in_thread(grpc_listener, port: int, host: str, gate: PortGate) -> 
                 await asyncio.sleep(30)
             elif result.latency_ms > 0:
                 await asyncio.sleep(result.latency_ms / 1000.0)
-            if result.action == "drop" and result.drop_at in ("after_headers", "mid_body"):
+            if result.reply_headers or (result.action == "drop" and result.drop_at in ("after_headers", "mid_body")):
                 # Half-open response: metadata out, then the status. Unary
                 # RPCs can't stream mid-body, so both variants collapse here.
+                # Chosen headers go out the same way. Without them a status is
+                # one frame, and its trailing metadata is all that it carries.
                 try:
-                    await context.send_initial_metadata([])
+                    await context.send_initial_metadata(grpc_wire.metadata_of(result.reply_headers))
                 except Exception:
                     pass
             # The row gets the status name right before the gRPC library gets
             # the status. A caller that went away during the wait cancels this
             # coroutine, so its row keeps no status.
             grpc_listener.status_sent(entry, status.code)
-            await context.abort(grpc.StatusCode[status.code], status.text)
+            await context.abort(
+                grpc.StatusCode[status.code],
+                status.text,
+                trailing_metadata=grpc_wire.metadata_of(result.reply_trailers),
+            )
             return None  # unreachable — abort raises
 
         # The history row of the call is finished, except for the status name.
@@ -1345,6 +1351,10 @@ def _run_grpc_in_thread(grpc_listener, port: int, host: str, gate: PortGate) -> 
         response = grpc_wire.message_of(result)
         if result.latency_ms > 0:
             await asyncio.sleep(result.latency_ms / 1000.0)
+        if result.reply_headers:
+            await context.send_initial_metadata(grpc_wire.metadata_of(result.reply_headers))
+        if result.reply_trailers:
+            context.set_trailing_metadata(grpc_wire.metadata_of(result.reply_trailers))
         grpc_listener.status_sent(entry, "OK")
         return response
 

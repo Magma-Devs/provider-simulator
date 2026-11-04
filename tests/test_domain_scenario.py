@@ -50,8 +50,8 @@ def test_unknown_transport_value_is_rejected():
 def test_reply_headers_default_to_none_and_take_text_headers_and_an_empty_object():
     s = ScenarioConfig()
     assert s.snapshot()["reply_headers"] is None
-    s.update({"reply_headers": {"Retry-After": "5", "X-Quota-Note": "a b\tc"}})
-    assert s.snapshot()["reply_headers"] == {"Retry-After": "5", "X-Quota-Note": "a b\tc"}
+    s.update({"reply_headers": {"Retry-After": "5", "X-Quota-Note": "a b c"}})
+    assert s.snapshot()["reply_headers"] == {"Retry-After": "5", "X-Quota-Note": "a b c"}
     s.update({"reply_headers": {}})
     assert s.snapshot()["reply_headers"] == {}
 
@@ -84,14 +84,14 @@ def test_reply_headers_that_could_not_be_sent_as_written_are_rejected(headers, w
     assert s.snapshot()["reply_headers"] is None
 
 
-def test_reply_headers_with_a_transports_filter_of_grpc_only_are_rejected():
+def test_reply_headers_are_accepted_with_any_transports_filter():
+    """Every adapter writes the chosen headers: as headers on 'http' and 'ws', and
+    as the header metadata of a gRPC reply on 'http2'."""
     s = ScenarioConfig()
-    with pytest.raises(ValueError, match="gRPC wire"):
-        s.update({"reply_headers": {"Retry-After": "5"}, "transports": ["http2"]})
-    # The positive controls: the HTTP adapter and the WebSocket adapter write them.
-    for transports in (["http"], ["ws"], ["http2", "ws"]):
+    for transports in (["http"], ["ws"], ["http2"], ["http2", "ws"]):
         s.update({"reply_headers": {"Retry-After": "5"}, "transports": transports})
         assert s.snapshot()["transports"] == transports
+        assert s.snapshot()["reply_headers"] == {"Retry-After": "5"}
 
 
 def test_reset_clears_the_reply_headers():
@@ -99,6 +99,98 @@ def test_reset_clears_the_reply_headers():
     s.update({"reply_headers": {"Retry-After": "5"}})
     s.reset()
     assert s.snapshot()["reply_headers"] is None
+
+
+def test_reply_trailers_default_to_none_and_take_text_values_and_an_empty_object():
+    s = ScenarioConfig()
+    assert s.snapshot()["reply_trailers"] is None
+    s.update({"reply_trailers": {"grpc-retry-pushback-ms": "5000", "Retry-After": "7"}})
+    assert s.snapshot()["reply_trailers"] == {"grpc-retry-pushback-ms": "5000", "Retry-After": "7"}
+    s.update({"reply_trailers": {}})
+    assert s.snapshot()["reply_trailers"] == {}
+
+
+@pytest.mark.parametrize(
+    "trailers, words",
+    [
+        pytest.param(["grpc-retry-pushback-ms", "5000"], "must be an object", id="a-list"),
+        pytest.param({"retry after": "5"}, "not an HTTP header name", id="a-space-in-the-name"),
+        pytest.param({"": "5"}, "not an HTTP header name", id="an-empty-name"),
+        pytest.param({"retry-after": 5}, "Write a number as text", id="a-number-for-a-value"),
+        pytest.param({"retry-after": "5\r\nx-added: 1"}, "visible ASCII", id="a-line-break-in-the-value"),
+        pytest.param({"Retry-After": "5", "retry-after": "6"}, "twice", id="one-name-in-two-letter-cases"),
+        pytest.param({"content-type": "text/plain"}, "gRPC library", id="content-type"),
+        pytest.param({"content-length": "0"}, "gRPC library", id="content-length"),
+    ],
+)
+def test_reply_trailers_that_could_not_be_sent_as_written_are_rejected(trailers, words):
+    s = ScenarioConfig()
+    with pytest.raises(ValueError, match=words):
+        s.update({"mode": "rate_limit", "reply_trailers": trailers})
+    # the whole update aborted
+    assert s.snapshot()["mode"] == "success"
+    assert s.snapshot()["reply_trailers"] is None
+
+
+# What a gRPC reply cannot carry as written. Measured with the gRPC library of the
+# simulator: a tab in a value, a capital letter or a character outside letters,
+# digits, '-', '_' and '.' in a name, and a name ending in '-bin' with a text value
+# each end the call; grpc-timeout stops the simulator process; the other names are
+# dropped or go out with the library's own value. reply_headers reaches the header
+# metadata of a gRPC reply, so both fields refuse them.
+_REFUSED_ON_THE_GRPC_WIRE = [
+    pytest.param({"X-Quota!": "5"}, "not an HTTP header name", id="a-character-a-grpc-name-cannot-hold"),
+    pytest.param({"X-Note": "a\tb"}, "visible ASCII", id="a-tab-in-the-value"),
+    pytest.param({"te": "trailers"}, "gRPC library", id="te"),
+    pytest.param({"grpc-status": "0"}, "gRPC library", id="grpc-status"),
+    pytest.param({"grpc-message": "fine"}, "gRPC library", id="grpc-message"),
+    pytest.param({"grpc-encoding": "gzip"}, "gRPC library", id="grpc-encoding"),
+    pytest.param({"grpc-accept-encoding": "gzip"}, "gRPC library", id="grpc-accept-encoding"),
+    pytest.param({"grpc-internal-encoding-request": "gzip"}, "gRPC library", id="grpc-internal-encoding-request"),
+    pytest.param({"grpc-previous-rpc-attempts": "2"}, "gRPC library", id="grpc-previous-rpc-attempts"),
+    pytest.param({"Grpc-Timeout": "1S"}, "gRPC library", id="grpc-timeout"),
+    pytest.param({"X-Trace-Bin": "abc"}, "-bin", id="a-binary-name"),
+    pytest.param({"grpc-retry-pushback-ms": "1.5"}, "whole number of milliseconds", id="a-pushback-of-a-fraction"),
+    pytest.param({"grpc-retry-pushback-ms": "soon"}, "whole number of milliseconds", id="a-pushback-of-words"),
+]
+
+
+@pytest.mark.parametrize("field_name", ["reply_headers", "reply_trailers"])
+@pytest.mark.parametrize("chosen, words", _REFUSED_ON_THE_GRPC_WIRE)
+def test_chosen_metadata_that_a_grpc_reply_cannot_carry_is_rejected(field_name, chosen, words):
+    s = ScenarioConfig()
+    with pytest.raises(ValueError, match=words):
+        s.update({"mode": "rate_limit", field_name: chosen})
+    # the whole update aborted
+    assert s.snapshot()["mode"] == "success"
+    assert s.snapshot()[field_name] is None
+
+
+def test_a_pushback_of_whole_milliseconds_is_taken_by_both_fields():
+    """The positive control of the two pushback rows above: a whole number, a
+    zero and a negative number each reach the caller as written."""
+    for field_name in ("reply_headers", "reply_trailers"):
+        for value in ("5000", "0", "-1"):
+            s = ScenarioConfig()
+            s.update({field_name: {"grpc-retry-pushback-ms": value}})
+            assert s.snapshot()[field_name] == {"grpc-retry-pushback-ms": value}
+
+
+def test_reply_trailers_with_a_transports_filter_without_grpc_are_rejected():
+    s = ScenarioConfig()
+    with pytest.raises(ValueError, match="reply_trailers cannot apply"):
+        s.update({"reply_trailers": {"grpc-retry-pushback-ms": "5000"}, "transports": ["http", "ws"]})
+    # The positive control: only the gRPC adapter ('http2') writes trailing metadata.
+    for transports in (["http2"], ["http", "http2"]):
+        s.update({"reply_trailers": {"grpc-retry-pushback-ms": "5000"}, "transports": transports})
+        assert s.snapshot()["transports"] == transports
+
+
+def test_reset_clears_the_reply_trailers():
+    s = ScenarioConfig()
+    s.update({"reply_trailers": {"grpc-retry-pushback-ms": "5000"}})
+    s.reset()
+    assert s.snapshot()["reply_trailers"] is None
 
 
 def test_reset_clears_a_prior_fault():
