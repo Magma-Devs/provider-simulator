@@ -320,7 +320,50 @@ def _caller_address(client_address: object) -> str:
     return str(mapped) if mapped is not None else str(parsed)
 
 
-class _HttpListenerHandler(BaseHTTPRequestHandler):
+class _ChosenReplyHeaders(BaseHTTPRequestHandler):
+    """Writes the chosen headers of a reply at the end of its header block.
+
+    A handler sets ``_reply_headers`` from the ``reply_headers`` of a
+    ServeResult before it writes the status line. ``end_headers`` then writes
+    them and empties the field, so a reply that the handler did not plan, such
+    as the error page for a verb that a port does not serve, carries none.
+
+    A chosen header replaces the header of the same name that the handler
+    writes itself: ``send_header`` drops that one. So a chosen ``Date``
+    replaces the ``Date`` that ``send_response`` writes, and the reply holds
+    one ``Date``.
+    """
+
+    # The chosen headers of the reply that the handler writes now, as (name,
+    # value) pairs.
+    _reply_headers: tuple = ()
+
+    def send_header(self, keyword: str, value: str) -> None:
+        if any(keyword.lower() == name.lower() for name, _ in self._reply_headers):
+            return
+        super().send_header(keyword, value)
+
+    def end_headers(self) -> None:
+        chosen, self._reply_headers = self._reply_headers, ()
+        for name, value in chosen:
+            super().send_header(name, value)
+        super().end_headers()
+
+
+def _upgrade_headers(provider_key: str, chosen: dict) -> dict:
+    """The headers that the 101 reply to an upgrade carries after the three of the handshake.
+
+    The simulator names the provider in ``Lava-Provider-Address``. The chosen
+    headers of the scenario follow, and a chosen header replaces the
+    simulator's header of the same name, as ``_ChosenReplyHeaders`` does on
+    every other reply.
+    """
+    names = {name.lower() for name in chosen}
+    own = {"Lava-Provider-Address": f"sim-provider-{provider_key}"}
+    return {**{name: value for name, value in own.items() if name.lower() not in names}, **chosen}
+
+
+class _HttpListenerHandler(_ChosenReplyHeaders):
     """Performs a Listener's ServeResult on a plain HTTP socket.
 
     Subclasses pick the verbs they answer, whether ``missing_field`` corruption
@@ -329,6 +372,10 @@ class _HttpListenerHandler(BaseHTTPRequestHandler):
 
     A request that this thread reads after ``close_port()`` began gets no
     history row and no reply: see ``_port_is_closed``.
+
+    Each reply that ``_perform`` writes with a status line carries the chosen
+    headers of its ServeResult: a reply with a body, the bodiless 503 of
+    ``down`` and the headers of a reply that ``drop_connection`` cuts.
     """
 
     # Socket timeout honoured by BaseHTTPRequestHandler: caps the otherwise
@@ -336,9 +383,6 @@ class _HttpListenerHandler(BaseHTTPRequestHandler):
     timeout = 30
     dotted = False
     mid_body_bytes = b'{"jsonrpc":"2.0",'
-    # The chosen headers of the reply that ``_perform`` writes now, as (name,
-    # value) pairs. ``end_headers`` writes them and empties this.
-    _reply_headers: tuple = ()
 
     server: _SimThreadingHTTPServer  # narrowed for the wiring attributes
 
@@ -354,31 +398,11 @@ class _HttpListenerHandler(BaseHTTPRequestHandler):
 
         A reply with no ``Content-Type`` gets none. A reply body does not change:
         a router compares the bodies of two providers.
-
-        A header that the scenario chose for this reply is not sent here:
-        ``end_headers`` sends the chosen value in its place. So a chosen ``Date``
-        replaces the ``Date`` that ``send_response`` writes, and the reply holds
-        one ``Date``.
         """
-        if any(keyword.lower() == name.lower() for name, _ in self._reply_headers):
-            return
         if keyword.lower() == "content-type":
             value = _content_type_with_provider_name(value, self.server.listener.provider.name)
             value = _content_type_with_caller_address(value, _caller_address(self.client_address))
         super().send_header(keyword, value)
-
-    def end_headers(self) -> None:
-        """Send the chosen headers of the reply, then end the header block.
-
-        Each reply that ``_perform`` writes with a status line ends here: a reply
-        with a body, the bodiless 503 of ``down`` and the headers of a reply that
-        ``drop_connection`` cuts. A reply that ``_perform`` did not plan, such as
-        the error page for a verb that this port does not serve, carries none.
-        """
-        chosen, self._reply_headers = self._reply_headers, ()
-        for name, value in chosen:
-            super().send_header(name, value)
-        super().end_headers()
 
     def _run(self, verb: str) -> None:
         if _port_is_closed(self.server):
@@ -656,7 +680,7 @@ class _WireSubscriptions(WsSubscriptions):
         return _ws_text_frame(event_message(sub, event))
 
 
-class _WsHandler(BaseHTTPRequestHandler):
+class _WsHandler(_ChosenReplyHeaders):
     """WebSocket endpoint: HTTP upgrade handshake + per-frame JSON-RPC.
 
     A WS endpoint is still ``(jsonrpc, ws, port)``, so frames are served by the
@@ -665,6 +689,10 @@ class _WsHandler(BaseHTTPRequestHandler):
     subscribe frame and an unsubscribe frame. This adapter performs what the
     listener decides. What is WS-specific lives here: the handshake bytes, the
     frame codec, and the reader/writer thread pair.
+
+    The answer to an upgrade carries the chosen ``reply_headers`` of the
+    listener's decision: the 101 reply, a refusal, and the 101 reply of a drop
+    after the headers. A frame carries none.
 
     The adapter handles these cases with no listener, and each one writes no
     history row: a wrong path (404); a bad upgrade request (400); a ping frame
@@ -717,7 +745,7 @@ class _WsHandler(BaseHTTPRequestHandler):
             self.connection.sendall(
                 ws_protocol.build_handshake_response(
                     client_key,
-                    extra_headers={"Lava-Provider-Address": f"sim-provider-{provider.key}"},
+                    extra_headers=_upgrade_headers(provider.key, decision.reply_headers),
                 )
             )
         except OSError:
@@ -751,6 +779,7 @@ class _WsHandler(BaseHTTPRequestHandler):
         if decision.action == "respond":
             refusal = decision.body
             assert isinstance(refusal, dict), refusal
+            self._reply_headers = tuple(decision.reply_headers.items())
             self._send_simple_error(decision.status, refusal["error"])
             return
         if decision.action == "hang":
@@ -767,7 +796,7 @@ class _WsHandler(BaseHTTPRequestHandler):
                 self.connection.sendall(
                     ws_protocol.build_handshake_response(
                         client_key,
-                        extra_headers={"Lava-Provider-Address": f"sim-provider-{provider.key}"},
+                        extra_headers=_upgrade_headers(provider.key, decision.reply_headers),
                     )
                 )
             elif decision.drop_at == "mid_body":
@@ -1297,18 +1326,24 @@ def _run_grpc_in_thread(grpc_listener, port: int, host: str, gate: PortGate) -> 
                 await asyncio.sleep(30)
             elif result.latency_ms > 0:
                 await asyncio.sleep(result.latency_ms / 1000.0)
-            if result.action == "drop" and result.drop_at in ("after_headers", "mid_body"):
+            if result.reply_headers or (result.action == "drop" and result.drop_at in ("after_headers", "mid_body")):
                 # Half-open response: metadata out, then the status. Unary
                 # RPCs can't stream mid-body, so both variants collapse here.
+                # Chosen headers go out the same way. Without them a status is
+                # one frame, and its trailing metadata is all that it carries.
                 try:
-                    await context.send_initial_metadata([])
+                    await context.send_initial_metadata(grpc_wire.metadata_of(result.reply_headers))
                 except Exception:
                     pass
             # The row gets the status name right before the gRPC library gets
             # the status. A caller that went away during the wait cancels this
             # coroutine, so its row keeps no status.
             grpc_listener.status_sent(entry, status.code)
-            await context.abort(grpc.StatusCode[status.code], status.text)
+            await context.abort(
+                grpc.StatusCode[status.code],
+                status.text,
+                trailing_metadata=grpc_wire.metadata_of(result.reply_trailers),
+            )
             return None  # unreachable — abort raises
 
         # The history row of the call is finished, except for the status name.
@@ -1316,6 +1351,10 @@ def _run_grpc_in_thread(grpc_listener, port: int, host: str, gate: PortGate) -> 
         response = grpc_wire.message_of(result)
         if result.latency_ms > 0:
             await asyncio.sleep(result.latency_ms / 1000.0)
+        if result.reply_headers:
+            await context.send_initial_metadata(grpc_wire.metadata_of(result.reply_headers))
+        if result.reply_trailers:
+            context.set_trailing_metadata(grpc_wire.metadata_of(result.reply_trailers))
         grpc_listener.status_sent(entry, "OK")
         return response
 

@@ -29,12 +29,15 @@ never faulted.
 When both are set they AND together: an endpoint must match the transport list
 AND the port list to be targeted.
 
-One field changes no fault and no body: ``reply_headers`` adds chosen headers to
-each reply that the provider writes on a targeted ``http`` endpoint, such as a
-``Retry-After`` on a 429. The HTTP adapter writes them, so a block that reaches
-no ``http`` endpoint is refused.
+Two fields change no fault and no body. ``reply_headers`` adds chosen headers to
+each reply of a targeted endpoint, such as a ``Retry-After`` on a 429: the HTTP
+adapter and the WebSocket adapter write them as headers, and the gRPC adapter as
+the header metadata of its reply. ``reply_trailers`` adds chosen trailing
+metadata to each reply of a targeted gRPC endpoint, and only the gRPC adapter
+writes it, so a block that reaches no gRPC endpoint is refused.
 """
 
+import re
 import string
 from dataclasses import dataclass, field
 
@@ -44,6 +47,18 @@ from provider_simulator.domain.introspective_config import IntrospectiveConfig
 # The characters of an HTTP ``token`` (RFC 9110, section 5.6.2). A header name is
 # a token, and so is a media-type parameter value that needs no quotes.
 HTTP_TOKEN_CHARS = frozenset("!#$%&'*+-.^_`|~" + string.digits + string.ascii_letters)
+
+# The characters of a chosen header or trailer name. A gRPC metadata name holds
+# only these, in lowercase, and the gRPC library ends the call for any other
+# character. The gRPC adapter lowercases a chosen name, so capitals are allowed.
+_CHOSEN_NAME_CHARS = frozenset("-_." + string.digits + string.ascii_letters)
+
+# A grpc-retry-pushback-ms value that reaches the caller as written: a whole number
+# with no leading zero, in the signed 64-bit range. The gRPC library parses the name
+# itself and sends any other value as -9223372036854775808, or rewrites it ("0007"
+# arrives as "7").
+_WHOLE_NUMBER = re.compile(r"0|-?[1-9][0-9]*")
+_SIGNED_64_BIT = range(-(2**63), 2**63)
 
 
 @dataclass
@@ -99,17 +114,49 @@ class ScenarioConfig(IntrospectiveConfig):
     # Address filter, ANDed with transports. The field that makes a provider
     # serving one interface and one transport at two ports separable at all.
     ports: list[int] | None = None  # endpoint filter; None = all endpoints
-    # Headers that the provider adds to each reply it writes on a targeted
-    # ``http`` endpoint, as {name: value}: a success, a fault, the bodiless 503 of
-    # ``down`` and the headers of a reply that ``drop_connection`` cuts. None or
-    # {} means none. A chosen header replaces the header of the same name that the
-    # simulator writes itself, such as ``Date``. A ``hang`` writes no reply, and
-    # the gRPC and WebSocket adapters write none of these headers.
+    # Headers that the provider adds to each reply of a targeted endpoint, as
+    # {name: value}. On an ``http`` endpoint: each reply with a status line, which
+    # is a success, a fault, the bodiless 503 of ``down`` and the headers of a reply
+    # that ``drop_connection`` cuts. On a ``ws`` endpoint: the answer to the upgrade
+    # request, the 101 reply or a refusal; a frame carries none. On a gRPC endpoint:
+    # the header metadata of each reply, with the names in lowercase. None or {}
+    # means none. A chosen header replaces the header of the same name that the
+    # simulator writes itself, such as ``Date``. A ``hang`` writes no HTTP reply.
     reply_headers: dict[str, str] | None = None
+    # The trailing metadata that a gRPC provider adds to each reply of a targeted
+    # endpoint, as {name: value}, with the names in lowercase. A reply that is a
+    # status only sends no header metadata: its trailing metadata is all it
+    # carries. None or {} means none.
+    reply_trailers: dict[str, str] | None = None
 
-    # The headers that frame a reply, and the Content-Type that names the provider.
-    # A chosen value would break the reply or the name, so it is refused.
-    _HEADERS_THE_SIMULATOR_OWNS = ("connection", "content-length", "content-type", "transfer-encoding")
+    # The headers that frame a reply or the WebSocket handshake, and the
+    # Content-Type that names the provider. A chosen value would break the reply,
+    # the handshake or the name, so it is refused.
+    _HEADERS_THE_SIMULATOR_OWNS = (
+        "connection",
+        "content-length",
+        "content-type",
+        "sec-websocket-accept",
+        "transfer-encoding",
+        "upgrade",
+    )
+
+    # The metadata names that the gRPC library of the simulator drops, sends with
+    # its own value, or stops on: grpc-timeout ends the simulator process. A name
+    # that ends in ``-bin`` carries bytes, and a text value ends the call. Both
+    # fields reach a gRPC reply, so both refuse them.
+    _NAMES_THE_GRPC_LIBRARY_OWNS = (
+        "content-length",
+        "content-type",
+        "grpc-accept-encoding",
+        "grpc-encoding",
+        "grpc-internal-encoding-request",
+        "grpc-message",
+        "grpc-previous-rpc-attempts",
+        "grpc-status",
+        "grpc-timeout",
+        "te",
+    )
 
     # Modes that answer, or refuse to answer, before the write path a pause acts
     # on is ever reached. ``down`` returns a bodiless 503 pre-parse, ``hang``
@@ -127,59 +174,82 @@ class ScenarioConfig(IntrospectiveConfig):
         self._validate_pause(cfg)
         self._validate_rate_limit_style(cfg)
         self._validate_unreadable_reply(cfg)
-        self._validate_reply_headers(cfg)
+        self._validate_chosen(cfg, "reply_headers")
+        self._validate_chosen(cfg, "reply_trailers")
 
-    def _validate_reply_headers(self, cfg: dict) -> None:
-        """Refuse chosen reply headers that could not be sent as they are written.
+    def _validate_chosen(self, cfg: dict, field_name: str) -> None:
+        """Refuse chosen reply headers or trailers that could not be sent as they are written.
 
-        A name must be an HTTP token, and a value must be text of visible ASCII
-        characters, spaces and tabs: a line break in a value would end the header
-        and start another one. Two names that differ only in letter case are one
-        header, so the pair is refused. ``_HEADERS_THE_SIMULATOR_OWNS`` are refused
-        too.
+        A name is letters, digits, '-', '_' and '.', which an HTTP header name and
+        a gRPC metadata name both allow. A value is text of visible ASCII
+        characters and spaces: a line break would end the header and start
+        another one, and a tab ends a gRPC call. Two names that differ only in
+        letter case are one header, so the pair is refused. So are the names that
+        the simulator writes itself on HTTP (``reply_headers`` only), the names
+        that its gRPC library owns, a name that ends in ``-bin``, and a
+        ``grpc-retry-pushback-ms`` that is not a whole number in the signed 64-bit
+        range with no leading zero: the gRPC library sends another value as
+        -9223372036854775808 or rewrites it.
 
-        Like a pause, the headers are written by the HTTP adapter, which serves the
-        'http' transport. So a ``transports`` filter without 'http' is refused here.
-        A ``ports`` filter is checked by the control API, which knows the endpoints.
+        Only the gRPC adapter ('http2') writes trailers, so ``reply_trailers``
+        with a ``transports`` filter without 'http2' is refused here. A ``ports``
+        filter is checked by the control API, which knows the endpoints.
         """
-        if "reply_headers" not in cfg or cfg["reply_headers"] is None:
+        if field_name not in cfg or cfg[field_name] is None:
             return
-        headers = cfg["reply_headers"]
-        if not isinstance(headers, dict):
-            raise ValueError(
-                f"reply_headers must be an object of header names and text values, or null, got {headers!r}"
-            )
+        chosen = cfg[field_name]
+        if not isinstance(chosen, dict):
+            raise ValueError(f"{field_name} must be an object of names and text values, or null, got {chosen!r}")
         seen: set[str] = set()
-        for name, value in headers.items():
-            if not isinstance(name, str) or not name or any(char not in HTTP_TOKEN_CHARS for char in name):
+        for name, value in chosen.items():
+            if not isinstance(name, str) or not name or any(char not in _CHOSEN_NAME_CHARS for char in name):
                 raise ValueError(
-                    f"reply_headers: {name!r} is not an HTTP header name. A name is letters, digits and "
-                    "!#$%&'*+-.^_`|~, with no space and no colon"
+                    f"{field_name}: {name!r} is not an HTTP header name that gRPC metadata can hold. A name "
+                    "is letters, digits, '-', '_' and '.'"
                 )
-            if not isinstance(value, str) or any(char != "\t" and not " " <= char <= "~" for char in value):
+            if not isinstance(value, str) or any(not " " <= char <= "~" for char in value):
                 raise ValueError(
-                    f"reply_headers[{name!r}] must be text of visible ASCII characters, spaces and tabs, "
+                    f"{field_name}[{name!r}] must be text of visible ASCII characters and spaces, "
                     f"got {value!r}. Write a number as text, such as '5'"
                 )
             lowered = name.lower()
-            if lowered in self._HEADERS_THE_SIMULATOR_OWNS:
+            if field_name == "reply_headers" and lowered in self._HEADERS_THE_SIMULATOR_OWNS:
                 raise ValueError(
                     f"reply_headers cannot set {name!r}: the simulator writes it itself. Connection, "
-                    "Content-Length and Transfer-Encoding frame the reply, and Content-Type names the provider"
+                    "Content-Length and Transfer-Encoding frame the reply, Upgrade and Sec-WebSocket-Accept "
+                    "frame the WebSocket handshake, and Content-Type names the provider"
+                )
+            if lowered in self._NAMES_THE_GRPC_LIBRARY_OWNS:
+                raise ValueError(
+                    f"{field_name} cannot set {name!r}: the gRPC library of the simulator drops that name "
+                    "or sends its own value, and grpc-timeout stops the simulator"
+                )
+            if lowered.endswith("-bin"):
+                raise ValueError(
+                    f"{field_name} cannot set {name!r}: a gRPC name that ends in '-bin' carries bytes, and a "
+                    "text value ends the call"
+                )
+            if lowered == "grpc-retry-pushback-ms" and not (
+                _WHOLE_NUMBER.fullmatch(value) and int(value) in _SIGNED_64_BIT
+            ):
+                raise ValueError(
+                    f"{field_name}[{name!r}] must be a whole number of milliseconds from "
+                    f"-9223372036854775808 to 9223372036854775807 with no leading zero, such as "
+                    f"'5000', got {value!r}: the gRPC library sends another value as "
+                    "-9223372036854775808 or rewrites it"
                 )
             if lowered in seen:
                 raise ValueError(
-                    f"reply_headers names {name!r} twice: header names do not depend on letter case, "
-                    "so the two entries are one header with two values"
+                    f"{field_name} names {name!r} twice: names do not depend on letter case, "
+                    "so the two entries are one name with two values"
                 )
             seen.add(lowered)
 
         transports = cfg.get("transports")
-        if headers and transports is not None and "http" not in transports:
+        if field_name == "reply_trailers" and chosen and transports is not None and "http2" not in transports:
             raise ValueError(
-                f"reply_headers cannot apply with transports={transports!r}: the HTTP adapter, which "
-                "serves the 'http' transport, writes them. The WebSocket and gRPC wires write none of "
-                "them, so the headers would reach no reply"
+                f"reply_trailers cannot apply with transports={transports!r}: only the gRPC adapter "
+                "('http2') writes trailing metadata, so the trailers would reach no reply"
             )
 
     def _validate_rate_limit_style(self, cfg: dict) -> None:

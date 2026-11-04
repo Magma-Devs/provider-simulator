@@ -363,6 +363,15 @@ def message_of(result: ServeResult):
     return response
 
 
+def metadata_of(chosen: dict) -> tuple:
+    """The chosen headers or trailers of a reply as gRPC metadata pairs.
+
+    A gRPC metadata name is lowercase, and the gRPC library ends the call for a
+    capital letter. ScenarioConfig accepts any case, as HTTP does, so the names
+    are lowercased here."""
+    return tuple((name.lower(), value) for name, value in chosen.items())
+
+
 # ── The servicers ─────────────────────────────────────────────────────────────
 
 

@@ -37,7 +37,7 @@ from provider_simulator import fault_policy
 from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.provider import Provider
 from provider_simulator.domain.registry import Registry
-from provider_simulator.listeners.base import RawRequest, ServeResult
+from provider_simulator.listeners.base import RawRequest, ServeResult, with_reply_headers
 from provider_simulator.listeners.jsonrpc import JsonRpcListener
 
 
@@ -244,11 +244,16 @@ class JsonRpcWsListener(JsonRpcListener):
         The upgrade is not a request of ``serve()``. It applies no latency, no
         corruption and no per-method override, and it has its own reply
         bodies. Each upgrade uses one count of the ``fail_first_n`` window.
+
+        Each answer carries the chosen ``reply_headers`` of the scenario when
+        the block targets this endpoint, as each reply of ``serve()`` does: the
+        101 reply and a refusal. The adapter writes them.
         """
         scenario = self.provider.scenario.snapshot()
+        chosen = (scenario.get("reply_headers") or {}) if fault_policy.targets(scenario, self.endpoint) else {}
         verdict = fault_policy.decide(scenario, self.endpoint, self.provider)
         if verdict.kind == "none":
-            return ServeResult(action="respond", status=101)
+            return with_reply_headers(ServeResult(action="respond", status=101), chosen)
 
         lava = {k: v for k, v in headers.items() if k.lower().startswith("lava-")}
 
@@ -267,18 +272,20 @@ class JsonRpcWsListener(JsonRpcListener):
         if verdict.kind == "down":
             # The provider is dead before it reads anything: the method is "*".
             _record("*", "down")
-            return ServeResult(action="respond", status=503, body={"error": "provider down"})
+            return with_reply_headers(
+                ServeResult(action="respond", status=503, body={"error": "provider down"}), chosen
+            )
         if verdict.kind == "rate_limit":
             _record("ws_upgrade", "rate_limit")
-            return ServeResult(action="respond", status=429, body={"error": "rate limited"})
+            return with_reply_headers(ServeResult(action="respond", status=429, body={"error": "rate limited"}), chosen)
         if verdict.kind == "error":
             # 200-without-101 is non-spec for WS upgrades; 4xx is the cleanest
             # "upgrade refused" a client can read.
             _record("ws_upgrade", "error")
             message = scenario.get("error_message", "Internal error")
-            return ServeResult(action="respond", status=400, body={"error": message})
+            return with_reply_headers(ServeResult(action="respond", status=400, body={"error": message}), chosen)
         if verdict.kind == "hang":
             _record("ws_upgrade", "hang")
             return ServeResult(action="hang")
         _record("ws_upgrade", "drop_connection")
-        return ServeResult(action="drop", drop_at=verdict.drop_at)
+        return with_reply_headers(ServeResult(action="drop", drop_at=verdict.drop_at), chosen)

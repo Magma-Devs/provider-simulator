@@ -977,38 +977,37 @@ def test_a_pause_armed_earlier_still_refuses_a_non_http_ports_filter_later():
     assert "pause_at" in resp["error"]
 
 
-# ── reply_headers on a block that targets no http endpoint ────────────────────
+# ── reply_headers on a block that targets no endpoint ─────────────────────────
 
 
 @pytest.mark.parametrize(
     "key, block",
     [
-        pytest.param("lava-sim-grpc:1", {}, id="a-provider-with-only-grpc-endpoints"),
-        pytest.param("eth-sim:1", {"ports": "ws"}, id="a-ports-filter-that-names-only-the-ws-port"),
-        pytest.param("eth-sim:1", {"transports": ["ws"]}, id="a-transports-filter-without-http"),
+        pytest.param("eth-sim:1", {"transports": ["http2"]}, id="a-transports-filter-of-grpc-only"),
     ],
 )
-def test_reply_headers_on_a_block_that_targets_no_http_endpoint_are_400(key, block):
-    """Only the HTTP adapter writes the chosen headers. A block that reaches no
-    http endpoint would store them, echo them, and send them on no reply. A test
-    would then read their absence as the router dropping them."""
+def test_reply_headers_on_a_block_that_targets_no_endpoint_that_writes_them_are_400(key, block):
+    """Every adapter writes the chosen headers, the gRPC adapter as header
+    metadata, but eth-sim serves no gRPC endpoint. A block whose filter reaches
+    no endpoint of the provider would store them, echo them, and send them on no
+    reply. A test would then read their absence as the router dropping them."""
     api = _api()
-    if block.get("ports") == "ws":
-        block = {"ports": [_port_of(api, key, "ws")]}
     st, resp = api.apply_scenario({"providers": {key: {"reply_headers": {"Retry-After": "5"}, **block}}})
-    assert st == 400, f"reply_headers that no http endpoint can send must be refused, got {st}: {resp}"
+    assert st == 400, f"reply_headers that no endpoint can send must be refused, got {st}: {resp}"
     assert key in resp["error"] and "reply_headers cannot apply" in resp["error"], resp
     _, scen = api.get_scenario()
     assert scen["providers"][key]["reply_headers"] is None
 
 
-def test_reply_headers_on_a_block_that_targets_the_http_endpoint_are_accepted():
+@pytest.mark.parametrize("transport", ["http", "ws"])
+def test_reply_headers_on_a_block_that_targets_one_endpoint_that_writes_them_are_accepted(transport):
     """The positive control. Without it, a rule that refused every reply_headers
-    block would pass the test above."""
+    block would pass the test above. A ws endpoint writes them on its answer to
+    the upgrade."""
     api = _api()
-    http_port = _port_of(api, "eth-sim:1", "http")
+    port = _port_of(api, "eth-sim:1", transport)
     st, resp = api.apply_scenario(
-        {"providers": {"eth-sim:1": {"reply_headers": {"Retry-After": "5"}, "ports": [http_port]}}}
+        {"providers": {"eth-sim:1": {"reply_headers": {"Retry-After": "5"}, "ports": [port]}}}
     )
     assert st == 200, resp
     assert resp["applied"]["eth-sim:1"]["reply_headers"] == {"Retry-After": "5"}
@@ -1016,14 +1015,14 @@ def test_reply_headers_on_a_block_that_targets_the_http_endpoint_are_accepted():
     assert scen["providers"]["eth-sim:1"]["reply_headers"] == {"Retry-After": "5"}
 
 
-def test_reply_headers_set_earlier_still_refuse_a_non_http_ports_filter_later():
+def test_reply_headers_set_earlier_still_refuse_a_grpc_only_filter_later():
     """Read EFFECTIVELY, merged over what is stored: a POST merges. Headers set in
-    one call and a ws-only ports filter set in the next would otherwise slip past
-    a rule that looked at one request only."""
+    one call and a filter moved to the gRPC wire in the next would otherwise slip
+    past a rule that looked at one request only."""
     api = _api()
     st, _ = api.apply_scenario({"providers": {"eth-sim:1": {"reply_headers": {"Retry-After": "5"}}}})
-    assert st == 200, "reply_headers with no filter reach the http endpoint"
-    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"ports": [_port_of(api, "eth-sim:1", "ws")]}}})
+    assert st == 200, "reply_headers with no filter reach the http and the ws endpoint"
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"transports": ["http2"]}}})
     assert st == 400, f"the stored reply_headers must still be considered, got {st}"
     assert "reply_headers cannot apply" in resp["error"]
 
@@ -1034,6 +1033,76 @@ def test_no_reply_headers_on_a_provider_with_only_grpc_endpoints_are_accepted(he
     does not know its interface. Neither sends a header, so neither is refused."""
     api = _api()
     st, resp = api.apply_scenario({"providers": {"lava-sim-grpc:1": {"reply_headers": headers}}})
+    assert st == 200, resp
+
+
+def test_reply_headers_on_a_grpc_endpoint_are_accepted():
+    """The gRPC adapter writes the chosen headers as the header metadata of its
+    reply, with no filter and with a ports filter that names the gRPC port."""
+    api = _api()
+    port = _port_of(api, "lava-sim-grpc:1", "http2")
+    for block in ({}, {"ports": [port]}):
+        st, resp = api.apply_scenario(
+            {"providers": {"lava-sim-grpc:1": {"reply_headers": {"retry-after": "7"}, **block}}}
+        )
+        assert st == 200, resp
+        assert resp["applied"]["lava-sim-grpc:1"]["reply_headers"] == {"retry-after": "7"}
+
+
+# ── reply_trailers on a block that targets no gRPC endpoint ───────────────────
+
+
+@pytest.mark.parametrize(
+    "key, block",
+    [
+        pytest.param("eth-sim:1", {}, id="a-provider-with-no-grpc-endpoint"),
+        pytest.param("lava-sim-grpc:1", {"transports": ["http"]}, id="a-transports-filter-off-the-grpc-endpoint"),
+    ],
+)
+def test_reply_trailers_on_a_block_that_targets_no_grpc_endpoint_are_400(key, block):
+    """Only the gRPC adapter writes trailing metadata. A block that reaches no
+    gRPC endpoint would store the trailers, echo them, and send them on no
+    reply. A test would then read their absence as the router dropping them."""
+    api = _api()
+    st, resp = api.apply_scenario({"providers": {key: {"reply_trailers": {"grpc-retry-pushback-ms": "5000"}, **block}}})
+    assert st == 400, f"reply_trailers that no endpoint can send must be refused, got {st}: {resp}"
+    assert key in resp["error"] and "reply_trailers cannot apply" in resp["error"], resp
+    _, scen = api.get_scenario()
+    assert scen["providers"][key]["reply_trailers"] is None
+
+
+def test_reply_trailers_on_a_grpc_endpoint_are_accepted():
+    """The positive control. Without it, a rule that refused every reply_trailers
+    block would pass the test above."""
+    api = _api()
+    port = _port_of(api, "lava-sim-grpc:1", "http2")
+    for block in ({}, {"ports": [port]}):
+        st, resp = api.apply_scenario(
+            {"providers": {"lava-sim-grpc:1": {"reply_trailers": {"grpc-retry-pushback-ms": "5000"}, **block}}}
+        )
+        assert st == 200, resp
+        assert resp["applied"]["lava-sim-grpc:1"]["reply_trailers"] == {"grpc-retry-pushback-ms": "5000"}
+
+
+def test_reply_trailers_set_earlier_still_refuse_a_filter_moved_off_the_grpc_endpoint_later():
+    """Read EFFECTIVELY, merged over what is stored, for the reason the
+    reply_headers rule gives: a POST merges."""
+    api = _api()
+    st, _ = api.apply_scenario(
+        {"providers": {"lava-sim-grpc:1": {"reply_trailers": {"grpc-retry-pushback-ms": "5000"}}}}
+    )
+    assert st == 200, "reply_trailers with no filter reach the gRPC endpoint"
+    st, resp = api.apply_scenario({"providers": {"lava-sim-grpc:1": {"transports": ["http"]}}})
+    assert st == 400, f"the stored reply_trailers must still be considered, got {st}"
+    assert "reply_trailers cannot apply" in resp["error"]
+
+
+@pytest.mark.parametrize("trailers", [None, {}])
+def test_no_reply_trailers_on_a_provider_with_no_grpc_endpoint_are_accepted(trailers):
+    """A caller that resets every field sends null or {} to each provider. Neither
+    sends a trailer, so neither is refused."""
+    api = _api()
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"reply_trailers": trailers}}})
     assert st == 200, resp
 
 

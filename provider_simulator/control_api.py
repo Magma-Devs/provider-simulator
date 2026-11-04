@@ -23,6 +23,7 @@ from provider_simulator.cache_sim import DEFAULT_MODE as DEFAULT_CACHE_MODE
 from provider_simulator.cache_sim import CacheEntry, CacheSimRegistry, UnknownMode
 from provider_simulator.chains import CHAINS
 from provider_simulator.domain.call_log import decode_row_headers
+from provider_simulator.domain.endpoint import TRANSPORTS
 from provider_simulator.domain.registry import Registry
 from provider_simulator.listeners.ws import WsSubscriptions
 from provider_simulator.port_gate import PortGate
@@ -198,39 +199,48 @@ def _a_filter_scenario_config_refuses(effective: dict) -> bool:
     return effective.get("ports") is not None and not effective["ports"]
 
 
-def _reply_headers_no_http_endpoint_can_send(provider: object, scenario_updates: dict) -> str:
-    """Refuse chosen reply headers when the block targets no ``http`` endpoint.
+# The transports whose adapter writes each chosen field. Every adapter writes the
+# chosen headers: as headers on 'http' and 'ws', as header metadata on 'http2'.
+# Only the gRPC adapter writes trailing metadata.
+_WRITERS_OF_CHOSEN = {
+    "reply_headers": (TRANSPORTS, "every endpoint writes them"),
+    "reply_trailers": (("http2",), "only a gRPC endpoint ('http2') writes them"),
+}
 
-    Only the HTTP adapter writes the headers. ``ScenarioConfig`` refuses a
-    ``transports`` filter without "http", and it cannot judge a ``ports``
-    filter or a provider that has no ``http`` endpoint at all, such as a gRPC
-    provider: it holds no endpoints. Here the provider is in hand. Without this
-    rule the headers would be stored, ``GET /scenario`` would echo them, and no
+
+def _chosen_metadata_no_endpoint_can_send(provider: object, scenario_updates: dict, field_name: str) -> str:
+    """Refuse chosen reply headers or trailers when the block targets no endpoint that writes them.
+
+    ``ScenarioConfig`` refuses a ``transports`` filter that names no writer, and
+    it cannot judge a ``ports`` filter, a ``transports`` filter that names a wire
+    the provider does not serve, or a provider with no gRPC endpoint for
+    trailers: it holds no endpoints. Here the provider is in hand. Without this
+    rule the values would be stored, ``GET /scenario`` would echo them, and no
     reply would carry them: a test would read their absence as the router
     dropping them.
 
     Every field is read EFFECTIVELY, merged over what is already stored, for the
-    reason ``_a_pause_no_named_port_can_serve`` gives: a POST merges, so headers
-    set in one call and a filter moved off the ``http`` endpoint in the next
-    would slip past a rule that read one request.
+    reason ``_a_pause_no_named_port_can_serve`` gives: a POST merges, so values
+    set in one call and a filter moved off their endpoints in the next would
+    slip past a rule that read one request.
     """
     stored = provider.scenario.snapshot()  # type: ignore[attr-defined]
     effective = {**stored, **scenario_updates}
-    headers = effective.get("reply_headers")
-    if not headers or not isinstance(headers, dict):
-        # None and {} send no header. A value of another shape is
+    chosen = effective.get(field_name)
+    if not chosen or not isinstance(chosen, dict):
+        # None and {} send nothing. A value of another shape is
         # ScenarioConfig's to refuse, a few lines below the caller.
         return ""
     if _a_filter_scenario_config_refuses(effective):
         return ""
+    writers, who = _WRITERS_OF_CHOSEN[field_name]
     endpoints = list(provider.endpoints)  # type: ignore[attr-defined]
-    if any(ep.transport == "http" and fault_policy.targets(effective, ep) for ep in endpoints):
+    if any(ep.transport in writers and fault_policy.targets(effective, ep) for ep in endpoints):
         return ""
     return (
-        f"reply_headers cannot apply: only an http endpoint writes them, and with "
-        f"transports={effective.get('transports')!r} and ports={effective.get('ports')!r} this block "
-        f"targets none (the provider serves {_endpoints_text(endpoints)}). The headers would be stored "
-        "and would reach no reply"
+        f"{field_name} cannot apply: {who}, and with transports={effective.get('transports')!r} and "
+        f"ports={effective.get('ports')!r} this block targets none (the provider serves "
+        f"{_endpoints_text(endpoints)}). They would be stored and would reach no reply"
     )
 
 
@@ -606,7 +616,8 @@ class ControlApi:
             err = (
                 _ports_the_provider_does_not_serve(provider, scenario_updates)
                 or _a_pause_no_named_port_can_serve(provider, scenario_updates)
-                or _reply_headers_no_http_endpoint_can_send(provider, scenario_updates)
+                or _chosen_metadata_no_endpoint_can_send(provider, scenario_updates, "reply_headers")
+                or _chosen_metadata_no_endpoint_can_send(provider, scenario_updates, "reply_trailers")
                 or _an_invalid_json_no_endpoint_can_apply(provider, scenario_updates)
                 or _an_invalid_proto_no_endpoint_can_apply(provider, scenario_updates)
                 or _a_graphql_field_no_endpoint_can_apply(provider, scenario_updates)

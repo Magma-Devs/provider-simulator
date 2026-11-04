@@ -266,6 +266,29 @@ def _status_of(call, *args, **kwargs) -> tuple[grpc.StatusCode, str]:
     return grpc.StatusCode.OK, ""
 
 
+def _metadata_of_one_call(address: str, timeout: float = 5.0) -> tuple[grpc.StatusCode, dict, dict]:
+    """Call GetLatestBlock once. Return the status, the header metadata and the
+    trailing metadata that the caller got, each as a dict of name to value."""
+
+    async def _do():
+        channel = grpc.aio.insecure_channel(address)
+        try:
+            call = query_pb2_grpc.ServiceStub(channel).GetLatestBlock(
+                query_pb2.GetLatestBlockRequest(), timeout=timeout
+            )
+            try:
+                await call
+            except grpc.aio.AioRpcError:
+                pass
+            header = {name: value for name, value in (await call.initial_metadata() or ())}
+            trailer = {name: value for name, value in (await call.trailing_metadata() or ())}
+            return await call.code(), header, trailer
+        finally:
+            await channel.close()
+
+    return asyncio.run(_do())
+
+
 def _call_raw(address: str, path: str, payload: bytes = b"", timeout: float = 5.0) -> bytes:
     """Call one gRPC method by its path, with request bytes that the test
     chooses, and return the reply bytes. A generated stub cannot call a method
@@ -1593,6 +1616,78 @@ class TestGrpcDropPoint:
         assert status == 200, body
         assert _frames_of_one_call(_GRPC_PORT_1, _GET_LATEST_BLOCK_PATH) == want_frames
         assert [(row["method"], row["status"]) for row in _rows(sim)] == [("GetLatestBlock", "drop_connection")]
+
+
+class TestGrpcChosenMetadata:
+    """``reply_headers`` go out as the header metadata of a gRPC reply, and
+    ``reply_trailers`` as its trailing metadata, on a fault and on a success.
+    The names go out in lowercase, which gRPC requires.
+
+    A router reads a rate-limit wait time from one of the two places. A reply
+    that carries only a status sends no header metadata at all: its one HEADERS
+    frame is the trailer. So a test chooses the place, and the frames show it."""
+
+    _WAIT = {"grpc-retry-pushback-ms": "5000", "Retry-After": "7"}
+    _SENT = {"grpc-retry-pushback-ms": "5000", "retry-after": "7"}
+
+    def test_a_fault_carries_the_chosen_headers_in_the_header_metadata(self, sim):
+        status, body = _set_grpc(sim, "1", mode="rate_limit", reply_headers=self._WAIT)
+        assert status == 200, body
+        code, header, trailer = _metadata_of_one_call(_GRPC_ADDRS["1"])
+        assert code == grpc.StatusCode.RESOURCE_EXHAUSTED
+        assert {name: header.get(name) for name in self._SENT} == self._SENT, header
+        assert not set(self._SENT) & set(trailer), trailer
+        assert _frames_of_one_call(_GRPC_PORT_1, _GET_LATEST_BLOCK_PATH) == ["HEADERS", "HEADERS+END_STREAM"]
+
+    def test_a_fault_carries_the_chosen_trailers_in_the_trailing_metadata(self, sim):
+        status, body = _set_grpc(sim, "1", mode="rate_limit", reply_trailers=self._WAIT)
+        assert status == 200, body
+        code, header, trailer = _metadata_of_one_call(_GRPC_ADDRS["1"])
+        assert code == grpc.StatusCode.RESOURCE_EXHAUSTED
+        assert {name: trailer.get(name) for name in self._SENT} == self._SENT, trailer
+        assert not set(self._SENT) & set(header), header
+        # The status alone: one HEADERS frame, the trailer, and no header metadata.
+        assert _frames_of_one_call(_GRPC_PORT_1, _GET_LATEST_BLOCK_PATH) == ["HEADERS+END_STREAM"]
+
+    def test_a_success_carries_both(self, sim):
+        status, body = _set_grpc(
+            sim, "1", reply_headers={"X-Chosen-Header": "h"}, reply_trailers={"X-Chosen-Trailer": "t"}
+        )
+        assert status == 200, body
+        code, header, trailer = _metadata_of_one_call(_GRPC_ADDRS["1"])
+        assert code == grpc.StatusCode.OK
+        assert header.get("x-chosen-header") == "h", header
+        assert trailer.get("x-chosen-trailer") == "t", trailer
+
+    @pytest.mark.parametrize(
+        "fault",
+        [
+            pytest.param({"mode": "down"}, id="down"),
+            pytest.param({"mode": "error", "error_message": "UNAVAILABLE"}, id="an-error-status"),
+            pytest.param({"mode": "drop_connection", "drop_at": "after_headers"}, id="a-drop-after-the-headers"),
+        ],
+    )
+    def test_every_status_carries_the_chosen_metadata(self, sim, fault):
+        status, body = _set_grpc(sim, "1", reply_headers={"x-h": "1"}, reply_trailers={"x-t": "2"}, **fault)
+        assert status == 200, body
+        code, header, trailer = _metadata_of_one_call(_GRPC_ADDRS["1"])
+        assert code == grpc.StatusCode.UNAVAILABLE
+        assert (header.get("x-h"), trailer.get("x-t")) == ("1", "2"), (header, trailer)
+
+    def test_another_provider_of_the_pool_carries_nothing(self, sim):
+        status, body = _set_grpc(sim, "1", reply_headers={"x-h": "1"}, reply_trailers={"x-t": "2"})
+        assert status == 200, body
+        code, header, trailer = _metadata_of_one_call(_GRPC_ADDRS["2"])
+        assert code == grpc.StatusCode.OK
+        assert "x-h" not in header and "x-t" not in trailer, (header, trailer)
+
+    def test_reset_removes_the_chosen_metadata(self, sim):
+        status, body = _set_grpc(sim, "1", reply_headers={"x-h": "1"}, reply_trailers={"x-t": "2"})
+        assert status == 200, body
+        _post(_ctrl(sim, "/reset"), {})
+        code, header, trailer = _metadata_of_one_call(_GRPC_ADDRS["1"])
+        assert code == grpc.StatusCode.OK
+        assert "x-h" not in header and "x-t" not in trailer, (header, trailer)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
