@@ -28,12 +28,22 @@ never faulted.
 
 When both are set they AND together: an endpoint must match the transport list
 AND the port list to be targeted.
+
+One field changes no fault and no body: ``reply_headers`` adds chosen headers to
+each reply that the provider writes on a targeted ``http`` endpoint, such as a
+``Retry-After`` on a 429. The HTTP adapter writes them, so a block that reaches
+no ``http`` endpoint is refused.
 """
 
+import string
 from dataclasses import dataclass, field
 
 from provider_simulator.domain.endpoint import TRANSPORTS
 from provider_simulator.domain.introspective_config import IntrospectiveConfig
+
+# The characters of an HTTP ``token`` (RFC 9110, section 5.6.2). A header name is
+# a token, and so is a media-type parameter value that needs no quotes.
+HTTP_TOKEN_CHARS = frozenset("!#$%&'*+-.^_`|~" + string.digits + string.ascii_letters)
 
 
 @dataclass
@@ -89,6 +99,17 @@ class ScenarioConfig(IntrospectiveConfig):
     # Address filter, ANDed with transports. The field that makes a provider
     # serving one interface and one transport at two ports separable at all.
     ports: list[int] | None = None  # endpoint filter; None = all endpoints
+    # Headers that the provider adds to each reply it writes on a targeted
+    # ``http`` endpoint, as {name: value}: a success, a fault, the bodiless 503 of
+    # ``down`` and the headers of a reply that ``drop_connection`` cuts. None or
+    # {} means none. A chosen header replaces the header of the same name that the
+    # simulator writes itself, such as ``Date``. A ``hang`` writes no reply, and
+    # the gRPC and WebSocket adapters write none of these headers.
+    reply_headers: dict[str, str] | None = None
+
+    # The headers that frame a reply, and the Content-Type that names the provider.
+    # A chosen value would break the reply or the name, so it is refused.
+    _HEADERS_THE_SIMULATOR_OWNS = ("connection", "content-length", "content-type", "transfer-encoding")
 
     # Modes that answer, or refuse to answer, before the write path a pause acts
     # on is ever reached. ``down`` returns a bodiless 503 pre-parse, ``hang``
@@ -106,6 +127,60 @@ class ScenarioConfig(IntrospectiveConfig):
         self._validate_pause(cfg)
         self._validate_rate_limit_style(cfg)
         self._validate_unreadable_reply(cfg)
+        self._validate_reply_headers(cfg)
+
+    def _validate_reply_headers(self, cfg: dict) -> None:
+        """Refuse chosen reply headers that could not be sent as they are written.
+
+        A name must be an HTTP token, and a value must be text of visible ASCII
+        characters, spaces and tabs: a line break in a value would end the header
+        and start another one. Two names that differ only in letter case are one
+        header, so the pair is refused. ``_HEADERS_THE_SIMULATOR_OWNS`` are refused
+        too.
+
+        Like a pause, the headers are written by the HTTP adapter, which serves the
+        'http' transport. So a ``transports`` filter without 'http' is refused here.
+        A ``ports`` filter is checked by the control API, which knows the endpoints.
+        """
+        if "reply_headers" not in cfg or cfg["reply_headers"] is None:
+            return
+        headers = cfg["reply_headers"]
+        if not isinstance(headers, dict):
+            raise ValueError(
+                f"reply_headers must be an object of header names and text values, or null, got {headers!r}"
+            )
+        seen: set[str] = set()
+        for name, value in headers.items():
+            if not isinstance(name, str) or not name or any(char not in HTTP_TOKEN_CHARS for char in name):
+                raise ValueError(
+                    f"reply_headers: {name!r} is not an HTTP header name. A name is letters, digits and "
+                    "!#$%&'*+-.^_`|~, with no space and no colon"
+                )
+            if not isinstance(value, str) or any(char != "\t" and not " " <= char <= "~" for char in value):
+                raise ValueError(
+                    f"reply_headers[{name!r}] must be text of visible ASCII characters, spaces and tabs, "
+                    f"got {value!r}. Write a number as text, such as '5'"
+                )
+            lowered = name.lower()
+            if lowered in self._HEADERS_THE_SIMULATOR_OWNS:
+                raise ValueError(
+                    f"reply_headers cannot set {name!r}: the simulator writes it itself. Connection, "
+                    "Content-Length and Transfer-Encoding frame the reply, and Content-Type names the provider"
+                )
+            if lowered in seen:
+                raise ValueError(
+                    f"reply_headers names {name!r} twice: header names do not depend on letter case, "
+                    "so the two entries are one header with two values"
+                )
+            seen.add(lowered)
+
+        transports = cfg.get("transports")
+        if headers and transports is not None and "http" not in transports:
+            raise ValueError(
+                f"reply_headers cannot apply with transports={transports!r}: the HTTP adapter, which "
+                "serves the 'http' transport, writes them. The WebSocket and gRPC wires write none of "
+                "them, so the headers would reach no reply"
+            )
 
     def _validate_rate_limit_style(self, cfg: dict) -> None:
         style = cfg.get("rate_limit_style")

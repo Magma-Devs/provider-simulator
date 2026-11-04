@@ -925,6 +925,12 @@ def test_a_string_ports_value_is_not_read_as_five_ports():
 # ── a pause that no named address could perform ──────────────────────────────
 
 
+def _port_of(api, key: str, transport: str) -> int:
+    """The first port where the provider ``key`` serves ``transport``, from ``GET /providers``."""
+    _, providers = api.get_providers({})
+    return next(e["port"] for e in providers["providers"][key]["endpoints"] if e["transport"] == transport)
+
+
 def test_a_pause_scoped_to_a_non_http_port_is_refused():
     """The same intent had two spellings and opposite answers.
 
@@ -938,9 +944,7 @@ def test_a_pause_scoped_to_a_non_http_port_is_refused():
     answer and concludes the router was fast.
     """
     api = _api()
-    _, providers = api.get_providers({})
-    eps = providers["providers"]["eth-sim:1"]["endpoints"]
-    ws_port = next(e["port"] for e in eps if e["transport"] == "ws")
+    ws_port = _port_of(api, "eth-sim:1", "ws")
     st, resp = api.apply_scenario(
         {"providers": {"eth-sim:1": {"pause_at": "mid_body", "pause_ms": 50, "ports": [ws_port]}}}
     )
@@ -952,9 +956,7 @@ def test_a_pause_scoped_to_an_http_port_is_accepted():
     """The positive control. Without it, a bug refusing EVERY pause-plus-ports
     combination would pass the test above and break a legitimate use."""
     api = _api()
-    _, providers = api.get_providers({})
-    eps = providers["providers"]["eth-sim:1"]["endpoints"]
-    http_port = next(e["port"] for e in eps if e["transport"] == "http")
+    http_port = _port_of(api, "eth-sim:1", "http")
     st, resp = api.apply_scenario(
         {"providers": {"eth-sim:1": {"pause_at": "mid_body", "pause_ms": 50, "ports": [http_port]}}}
     )
@@ -967,14 +969,72 @@ def test_a_pause_armed_earlier_still_refuses_a_non_http_ports_filter_later():
     than replaces. A pause armed in one call and a ws-only ports filter set in the
     next would otherwise slip past a check that looked at one request only."""
     api = _api()
-    _, providers = api.get_providers({})
-    eps = providers["providers"]["eth-sim:1"]["endpoints"]
-    ws_port = next(e["port"] for e in eps if e["transport"] == "ws")
+    ws_port = _port_of(api, "eth-sim:1", "ws")
     st, _ = api.apply_scenario({"providers": {"eth-sim:1": {"pause_at": "mid_body", "pause_ms": 50}}})
     assert st == 200, "a pause with no filter at all is fine"
     st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"ports": [ws_port]}}})
     assert st == 400, f"the stored pause must still be considered, got {st}"
     assert "pause_at" in resp["error"]
+
+
+# ── reply_headers on a block that targets no http endpoint ────────────────────
+
+
+@pytest.mark.parametrize(
+    "key, block",
+    [
+        pytest.param("lava-sim-grpc:1", {}, id="a-provider-with-only-grpc-endpoints"),
+        pytest.param("eth-sim:1", {"ports": "ws"}, id="a-ports-filter-that-names-only-the-ws-port"),
+        pytest.param("eth-sim:1", {"transports": ["ws"]}, id="a-transports-filter-without-http"),
+    ],
+)
+def test_reply_headers_on_a_block_that_targets_no_http_endpoint_are_400(key, block):
+    """Only the HTTP adapter writes the chosen headers. A block that reaches no
+    http endpoint would store them, echo them, and send them on no reply. A test
+    would then read their absence as the router dropping them."""
+    api = _api()
+    if block.get("ports") == "ws":
+        block = {"ports": [_port_of(api, key, "ws")]}
+    st, resp = api.apply_scenario({"providers": {key: {"reply_headers": {"Retry-After": "5"}, **block}}})
+    assert st == 400, f"reply_headers that no http endpoint can send must be refused, got {st}: {resp}"
+    assert key in resp["error"] and "reply_headers cannot apply" in resp["error"], resp
+    _, scen = api.get_scenario()
+    assert scen["providers"][key]["reply_headers"] is None
+
+
+def test_reply_headers_on_a_block_that_targets_the_http_endpoint_are_accepted():
+    """The positive control. Without it, a rule that refused every reply_headers
+    block would pass the test above."""
+    api = _api()
+    http_port = _port_of(api, "eth-sim:1", "http")
+    st, resp = api.apply_scenario(
+        {"providers": {"eth-sim:1": {"reply_headers": {"Retry-After": "5"}, "ports": [http_port]}}}
+    )
+    assert st == 200, resp
+    assert resp["applied"]["eth-sim:1"]["reply_headers"] == {"Retry-After": "5"}
+    _, scen = api.get_scenario()
+    assert scen["providers"]["eth-sim:1"]["reply_headers"] == {"Retry-After": "5"}
+
+
+def test_reply_headers_set_earlier_still_refuse_a_non_http_ports_filter_later():
+    """Read EFFECTIVELY, merged over what is stored: a POST merges. Headers set in
+    one call and a ws-only ports filter set in the next would otherwise slip past
+    a rule that looked at one request only."""
+    api = _api()
+    st, _ = api.apply_scenario({"providers": {"eth-sim:1": {"reply_headers": {"Retry-After": "5"}}}})
+    assert st == 200, "reply_headers with no filter reach the http endpoint"
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"ports": [_port_of(api, "eth-sim:1", "ws")]}}})
+    assert st == 400, f"the stored reply_headers must still be considered, got {st}"
+    assert "reply_headers cannot apply" in resp["error"]
+
+
+@pytest.mark.parametrize("headers", [None, {}])
+def test_no_reply_headers_on_a_provider_with_only_grpc_endpoints_are_accepted(headers):
+    """A caller that resets every field sends null or {} to each provider, and
+    does not know its interface. Neither sends a header, so neither is refused."""
+    api = _api()
+    st, resp = api.apply_scenario({"providers": {"lava-sim-grpc:1": {"reply_headers": headers}}})
+    assert st == 200, resp
 
 
 # ── invalid_json on a provider that has only gRPC endpoints ───────────────────

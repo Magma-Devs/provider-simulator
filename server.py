@@ -44,7 +44,6 @@ import os
 import queue
 import socket
 import socketserver
-import string
 import sys
 import threading
 import time
@@ -67,6 +66,7 @@ from constants import (
 from provider_simulator.cache_sim import CacheSimRegistry
 from provider_simulator.control_api import ControlApi
 from provider_simulator.domain.registry import Registry, build_registry
+from provider_simulator.domain.scenario import HTTP_TOKEN_CHARS
 from provider_simulator.listeners import (
     GraphQLListener,
     JsonRpcListener,
@@ -242,9 +242,6 @@ def _port_is_closed(server: object) -> bool:
 
 # ── HTTP request/response adapter (jsonrpc / rest / tendermintrpc / graphql) ───
 
-# The characters of an HTTP ``token`` (RFC 9110, section 5.6.2).
-_HTTP_TOKEN_CHARS = frozenset("!#$%&'*+-.^_`|~" + string.digits + string.ascii_letters)
-
 
 def _content_type_with_provider_name(media_type: str, provider_name: str) -> str:
     """Return ``media_type`` with the provider name as its ``sim-provider`` parameter.
@@ -297,7 +294,7 @@ def _with_media_type_parameter(media_type: str, name: str, value: str) -> str:
     """
     if not value:
         return media_type
-    if all(char in _HTTP_TOKEN_CHARS for char in value):
+    if all(char in HTTP_TOKEN_CHARS for char in value):
         text = value
     else:
         text = '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -339,6 +336,9 @@ class _HttpListenerHandler(BaseHTTPRequestHandler):
     timeout = 30
     dotted = False
     mid_body_bytes = b'{"jsonrpc":"2.0",'
+    # The chosen headers of the reply that ``_perform`` writes now, as (name,
+    # value) pairs. ``end_headers`` writes them and empties this.
+    _reply_headers: tuple = ()
 
     server: _SimThreadingHTTPServer  # narrowed for the wiring attributes
 
@@ -354,11 +354,31 @@ class _HttpListenerHandler(BaseHTTPRequestHandler):
 
         A reply with no ``Content-Type`` gets none. A reply body does not change:
         a router compares the bodies of two providers.
+
+        A header that the scenario chose for this reply is not sent here:
+        ``end_headers`` sends the chosen value in its place. So a chosen ``Date``
+        replaces the ``Date`` that ``send_response`` writes, and the reply holds
+        one ``Date``.
         """
+        if any(keyword.lower() == name.lower() for name, _ in self._reply_headers):
+            return
         if keyword.lower() == "content-type":
             value = _content_type_with_provider_name(value, self.server.listener.provider.name)
             value = _content_type_with_caller_address(value, _caller_address(self.client_address))
         super().send_header(keyword, value)
+
+    def end_headers(self) -> None:
+        """Send the chosen headers of the reply, then end the header block.
+
+        Each reply that ``_perform`` writes with a status line ends here: a reply
+        with a body, the bodiless 503 of ``down`` and the headers of a reply that
+        ``drop_connection`` cuts. A reply that ``_perform`` did not plan, such as
+        the error page for a verb that this port does not serve, carries none.
+        """
+        chosen, self._reply_headers = self._reply_headers, ()
+        for name, value in chosen:
+            super().send_header(name, value)
+        super().end_headers()
 
     def _run(self, verb: str) -> None:
         if _port_is_closed(self.server):
@@ -383,6 +403,7 @@ class _HttpListenerHandler(BaseHTTPRequestHandler):
         self._perform(result)
 
     def _perform(self, result: ServeResult) -> None:
+        self._reply_headers = tuple(result.reply_headers.items())
         if result.action == "hang":
             # Long enough for any reasonable client read timeout to fire,
             # finite so the worker thread eventually unwinds.

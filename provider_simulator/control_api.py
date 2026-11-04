@@ -178,6 +178,62 @@ def _a_pause_no_named_port_can_serve(provider: object, scenario_updates: dict) -
     return ""
 
 
+def _endpoints_text(endpoints: list) -> str:
+    """The endpoints of a provider as text, for a refusal that names what the provider serves."""
+    return ", ".join(f"{ep.interface}/{ep.transport} :{ep.port}" for ep in endpoints)
+
+
+def _a_filter_scenario_config_refuses(effective: dict) -> bool:
+    """True when the ``transports`` or ``ports`` filter of ``effective`` is one that
+    ScenarioConfig refuses: a value that is not a list, or an empty ports list.
+
+    A rule that reads which endpoints a block targets DEFERS on such a filter, as
+    ``_ports_the_provider_does_not_serve`` does: ScenarioConfig refuses it a few
+    lines below the caller, with the reason that fits every mode.
+    """
+    for filter_name in ("transports", "ports"):
+        value = effective.get(filter_name)
+        if value is not None and not isinstance(value, (list, tuple)):
+            return True
+    return effective.get("ports") is not None and not effective["ports"]
+
+
+def _reply_headers_no_http_endpoint_can_send(provider: object, scenario_updates: dict) -> str:
+    """Refuse chosen reply headers when the block targets no ``http`` endpoint.
+
+    Only the HTTP adapter writes the headers. ``ScenarioConfig`` refuses a
+    ``transports`` filter without "http", and it cannot judge a ``ports``
+    filter or a provider that has no ``http`` endpoint at all, such as a gRPC
+    provider: it holds no endpoints. Here the provider is in hand. Without this
+    rule the headers would be stored, ``GET /scenario`` would echo them, and no
+    reply would carry them: a test would read their absence as the router
+    dropping them.
+
+    Every field is read EFFECTIVELY, merged over what is already stored, for the
+    reason ``_a_pause_no_named_port_can_serve`` gives: a POST merges, so headers
+    set in one call and a filter moved off the ``http`` endpoint in the next
+    would slip past a rule that read one request.
+    """
+    stored = provider.scenario.snapshot()  # type: ignore[attr-defined]
+    effective = {**stored, **scenario_updates}
+    headers = effective.get("reply_headers")
+    if not headers or not isinstance(headers, dict):
+        # None and {} send no header. A value of another shape is
+        # ScenarioConfig's to refuse, a few lines below the caller.
+        return ""
+    if _a_filter_scenario_config_refuses(effective):
+        return ""
+    endpoints = list(provider.endpoints)  # type: ignore[attr-defined]
+    if any(ep.transport == "http" and fault_policy.targets(effective, ep) for ep in endpoints):
+        return ""
+    return (
+        f"reply_headers cannot apply: only an http endpoint writes them, and with "
+        f"transports={effective.get('transports')!r} and ports={effective.get('ports')!r} this block "
+        f"targets none (the provider serves {_endpoints_text(endpoints)}). The headers would be stored "
+        "and would reach no reply"
+    )
+
+
 def _an_invalid_json_no_endpoint_can_apply(provider: object, scenario_updates: dict) -> str:
     """Refuse ``corruption_mode="invalid_json"`` for a provider that has only
     gRPC endpoints.
@@ -255,7 +311,7 @@ def _a_canned_body_no_endpoint_can_serve(provider: object, scenario_updates: dic
         return ""
     for method, cfg in responses.items():
         if isinstance(method, str) and isinstance(cfg, dict) and "body" in cfg:
-            serves = ", ".join(f"{ep.interface}/{ep.transport} :{ep.port}" for ep in endpoints)
+            serves = _endpoints_text(endpoints)
             return (
                 f"responses[{method!r}] holds a canned body under a method name, and no endpoint of "
                 f"this provider serves one (it serves {serves}). A gRPC endpoint reads 'result', "
@@ -289,7 +345,7 @@ def _a_graphql_field_no_endpoint_can_apply(provider: object, scenario_updates: d
         return ""
     for field_name, default in _GRAPHQL_ONLY_FIELDS.items():
         if field_name in scenario_updates and scenario_updates[field_name] != default:
-            serves = ", ".join(f"{ep.interface}/{ep.transport} :{ep.port}" for ep in endpoints)
+            serves = _endpoints_text(endpoints)
             return (
                 f"{field_name} cannot apply: only the GraphQL listener reads it, and this provider has "
                 f"no GraphQL endpoint (it serves {serves}). The value would be stored and would change "
@@ -329,19 +385,11 @@ def _a_port_closed_that_cannot_happen(
     effective = {**stored, **scenario_updates}
     if effective.get("mode") != "port_closed":
         return 200, ""
-    for filter_name in ("transports", "ports"):
-        value = effective.get(filter_name)
-        if value is not None and not isinstance(value, (list, tuple)):
-            # A malformed filter is ScenarioConfig's to refuse, a few lines
-            # below the caller. DEFER, as _ports_the_provider_does_not_serve does.
-            return 200, ""
-    if effective.get("ports") is not None and not effective["ports"]:
-        # An empty ports list is refused by ScenarioConfig too, whatever the
-        # mode, with the reason that fits every mode. Leave it that one answer.
+    if _a_filter_scenario_config_refuses(effective):
         return 200, ""
 
     endpoints = list(provider.endpoints)  # type: ignore[attr-defined]
-    serves = ", ".join(f"{ep.interface}/{ep.transport} :{ep.port}" for ep in endpoints)
+    serves = _endpoints_text(endpoints)
     targeted = [ep for ep in endpoints if fault_policy.targets(effective, ep)]
     if not targeted:
         return 400, (
@@ -558,6 +606,7 @@ class ControlApi:
             err = (
                 _ports_the_provider_does_not_serve(provider, scenario_updates)
                 or _a_pause_no_named_port_can_serve(provider, scenario_updates)
+                or _reply_headers_no_http_endpoint_can_send(provider, scenario_updates)
                 or _an_invalid_json_no_endpoint_can_apply(provider, scenario_updates)
                 or _an_invalid_proto_no_endpoint_can_apply(provider, scenario_updates)
                 or _a_graphql_field_no_endpoint_can_apply(provider, scenario_updates)
