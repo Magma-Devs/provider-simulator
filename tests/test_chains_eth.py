@@ -286,3 +286,83 @@ def test_unparseable_block_parameter_still_echoes_when_provider_is_behind():
     chain, sc, q = _behind(100)
     _, body = chain.build_success({"id": 1, "method": "eth_getBlockByNumber", "params": ["not-a-block", False]}, sc, q)
     assert body["result"]["number"] == "not-a-block"
+
+
+# ── A pruned node: the earliest_block quirk ────────────────────────────────────
+
+EARLIEST = BASE - 1_000  # a pruned node that keeps the last 1,000 blocks
+
+
+def _pruned(earliest: int = EARLIEST):
+    q = EthQuirks()
+    q.update({"earliest_block": earliest})
+    return EthChain(), ScenarioConfig().snapshot(), q.snapshot()
+
+
+def test_earliest_resolves_to_the_earliest_block_of_a_pruned_node():
+    """The router's archive check asks for `earliest` and expects block 0."""
+    chain, sc, q = _pruned()
+    _, body = chain.build_success({"id": 1, "method": "eth_getBlockByNumber", "params": ["earliest", False]}, sc, q)
+    assert body["result"]["number"] == _upper(EARLIEST)
+
+
+def test_a_pruned_node_answers_null_for_a_block_below_its_earliest_and_serves_the_rest():
+    chain, sc, q = _pruned()
+    for asked, held in ((hex(EARLIEST - 1), False), ("0x0", False), (hex(EARLIEST), True), (hex(BASE), True)):
+        _, body = chain.build_success({"id": 1, "method": "eth_getBlockByNumber", "params": [asked, False]}, sc, q)
+        if held:
+            assert body["result"]["number"] == asked, asked
+        else:
+            assert body["result"] is None, f"{asked} is below the earliest block, so the node no longer holds it"
+    for tag in ("latest", "safe", "finalized", "pending"):
+        _, body = chain.build_success({"id": 1, "method": "eth_getBlockByNumber", "params": [tag, False]}, sc, q)
+        assert isinstance(body["result"], dict), f"{tag} names the head, which a pruned node holds"
+
+
+def test_a_pruned_node_fails_a_state_read_below_its_earliest_block():
+    """Each state read, with its block parameter at its own position."""
+    chain, sc, q = _pruned()
+    old, recent = hex(EARLIEST - 1), hex(EARLIEST)
+    address = "0x" + "a" * 40
+    for method, prefix in (
+        ("eth_getBalance", [address]),
+        ("eth_getCode", [address]),
+        ("eth_getTransactionCount", [address]),
+        ("eth_call", [{"to": address, "data": "0x"}]),
+        ("eth_estimateGas", [{"to": address, "data": "0x"}]),
+        ("eth_getStorageAt", [address, "0x0"]),
+        ("eth_getProof", [address, []]),
+    ):
+        _, body = chain.build_success({"id": 7, "method": method, "params": prefix + [old]}, sc, q)
+        assert body == {"jsonrpc": "2.0", "id": 7, "error": ETH_ERROR_STUBS["pruned_state"]}, method
+        for held in (recent, "latest", "earliest", {"blockNumber": recent}):
+            _, body = chain.build_success({"id": 7, "method": method, "params": prefix + [held]}, sc, q)
+            assert "error" not in body, f"{method} at {held!r} is a height the node holds"
+
+
+def test_an_eip1898_block_object_below_the_earliest_block_is_pruned_too():
+    chain, sc, q = _pruned()
+    req = {"id": 1, "method": "eth_getBalance", "params": ["0x" + "a" * 40, {"blockNumber": hex(EARLIEST - 1)}]}
+    _, body = chain.build_success(req, sc, q)
+    assert body["error"] == ETH_ERROR_STUBS["pruned_state"]
+    by_hash = {"id": 1, "method": "eth_getBalance", "params": ["0x" + "a" * 40, {"blockHash": "0x" + "b" * 64}]}
+    _, body = chain.build_success(by_hash, sc, q)
+    assert "error" not in body, "a block hash names no height the simulator can compare"
+
+
+def test_a_per_method_error_still_wins_over_the_pruned_node():
+    chain = EthChain()
+    sc = ScenarioConfig()
+    sc.update({"responses": {"eth_getBalance": {"error": {"code": -32005, "message": "limit exceeded"}}}})
+    _, _, q = _pruned()
+    req = {"id": 1, "method": "eth_getBalance", "params": ["0x" + "a" * 40, hex(EARLIEST - 1)]}
+    _, body = chain.build_success(req, sc.snapshot(), q)
+    assert body["error"]["code"] == -32005
+
+
+def test_without_the_quirk_every_height_is_served_as_by_an_archive_node():
+    chain, sc, q = _fresh()
+    _, body = chain.build_success({"id": 1, "method": "eth_getBlockByNumber", "params": ["earliest", False]}, sc, q)
+    assert body["result"]["number"] == "0x0"
+    _, body = chain.build_success({"id": 1, "method": "eth_getBalance", "params": ["0x" + "a" * 40, "0x0"]}, sc, q)
+    assert "error" not in body

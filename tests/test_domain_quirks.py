@@ -18,9 +18,24 @@ def test_base_quirks_has_no_fields():
 
 def test_eth_quirks_fields_and_defaults():
     q = EthQuirks()
-    assert q.snapshot() == {"logs_indexed_up_to": None, "logs_lag_mode": "empty"}
-    q.update({"logs_indexed_up_to": 100, "logs_lag_mode": "partial"})
-    assert q.snapshot() == {"logs_indexed_up_to": 100, "logs_lag_mode": "partial"}
+    assert q.snapshot() == {"logs_indexed_up_to": None, "logs_lag_mode": "empty", "earliest_block": None}
+    q.update({"logs_indexed_up_to": 100, "logs_lag_mode": "partial", "earliest_block": 5})
+    assert q.snapshot() == {"logs_indexed_up_to": 100, "logs_lag_mode": "partial", "earliest_block": 5}
+
+
+@pytest.mark.parametrize("bad", [-1, True, "0x10", 1.5])
+def test_eth_quirks_refuse_an_earliest_block_that_is_not_a_height(bad):
+    q = EthQuirks()
+    with pytest.raises(ValueError, match="earliest_block"):
+        q.update({"earliest_block": bad})
+    assert q.snapshot()["earliest_block"] is None, "a refused update writes nothing"
+
+
+def test_eth_quirks_accept_null_to_turn_the_pruned_node_off():
+    q = EthQuirks()
+    q.update({"earliest_block": 10})
+    q.update({"earliest_block": None})
+    assert q.snapshot()["earliest_block"] is None
 
 
 def test_solana_quirks_defaults_share_the_one_gap_constant():

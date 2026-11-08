@@ -251,6 +251,16 @@ curl -si -X POST "$SIM_ROUTER_URL" -H "Content-Type: application/json" -d '{"jso
 curl -s "$SIM_CONTROL_URL/history" | python3 -m json.tool
 ```
 
+### A pruned node — provider 1 keeps only recent history (Ethereum)
+
+The quirk `earliest_block` makes an Ethereum provider a pruned node. `earliest` resolves to that height instead of block 0. `eth_getBlockByNumber` answers `null` for a block below it. A state read below it (`eth_getBalance`, `eth_getCode`, `eth_getTransactionCount`, `eth_call`, `eth_estimateGas`, `eth_getStorageAt`, `eth_getProof`) answers `{"code": -32000, "message": "missing trie node"}`. Every recent height is answered as before. The router's archive check asks for `earliest` and expects block 0, so a router that verifies the provider refuses its archive extension and keeps it for everything else. A height within the base check's minimum distance of the head (128 blocks on ETH1) fails that check too. `null` turns the quirk off, and so does a reset. The TTL sweep resets the scenario of an idle provider and never its quirks, so the quirk lasts as long as a test needs it, past the router's 15-minute epoch.
+
+```bash
+curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" -d '{"providers":{"eth-sim:1":{"earliest_block":19999000}}}'
+curl -s -X POST "http://127.0.0.1:18545" -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["earliest",false],"id":1}'
+# → "number": "0x1312918"
+```
+
 ### Two providers down — only provider 3 healthy
 
 ```bash

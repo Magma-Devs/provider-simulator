@@ -27,6 +27,14 @@ Method-specific behaviour:
 - ``eth_getLogs`` — models head-fresh-but-logs-lagged: when the query's upper
   bound exceeds ``logs_indexed_up_to``, return no logs (``empty``) or only the
   indexed ones (``partial``).
+- The ``earliest_block`` quirk models a pruned node. ``earliest`` resolves to
+  that height instead of block 0, ``eth_getBlockByNumber`` answers ``null`` for
+  a numeric block below it, and a state read (``_STATE_READ_BLOCK_PARAM``) at a
+  height below it answers geth's ``missing trie node``. The router's archive
+  check asks for ``earliest`` and expects block 0, so it fails; every other
+  check, and every relay at a recent height, is answered as before. A
+  per-method ``error`` still wins, and the quirk wins over a per-method
+  ``result``: a pruned node has no state to answer an old height with.
 """
 
 from provider_simulator.chains.base import AdvancingHead, Chain
@@ -71,6 +79,32 @@ def _parse_block_number(raw: object) -> int | None:
         except (ValueError, TypeError):
             return None
     return None
+
+
+# The position of the block parameter of each state read. A pruned node no longer
+# holds the state of an old block, so it fails these reads below its earliest block.
+_STATE_READ_BLOCK_PARAM = {
+    "eth_getBalance": 1,
+    "eth_getCode": 1,
+    "eth_getTransactionCount": 1,
+    "eth_call": 1,
+    "eth_estimateGas": 1,
+    "eth_getStorageAt": 2,
+    "eth_getProof": 2,
+}
+
+
+def _block_param_height(raw: object, earliest: int) -> int | None:
+    """The height a block parameter names, or None when it names no fixed height.
+
+    A number and ``earliest`` name one. The other tags name the head, which a
+    pruned node always holds. An EIP-1898 object names one through its
+    ``blockNumber``; one with a ``blockHash`` names none that this chain can read."""
+    if raw == "earliest":
+        return earliest
+    if isinstance(raw, dict):
+        raw = raw.get("blockNumber")
+    return _parse_block_number(raw)
 
 
 def _entry_blocknum_le(entry: dict, threshold: int) -> bool:
@@ -118,6 +152,13 @@ class EthChain(Chain):
                 "error": err,
             }
 
+        earliest = quirks.get("earliest_block")
+        position = _STATE_READ_BLOCK_PARAM.get(method)
+        if earliest is not None and position is not None and isinstance(params, list) and len(params) > position:
+            height = _block_param_height(params[position], earliest)
+            if height is not None and height < earliest:
+                return 200, {"jsonrpc": "2.0", "id": req_id, "error": self.error_stub("pruned_state")}
+
         result = method_cfg.get("result", ETH_METHOD_DEFAULTS.get(method, "0x1"))
         blocks_behind = scenario.get("blocks_behind", 0)
 
@@ -130,7 +171,7 @@ class EthChain(Chain):
             effective_latest = _hex_upper(effective_head)
             named = {
                 "latest": effective_latest,
-                "earliest": "0x0",
+                "earliest": "0x0" if earliest is None else _hex_upper(earliest),
                 "pending": _hex_upper(effective_head + 1),
                 "safe": effective_latest,
                 "finalized": _hex_upper(effective_head - 1),
@@ -156,8 +197,16 @@ class EthChain(Chain):
             if blocks_behind != 0 and isinstance(params[0], (str, int)):
                 requested = _parse_block_number(params[0])
                 above_head = requested is not None and requested > effective_head
-            if above_head:
-                result = None  # HTTP 200, no error field — the false-gap symptom
+            # A pruned node no longer holds a block below its earliest one. Only a
+            # number can name one: ``earliest`` itself resolves to that block.
+            pruned = False
+            if earliest is not None and isinstance(params[0], (str, int)):
+                requested = _parse_block_number(params[0])
+                pruned = requested is not None and requested < earliest
+            if above_head or pruned:
+                # HTTP 200, no error field. Above the head that is the false-gap
+                # symptom; below a pruned node's earliest block the block is gone.
+                result = None
             else:
                 result = dict(result)
                 result["number"] = named.get(params[0], params[0])

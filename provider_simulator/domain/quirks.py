@@ -30,8 +30,28 @@ class Quirks(IntrospectiveConfig):
 
 @dataclass
 class EthQuirks(Quirks):
+    """Settings of a simulated Ethereum provider.
+
+    ``logs_indexed_up_to`` and ``logs_lag_mode`` model a head that is fresh while
+    the log index lags.
+
+    ``earliest_block`` models a pruned node, one that keeps only recent history.
+    ``earliest`` resolves to that height, a block below it answers ``null``, and a
+    state read at a height below it answers ``missing trie node``. None, the
+    default, is an archive node: ``earliest`` is block 0 and every height is
+    served. A router's archive check asks for ``earliest`` and expects block 0, so
+    any value above 0 fails it.
+    """
+
     logs_indexed_up_to: int | None = None
     logs_lag_mode: str = "empty"  # empty | partial
+    earliest_block: int | None = None
+
+    def _validate(self, cfg: dict) -> None:
+        if "earliest_block" in cfg:
+            value = cfg["earliest_block"]
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+                raise ValueError(f"earliest_block must be a non-negative integer or null, got {value!r}")
 
 
 @dataclass
