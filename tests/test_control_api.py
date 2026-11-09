@@ -975,6 +975,18 @@ def test_a_frozen_head_whose_filter_targets_no_endpoint_is_400():
     assert st == 200, resp
 
 
+def test_a_frozen_head_with_a_transports_object_is_400_and_applies_nothing():
+    """An object whose keys name a transport passed the scenario check, so the
+    freeze was stored, echoed, and scoped to no endpoint of this http-only provider."""
+    api = _api()
+    block = {"frozen_head": 20_000_123, "transports": {"ws": 1}}
+    st, resp = api.apply_scenario({"providers": {"eth-failover-pair-sim:1": block}})
+    assert st == 400
+    assert "transports must be a list of transport names or None" in resp["error"], resp
+    _, scen = api.get_scenario()
+    assert scen["providers"]["eth-failover-pair-sim:1"]["frozen_head"] is None, "a refused request applies nothing"
+
+
 def test_a_frozen_provider_keeps_its_block_while_the_head_advances_at_a_rate():
     """The proof of the setting. The eth head advances at a rate, the primary of
     eth-failover-pair-sim stands on one block, its backup follows the head, and a

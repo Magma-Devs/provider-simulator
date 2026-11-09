@@ -171,7 +171,7 @@ def test_the_ports_closed_by_a_scenario_are_read_from_the_scenario():
     [
         ({"ports": 18548}, "ports must be a list of integers or None"),
         ({"ports": []}, "ports must not be empty"),
-        ({"transports": "http2"}, "unknown transport(s)"),
+        ({"transports": "http2"}, "transports must be a list of transport names or None"),
     ],
 )
 def test_a_malformed_filter_is_still_refused_by_the_scenario_itself(bad_filter, reason):

@@ -310,3 +310,16 @@ def test_a_frozen_head_answers_its_block_while_the_chain_head_moves():
 
     _, body = chain.build_success({"id": 1, "method": "eth_blockNumber"}, ScenarioConfig().snapshot(), q)
     assert body["result"] == _upper(BASE + 10), "a provider with no frozen head answers the moving head"
+
+
+def test_a_provider_frozen_at_block_zero_answers_block_zero_for_every_named_tag_but_pending():
+    """frozen_head=0 is a valid setting. The block before block 0 does not exist, so
+    'finalized' is block 0 as well, never the quantity 0x-1."""
+    sc = ScenarioConfig()
+    sc.update({"frozen_head": 0})
+    frozen, q = sc.snapshot(), EthQuirks().snapshot()
+    chain = EthChain()
+    for tag in ("latest", "safe", "finalized", "earliest"):
+        request = {"id": 1, "method": "eth_getBlockByNumber", "params": [tag, False]}
+        _, body = chain.build_success(request, frozen, q)
+        assert body["result"]["number"] == "0x0", tag

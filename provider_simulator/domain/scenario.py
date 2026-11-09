@@ -307,6 +307,10 @@ class ScenarioConfig(IntrospectiveConfig):
         transports = cfg.get("transports")
         if transports is None:
             return
+        # Any other value would be read item by item: a text letter by letter, and an
+        # object by its keys, so an object keyed by transport names would pass.
+        if not isinstance(transports, (list, tuple)):
+            raise ValueError(f"transports must be a list of transport names or None, got {transports!r}")
         bad = [t for t in transports if t not in TRANSPORTS]
         if bad:
             raise ValueError(

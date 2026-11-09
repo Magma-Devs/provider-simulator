@@ -138,7 +138,9 @@ class EthChain(Chain):
                 "earliest": "0x0",
                 "pending": _hex_upper(effective_head + 1),
                 "safe": effective_latest,
-                "finalized": _hex_upper(effective_head - 1),
+                # No block comes before block 0, so a provider frozen at block 0
+                # reports block 0 as finalized too.
+                "finalized": _hex_upper(max(effective_head - 1, 0)),
             }
             # Only a NUMERIC parameter can be above the head. Every named tag is
             # already resolved against the shifted height, so "latest" on a

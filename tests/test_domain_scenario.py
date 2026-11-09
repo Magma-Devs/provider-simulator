@@ -363,6 +363,17 @@ def test_a_frozen_head_is_stored_and_a_reset_clears_it():
     assert s.snapshot()["frozen_head"] is None
 
 
+@pytest.mark.parametrize("bad", ["ws", {"ws": 1}])
+def test_a_transports_value_that_is_not_a_list_is_rejected(bad):
+    """A text would be read letter by letter and an object by its keys, so an object
+    whose keys name transports passed the check and scoped the block to nothing a
+    caller meant."""
+    s = ScenarioConfig()
+    with pytest.raises(ValueError, match="transports must be a list of transport names or None"):
+        s.update({"mode": "down", "transports": bad})
+    assert s.snapshot()["mode"] == "success", "the whole update aborts"
+
+
 @pytest.mark.parametrize("bad", ["now", "20000123", -1, True, 1.5, [20_000_123]])
 def test_a_frozen_head_that_is_not_a_block_number_is_rejected(bad):
     """A block number is a non-negative integer. ``True`` is refused although it
