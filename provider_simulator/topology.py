@@ -96,6 +96,12 @@ across three groups can be added without a new pool.
 sui-testnet-graphql-sim is the pool of the Sui testnet GraphQL router, k3d-only too. Its
 providers are on the chain ``suit``, so they answer the chain identifier of Sui testnet,
 and a reset of the pool keeps that identifier.
+eth-failover-pair-sim is the pool of the head-stall router, k3d-only too: one primary
+and one backup, each on one http address. Its backup tier comes from
+config/values_sim.yml in smart_router_automation.
+eth-failover-httpws-sim is k3d-only too: one provider with one http address and one ws
+address, and no other provider. Its router gets both URLs of that provider from
+config/values_sim.yml in smart_router_automation.
 The listener ports live here and nowhere else. constants.py holds no ports, so
 there is nothing to cross-check them against; the sentence that used to claim
 such a test described a check removed with those duplicate port tables.
@@ -1342,6 +1348,45 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
         False,
         "",
         (("graphql", "http", 18731),),
+    ),
+    # eth-failover-pair-sim: ports 18732-18733. One primary, then one backup.
+    # The router marks a URL head-stalled when its block stops moving while
+    # another URL shows a higher block. With this shape a frozen primary leaves
+    # exactly one provider to take the traffic, and that provider is in the other
+    # tier. No ws address: the router never marks a ws URL, but its block counts
+    # toward the highest block of the chain.
+    (
+        "eth-failover-pair-sim",
+        "eth",
+        "1",
+        "EthFailoverPairPrimaryProvider1",
+        False,
+        "",
+        (("jsonrpc", "http", 18732),),
+    ),
+    (
+        "eth-failover-pair-sim",
+        "eth",
+        "2",
+        "EthFailoverPairBackupProvider2",
+        True,
+        "",
+        (("jsonrpc", "http", 18733),),
+    ),
+    # eth-failover-httpws-sim: port 18734 http, 18735 ws. One provider and no
+    # other. The router never marks a ws URL, but its block counts toward the
+    # highest block of the chain. A test freezes the http address only, with a
+    # ports filter, while the ws address keeps moving. The http URL then falls
+    # behind a URL that cannot take its traffic, and the test checks that the
+    # router keeps it in rotation as the last URL that can serve.
+    (
+        "eth-failover-httpws-sim",
+        "eth",
+        "1",
+        "EthFailoverHttpwsSoloProvider1",
+        False,
+        "",
+        (("jsonrpc", "http", 18734), ("jsonrpc", "ws", 18735)),
     ),
 )
 

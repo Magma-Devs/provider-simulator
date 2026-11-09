@@ -86,6 +86,19 @@ _METHOD_OVERRIDE_KEYS = (
 )
 
 
+def _content_scenario(scenario: dict, targeted: bool) -> dict:
+    """The scenario that the reply content of one endpoint reads.
+
+    ``frozen_head`` obeys the ``transports`` and ``ports`` filters, so it reaches
+    only a targeted endpoint: a test freezes one address of a provider, and the
+    other address keeps answering the moving head. ``blocks_behind`` and the other
+    content fields reach every endpoint of the provider, filter or not.
+    """
+    if targeted or scenario.get("frozen_head") is None:
+        return scenario
+    return {**scenario, "frozen_head": None}
+
+
 class ParseError(Exception):
     """Raised by ``parse_request`` when the wire is malformed (Tendermint uses
     this to surface a JSON-RPC -32700). Transports that tolerate junk input
@@ -306,7 +319,7 @@ class Listener(ABC):
                 request_id = self.request_id(parsed)
                 waited = verdict.kind != "hang"
             else:
-                status, body = self.build_content(parsed, scenario, request)
+                status, body = self.build_content(parsed, _content_scenario(scenario, targeted), request)
                 result = self.build_success(status, body)
                 status_label = self.success_label(status, body, parsed)
                 request_id = self.response_id(body) or self.request_id(parsed)

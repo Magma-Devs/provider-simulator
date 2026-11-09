@@ -4,6 +4,7 @@ resets, stats/history filters, advance, and ws/emit."""
 
 import hashlib
 import json
+import time
 from collections import Counter
 
 import pytest
@@ -891,6 +892,143 @@ def test_a_port_belonging_to_another_provider_is_still_refused():
     st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down", "ports": [neighbour]}}})
     assert st == 400
     assert str(neighbour) in resp["error"]
+
+
+# ── frozen_head ───────────────────────────────────────────────────────────────
+# One block that a provider reports as its head while the chain head moves. The
+# rules below need the provider: its chain, its endpoints and what it already holds.
+
+
+def _block_of(listener) -> int:
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber"}).encode()
+    return int(listener.serve(RawRequest(body=body)).body["result"], 16)
+
+
+def test_a_frozen_head_is_applied_echoed_and_cleared():
+    api = _api()
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"frozen_head": 20_000_123}}})
+    assert st == 200, resp
+    _, scen = api.get_scenario()
+    assert scen["providers"]["eth-sim:1"]["frozen_head"] == 20_000_123
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"frozen_head": None}}})
+    assert st == 200, resp
+    _, scen = api.get_scenario()
+    assert scen["providers"]["eth-sim:1"]["frozen_head"] is None
+
+
+def test_a_frozen_head_beside_a_blocks_behind_is_400_also_when_one_of_them_is_stored():
+    """Both settings say which block the provider reports, so one of them would be
+    stored, echoed by GET /scenario, and do nothing. A POST merges by field, so a
+    value stored by an earlier POST counts as much as one in the same request."""
+    api = _api()
+    assert api.apply_scenario({"providers": {"eth-sim:1": {"blocks_behind": 3}}})[0] == 200
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"frozen_head": 20_000_123}}})
+    assert st == 400
+    assert "only one of them can apply" in resp["error"], resp
+    _, scen = api.get_scenario()
+    assert scen["providers"]["eth-sim:1"]["frozen_head"] is None, "a refused request applies nothing"
+
+    # The positive control: the same freeze, with blocks_behind put back to 0 in the same request.
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"frozen_head": 20_000_123, "blocks_behind": 0}}})
+    assert st == 200, resp
+    # And the other order: a frozen head is stored, and a request sets blocks_behind alone.
+    st, resp = api.apply_scenario({"providers": {"eth-sim:1": {"blocks_behind": 5}}})
+    assert st == 400
+    assert "only one of them can apply" in resp["error"], resp
+
+
+def test_a_frozen_head_on_a_chain_that_does_not_read_it_is_400():
+    """A Solana provider takes its slot from slot_offset and reads neither
+    blocks_behind nor frozen_head. Accepted, the setting would be stored and echoed,
+    and the provider would keep answering the moving slot."""
+    api = _api()
+    st, resp = api.apply_scenario({"providers": {"solana-sim:1": {"frozen_head": 1_000}}})
+    assert st == 400
+    assert "the solana chain does not read it" in resp["error"], resp
+
+
+@pytest.mark.parametrize("chain", sorted(CHAINS))
+def test_a_frozen_head_is_accepted_on_each_chain_that_reads_it_and_refused_on_the_rest(chain):
+    """Each chain says whether it reports its head through reported_head
+    (``Chain.reads_frozen_head``), and the control API reads that flag. Pinned per
+    chain, so a flag set wrongly, or a new chain added with no decision, fails here
+    rather than as a freeze that a test of the router never sees."""
+    refused = {"solana"}
+    api = _api()
+    _, providers = api.get_providers({})
+    key = next((k for k, v in providers["providers"].items() if v["chain"] == chain), None)
+    assert key is not None, f"no provider of the chain {chain!r} in the topology"
+    st, resp = api.apply_scenario({"providers": {key: {"frozen_head": 1_000}}})
+    assert (st == 400) is (chain in refused), f"{key} on the chain {chain!r}: {st} {resp}"
+
+
+def test_a_frozen_head_whose_filter_targets_no_endpoint_is_400():
+    """eth-failover-pair-sim:1 serves one http address and no ws address, so a block
+    filtered to ws would freeze nothing."""
+    api = _api()
+    block = {"frozen_head": 20_000_123, "transports": ["ws"]}
+    st, resp = api.apply_scenario({"providers": {"eth-failover-pair-sim:1": block}})
+    assert st == 400
+    assert "targets no endpoint" in resp["error"], resp
+    block = {"frozen_head": 20_000_123, "transports": ["http"]}
+    st, resp = api.apply_scenario({"providers": {"eth-failover-pair-sim:1": block}})
+    assert st == 200, resp
+
+
+def test_a_frozen_head_with_a_transports_object_is_400_and_applies_nothing():
+    """An object whose keys name a transport passed the scenario check, so the
+    freeze was stored, echoed, and scoped to no endpoint of this http-only provider."""
+    api = _api()
+    block = {"frozen_head": 20_000_123, "transports": {"ws": 1}}
+    st, resp = api.apply_scenario({"providers": {"eth-failover-pair-sim:1": block}})
+    assert st == 400
+    assert "transports must be a list of transport names or None" in resp["error"], resp
+    _, scen = api.get_scenario()
+    assert scen["providers"]["eth-failover-pair-sim:1"]["frozen_head"] is None, "a refused request applies nothing"
+
+
+def test_a_frozen_provider_keeps_its_block_while_the_head_advances_at_a_rate():
+    """The proof of the setting. The eth head advances at a rate, the primary of
+    eth-failover-pair-sim stands on one block, its backup follows the head, and a
+    cleared setting puts the primary back on the head."""
+    api = _api()
+    primary, backup = (api.registry.provider("eth-failover-pair-sim", pid) for pid in ("1", "2"))
+    primary_door = JsonRpcListener(primary, primary.endpoints[0])
+    backup_door = JsonRpcListener(backup, backup.endpoints[0])
+    try:
+        start = _block_of(backup_door)
+        assert api.apply_scenario({"providers": {"eth-failover-pair-sim:1": {"frozen_head": start}}})[0] == 200
+        assert api.advance({"chain": "eth", "per_second": 200})[0] == 200
+        deadline = time.monotonic() + 5.0
+        while _block_of(backup_door) < start + 20:
+            assert time.monotonic() < deadline, "the eth head did not advance"
+            time.sleep(0.02)
+        assert _block_of(primary_door) == start, "the frozen provider moved with the head"
+        assert api.apply_scenario({"providers": {"eth-failover-pair-sim:1": {"frozen_head": None}}})[0] == 200
+        assert _block_of(primary_door) >= start + 20, "a cleared provider answers the head again"
+    finally:
+        api.reset()  # the heads are a shared singleton
+
+
+def test_a_frozen_head_with_a_ports_filter_leaves_the_ws_address_of_the_provider_moving():
+    """eth-failover-httpws-sim:1 serves one http and one ws address. A freeze filtered
+    to the http port stands still there, and the ws address follows the head: the
+    shape of the head-stall case where the only http URL must stay in rotation."""
+    api = _api()
+    provider = api.registry.provider("eth-failover-httpws-sim", "1")
+    http = next(ep for ep in provider.endpoints if ep.transport == "http")
+    ws = next(ep for ep in provider.endpoints if ep.transport == "ws")
+    http_door = JsonRpcListener(provider, http)
+    ws_door = JsonRpcWsListener(provider, ws, WsSubscriptions())
+    try:
+        start = _block_of(http_door)
+        block = {"frozen_head": start, "ports": [http.port]}
+        assert api.apply_scenario({"providers": {"eth-failover-httpws-sim:1": block}})[0] == 200
+        assert api.advance({"chain": "eth", "blocks": 7})[0] == 200
+        assert _block_of(http_door) == start
+        assert _block_of(ws_door) == start + 7, "the freeze reached the ws address too"
+    finally:
+        api.reset()
 
 
 # ── a mis-shaped ports value must be ANSWERED, never dropped ─────────────────

@@ -287,3 +287,21 @@ def test_arrive_keeps_every_header_of_the_call_in_headers():
     assert row["headers"] == {"Lava-Guid": "GUID_1", "X-Other": "kept"}
     assert row["lava_headers"] == {"Lava-Guid": "GUID_1"}
     assert (row["deadline_remaining_ms"], row["grpc_status"]) == (None, None)
+
+
+# ── a frozen head reaches only the address its filter names ───────────────────
+
+
+def test_a_frozen_head_reaches_only_the_address_its_ports_filter_names():
+    """blocks_behind reaches every address of a provider, filter or not. A frozen
+    head obeys the transports and ports filters, so a test can freeze one address
+    while the other address of the same provider keeps answering the chain head."""
+    first, second = Endpoint("jsonrpc", "http", 18638), Endpoint("jsonrpc", "http", 18639)
+    provider = Pool(name="eth-failover-twoaddr-sim", chain="eth").add_provider("1", [first, second])
+    frozen_door, moving_door = JsonRpcListener(provider, first), JsonRpcListener(provider, second)
+    head = int(_serve(moving_door, "eth_blockNumber").body["result"], 16)
+
+    provider.scenario.update({"frozen_head": head - 3, "ports": [18638]})
+
+    assert int(_serve(frozen_door, "eth_blockNumber").body["result"], 16) == head - 3
+    assert int(_serve(moving_door, "eth_blockNumber").body["result"], 16) == head, "the other address moved too"

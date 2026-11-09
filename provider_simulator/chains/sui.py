@@ -15,10 +15,11 @@ other roots.
 
 Checkpoints. The head starts at ``SUI_BASE_CHECKPOINT`` and a test moves it with
 ``POST /advance``. A provider that is ``blocks_behind`` blocks late reports the
-head minus that number as its tip, and a checkpoint above the tip does not exist
-for it. The digest of a checkpoint derives from its sequence number and from the
-salt of the provider and from nothing else, so two providers at different tips
-agree on a checkpoint that both have (the rule of ``chains/base.py``).
+head minus that number as its tip, a provider with a ``frozen_head`` reports that
+checkpoint, and a checkpoint above the tip does not exist for it. The digest of a
+checkpoint derives from its sequence number and from the salt of the provider and
+from nothing else, so two providers at different tips agree on a checkpoint that
+both have (the rule of ``chains/base.py``).
 
 Transactions. ``executeTransaction`` answers the real digest of the bytes that it
 received, and it reports the digest in ``request["executed_now"]``. The listener
@@ -32,7 +33,7 @@ import hashlib
 import re
 import time
 
-from provider_simulator.chains.base import AdvancingHead, Chain
+from provider_simulator.chains.base import AdvancingHead, Chain, reported_head
 from provider_simulator.chains.sui_digest import base58_encode, transaction_digest
 from provider_simulator.domain.quirks import SuiQuirks, SuiTestnetQuirks
 from provider_simulator.graphql_document import GraphQLRequest, RootField, project
@@ -63,6 +64,7 @@ def _as_height(value: object) -> int | None:
 class SuiChain(Chain):
     name = "sui"
     quirks_type = SuiQuirks
+    reads_frozen_head = True
 
     def __init__(self) -> None:
         self.head = AdvancingHead(SUI_BASE_CHECKPOINT)
@@ -76,9 +78,10 @@ class SuiChain(Chain):
             raise KeyError(f"unknown error_stub {name!r}; the Sui codes are {sorted(SUI_ERROR_STUBS)}") from None
 
     def tip(self, scenario: dict) -> int:
-        """The latest checkpoint of one provider: the head, minus ``blocks_behind``
-        (which is signed), never below 0 and never above ``SUI_MAX_CHECKPOINT``."""
-        return min(SUI_MAX_CHECKPOINT, max(0, self.head.current() - scenario.get("blocks_behind", 0)))
+        """The latest checkpoint of one provider: its ``reported_head``, which is the
+        head minus ``blocks_behind`` (signed) or its ``frozen_head``, never below 0 and
+        never above ``SUI_MAX_CHECKPOINT``."""
+        return min(SUI_MAX_CHECKPOINT, max(0, reported_head(self.head.current(), scenario)))
 
     @staticmethod
     def checkpoint_digest(sequence_number: int, salt: str = "") -> str:

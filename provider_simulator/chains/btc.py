@@ -2,12 +2,13 @@
 
 Reimplements the BTC success path (today in ``handlers_btc.handle``) against the
 new domain shapes. BTC has no chain-specific quirks (it uses the empty Quirks
-base); ``blocks_behind`` and ``http_status`` come from the ScenarioConfig
-snapshot. The head is an ``AdvancingHead`` based at ``BTC_LATEST_BLOCK``, shifted by
-``blocks_behind``. Static until a test moves it, so a reply at rest is
-byte-identical to the old fixed constant.
+base); ``blocks_behind``, ``frozen_head`` and ``http_status`` come from the
+ScenarioConfig snapshot. The head is an ``AdvancingHead`` based at
+``BTC_LATEST_BLOCK``. A provider reports ``reported_head``: the head shifted by
+``blocks_behind``, or its ``frozen_head``. Static until a test moves it, so a reply
+at rest is byte-identical to the old fixed constant.
 
-Height-tracking methods shift with ``blocks_behind``; ``getblockhash`` /
+Height-tracking methods follow the provider's own head; ``getblockhash`` /
 ``getblock`` / ``getblockheader`` echo the requested height / hash so the
 router's pruning verification sees what it asked for.
 """
@@ -15,7 +16,7 @@ router's pruning verification sees what it asked for.
 from copy import deepcopy
 
 from constants import BTC_LATEST_BLOCK
-from provider_simulator.chains.base import AdvancingHead, Chain
+from provider_simulator.chains.base import AdvancingHead, Chain, reported_head
 from stubs_btc import BTC_ERROR_STUBS, BTC_METHOD_DEFAULTS, btc_block_hash
 
 _HEIGHT_METHODS = {"getblockcount"}
@@ -58,6 +59,7 @@ def _restamp_head(value: object, effective_head: int) -> object:
 
 class BtcChain(Chain):
     name = "btc"
+    reads_frozen_head = True
 
     def __init__(self) -> None:
         self.head = AdvancingHead(BTC_LATEST_BLOCK)
@@ -91,8 +93,7 @@ class BtcChain(Chain):
         else:
             result = None
 
-        blocks_behind = scenario.get("blocks_behind", 0)
-        effective_head = self.head.current() - blocks_behind
+        effective_head = reported_head(self.head.current(), scenario)
 
         # Recomputed whatever ``blocks_behind`` is. It used to be skipped at
         # zero, which was free while the head was a constant -- the stub

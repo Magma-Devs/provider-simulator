@@ -115,6 +115,7 @@ Pick one `mode`; combine it with the orthogonal fields.
 | `corruption_mode` | `truncated` \| `invalid_json` \| `empty_response` \| `missing_field` \| `wrong_type` | Break the response body |
 | `missing_field` | str | Which field to drop or retype |
 | `blocks_behind` | int | Report a stale head (`eth_blockNumber` / `eth_getBlockByNumber` / gRPC `GetLatestBlock`) |
+| `frozen_head` | int (0 or more) or `null` | Report this block as the head while the chain head moves, on every chain but Solana. Unlike `blocks_behind`, it obeys `transports` and `ports`, so it can freeze one address of a provider. Refused beside a `blocks_behind` that is not 0 (stored or in the same request), on a Solana provider, and when the filter targets no endpoint. `null` puts the provider back on the chain head |
 | `drop_at` | `before_headers` \| `after_headers` \| `mid_body` | Where `drop_connection` cuts the socket |
 | `pause_at` | `after_headers` \| `mid_body` | Where a reply is HELD and then finished. Not a fault — `mode` stays `success`, the body is complete and the `Content-Length` honest, so the caller gets a correct reply late. `before_headers` is refused, because `latency_ms` already delays the first byte. HTTP transports only |
 | `pause_ms` | int | How long the hold lasts. Measured complete at 240s; the handler's 30s socket timeout governs the request READ, not the response write |

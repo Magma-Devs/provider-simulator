@@ -286,3 +286,40 @@ def test_unparseable_block_parameter_still_echoes_when_provider_is_behind():
     chain, sc, q = _behind(100)
     _, body = chain.build_success({"id": 1, "method": "eth_getBlockByNumber", "params": ["not-a-block", False]}, sc, q)
     assert body["result"]["number"] == "not-a-block"
+
+
+# --- a frozen head: one block while the chain head moves ------------------------
+# blocks_behind keeps a distance from the head, so the provider moves with it.
+# frozen_head names the block itself, so the provider stands still.
+
+
+def test_a_frozen_head_answers_its_block_while_the_chain_head_moves():
+    chain = EthChain()
+    sc = ScenarioConfig()
+    sc.update({"frozen_head": BASE + 2})
+    frozen, q = sc.snapshot(), EthQuirks().snapshot()
+    chain.head.bump(10)
+
+    _, body = chain.build_success({"id": 1, "method": "eth_blockNumber"}, frozen, q)
+    assert body["result"] == _upper(BASE + 2)
+    _, body = chain.build_success({"id": 1, "method": "eth_getBlockByNumber", "params": ["latest", False]}, frozen, q)
+    assert body["result"]["number"] == _upper(BASE + 2)
+    above = {"id": 1, "method": "eth_getBlockByNumber", "params": [hex(BASE + 3), False]}
+    _, body = chain.build_success(above, frozen, q)
+    assert body["result"] is None, "a block above the frozen head does not exist for this provider"
+
+    _, body = chain.build_success({"id": 1, "method": "eth_blockNumber"}, ScenarioConfig().snapshot(), q)
+    assert body["result"] == _upper(BASE + 10), "a provider with no frozen head answers the moving head"
+
+
+def test_a_provider_frozen_at_block_zero_answers_block_zero_for_every_named_tag_but_pending():
+    """frozen_head=0 is a valid setting. The block before block 0 does not exist, so
+    'finalized' is block 0 as well, never the quantity 0x-1."""
+    sc = ScenarioConfig()
+    sc.update({"frozen_head": 0})
+    frozen, q = sc.snapshot(), EthQuirks().snapshot()
+    chain = EthChain()
+    for tag in ("latest", "safe", "finalized", "earliest"):
+        request = {"id": 1, "method": "eth_getBlockByNumber", "params": [tag, False]}
+        _, body = chain.build_success(request, frozen, q)
+        assert body["result"]["number"] == "0x0", tag

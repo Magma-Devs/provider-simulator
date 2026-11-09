@@ -35,6 +35,13 @@ adapter and the WebSocket adapter write them as headers, and the gRPC adapter as
 the header metadata of its reply. ``reply_trailers`` adds chosen trailing
 metadata to each reply of a targeted gRPC endpoint, and only the gRPC adapter
 writes it, so a block that reaches no gRPC endpoint is refused.
+
+Two fields choose the head that a provider reports. ``blocks_behind`` keeps a
+distance from the chain head, so the provider moves when the head moves, and it
+reaches every endpoint of the provider. ``frozen_head`` names one block, so the
+provider stands still while the head moves, and it reaches only the endpoints
+that the ``transports`` and ``ports`` filters target. Only one of the two can
+apply, and the control API refuses both together.
 """
 
 import re
@@ -97,6 +104,9 @@ class ScenarioConfig(IntrospectiveConfig):
     corruption_mode: str | None = None
     missing_field: str | None = None
     blocks_behind: int = 0
+    # The block that the provider reports as its head while the chain head moves.
+    # None means the chain head, shifted by blocks_behind.
+    frozen_head: int | None = None
     fail_first_n: int = 0
     then_mode: str = "success"
     drop_at: str = "before_headers"
@@ -176,6 +186,22 @@ class ScenarioConfig(IntrospectiveConfig):
         self._validate_unreadable_reply(cfg)
         self._validate_chosen(cfg, "reply_headers")
         self._validate_chosen(cfg, "reply_trailers")
+        self._validate_frozen_head(cfg)
+
+    def _validate_frozen_head(self, cfg: dict) -> None:
+        """Refuse a frozen head that is not a block number.
+
+        A block number is an integer of 0 or more. ``True`` is refused although it
+        is an int, and a text is refused although it can name a number: the chains
+        compare the value with heights, so any other type would freeze nothing. The
+        rules that need the provider, its chain, its endpoints and a
+        ``blocks_behind`` that it already holds, are the control API's.
+        """
+        frozen = cfg.get("frozen_head")
+        if frozen is None:
+            return
+        if isinstance(frozen, bool) or not isinstance(frozen, int) or frozen < 0:
+            raise ValueError(f"frozen_head must be a block number (an integer of 0 or more) or null, got {frozen!r}")
 
     def _validate_chosen(self, cfg: dict, field_name: str) -> None:
         """Refuse chosen reply headers or trailers that could not be sent as they are written.
@@ -281,6 +307,10 @@ class ScenarioConfig(IntrospectiveConfig):
         transports = cfg.get("transports")
         if transports is None:
             return
+        # Any other value would be read item by item: a text letter by letter, and an
+        # object by its keys, so an object keyed by transport names would pass.
+        if not isinstance(transports, (list, tuple)):
+            raise ValueError(f"transports must be a list of transport names or None, got {transports!r}")
         bad = [t for t in transports if t not in TRANSPORTS]
         if bad:
             raise ValueError(

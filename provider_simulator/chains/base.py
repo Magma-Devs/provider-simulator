@@ -41,6 +41,20 @@ from abc import ABC, abstractmethod
 from provider_simulator.domain.quirks import Quirks
 
 
+def reported_head(head: int, scenario: dict) -> int:
+    """The head that one provider reports: the block of ``frozen_head`` when the
+    scenario sets one, otherwise the chain head shifted by ``blocks_behind``.
+
+    Every chain that sets ``reads_frozen_head`` asks this function, so the two
+    settings mean the same thing on each of them. A caller compares the result with
+    ``head`` to learn whether the provider stands off the chain head.
+    """
+    frozen = scenario.get("frozen_head")
+    if frozen is not None:
+        return int(frozen)
+    return head - scenario.get("blocks_behind", 0)
+
+
 class AdvancingHead:
     """A block head that is static by default and can be advanced on demand.
 
@@ -93,6 +107,13 @@ class Chain(ABC):
 
     name: str
     quirks_type: type[Quirks] = Quirks
+
+    #: True when ``build_success`` reports its head through ``reported_head``, so
+    #: that ``frozen_head`` reaches the replies. The control API refuses
+    #: ``frozen_head`` for a provider whose chain leaves this False: the setting
+    #: would be stored and echoed, and the provider would keep answering the moving
+    #: head. A chain opts in when it calls ``reported_head``.
+    reads_frozen_head: bool = False
 
     #: Heads this chain serves, keyed by the interface that serves each one.
     #:

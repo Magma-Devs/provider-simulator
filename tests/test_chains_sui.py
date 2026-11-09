@@ -101,6 +101,13 @@ def test_blocks_behind_moves_the_tip_down_and_a_negative_value_moves_it_up():
     assert _head_of(chain, blocks_behind=-30) == SUI_BASE_CHECKPOINT + 30
 
 
+def test_a_frozen_head_answers_its_checkpoint_while_the_head_moves():
+    chain = SuiChain()
+    chain.head.bump(10)
+    assert _head_of(chain, frozen_head=SUI_BASE_CHECKPOINT + 2) == SUI_BASE_CHECKPOINT + 2
+    assert _head_of(chain) == SUI_BASE_CHECKPOINT + 10, "a provider with no frozen head answers the moving head"
+
+
 def test_a_provider_behind_by_more_than_the_head_has_the_tip_zero():
     chain = SuiChain()
     assert _head_of(chain, blocks_behind=SUI_BASE_CHECKPOINT + 50) == 0
