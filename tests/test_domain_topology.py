@@ -70,6 +70,9 @@ EXPECTED_POOLS = {
     "sui-cv-graphql-sim",
     # The pool of the Sui testnet GraphQL router, on the chain suit.
     "sui-testnet-graphql-sim",
+    # The pool of the head-stall router: one primary and one backup. A frozen
+    # primary then has exactly one place for the traffic to go.
+    "eth-failover-pair-sim",
 }
 
 
@@ -329,6 +332,27 @@ def test_the_two_address_pool_really_serves_two_addresses():
         "move to the other."
     )
     assert sorted(ports_of("eth-failover-twoaddr-sim", "1")) == [18638, 18639]
+
+
+def test_the_pair_pool_holds_one_primary_and_one_backup_on_one_http_address_each():
+    """The pool of the head-stall router, pinned as a literal.
+
+    The head-stall tests freeze one provider and need exactly one other provider
+    to take the traffic, in the other tier. A second primary would give the traffic
+    a second place to go, and a ws address would count toward the highest block of
+    the chain while the router never marks it. The generic tests compare the rows
+    with tables built from the same rows, so they cannot see either change.
+    """
+    rows = [row for row in TOPOLOGY if row[0] == "eth-failover-pair-sim"]
+    slots_and_tiers = [(row[2], row[4]) for row in rows]
+    assert slots_and_tiers == [("1", False), ("2", True)], "slot 1 is the primary, slot 2 its backup, no other slot"
+    for _pool, chain, pid, _name, _is_backup, group, endpoints in rows:
+        assert chain == "eth"
+        assert group == "", f"slot {pid}: no cross-validation policy here, so no group to claim"
+        doors = [(interface, transport) for interface, transport, _port in endpoints]
+        assert doors == [("jsonrpc", "http")], f"slot {pid} must serve one http address only, got {endpoints}"
+    assert ports_of("eth-failover-pair-sim", "1") == (18732,)
+    assert ports_of("eth-failover-pair-sim", "2") == (18733,)
 
 
 # ── one provider, two addresses on the same door ──────────────────────────────
@@ -701,17 +725,21 @@ AGREED_NAMES = {
     ("sui-testnet-graphql-sim", "1"): "SuiTestnetGraphqlPrimaryProvider1",
     ("sui-testnet-graphql-sim", "2"): "SuiTestnetGraphqlPrimaryProvider2",
     ("sui-testnet-graphql-sim", "3"): "SuiTestnetGraphqlPrimaryProvider3",
+    # The head-stall pool: one primary, then one backup.
+    ("eth-failover-pair-sim", "1"): "EthFailoverPairPrimaryProvider1",
+    ("eth-failover-pair-sim", "2"): "EthFailoverPairBackupProvider2",
 }
 
 # The pools that HAVE a backup tier, and which of their slots it is. The router
 # consults a backup only after the primary tier is exhausted, and the values file
 # marks them is_backup.
 #
-# Two shapes, because a backup tier does not always start at slot 4. A
+# Three shapes, because a backup tier does not always start at slot 4. A
 # six-provider pool has three primaries and slots 4 to 6 behind them. A
-# four-provider pool has two primaries and slots 3 and 4 behind them. Writing
-# both out is the point: a single "the last three slots" rule would silently
-# accept a pool whose tiers were split somewhere else.
+# four-provider pool has two primaries and slots 3 and 4 behind them. A
+# two-provider pool has one primary and slot 2 behind it. Writing each out is
+# the point: a single "the last three slots" rule would silently accept a pool
+# whose tiers were split somewhere else.
 _SIX_PROVIDER_POOLS_WITH_A_BACKUP_TIER = (
     "eth-sim",
     "lava-sim-grpc",
@@ -745,6 +773,11 @@ _FOUR_PROVIDER_POOLS_WITH_A_BACKUP_TIER = (
     "eth-failover-archiveless-sim",
 )
 
+# Two-provider pools: one primary, then one backup in slot 2. The head-stall tests
+# need this shape, because a frozen primary then leaves exactly one provider to
+# serve.
+_TWO_PROVIDER_POOLS_WITH_A_BACKUP_TIER = ("eth-failover-pair-sim",)
+
 # eth-cache-writer-sim and eth-cache-reader-sim carry a backup tier because the
 # router answers from either cache tier BEFORE it picks any provider, primary
 # tier and backup tier alike. Without a backup tier a test cannot tell "the
@@ -765,9 +798,11 @@ _FOUR_PROVIDER_POOLS_WITH_A_BACKUP_TIER = (
 # Two more are absent for the same reason: eth-failover-solo-sim is a single
 # provider, and btc-failover-sim is three primaries. solana-failover-sim is three
 # primaries too.
-AGREED_BACKUPS = {(pool, pid) for pool in _SIX_PROVIDER_POOLS_WITH_A_BACKUP_TIER for pid in ("4", "5", "6")} | {
-    (pool, pid) for pool in _FOUR_PROVIDER_POOLS_WITH_A_BACKUP_TIER for pid in ("3", "4")
-}
+AGREED_BACKUPS = (
+    {(pool, pid) for pool in _SIX_PROVIDER_POOLS_WITH_A_BACKUP_TIER for pid in ("4", "5", "6")}
+    | {(pool, pid) for pool in _FOUR_PROVIDER_POOLS_WITH_A_BACKUP_TIER for pid in ("3", "4")}
+    | {(pool, "2") for pool in _TWO_PROVIDER_POOLS_WITH_A_BACKUP_TIER}
+)
 
 
 def test_every_row_carries_the_agreed_name():

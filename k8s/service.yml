@@ -868,3 +868,12 @@ spec:
       port: 18731
       targetPort: 18731
       protocol: TCP
+    # 18732-18733: the primary and the backup of eth-failover-pair-sim.
+    - name: spare-18732
+      port: 18732
+      targetPort: 18732
+      protocol: TCP
+    - name: spare-18733
+      port: 18733
+      targetPort: 18733
+      protocol: TCP

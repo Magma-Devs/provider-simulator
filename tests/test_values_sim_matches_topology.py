@@ -466,6 +466,12 @@ POOLS_WITH_NO_ROUTER_HERE = {
     # config/values_sim.yml. The shared cluster does not run it, so a router entry in THIS
     # file would claim a deployment nobody makes.
     "sui-testnet-graphql-sim",
+    # eth-failover-pair-sim. Its router runs on the local k3d cluster, declared in
+    # smart_router_automation's tools/local-cluster/routers.yml plus its own
+    # config/values_sim.yml, which is where its backup tier comes from. The shared
+    # cluster does not run it, so a router entry in THIS file would claim a deployment
+    # nobody makes.
+    "eth-failover-pair-sim",
 }
 
 

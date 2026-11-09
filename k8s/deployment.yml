@@ -688,6 +688,13 @@ spec:
             - name: spare-18731
               containerPort: 18731
               protocol: TCP
+            # 18732-18733: the primary and the backup of eth-failover-pair-sim.
+            - name: spare-18732
+              containerPort: 18732
+              protocol: TCP
+            - name: spare-18733
+              containerPort: 18733
+              protocol: TCP
           resources:
             requests:
               cpu: "100m"
