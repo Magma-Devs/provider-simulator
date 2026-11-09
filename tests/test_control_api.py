@@ -947,6 +947,21 @@ def test_a_frozen_head_on_a_chain_that_does_not_read_it_is_400():
     assert "the solana chain does not read it" in resp["error"], resp
 
 
+@pytest.mark.parametrize("chain", sorted(CHAINS))
+def test_a_frozen_head_is_accepted_on_each_chain_that_reads_it_and_refused_on_the_rest(chain):
+    """Each chain says whether it reports its head through reported_head
+    (``Chain.reads_frozen_head``), and the control API reads that flag. Pinned per
+    chain, so a flag set wrongly, or a new chain added with no decision, fails here
+    rather than as a freeze that a test of the router never sees."""
+    refused = {"solana"}
+    api = _api()
+    _, providers = api.get_providers({})
+    key = next((k for k, v in providers["providers"].items() if v["chain"] == chain), None)
+    assert key is not None, f"no provider of the chain {chain!r} in the topology"
+    st, resp = api.apply_scenario({"providers": {key: {"frozen_head": 1_000}}})
+    assert (st == 400) is (chain in refused), f"{key} on the chain {chain!r}: {st} {resp}"
+
+
 def test_a_frozen_head_whose_filter_targets_no_endpoint_is_400():
     """eth-failover-pair-sim:1 serves one http address and no ws address, so a block
     filtered to ws would freeze nothing."""

@@ -157,7 +157,8 @@ class EthChain(Chain):
             # A provider on the chain head is the one case left alone, and that
             # is deliberate. It keeps answering for any height, because the
             # router's pruning verification asks for block 0 and must receive a
-            # block.
+            # block. A provider frozen at the chain head is on the chain head
+            # until the head moves, so it answers as its peers do until then.
             above_head = False
             if effective_head != head and isinstance(params[0], (str, int)):
                 requested = _parse_block_number(params[0])
