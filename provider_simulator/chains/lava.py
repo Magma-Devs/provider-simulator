@@ -24,7 +24,7 @@ from copy import deepcopy
 from typing import Any
 
 from constants import TM_LATEST_HEIGHT
-from provider_simulator.chains.base import AdvancingHead, Chain
+from provider_simulator.chains.base import AdvancingHead, Chain, reported_head
 from stubs_rest import REST_ERROR_STUBS, REST_LATEST_HEIGHT, REST_METHOD_DEFAULTS
 from stubs_tendermintrpc import (
     TENDERMINT_ERROR_STUBS,
@@ -121,6 +121,7 @@ def _pick_status(cfg: dict, primary: str, secondary: str, default: int) -> int:
 
 class LavaChain(Chain):
     name = "lava"
+    reads_frozen_head = True
 
     def __init__(self) -> None:
         # One head per interface, because lava genuinely serves a different
@@ -191,15 +192,13 @@ class LavaChain(Chain):
             }
         result = deepcopy(REST_METHOD_DEFAULTS[key])
 
-        blocks_behind = scenario.get("blocks_behind", 0)
-
         if template == "/cosmos/base/tendermint/v1beta1/blocks/latest":
             # Always stamp the head, not only when blocks_behind moves it. The
             # template's own height was returned unchanged before, so a head
             # that had been advanced was ignored on the one reply that is
             # supposed to report it.
             if isinstance(result, dict):
-                shifted = str(max(self.heads["rest"].current() - blocks_behind, 0))
+                shifted = str(max(reported_head(self.heads["rest"].current(), scenario), 0))
                 result["block"]["header"]["height"] = shifted
                 try:
                     result["block"]["last_commit"]["height"] = str(max(int(shifted) - 1, 0))
@@ -259,21 +258,19 @@ class LavaChain(Chain):
                 "error": {"code": -32601, "message": f"Unknown method: {method}"},
             }
 
-        blocks_behind = scenario.get("blocks_behind", 0)
+        own_head = max(reported_head(self.heads["tendermintrpc"].current(), scenario), 0)
 
         if method == "block":
             requested_height = params.get("height")
             if requested_height is not None:
                 height_i = _to_int(requested_height, 0)
             else:
-                height_i = max(self.heads["tendermintrpc"].current() - blocks_behind, 0)
+                height_i = own_head
             result = _block_response(height=height_i)
         elif method == "validators":
             height_raw = params.get("height")
             height_i = (
-                _to_int(height_raw, self.heads["tendermintrpc"].current())
-                if height_raw is not None
-                else max(self.heads["tendermintrpc"].current() - blocks_behind, 0)
+                _to_int(height_raw, self.heads["tendermintrpc"].current()) if height_raw is not None else own_head
             )
             page = max(_to_int(params.get("page"), 1), 1)
             per_page = max(_to_int(params.get("per_page"), 30), 1)
@@ -301,7 +298,7 @@ class LavaChain(Chain):
             # base height, nothing here reads it, and recomputing it would be
             # invention rather than fidelity. After an advance the hash and the
             # height do not agree, and that is known rather than overlooked.
-            height = str(max(self.heads["tendermintrpc"].current() - blocks_behind, 0))
+            height = str(own_head)
             if isinstance(result, dict):
                 sync = result.get("sync_info")
                 if isinstance(sync, dict) and "latest_block_height" in sync:
@@ -356,7 +353,7 @@ class LavaChain(Chain):
             return 200, {"grpc_method": method, "balances": deepcopy(rest_stub["balances"])}
 
         if method == "GetLatestBlock":
-            head = max(self.heads["grpc"].current() - scenario.get("blocks_behind", 0), 0)
+            head = max(reported_head(self.heads["grpc"].current(), scenario), 0)
             return 200, {
                 "grpc_method": method,
                 "height": head,

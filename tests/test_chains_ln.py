@@ -23,6 +23,13 @@ def test_getinfo_shifts_height_and_flags_unsynced():
     assert body["result"]["synced_to_chain"] is False
 
 
+def test_a_frozen_head_reports_its_height_and_a_node_out_of_sync():
+    chain = LnChain()
+    _, body = chain.build_success({"id": 1, "method": "getinfo"}, _sc(frozen_head=LN_BLOCK_HEIGHT - 4), {})
+    assert body["result"]["block_height"] == LN_BLOCK_HEIGHT - 4
+    assert body["result"]["synced_to_chain"] is False, "a node that stands below the chain head is not synced"
+
+
 def test_getinfo_default_is_synced_at_head():
     chain = LnChain()
     _, body = chain.build_success({"id": 1, "method": "getinfo"}, _sc(), {})

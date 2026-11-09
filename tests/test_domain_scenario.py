@@ -347,3 +347,29 @@ def test_reset_restores_the_three_graphql_fields():
     s.reset()
     snap = s.snapshot()
     assert (snap["rate_limit_style"], snap["error_body"], snap["unreadable_reply"]) == ("status", None, None)
+
+
+# ── frozen_head ───────────────────────────────────────────────────────────────
+
+
+def test_a_frozen_head_is_stored_and_a_reset_clears_it():
+    """None means the provider reports the chain head. A block number freezes it
+    there, and a reset puts the provider back on the chain head."""
+    s = ScenarioConfig()
+    assert s.snapshot()["frozen_head"] is None
+    s.update({"frozen_head": 20_000_123})
+    assert s.snapshot()["frozen_head"] == 20_000_123
+    s.reset()
+    assert s.snapshot()["frozen_head"] is None
+
+
+@pytest.mark.parametrize("bad", ["now", "20000123", -1, True, 1.5, [20_000_123]])
+def test_a_frozen_head_that_is_not_a_block_number_is_rejected(bad):
+    """A block number is a non-negative integer. ``True`` is refused although it
+    subclasses int, and a text is refused although it can name a number: a value
+    the chains cannot compare with a height would freeze nothing."""
+    s = ScenarioConfig()
+    with pytest.raises(ValueError, match="frozen_head must be a block number"):
+        s.update({"mode": "down", "frozen_head": bad})
+    assert s.snapshot()["mode"] == "success", "the whole update aborts"
+    assert s.snapshot()["frozen_head"] is None

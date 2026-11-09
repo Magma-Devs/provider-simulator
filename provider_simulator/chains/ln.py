@@ -2,8 +2,9 @@
 
 Reimplements the LN success path (today in ``handlers_lnd.handle``) against the
 new domain shapes. LN has no chain-specific quirks (empty Quirks base);
-``blocks_behind`` and ``http_status`` come from the ScenarioConfig snapshot.
-``getinfo`` tracks the underlying BTC head (shifted by ``blocks_behind``) --
+``blocks_behind``, ``frozen_head`` and ``http_status`` come from the
+ScenarioConfig snapshot. ``getinfo`` tracks the underlying BTC head (shifted by
+``blocks_behind``, or held at ``frozen_head``) --
 really tracks it: the chain is handed btc's own head at construction, so a
 test that moves btc moves what an LN node reports it has synced to. It said
 this before while reading a separate constant, which was invisible only
@@ -14,7 +15,7 @@ because btc's height could not move either;
 from copy import deepcopy
 
 from constants import LN_BLOCK_HEIGHT
-from provider_simulator.chains.base import Chain
+from provider_simulator.chains.base import Chain, reported_head
 from stubs_lnd import LND_ERROR_STUBS, LND_METHOD_DEFAULTS
 
 _HEIGHT_METHODS = {"getinfo"}
@@ -31,6 +32,7 @@ class LnChain(Chain):
         self._btc_head = btc_head
 
     name = "ln"
+    reads_frozen_head = True
 
     def error_stub(self, name: str) -> dict:
         return LND_ERROR_STUBS[name]
@@ -61,18 +63,17 @@ class LnChain(Chain):
         else:
             result = None
 
-        blocks_behind = scenario.get("blocks_behind", 0)
-
         if method not in responses and method in _HEIGHT_METHODS and isinstance(result, dict):
             # The height follows the chain whatever ``blocks_behind`` is --
             # it used to be recomputed only when the node was BEHIND, which
             # was invisible while the height was a constant and wrong the
             # moment btc's head could move.
             base = self._btc_head.current() if self._btc_head is not None else LN_BLOCK_HEIGHT
-            result["block_height"] = base - blocks_behind
-            # Only a node that is actually behind is out of sync. Keeping
+            height = reported_head(base, scenario)
+            result["block_height"] = height
+            # Only a node that stands off the chain head is out of sync. Keeping
             # this inside the lag check is the half that was always right.
-            if blocks_behind != 0:
+            if height != base:
                 result["synced_to_chain"] = False
 
         if method == "decodepayreq" and params and method not in responses and isinstance(result, dict):

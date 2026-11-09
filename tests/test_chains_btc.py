@@ -24,6 +24,15 @@ def test_getblockcount_default_and_shift():
     assert body["result"] == BTC_LATEST_BLOCK - 10
 
 
+def test_a_frozen_head_answers_its_height_while_the_chain_head_moves():
+    chain = BtcChain()
+    chain.head.bump(10)
+    _, body = chain.build_success({"id": 1, "method": "getblockcount"}, _sc(frozen_head=BTC_LATEST_BLOCK + 2), {})
+    assert body["result"] == BTC_LATEST_BLOCK + 2
+    _, body = chain.build_success({"id": 1, "method": "getblockcount"}, _sc(), {})
+    assert body["result"] == BTC_LATEST_BLOCK + 10, "a provider with no frozen head answers the moving head"
+
+
 def test_getblockhash_echoes_requested_height():
     chain = BtcChain()
     _, body = chain.build_success({"id": 1, "method": "getblockhash", "params": [700000]}, _sc(), {})

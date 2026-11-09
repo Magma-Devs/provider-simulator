@@ -77,6 +77,22 @@ def test_rest_blocks_latest_blocks_behind_shifts_head():
     assert body["block"]["last_commit"]["height"] == str(REST_HEIGHT - 101)
 
 
+def test_a_frozen_head_answers_its_height_on_every_interface():
+    """Each interface has a head of its own, and a frozen head names one block for
+    whichever of them serves the reply. A test that freezes one address of a
+    provider scopes it with the ports filter."""
+    chain = _chain()
+    frozen = _sc(frozen_head=1_234_567)
+    _, body = chain.build_success(_rest(_BLOCKS_LATEST), frozen, {}, "rest")
+    assert body["block"]["header"]["height"] == "1234567"
+    _, body = chain.build_success(_tm("block"), frozen, {}, "tendermintrpc")
+    assert body["result"]["block"]["header"]["height"] == "1234567"
+    _, body = chain.build_success(_tm("status"), frozen, {}, "tendermintrpc")
+    assert body["result"]["sync_info"]["latest_block_height"] == "1234567"
+    _, body = chain.build_success({"method": "GetLatestBlock"}, frozen, {}, "grpc")
+    assert body["height"] == 1_234_567
+
+
 def test_rest_block_by_height_echoes_requested_height():
     st, body = _chain().build_success(_rest(_BLOCKS_HEIGHT, path_params={"height": "12345"}), _sc(), {}, "rest")
     assert body["block"]["header"]["height"] == "12345"

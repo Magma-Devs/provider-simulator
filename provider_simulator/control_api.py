@@ -331,6 +331,54 @@ def _a_canned_body_no_endpoint_can_serve(provider: object, scenario_updates: dic
     return ""
 
 
+def _a_frozen_head_that_cannot_apply(provider: object, scenario_updates: dict) -> str:
+    """Refuse a ``frozen_head`` that would be stored, echoed by GET /scenario, and
+    reach no reply.
+
+    Three cases need the provider, so ScenarioConfig cannot judge them: a
+    ``blocks_behind`` beside it, because both choose the head that the provider
+    reports and only one can apply; a chain that does not read it
+    (``Chain.reads_frozen_head``); and a filter that targets none of the provider's
+    endpoints. A provider that keeps answering the moving head reads, to a test, as
+    a router that never saw the freeze.
+
+    Every field is read EFFECTIVELY, merged over what is already stored, for the
+    reason ``_a_pause_no_named_port_can_serve`` gives: a POST merges, so a value set
+    in one call and a value set in the next would slip past a rule that read one
+    request.
+    """
+    stored = provider.scenario.snapshot()  # type: ignore[attr-defined]
+    effective = {**stored, **scenario_updates}
+    frozen = effective.get("frozen_head")
+    if frozen is None or isinstance(frozen, bool) or not isinstance(frozen, int):
+        # None freezes nothing. A value of another type is ScenarioConfig's to
+        # refuse, a few lines below the caller.
+        return ""
+    blocks_behind = effective.get("blocks_behind", 0)
+    if blocks_behind != 0:
+        return (
+            f"frozen_head={frozen!r} and blocks_behind={blocks_behind!r} both choose the head that this "
+            "provider reports, so only one of them can apply. Send blocks_behind=0 with the frozen head, "
+            "or frozen_head=null with blocks_behind"
+        )
+    chain = provider.pool.chain  # type: ignore[attr-defined]
+    if not CHAINS[chain].reads_frozen_head:
+        return (
+            f"frozen_head cannot apply: the {chain} chain does not read it, so the provider would keep "
+            "answering the moving head"
+        )
+    if _a_filter_scenario_config_refuses(effective):
+        return ""
+    endpoints = list(provider.endpoints)  # type: ignore[attr-defined]
+    if any(fault_policy.targets(effective, ep) for ep in endpoints):
+        return ""
+    return (
+        f"frozen_head cannot apply: with transports={effective.get('transports')!r} and "
+        f"ports={effective.get('ports')!r} this block targets no endpoint (the provider serves "
+        f"{_endpoints_text(endpoints)}). It would be stored and would reach no reply"
+    )
+
+
 # The fields that only the GraphQL listener reads, each with the value that it has
 # when it is not set.
 _GRAPHQL_ONLY_FIELDS = {"rate_limit_style": "status", "error_body": None, "unreadable_reply": None}
@@ -622,6 +670,7 @@ class ControlApi:
                 or _an_invalid_proto_no_endpoint_can_apply(provider, scenario_updates)
                 or _a_graphql_field_no_endpoint_can_apply(provider, scenario_updates)
                 or _a_canned_body_no_endpoint_can_serve(provider, scenario_updates)
+                or _a_frozen_head_that_cannot_apply(provider, scenario_updates)
             )
             if err:
                 return 400, {"error": f"{key}: {err}"}

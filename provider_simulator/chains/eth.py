@@ -1,35 +1,38 @@
 """Ethereum chain — success-path response building plus the advancing head.
 
 Reimplements the ETH success path (today in ``handlers_eth.handle``) against the
-redesigned domain shapes: the per-method overrides, ``blocks_behind`` and
-``http_status`` come from the ScenarioConfig snapshot; ``logs_indexed_up_to`` and
-``logs_lag_mode`` come from the EthQuirks snapshot; the head lives on this chain
-instance instead of a module global.
+redesigned domain shapes: the per-method overrides, ``blocks_behind``,
+``frozen_head`` and ``http_status`` come from the ScenarioConfig snapshot;
+``logs_indexed_up_to`` and ``logs_lag_mode`` come from the EthQuirks snapshot; the
+head lives on this chain instance instead of a module global.
+
+The provider's own head is ``reported_head``: the block of ``frozen_head`` when one
+is set, otherwise the chain head shifted by ``blocks_behind``.
 
 Method-specific behaviour:
-- ``eth_blockNumber`` — reports the head shifted by ``blocks_behind`` (unless a
-  response override pins a result). Static head + blocks_behind 0 = ``0x1312D00``.
+- ``eth_blockNumber`` — reports the provider's own head (unless a response
+  override pins a result). Static head + blocks_behind 0 = ``0x1312D00``.
 - ``eth_getBlockByNumber`` — echoes the requested block number so the router's
-  pruning verification sees it; the named tags resolve to shifted heights. A
-  provider whose ``blocks_behind`` is not zero answers ``null`` for a numeric
-  block above its own effective head, which is the chain head minus its
-  ``blocks_behind``. A real node that has not reached a block does not fail: it
-  answers HTTP 200 with a null result and no error field, the router does not
-  classify that as a failure and does not retry, and the caller records a gap in
-  the chain that is not there. Reproducing that symptom is why this exists.
-  ``blocks_behind`` is signed, so this covers both directions: a provider that
-  is behind, and one set AHEAD with a negative value, which is how a provider
-  that claims a head it cannot back up is modelled. Both have a head, and a
-  block above either one does not exist.
-  ``blocks_behind`` of zero is left exactly as it was — the guard below is the
-  first thing tested, so a provider at rest never takes the new path, because
-  the router's pruning verification asks it for block 0 and must get a block.
+  pruning verification sees it; the named tags resolve to the provider's own
+  head. A provider whose own head is not the chain head answers ``null`` for a
+  numeric block above its own head. A real node that has not reached a block
+  does not fail: it answers HTTP 200 with a null result and no error field, the
+  router does not classify that as a failure and does not retry, and the caller
+  records a gap in the chain that is not there. Reproducing that symptom is why
+  this exists. ``blocks_behind`` is signed, so this covers both directions: a
+  provider that is behind, and one set AHEAD with a negative value, which is how
+  a provider that claims a head it cannot back up is modelled. Both have a head,
+  and a block above either one does not exist.
+  A provider on the chain head is left exactly as it was — the guard below is
+  the first thing tested, so a provider at rest never takes the new path,
+  because the router's pruning verification asks it for block 0 and must get a
+  block.
 - ``eth_getLogs`` — models head-fresh-but-logs-lagged: when the query's upper
   bound exceeds ``logs_indexed_up_to``, return no logs (``empty``) or only the
   indexed ones (``partial``).
 """
 
-from provider_simulator.chains.base import AdvancingHead, Chain
+from provider_simulator.chains.base import AdvancingHead, Chain, reported_head
 from provider_simulator.domain.quirks import EthQuirks
 from stubs import ETH_ERROR_STUBS, ETH_METHOD_DEFAULTS
 
@@ -91,6 +94,7 @@ def _entry_blocknum_le(entry: dict, threshold: int) -> bool:
 class EthChain(Chain):
     name = "eth"
     quirks_type = EthQuirks
+    reads_frozen_head = True
 
     def __init__(self) -> None:
         self.head = AdvancingHead(int(ETH_METHOD_DEFAULTS["eth_blockNumber"], 16))
@@ -119,14 +123,15 @@ class EthChain(Chain):
             }
 
         result = method_cfg.get("result", ETH_METHOD_DEFAULTS.get(method, "0x1"))
-        blocks_behind = scenario.get("blocks_behind", 0)
+        # One read of the head per request, so every method of the reply sees the
+        # same height while the head advances at a rate.
+        head = self.head.current()
+        effective_head = reported_head(head, scenario)
 
         if method == "eth_blockNumber" and "result" not in method_cfg:
-            result = _hex_upper(self.head.current() - blocks_behind)
+            result = _hex_upper(effective_head)
 
         if method == "eth_getBlockByNumber" and isinstance(result, dict) and params:
-            head = self.head.current()
-            effective_head = head - blocks_behind
             effective_latest = _hex_upper(effective_head)
             named = {
                 "latest": effective_latest,
@@ -146,14 +151,15 @@ class EthChain(Chain):
             # above it does not exist either. ``blocks_behind`` is signed: a
             # negative value moves the provider's head UP, so effective_head
             # already carries the right boundary for both directions and the
-            # comparison below needs no sign of its own.
+            # comparison below needs no sign of its own. A frozen head is a
+            # head too: a block above it does not exist for this provider.
             #
-            # Zero is the one value left alone, and that is deliberate. A
-            # provider at the canonical head keeps answering for any height,
-            # because the router's pruning verification asks for block 0 and
-            # must receive a block.
+            # A provider on the chain head is the one case left alone, and that
+            # is deliberate. It keeps answering for any height, because the
+            # router's pruning verification asks for block 0 and must receive a
+            # block.
             above_head = False
-            if blocks_behind != 0 and isinstance(params[0], (str, int)):
+            if effective_head != head and isinstance(params[0], (str, int)):
                 requested = _parse_block_number(params[0])
                 above_head = requested is not None and requested > effective_head
             if above_head:
@@ -165,8 +171,7 @@ class EthChain(Chain):
         if method == "eth_getLogs":
             logs_indexed = quirks.get("logs_indexed_up_to")
             if logs_indexed is not None:
-                head_int = self.head.current() - blocks_behind
-                to_block = _resolve_block_tag(params, "toBlock", head_int)
+                to_block = _resolve_block_tag(params, "toBlock", effective_head)
                 if to_block is not None and to_block > logs_indexed:
                     mode = quirks.get("logs_lag_mode", "empty")
                     if mode == "partial" and isinstance(result, list):
