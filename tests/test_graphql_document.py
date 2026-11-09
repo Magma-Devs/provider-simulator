@@ -309,6 +309,25 @@ def test_each_unreadable_body_has_its_kind_and_the_default_reply_of_sui(
         assert entry["message"]
 
 
+def test_the_nesting_error_of_graphql_core_gets_the_recursion_message_of_sui(monkeypatch):
+    """graphql-core 3.2.14 stops a document nested deeper than its own limit of 200
+    with the syntax error "Document is nested too deeply". graphql-core 3.2.13 ran out
+    of Python recursion on the same document. Either document is far past the limit of
+    the real server, 32, so either one gets the recursion message of that server.
+
+    The error is raised here by hand, so this test checks that answer whichever 3.2
+    version is installed. The case "5000 nested braces" above meets the real error
+    only under 3.2.14."""
+    import graphql
+
+    def nested_too_deeply(text, **_kwargs):
+        raise graphql.GraphQLSyntaxError(graphql.Source(text), 0, "Document is nested too deeply. Parsing aborted.")
+
+    monkeypatch.setattr(graphql, "parse", nested_too_deeply)
+    error = _error_of(json.dumps({"query": "{ a }"}).encode())
+    assert (error.kind, error.message) == ("parse", _RECURSION)
+
+
 def test_a_fragment_cycle_and_an_undefined_fragment():
     own = _error_of(_body("query { ...A } fragment A on Query { ...A }"))
     two = _error_of(_body("query { ...A } fragment A on Query { ...B } fragment B on Query { ...A }"))

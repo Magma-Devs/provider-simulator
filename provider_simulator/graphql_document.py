@@ -34,6 +34,12 @@ from typing import Any
 MAX_DEPTH = 32
 RECURSION_MESSAGE = f"The recursion depth of the query cannot be greater than `{MAX_DEPTH}`"
 
+# The syntax error with which graphql-core 3.2.14 stops a document nested deeper than
+# its own limit of 200. graphql-core 3.2.13 raised RecursionError for the same
+# document. Either document is far past MAX_DEPTH, so either one gets
+# RECURSION_MESSAGE, the answer of the real server.
+_LIBRARY_NESTING_ERROR = "Document is nested too deeply"
+
 # The most nodes that the real server accepts in one query. Each field, each fragment spread and
 # each inline fragment is one node, wherever it sits, and a fragment counts again at each spread.
 # A document of small fragments that spread each other makes billions of nodes, so the server
@@ -142,6 +148,8 @@ def _parse_document(text: str) -> Any:
     try:
         return graphql.parse(text, no_location=True)
     except graphql.GraphQLSyntaxError as exc:
+        if _LIBRARY_NESTING_ERROR in exc.message:
+            raise GraphQLRequestError("parse", RECURSION_MESSAGE) from None
         raise GraphQLRequestError("parse", exc.message) from None
     except RecursionError:
         # The parser of graphql-core is recursive. A document nested a few hundred
