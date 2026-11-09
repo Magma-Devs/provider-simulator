@@ -472,6 +472,12 @@ POOLS_WITH_NO_ROUTER_HERE = {
     # cluster does not run it, so a router entry in THIS file would claim a deployment
     # nobody makes.
     "eth-failover-pair-sim",
+    # eth-failover-httpws-sim. Its router runs on the local k3d cluster, declared in
+    # smart_router_automation's tools/local-cluster/routers.yml plus its own
+    # config/values_sim.yml, which is where its one provider gets both of its URLs. The
+    # shared cluster does not run it, so a router entry in THIS file would claim a
+    # deployment nobody makes.
+    "eth-failover-httpws-sim",
 }
 
 

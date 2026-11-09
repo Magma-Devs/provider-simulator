@@ -73,6 +73,9 @@ EXPECTED_POOLS = {
     # The pool of the head-stall router: one primary and one backup. A frozen
     # primary then has exactly one place for the traffic to go.
     "eth-failover-pair-sim",
+    # One provider with one http address and one ws address, and no other
+    # provider: the head-stall case where the only http URL must stay in rotation.
+    "eth-failover-httpws-sim",
 }
 
 
@@ -353,6 +356,29 @@ def test_the_pair_pool_holds_one_primary_and_one_backup_on_one_http_address_each
         assert doors == [("jsonrpc", "http")], f"slot {pid} must serve one http address only, got {endpoints}"
     assert ports_of("eth-failover-pair-sim", "1") == (18732,)
     assert ports_of("eth-failover-pair-sim", "2") == (18733,)
+
+
+def test_the_httpws_pool_holds_one_provider_with_one_http_and_one_ws_address():
+    """The pool of the head-stall case with one http URL, pinned as a literal.
+
+    The router never marks a ws URL head-stalled, but the block of a ws URL counts
+    toward the highest block of the chain. When the http address of this provider
+    freezes and its ws address keeps moving, the http URL falls behind a URL that
+    cannot take its traffic. The head-stall test of this pool checks that the
+    router keeps the http URL in rotation, because it is the last URL that can
+    serve. The case needs exactly this shape: one provider, one http address, one
+    ws address, and no other provider.
+    """
+    rows = [row for row in TOPOLOGY if row[0] == "eth-failover-httpws-sim"]
+    assert len(rows) == 1, "the pool holds exactly one provider - that is the point of it"
+    _pool, chain, pid, _name, is_backup, group, endpoints = rows[0]
+    assert chain == "eth"
+    assert pid == "1"
+    assert is_backup is False, "one provider cannot be the tier behind itself"
+    assert group == "", "no cross-validation policy here, so no group to claim"
+    assert endpoints == (("jsonrpc", "http", 18734), ("jsonrpc", "ws", 18735))
+    assert port_of("eth-failover-httpws-sim", "1") == 18734
+    assert port_of("eth-failover-httpws-sim", "1", transport="ws") == 18735
 
 
 # ── one provider, two addresses on the same door ──────────────────────────────
@@ -728,6 +754,8 @@ AGREED_NAMES = {
     # The head-stall pool: one primary, then one backup.
     ("eth-failover-pair-sim", "1"): "EthFailoverPairPrimaryProvider1",
     ("eth-failover-pair-sim", "2"): "EthFailoverPairBackupProvider2",
+    # One provider on two doors, as eth-failover-twoaddr-sim, so the role is Solo.
+    ("eth-failover-httpws-sim", "1"): "EthFailoverHttpwsSoloProvider1",
 }
 
 # The pools that HAVE a backup tier, and which of their slots it is. The router

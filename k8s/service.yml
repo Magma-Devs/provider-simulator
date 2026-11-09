@@ -877,3 +877,12 @@ spec:
       port: 18733
       targetPort: 18733
       protocol: TCP
+    # 18734-18735: the http and the ws address of eth-failover-httpws-sim.
+    - name: spare-18734
+      port: 18734
+      targetPort: 18734
+      protocol: TCP
+    - name: spare-18735
+      port: 18735
+      targetPort: 18735
+      protocol: TCP

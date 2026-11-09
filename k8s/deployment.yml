@@ -695,6 +695,13 @@ spec:
             - name: spare-18733
               containerPort: 18733
               protocol: TCP
+            # 18734-18735: the http and the ws address of eth-failover-httpws-sim.
+            - name: spare-18734
+              containerPort: 18734
+              protocol: TCP
+            - name: spare-18735
+              containerPort: 18735
+              protocol: TCP
           resources:
             requests:
               cpu: "100m"
