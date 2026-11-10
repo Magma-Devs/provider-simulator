@@ -140,6 +140,27 @@ def _ports_the_provider_does_not_serve(provider: object, scenario_updates: dict)
     return ""
 
 
+def _quirk_ports_the_provider_does_not_serve(provider: object, quirks_updates: dict) -> str:
+    """Refuse ``earliest_block_ports`` naming an address this provider does not serve.
+
+    The same reason as for the ``ports`` filter: EthQuirks checks the shape of the
+    list and holds no endpoints. A port the provider does not serve would make the
+    pruned node apply nowhere, and a test would read an archive node where it set
+    a pruned one.
+    """
+    ports = quirks_updates.get("earliest_block_ports")
+    if not ports or not isinstance(ports, list):
+        return ""  # the shape is EthQuirks's to judge, in quirks.check below
+    served = [ep.port for ep in provider.endpoints]  # type: ignore[attr-defined]
+    unknown = [p for p in ports if p not in served]
+    if unknown:
+        return (
+            f"earliest_block_ports {unknown} are not served by this provider; it serves "
+            f"{sorted(served)}. The pruned node would apply at no address"
+        )
+    return ""
+
+
 def _a_pause_no_named_port_can_serve(provider: object, scenario_updates: dict) -> str:
     """Refuse a pause whose ``ports`` filter names no address that could serve it.
 
@@ -615,6 +636,7 @@ class ControlApi:
                     }
             err = (
                 _ports_the_provider_does_not_serve(provider, scenario_updates)
+                or _quirk_ports_the_provider_does_not_serve(provider, quirks_updates)
                 or _a_pause_no_named_port_can_serve(provider, scenario_updates)
                 or _chosen_metadata_no_endpoint_can_send(provider, scenario_updates, "reply_headers")
                 or _chosen_metadata_no_endpoint_can_send(provider, scenario_updates, "reply_trailers")

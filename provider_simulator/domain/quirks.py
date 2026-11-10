@@ -27,6 +27,11 @@ from stubs_sui_graphql import SUI_CHAIN_ID, SUI_TESTNET_CHAIN_ID
 class Quirks(IntrospectiveConfig):
     """No chain-specific knobs. Used by btc / ln / lava."""
 
+    def for_port(self, snapshot: dict, port: int) -> dict:
+        """The snapshot as the endpoint at ``port`` serves it. Every quirk applies on
+        every port of the provider, unless the quirks of its chain say otherwise."""
+        return snapshot
+
 
 @dataclass
 class EthQuirks(Quirks):
@@ -41,17 +46,40 @@ class EthQuirks(Quirks):
     default, is an archive node: ``earliest`` is block 0 and every height is
     served. A router's archive check asks for ``earliest`` and expects block 0, so
     any value above 0 fails it.
+
+    ``earliest_block_ports`` names the ports where ``earliest_block`` applies. None,
+    the default, applies it on every port of the provider. A provider that serves one
+    interface and transport at two addresses can so be a pruned node at one address
+    and an archive node at the other, which is how a test shows that a router checks
+    each node url at its own address (MAG-4505 F5).
     """
 
     logs_indexed_up_to: int | None = None
     logs_lag_mode: str = "empty"  # empty | partial
     earliest_block: int | None = None
+    earliest_block_ports: list[int] | None = None
 
     def _validate(self, cfg: dict) -> None:
         if "earliest_block" in cfg:
             value = cfg["earliest_block"]
             if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
                 raise ValueError(f"earliest_block must be a non-negative integer or null, got {value!r}")
+        if "earliest_block_ports" in cfg:
+            ports = cfg["earliest_block_ports"]
+            if ports is not None and (
+                not isinstance(ports, list)
+                or not ports
+                or any(isinstance(p, bool) or not isinstance(p, int) or p <= 0 for p in ports)
+            ):
+                raise ValueError(f"earliest_block_ports must be a non-empty list of ports or null, got {ports!r}")
+
+    def for_port(self, snapshot: dict, port: int) -> dict:
+        """The snapshot as the endpoint at ``port`` serves it: ``earliest_block``
+        applies only at the ports ``earliest_block_ports`` names, when it names any."""
+        ports = snapshot.get("earliest_block_ports")
+        if ports is not None and port not in ports:
+            return {**snapshot, "earliest_block": None}
+        return snapshot
 
 
 @dataclass
