@@ -56,14 +56,14 @@ class GraphQLListener(Listener):
             graphql = parse_graphql_request(request.body)
         except GraphQLRequestError as error:
             raise DirectResponse(
-                result=self._reply_to_an_unreadable_body(error, request.caller), method="unknown", status_label="error"
+                result=self._reply_to_an_unreadable_body(error), method="unknown", status_label="error"
             ) from None
         return {"graphql": graphql, "method": graphql.method, "request_id": graphql.request_id}
 
-    def _reply_to_an_unreadable_body(self, error: GraphQLRequestError, caller: str) -> ServeResult:
+    def _reply_to_an_unreadable_body(self, error: GraphQLRequestError) -> ServeResult:
         scenario = self.provider.scenario.snapshot()
         chosen = scenario.get("unreadable_reply")
-        if chosen is not None and fault_policy.targets(scenario, self.endpoint, caller):
+        if chosen is not None and fault_policy.targets(scenario, self.endpoint):
             return ServeResult(action="respond", status=chosen["status"], body=chosen.get("body", ""))
         status, body = default_error_reply(error)
         return ServeResult(action="respond", status=status, body=body)

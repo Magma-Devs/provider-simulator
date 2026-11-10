@@ -1988,27 +1988,3 @@ class TestGrpcRowRecordsWhatTheProviderReceived:
         # Some milliseconds above the 0.3 s of the caller are possible: see the
         # test of the 5 s deadline.
         assert 0 <= rows[0]["deadline_remaining_ms"] <= 400
-
-
-# ── a fault reaches only the caller that the callers filter names ─────────────
-
-
-def _set_grpc_ok(sim, **block) -> None:
-    status, body = _set_grpc(sim, "1", **block)
-    assert status == 200, f"POST /scenario answered HTTP {status}: {body!r}"
-
-
-def test_a_fault_reaches_the_call_of_the_listed_address_and_not_the_call_of_another(sim):
-    """The adapter reads the address of the caller from ``context.peer()``. The tests send
-    from this machine, so the caller is 127.0.0.1."""
-    address = _GRPC_ADDRS["1"]
-    assert _status_of(_call_get_latest_block, address) == (grpc.StatusCode.OK, ""), "the baseline answers"
-
-    _set_grpc_ok(sim, mode="down", callers=["127.0.0.1"])
-    assert _status_of(_call_get_latest_block, address)[0] == grpc.StatusCode.UNAVAILABLE, "the listed address faults"
-
-    _set_grpc_ok(sim, callers=["10.42.0.26"])
-    assert _status_of(_call_get_latest_block, address) == (grpc.StatusCode.OK, ""), "another address is answered"
-
-    _set_grpc_ok(sim, callers=None)
-    assert _status_of(_call_get_latest_block, address)[0] == grpc.StatusCode.UNAVAILABLE, "no filter faults all"

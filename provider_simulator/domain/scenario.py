@@ -11,9 +11,8 @@ endpoint that the block targets. This class cannot tell which endpoints a
 provider has, and the control API can. So the control API refuses the mode for
 a block that targets no endpoint, and for a port with no listener.
 
-Three fields scope a block to SOME of the requests that a provider gets rather
-than all of them, and all three default to None, meaning every endpoint and every
-caller.
+Two fields scope a block to SOME of a provider's endpoints rather than all of
+them, and both default to None, meaning every endpoint.
 
 `transports` names wires — "only its ws endpoint". Values are validated against
 the closed TRANSPORTS vocabulary, because "grpc" is an interface rather than a
@@ -27,19 +26,8 @@ reason an unknown transport is — a filter that matches no endpoint means no fa
 at all, and a provider answering normally looks exactly like a provider that was
 never faulted.
 
-`callers` names the addresses that REQUESTS come from, as the text of an IP
-address. It exists for two pods of one router that call the same provider: a test
-gives the fault to the calls of one pod, by the address that the provider sees as
-the source of its connection, while the calls of the other pod get the normal
-answer. A test reads the address from the ``sim-caller`` parameter of a reply. The
-simulator cannot know which addresses will call, so unlike ``ports`` it cannot
-refuse an address that no caller has. It refuses what no caller can have: a text
-that is not an IP address, the unspecified address, and an address in a spelling
-that the simulator never reads from a socket, because the filter compares text.
-
-When they are set they AND together: an endpoint must match the transport list
-AND the port list, and the request must come from an address of the caller list,
-to be targeted.
+When both are set they AND together: an endpoint must match the transport list
+AND the port list to be targeted.
 
 Two fields change no fault and no body. ``reply_headers`` adds chosen headers to
 each reply of a targeted endpoint, such as a ``Retry-After`` on a 429: the HTTP
@@ -56,7 +44,6 @@ that the ``transports`` and ``ports`` filters target. Only one of the two can
 apply, and the control API refuses both together.
 """
 
-import ipaddress
 import re
 import string
 from dataclasses import dataclass, field
@@ -79,23 +66,6 @@ _CHOSEN_NAME_CHARS = frozenset("-_." + string.digits + string.ascii_letters)
 # arrives as "7").
 _WHOLE_NUMBER = re.compile(r"0|-?[1-9][0-9]*")
 _SIGNED_64_BIT = range(-(2**63), 2**63)
-
-
-def canonical_address(host: str) -> str | None:
-    """The one text of the address of a caller, or None when ``host`` is not an IP address.
-
-    The ``sim-caller`` parameter of a reply, the ``callers`` filter and the address
-    that a WebSocket or a gRPC call reads from its socket all use this text, so one
-    caller has one spelling on every socket. An IPv4 peer of an IPv6 socket has the
-    form ``::ffff:10.42.0.26``, and its text is the IPv4 address. Any other IPv6
-    address is in the compressed form with lowercase letters.
-    """
-    try:
-        parsed = ipaddress.ip_address(host)
-    except ValueError:
-        return None
-    mapped = getattr(parsed, "ipv4_mapped", None)
-    return str(mapped) if mapped is not None else str(parsed)
 
 
 @dataclass
@@ -154,10 +124,6 @@ class ScenarioConfig(IntrospectiveConfig):
     # Address filter, ANDed with transports. The field that makes a provider
     # serving one interface and one transport at two ports separable at all.
     ports: list[int] | None = None  # endpoint filter; None = all endpoints
-    # Caller filter, ANDed with transports and ports. The text of each address that a
-    # request comes from, as ``canonical_address`` spells it. The field that makes
-    # two pods of one router, which call one provider, separable at all.
-    callers: list[str] | None = None  # request filter; None = all callers
     # Headers that the provider adds to each reply of a targeted endpoint, as
     # {name: value}. On an ``http`` endpoint: each reply with a status line, which
     # is a success, a fault, the bodiless 503 of ``down`` and the headers of a reply
@@ -215,7 +181,6 @@ class ScenarioConfig(IntrospectiveConfig):
     def _validate(self, cfg: dict) -> None:
         self._validate_transports(cfg)
         self._validate_ports(cfg)
-        self._validate_callers(cfg)
         self._validate_pause(cfg)
         self._validate_rate_limit_style(cfg)
         self._validate_unreadable_reply(cfg)
@@ -382,60 +347,6 @@ class ScenarioConfig(IntrospectiveConfig):
         bad = [p for p in ports if isinstance(p, bool) or not isinstance(p, int) or not 1 <= p <= 65535]
         if bad:
             raise ValueError(f"ports must be integers in [1, 65535], got {bad!r}")
-
-    def _validate_callers(self, cfg: dict) -> None:
-        """Refuse a callers list that could not target any caller.
-
-        This class cannot tell which addresses will call, so it judges the shape of
-        the list and of each address, and nothing the deployment decides.
-
-        An empty list is refused for the reason ``ports`` gives: its two readings,
-        "no caller" and "every caller", are opposite.
-
-        A value that is not text is refused before the text is read, because
-        ``ipaddress`` reads ``True`` as 0.0.0.1 and ``5`` as 0.0.0.5. The
-        unspecified address is refused because it reads as "any address" and no
-        connection comes from it. An address that is not in the spelling of
-        ``canonical_address`` is refused with the spelling to write, because the
-        filter compares text: the address would match no caller, and the fault would
-        never fire.
-
-        A closed port receives no request, so ``mode="port_closed"`` has no caller
-        to tell apart. Only a combination in the SAME update is checked here, as
-        ``_validate_pause`` does; the control API reads the stored mode.
-        """
-        callers = cfg.get("callers")
-        if callers is None:
-            return
-        if not isinstance(callers, (list, tuple)):
-            raise ValueError(f"callers must be a list of IP addresses or None, got {callers!r}")
-        if not callers:
-            raise ValueError(
-                "callers must not be empty; use None for 'every caller'. An empty list "
-                "would target no caller, so no fault would apply and the provider "
-                "would answer normally"
-            )
-        spelled = [canonical_address(c) if isinstance(c, str) else None for c in callers]
-        bad = [c for c, text in zip(callers, spelled) if text is None]
-        if bad:
-            raise ValueError(f"callers must be IP addresses written as text, such as '10.42.0.26', got {bad!r}")
-        for written, text in zip(callers, spelled):
-            if ipaddress.ip_address(str(text)).is_unspecified:
-                raise ValueError(
-                    f"callers cannot name {written!r}: no connection comes from the unspecified address. "
-                    "Use None for 'every caller'"
-                )
-            if written != text:
-                raise ValueError(
-                    f"callers must spell an address the way the sim-caller parameter of a reply does: "
-                    f"write {text!r}, not {written!r}"
-                )
-        if cfg.get("mode") == "port_closed":
-            raise ValueError(
-                f"callers={list(callers)!r} cannot apply with mode='port_closed': a closed port receives "
-                "no request, so it has no caller to tell apart and the port would close for every caller. "
-                "Use a mode that answers, or callers=None"
-            )
 
     def _validate_pause(self, cfg: dict) -> None:
         """Refuse a pause that could not possibly happen.

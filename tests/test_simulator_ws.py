@@ -3123,32 +3123,3 @@ class TestEveryUpgradeHeaderOnTheFrameRow:
         }
         assert row["lava_headers"] == {"lava-stateful-api": "true"}
         assert (row["deadline_remaining_ms"], row["grpc_status"]) == (None, None)
-
-
-# ── a fault reaches only the caller that the callers filter names ─────────────
-
-
-class TestFaultByCaller:
-    """A WebSocket peer is a caller as an HTTP peer is. The adapter reads the address of
-    the peer once, and the upgrade request and each frame of the connection come from it.
-    The tests send from this machine, so the caller is 127.0.0.1."""
-
-    def test_the_upgrade_of_the_listed_address_is_refused_and_the_upgrade_of_another_completes(self, sim):
-        _set_scenario(sim, {"mode": "rate_limit", "transports": ["ws"], "callers": ["127.0.0.1"]})
-        status, _ = _refusal(_request_upgrade())
-        assert status == 429, "the listed address must be refused"
-
-        _set_scenario(sim, {"callers": ["10.42.0.26"]})
-        with WsClient(_WS_HOST, _PORT, "/ws") as client:  # connect raises when the upgrade is refused
-            client.send_json(_BLOCK_NUMBER)
-            assert client.recv_json(timeout=2.0)["result"].startswith("0x")
-
-    def test_a_frame_of_the_listed_address_is_faulted_and_a_frame_of_another_is_answered(self, sim):
-        with WsClient(_WS_HOST, _PORT, "/ws") as client:
-            _set_scenario(sim, {"mode": "error", "transports": ["ws"], "callers": ["127.0.0.1"]})
-            client.send_json(_BLOCK_NUMBER)
-            assert "error" in client.recv_json(timeout=2.0), "the listed address must get the error"
-
-            _set_scenario(sim, {"callers": ["10.42.0.26"]})
-            client.send_json(_BLOCK_NUMBER)
-            assert client.recv_json(timeout=2.0)["result"].startswith("0x"), "another address must be answered"

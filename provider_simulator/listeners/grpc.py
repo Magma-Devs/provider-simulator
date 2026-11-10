@@ -49,7 +49,6 @@ on an open port.
 import datetime
 from dataclasses import dataclass
 from typing import cast
-from urllib.parse import unquote
 
 import grpc
 from google.protobuf import descriptor_pool
@@ -66,7 +65,6 @@ from tendermint.types import block_pb2, types_pb2  # isort: skip
 
 from provider_simulator import fault_policy
 from provider_simulator.chains.lava import GRPC_LATEST_BLOCK, LAVA_SIM_CHAIN_ID
-from provider_simulator.domain.scenario import canonical_address
 from provider_simulator.listeners.base import Listener, RawRequest, ServeResult
 
 _STATUS_BY_NAME = {sc.name: sc for sc in grpc.StatusCode}
@@ -363,22 +361,6 @@ def message_of(result: ServeResult):
         if response.DESCRIPTOR.fields_by_name.get(result.missing_field):
             response.ClearField(result.missing_field)
     return response
-
-
-def caller_of(peer: str) -> str:
-    """The address of the caller of a gRPC call, from ``context.peer()``, in the one
-    spelling of ``canonical_address``. Empty when the peer is no IP address.
-
-    The gRPC library writes ``ipv4:127.0.0.1:50060`` and ``ipv6:%5B::1%5D:50064``
-    (grpcio 1.81.1), and a peer on a unix socket ``unix:/path``. An IPv4 peer of an
-    IPv6 socket can come as ``ipv6:[::ffff:10.42.0.26]:51234``, so the text goes
-    through ``canonical_address`` like the address of an HTTP or a WebSocket peer.
-    """
-    scheme, _, rest = unquote(peer).partition(":")
-    if scheme not in ("ipv4", "ipv6"):
-        return ""
-    host = rest.rpartition(":")[0].strip("[]")
-    return canonical_address(host) or ""
 
 
 def metadata_of(chosen: dict) -> tuple:

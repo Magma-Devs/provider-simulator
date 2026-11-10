@@ -265,16 +265,3 @@ def test_arrive_keeps_every_header_of_the_call_in_headers():
     assert row["headers"] == {"Lava-Guid": "GUID_1", "X-Other": "kept"}
     assert row["lava_headers"] == {"Lava-Guid": "GUID_1"}
     assert (row["deadline_remaining_ms"], row["grpc_status"]) == (None, None)
-
-
-# ── a fault reaches only the caller that its callers filter names ─────────────
-
-POD_A, POD_B = "10.42.0.26", "10.42.0.27"
-
-
-def test_a_fault_reaches_only_the_caller_that_the_callers_filter_names():
-    listener, provider = _listener()
-    provider.scenario.update({"mode": "error", "callers": [POD_A]})
-    faulted = listener.serve(RawRequest(verb="POST", body=_post("status").body, caller=POD_A))
-    healthy = listener.serve(RawRequest(verb="POST", body=_post("status").body, caller=POD_B))
-    assert "error" in faulted.body and "result" in healthy.body

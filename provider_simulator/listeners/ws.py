@@ -231,12 +231,8 @@ class JsonRpcWsListener(JsonRpcListener):
         for sub_id in list(connection.subscription_ids):
             self.subscriptions.unregister(sub_id)
 
-    def decide_upgrade(self, headers: dict, caller: str = "") -> ServeResult:
+    def decide_upgrade(self, headers: dict) -> ServeResult:
         """Decide the upgrade request that opens a WebSocket.
-
-        ``caller`` is the text of the address that the request came from. The
-        ``callers`` filter of the scenario reads it, and an empty text is a
-        request with an unknown address, which is none of the listed callers.
 
         The status 101 tells the adapter to complete the handshake. Each other
         result is a refusal: a JSON body with its HTTP status, a hang, or a
@@ -254,8 +250,8 @@ class JsonRpcWsListener(JsonRpcListener):
         101 reply and a refusal. The adapter writes them.
         """
         scenario = self.provider.scenario.snapshot()
-        chosen = (scenario.get("reply_headers") or {}) if fault_policy.targets(scenario, self.endpoint, caller) else {}
-        verdict = fault_policy.decide(scenario, self.endpoint, self.provider, caller)
+        chosen = (scenario.get("reply_headers") or {}) if fault_policy.targets(scenario, self.endpoint) else {}
+        verdict = fault_policy.decide(scenario, self.endpoint, self.provider)
         if verdict.kind == "none":
             return with_reply_headers(ServeResult(action="respond", status=101), chosen)
 

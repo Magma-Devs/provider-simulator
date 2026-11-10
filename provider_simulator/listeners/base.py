@@ -2,8 +2,8 @@
 
 serve() runs one fixed sequence for all transports:
 
-    record arrival → snapshot scenario → resolve the effective mode (the transports,
-    ports and callers filters + fail_first_n window, consumed once) → (provider-wide down? emit
+    record arrival → snapshot scenario → resolve the effective mode (transports
+    filter + fail_first_n window, consumed once) → (provider-wide down? emit
     before parsing) → parse request (parse error?) → merge per-method overrides
     → body override OR fault ladder OR success content → finalize the log entry.
 
@@ -29,9 +29,9 @@ Per-method ``responses`` overrides can shadow the fault keys (mode, latency_ms,
 error probability/code/message, http_status, drop_at) for one method — the
 merged config inherits every provider-wide key the override doesn't set. The
 override key is the transport's ``method_key`` (JSON-RPC, Tendermint RPC and
-gRPC: the method name; REST: the (verb, template) route pair). The transports,
-ports and callers filters scope per-method overrides the same way they scope
-everything else in the block.
+gRPC: the method name; REST: the (verb, template) route pair). The transports
+filter scopes per-method overrides the same way it scopes everything else in
+the block.
 
 Three more hooks have a default. Two defaults are right for the HTTP
 interfaces, and gRPC overrides each one: ``build_down`` (the reply of a down
@@ -89,11 +89,10 @@ _METHOD_OVERRIDE_KEYS = (
 def _content_scenario(scenario: dict, targeted: bool) -> dict:
     """The scenario that the reply content of one endpoint reads.
 
-    ``frozen_head`` obeys the ``transports``, ``ports`` and ``callers`` filters, so
-    it reaches only a targeted request: a test freezes one address of a provider,
-    or one caller of it, and the other keeps answering the moving head.
-    ``blocks_behind`` and the other content fields reach every endpoint and every
-    caller of the provider, filter or not.
+    ``frozen_head`` obeys the ``transports`` and ``ports`` filters, so it reaches
+    only a targeted endpoint: a test freezes one address of a provider, and the
+    other address keeps answering the moving head. ``blocks_behind`` and the other
+    content fields reach every endpoint of the provider, filter or not.
     """
     if targeted or scenario.get("frozen_head") is None:
         return scenario
@@ -132,8 +131,7 @@ class RawRequest:
     JSON-RPC reads ``body``; REST and Tendermint's GET form read ``verb`` /
     ``path`` / ``query``; gRPC reads ``path``, which holds the method name, and
     ``message``. Every field defaults empty, so a POST-body transport can pass
-    just ``body`` (and ``headers``). Each adapter also gives the address of the
-    caller in ``caller``, which the filters of the scenario read.
+    just ``body`` (and ``headers``).
     """
 
     body: bytes = b""
@@ -146,11 +144,6 @@ class RawRequest:
     # WebSocket only: the WsConnection of the connection that the frame arrived
     # on. Each other adapter leaves it empty.
     connection: object = None
-    # The text of the address that the request came from, as
-    # ``scenario.canonical_address`` spells it, which is also the ``sim-caller``
-    # parameter of an HTTP reply. The ``callers`` filter reads it. Empty when the
-    # adapter has no address: such a request is none of the listed callers.
-    caller: str = ""
 
 
 @dataclass
@@ -247,9 +240,9 @@ class Listener(ABC):
         if recorded_path is not None:
             self.provider.log.record_path(entry, recorded_path)
         scenario = self.provider.scenario.snapshot()
-        # One stateful policy step per request: the transports, ports and callers
-        # filters plus the fail_first_n window (consumed here, exactly once).
-        targeted, mode = fault_policy.resolve_mode(scenario, self.endpoint, self.provider, request.caller)
+        # One stateful policy step per request: the transports filter plus the
+        # fail_first_n window (consumed here, exactly once).
+        targeted, mode = fault_policy.resolve_mode(scenario, self.endpoint, self.provider)
         latency = scenario.get("latency_ms", 0) if targeted else 0
         # The chosen headers and trailers go on every reply of a targeted
         # endpoint, whatever its kind, so each return below passes through

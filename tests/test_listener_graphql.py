@@ -366,27 +366,3 @@ def test_a_transaction_that_ran_through_a_fault_is_not_remembered():
     _scenario(provider, mode="error")
     listener.serve(_post(_execute(_VECTORS[0])))
     assert provider.executed_snapshot() == {}
-
-
-# ── a fault reaches only the caller that its callers filter names ─────────────
-
-POD_A, POD_B = "10.42.0.26", "10.42.0.27"
-
-
-def _from(caller: str, body: bytes) -> RawRequest:
-    return RawRequest(verb="POST", path="/graphql", body=body, caller=caller)
-
-
-def test_a_fault_reaches_only_the_caller_that_the_callers_filter_names():
-    listener, provider = _listener()
-    _scenario(provider, mode="error", callers=[POD_A])
-    assert "errors" in listener.serve(_from(POD_A, _body("{ chainIdentifier }"))).body
-    assert "data" in listener.serve(_from(POD_B, _body("{ chainIdentifier }"))).body
-
-
-def test_the_reply_to_an_unreadable_body_reaches_only_the_caller_that_the_callers_filter_names():
-    """The listener asks the filters a second time for this reply, so it needs the caller too."""
-    listener, provider = _listener()
-    _scenario(provider, unreadable_reply={"status": 502, "body": "bad gateway"}, callers=[POD_A])
-    assert listener.serve(_from(POD_A, b"not json")).status == 502
-    assert listener.serve(_from(POD_B, b"not json")).status != 502, "the peer pod got the chosen reply"

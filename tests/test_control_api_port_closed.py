@@ -182,26 +182,3 @@ def test_a_malformed_filter_is_still_refused_by_the_scenario_itself(bad_filter, 
     st, resp = api.apply_scenario({"providers": {KEY: {"mode": "port_closed", **bad_filter}}})
     assert st == 400
     assert reason in resp["error"]
-
-
-# ── a caller filter on a port that is closed ─────────────────────────────────
-
-
-def test_callers_beside_port_closed_are_refused_also_when_one_of_them_is_stored():
-    """A closed port receives no request, so it has no caller to tell apart. The port
-    would close for every caller while the test expects one pod to be cut off. A POST
-    merges, so the stored value counts as much as the one in the same request."""
-    api, _ = _api_with_a_gate_nothing_serves()
-    provider = api.registry.provider("lava-sim-grpc", "1")
-    st, resp = api.apply_scenario({"providers": {KEY: {"mode": "port_closed", "callers": ["10.42.0.26"]}}})
-    assert st == 400, resp
-    assert "callers=['10.42.0.26'] cannot apply with mode 'port_closed'" in resp["error"], resp
-    assert provider.scenario.snapshot()["mode"] == "success", "a refused request applies nothing"
-
-    # The stored filter, then the mode in a later request. The filter is stored through the
-    # scenario itself: a control write moves no port here, and this gate has no serve loop.
-    provider.scenario.update({"callers": ["10.42.0.26"]})
-    st, resp = api.apply_scenario({"providers": {KEY: {"mode": "port_closed"}}})
-    assert st == 400, resp
-    assert "callers=['10.42.0.26'] cannot apply with mode 'port_closed'" in resp["error"], resp
-    assert provider.scenario.snapshot()["mode"] == "success"

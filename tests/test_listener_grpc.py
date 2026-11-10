@@ -1040,39 +1040,3 @@ def test_arrive_keeps_every_metadata_key_and_the_deadline_and_status_sent_writes
 
     listener.status_sent(entry, "NOT_FOUND")
     assert provider.log.get_history()[0]["grpc_status"] == "NOT_FOUND"
-
-
-# ── a fault reaches only the caller that its callers filter names ─────────────
-
-POD_A, POD_B = "10.42.0.26", "10.42.0.27"
-
-
-def test_a_fault_reaches_only_the_caller_that_the_callers_filter_names():
-    listener, _ = _listener()
-    _upd(listener, {"mode": "down", "callers": [POD_A]})
-    faulted = listener.serve(RawRequest(path="GetLatestBlock", caller=POD_A))
-    healthy = listener.serve(RawRequest(path="GetLatestBlock", caller=POD_B))
-    assert faulted.body == GrpcStatus("UNAVAILABLE", "provider down")
-    assert isinstance(healthy.body, GrpcReply)
-
-
-@pytest.mark.parametrize(
-    "peer, caller",
-    [
-        ("ipv4:127.0.0.1:50060", "127.0.0.1"),
-        ("ipv6:%5B::1%5D:50064", "::1"),
-        ("ipv6:[::1]:50064", "::1"),
-        ("ipv6:[::ffff:10.42.0.26]:51234", "10.42.0.26"),
-        ("ipv6:%5Bfd00::1A%5D:51234", "fd00::1a"),
-        ("unix:/tmp/sim.sock", ""),
-        ("unix:", ""),
-        ("", ""),
-        ("ipv4:127.0.0.1", ""),
-    ],
-)
-def test_the_caller_of_a_grpc_call_is_read_from_its_peer_in_the_one_spelling_of_an_address(peer, caller):
-    """``context.peer()`` gives ``ipv4:127.0.0.1:50060`` and ``ipv6:%5B::1%5D:50064``, as
-    measured with grpcio 1.81.1, and a peer that is no IP address gives no caller."""
-    from provider_simulator.listeners.grpc import caller_of
-
-    assert caller_of(peer) == caller

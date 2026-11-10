@@ -8,19 +8,17 @@ change to the fault rules happens once.
 
 Two rules the ladder folds in:
 
-- **transports, ports and callers filters.** A scenario block's ``transports``
-  list scopes its effect to specific wires of the provider, its ``ports`` list to
-  specific ADDRESSES of the provider, and its ``callers`` list to the addresses
-  that REQUESTS come from. If set and this endpoint or this caller does not match,
-  no fault applies — the request gets success. ``None`` = every endpoint or every
-  caller. They AND together. Because provider state is per-provider (never shared
-  across chains), a provider-wide ``down`` is just "no filter" — there is no
-  universal-down special case to carry.
+- **transports and ports filters.** A scenario block's ``transports`` list scopes
+  its effect to specific wires of the provider, and its ``ports`` list to specific
+  ADDRESSES. If set and this endpoint does not match, no fault applies — the
+  endpoint serves success. ``None`` = every endpoint, for either. They AND
+  together. Because provider state is per-provider (never shared across chains),
+  a provider-wide ``down`` is just "no filter" — there is no universal-down
+  special case to carry.
 
   ``ports`` is what makes a provider serving one interface and one transport at
   two addresses separable: ``transports`` cannot tell those two apart, so before
-  this field a fault on such a provider always reached both. ``callers`` is what
-  makes two callers of one provider separable, such as two pods of one router.
+  this field a fault on such a provider always reached both.
 
 - **fail_first_n sequence.** When set, the first N requests on a targeted
   endpoint get the fault ``mode``; every request after switches to ``then_mode``
@@ -75,20 +73,12 @@ NONE_VERDICT = Verdict(kind="none")
 _NONE = NONE_VERDICT  # backward-compatible module-private alias
 
 
-def targets(scenario: dict, endpoint: Endpoint, caller: str | None = None) -> bool:
-    """Does this scenario block apply to this endpoint, and to this caller?
+def targets(scenario: dict, endpoint: Endpoint) -> bool:
+    """Does this scenario block apply to this endpoint?
 
-    The ONE answer to that question. The filters AND together, and each one left
-    as ``None`` means "no opinion", so a block with none targets every endpoint
-    and every caller exactly as it did before ``ports`` and ``callers`` existed.
-
-    ``caller`` is the text of the address that a request came from
-    (``RawRequest.caller``). A request that is being served always passes it, and
-    an empty text is a request whose address is unknown: it is none of the listed
-    callers. ``None`` means that no request is in question, as when the control API
-    asks which endpoints a block names, and the loop of a port asks which port to
-    close. A block says which callers it applies to and nothing about an
-    endpoint, so the ``callers`` filter is then left out of the answer.
+    The ONE answer to that question. Both filters AND together, and either one
+    left as ``None`` means "no opinion", so a block with neither targets every
+    endpoint exactly as it did before ``ports`` existed.
 
     Exported rather than inlined into ``resolve_mode`` because it is not the only
     caller: the control API asks it which endpoints a block names. The gRPC
@@ -99,12 +89,7 @@ def targets(scenario: dict, endpoint: Endpoint, caller: str | None = None) -> bo
     """
     transports = scenario.get("transports")
     ports = scenario.get("ports")
-    callers = scenario.get("callers")
-    return (
-        (transports is None or endpoint.transport in transports)
-        and (ports is None or endpoint.port in ports)
-        and (callers is None or caller is None or caller in callers)
-    )
+    return (transports is None or endpoint.transport in transports) and (ports is None or endpoint.port in ports)
 
 
 def port_closed(scenario: dict, endpoint: Endpoint) -> bool:
@@ -124,21 +109,16 @@ def port_closed(scenario: dict, endpoint: Endpoint) -> bool:
     return scenario.get("mode") == "port_closed" and targets(scenario, endpoint)
 
 
-def resolve_mode(scenario: dict, endpoint: Endpoint, provider: Provider, caller: str = "") -> tuple[bool, str]:
-    """Apply the filters and the fail_first_n window; return
+def resolve_mode(scenario: dict, endpoint: Endpoint, provider: Provider) -> tuple[bool, str]:
+    """Apply the transports filter and the fail_first_n window; return
     ``(targeted, effective_mode)``.
-
-    ``caller`` is the text of the address that the request came from, and an empty
-    text is a request with an unknown address (see ``targets``).
 
     This is the only stateful step of the policy: a targeted request under an
     active ``fail_first_n`` advances the provider's counter, so call it exactly
-    once per request. An untargeted request neither faults nor advances the
-    window — its effective mode is always ``success``. A request from a caller
-    that the ``callers`` filter does not name is untargeted, so the other pod of a
-    router does not spend the window of the pod under test.
+    once per request. An untargeted endpoint neither faults nor advances the
+    window — its effective mode is always ``success``.
     """
-    targeted = targets(scenario, endpoint, caller)
+    targeted = targets(scenario, endpoint)
 
     mode = scenario.get("mode", "success")
     fail_first_n = scenario.get("fail_first_n", 0)
@@ -187,14 +167,13 @@ def ladder(mode: str, scenario: dict) -> Verdict:
     return NONE_VERDICT
 
 
-def decide(scenario: dict, endpoint: Endpoint, provider: Provider, caller: str = "") -> Verdict:
-    """Return the fault Verdict for one request on ``endpoint`` of ``provider``,
-    from the address ``caller``.
+def decide(scenario: dict, endpoint: Endpoint, provider: Provider) -> Verdict:
+    """Return the fault Verdict for one request on ``endpoint`` of ``provider``.
 
     ``scenario`` is a ScenarioConfig snapshot dict. Pure except for advancing the
-    provider's fail_first_n counter on a targeted request.
+    provider's fail_first_n counter on a targeted endpoint.
     """
-    targeted, mode = resolve_mode(scenario, endpoint, provider, caller)
+    targeted, mode = resolve_mode(scenario, endpoint, provider)
     if not targeted:
         return NONE_VERDICT
     return ladder(mode, scenario)

@@ -37,6 +37,7 @@ control API from the listeners.
 """
 
 import errno
+import ipaddress
 import json
 import logging
 import os
@@ -65,7 +66,7 @@ from constants import (
 from provider_simulator.cache_sim import CacheSimRegistry
 from provider_simulator.control_api import ControlApi
 from provider_simulator.domain.registry import Registry, build_registry
-from provider_simulator.domain.scenario import HTTP_TOKEN_CHARS, canonical_address
+from provider_simulator.domain.scenario import HTTP_TOKEN_CHARS
 from provider_simulator.listeners import (
     GraphQLListener,
     JsonRpcListener,
@@ -306,13 +307,17 @@ def _caller_address(client_address: object) -> str:
     ``client_address`` is what ``socketserver`` gives a request handler. For a
     TCP connection it is a tuple that starts with the host. An IPv4 peer of an
     IPv6 socket has the form ``::ffff:10.42.0.26``. The result is then the IPv4
-    address, so one caller has one spelling on every socket. The spelling is
-    ``canonical_address``, which the ``callers`` filter of a scenario uses too.
+    address, so one caller has one spelling on every socket.
     """
     if not isinstance(client_address, tuple) or not client_address:
         return ""
     host = str(client_address[0])
-    return canonical_address(host) or host
+    try:
+        parsed = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    mapped = getattr(parsed, "ipv4_mapped", None)
+    return str(mapped) if mapped is not None else str(parsed)
 
 
 class _ChosenReplyHeaders(BaseHTTPRequestHandler):
@@ -417,7 +422,6 @@ class _HttpListenerHandler(_ChosenReplyHeaders):
             verb=verb,
             path=parsed.path,
             query=parse_qs(parsed.query),
-            caller=_caller_address(self.client_address),
         )
         result = listener.serve(raw, entry=entry)
         self._perform(result)
@@ -732,8 +736,7 @@ class _WsHandler(_ChosenReplyHeaders):
         # The listener decides the upgrade BEFORE the handshake completes, so a
         # faulted provider refuses the upgrade the way it refuses an HTTP
         # request. The status 101 says: complete the handshake.
-        caller = _caller_address(self.client_address)
-        decision = listener.decide_upgrade(headers, caller)
+        decision = listener.decide_upgrade(headers)
         if decision.action != "respond" or decision.status != 101:
             self._refuse_upgrade(decision, client_key)
             return
@@ -757,7 +760,7 @@ class _WsHandler(_ChosenReplyHeaders):
         )
         writer.start()
         try:
-            self._reader_loop(listener, out_queue, headers, caller)
+            self._reader_loop(listener, out_queue, headers)
         finally:
             try:
                 out_queue.put_nowait(_WS_SENTINEL)
@@ -807,10 +810,9 @@ class _WsHandler(_ChosenReplyHeaders):
         except OSError:
             pass
 
-    def _reader_loop(self, listener: JsonRpcWsListener, out_queue: "queue.Queue", headers: dict, caller: str) -> None:
+    def _reader_loop(self, listener: JsonRpcWsListener, out_queue: "queue.Queue", headers: dict) -> None:
         # ``headers`` is every header of the upgrade request. A frame has no
-        # headers of its own, so the row of each frame holds these. ``caller`` is
-        # the address of the peer of the connection, which every frame shares.
+        # headers of its own, so the row of each frame holds these.
         # One object for the life of the connection. The listener registers
         # each subscription of the connection on it.
         connection = WsConnection(out_queue)
@@ -848,9 +850,7 @@ class _WsHandler(_ChosenReplyHeaders):
                 if isinstance(body, dict) and isinstance(body.get("method"), (list, dict)):
                     return
 
-                result = listener.serve(
-                    RawRequest(body=frame.payload, headers=headers, connection=connection, caller=caller)
-                )
+                result = listener.serve(RawRequest(body=frame.payload, headers=headers, connection=connection))
                 if self._perform_frame(result, out_queue) == "close":
                     return
         finally:
@@ -1316,10 +1316,7 @@ def _run_grpc_in_thread(grpc_listener, port: int, host: str, gate: PortGate) -> 
         remaining_s = context.time_remaining()
         deadline_remaining_ms = None if remaining_s is None else max(0, int(remaining_s * 1000))
         entry = grpc_listener.arrive(headers, deadline_remaining_ms=deadline_remaining_ms)
-        caller = grpc_wire.caller_of(context.peer())
-        result = grpc_listener.serve(
-            RawRequest(path=method, headers=headers, message=request, caller=caller), entry=entry
-        )
+        result = grpc_listener.serve(RawRequest(path=method, headers=headers, message=request), entry=entry)
 
         status = result.body
         if isinstance(status, grpc_wire.GrpcStatus):
