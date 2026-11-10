@@ -1021,6 +1021,21 @@ def test_a_commitment_lag_that_is_not_a_count_of_slots_is_400_and_applies_nothin
     assert _lags_of(api) == (0, 0, 0), "a refused request applies nothing"
 
 
+def test_lags_that_no_node_has_are_400_and_apply_nothing():
+    """A processed lag above the confirmed lag would make a processed reply older than a confirmed
+    one. The rule reads the lags merged over the stored ones, because a write can name one lag."""
+    api = _api()
+    st, resp = api.apply_scenario({"providers": {"solana-sim:1": {"processed_lag_slots": 5}}})
+    assert st == 400, resp
+    assert "processed_lag_slots <= confirmed_lag_slots <= finalized_lag_slots" in resp["error"], resp
+    assert _lags_of(api) == (0, 0, 0), "a refused request applies nothing"
+    stored = {"confirmed_lag_slots": 1, "finalized_lag_slots": 1}
+    assert api.apply_scenario({"providers": {"solana-sim:1": stored}})[0] == 200
+    st, resp = api.apply_scenario({"providers": {"solana-sim:1": {"finalized_lag_slots": 0}}})
+    assert st == 400, resp
+    assert _lags_of(api) == (0, 1, 1), "the stored lags stay"
+
+
 def test_a_commitment_lag_on_a_provider_of_another_chain_is_400():
     """A commitment is a Solana idea: the lag would be stored on a provider that answers no slot."""
     api = _api()

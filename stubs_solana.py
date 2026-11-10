@@ -13,9 +13,9 @@ per-provider ``slot_offset``, and the slot ↔ lastValidBlockHeight distance on
 to hold here. What lives here instead are the fixed chain values those
 computed responses are built from.
 
-Adding a new Solana method: implement the per-request branch in
-``handlers_solana.handle`` and put any new fixed values here so the handler
-stays free of inline magic numbers.
+Adding a new Solana method: implement its branch in ``SolanaChain.build_success``
+(``provider_simulator.chains.solana``) and put any new fixed values here so the
+chain stays free of inline magic numbers.
 """
 
 # Base mainnet slot — a realistic post-2024 Solana slot number. It is the HEAD of

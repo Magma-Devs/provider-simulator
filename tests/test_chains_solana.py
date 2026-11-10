@@ -210,8 +210,9 @@ def test_get_slot_with_no_commitment_in_any_form_is_answered_at_the_finalized_sl
 # commitment answered 467685357, finalized 467685357, confirmed 467685357 and processed
 # 467685358, and {"commitment": "bogus"} answered 467685357, with no error. So a commitment
 # that is none of the three is no error: it is answered as a request that names none, at the
-# finalized slot. Only "bogus" was measured. The other spellings below take the same path in
-# this simulator and were not measured on a real node.
+# finalized slot. A second batch the same day gave getSlot the finalized slot, and no error,
+# for "finalised", "Finalized" and "" as well. getLatestBlockhash and getBalance were not
+# measured: the public RPC refused them with HTTP 429. They take the same path in this simulator.
 @pytest.mark.parametrize("method", SLOT_METHODS)
 @pytest.mark.parametrize("unknown", ["bogus", "finalised", "Finalized", ""])
 def test_a_commitment_that_is_none_of_the_three_is_answered_like_a_request_with_no_commitment(method, unknown):

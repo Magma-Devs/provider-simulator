@@ -67,6 +67,36 @@ def test_solana_quirks_accept_a_lag_of_zero_for_every_commitment():
     assert q.snapshot()["finalized_lag_slots"] == 0
 
 
+@pytest.mark.parametrize(
+    "stored, write",
+    [
+        ({}, {"processed_lag_slots": 1}),
+        ({}, {"confirmed_lag_slots": 1}),
+        ({"confirmed_lag_slots": 1, "finalized_lag_slots": 1}, {"finalized_lag_slots": 0}),
+        ({"confirmed_lag_slots": 2, "finalized_lag_slots": 2}, {"processed_lag_slots": 3}),
+    ],
+)
+def test_solana_quirks_refuse_lags_that_no_node_has_and_write_nothing(stored, write):
+    """A node's processed slot is never below its confirmed slot, and its confirmed slot is never
+    below its finalized slot. The rule reads the lags merged over the stored ones, because a write
+    can name one lag."""
+    q = SolanaQuirks()
+    q.update(stored)
+    before = q.snapshot()
+    with pytest.raises(ValueError, match="processed_lag_slots <= confirmed_lag_slots <= finalized_lag_slots"):
+        q.update(write)
+    assert q.snapshot() == before
+
+
+def test_solana_quirks_accept_lags_raised_one_commitment_at_a_time_in_order():
+    """The positive control of the rule above: each write keeps the order."""
+    q = SolanaQuirks()
+    for name in ("finalized_lag_slots", "confirmed_lag_slots", "processed_lag_slots"):
+        q.update({name: 5})
+    snap = q.snapshot()
+    assert (snap["processed_lag_slots"], snap["confirmed_lag_slots"], snap["finalized_lag_slots"]) == (5, 5, 5)
+
+
 def test_solana_quirks_reject_an_eth_field():
     q = SolanaQuirks()
     with pytest.raises(ValueError, match="logs_lag_mode"):

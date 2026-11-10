@@ -51,7 +51,7 @@ class SolanaQuirks(Quirks):
     answers the head; a test that wants the shape of a real network sets the lags
     that were measured on real networks (see ``stubs_solana``). Each one is a
     setting of its own, so an update that names one leaves the other two as they
-    are.
+    are. They never fall from processed to finalized, as on a real node.
     """
 
     slot_block_gap: int = SOLANA_DEFAULT_SLOT_BLOCK_GAP
@@ -62,18 +62,30 @@ class SolanaQuirks(Quirks):
     finalized_lag_slots: int = SOLANA_DEFAULT_FINALIZED_LAG_SLOTS
 
     def _validate(self, cfg: dict) -> None:
-        """Refuse a lag that is not a count of slots below the head.
+        """Refuse a lag that is not a count of slots below the head, and lags that no node has.
 
         ``True`` is refused although it is an int, and a text is refused although it
         can name a number: the chain subtracts the lag from the head, so any other
         type would fail on a request and not on the update.
+
+        A node's processed slot is never below its confirmed slot, and its confirmed
+        slot is never below its finalized slot. The order is read on the lags merged
+        over the stored ones, because an update can name one lag.
         """
-        for name in ("processed_lag_slots", "confirmed_lag_slots", "finalized_lag_slots"):
+        names = ("processed_lag_slots", "confirmed_lag_slots", "finalized_lag_slots")
+        for name in names:
             if name not in cfg:
                 continue
             lag = cfg[name]
             if isinstance(lag, bool) or not isinstance(lag, int) or lag < 0:
                 raise ValueError(f"{name} must be a non-negative integer (slots below the head), got {lag!r}")
+        processed, confirmed, finalized = (cfg.get(name, getattr(self, name)) for name in names)
+        if not processed <= confirmed <= finalized:
+            raise ValueError(
+                "processed_lag_slots <= confirmed_lag_slots <= finalized_lag_slots must hold: a node's processed "
+                "slot is never below its confirmed slot, and its confirmed slot never below its finalized slot. "
+                f"This update would make them {processed}, {confirmed} and {finalized}"
+            )
 
 
 @dataclass
