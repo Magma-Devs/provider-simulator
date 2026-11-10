@@ -21,6 +21,13 @@ Coverage:
                                       the method name and status preserved.
   Cross-pool isolation              — a down on eth-sim:1 never touches
                                       solana-sim:1.
+  Commitments                       — getSlot, getLatestBlockhash and getBalance
+                                      answer the slot of the commitment that the
+                                      request names (finalized when it names
+                                      none), below the head of the provider. Each
+                                      commitment has a lag setting that starts at
+                                      0; blocks_behind and frozen_head move the
+                                      head that the commitments sit below.
 
 Run with:
   pytest tests/test_simulator_solana.py -v
@@ -575,3 +582,125 @@ class TestSolanaFaultInjection:
         _rpc(_SOL_URLS["1"], "getSlot")
         elapsed_ms = (time.monotonic() - t0) * 1000
         assert elapsed_ms >= 180, f"latency_ms=200 must delay the response by at least 180ms; got {elapsed_ms:.1f}ms"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Commitments — the slot of a reply is the slot of the commitment that the
+# request names. The router polls the finalized slot and harvests the slot of
+# a relay at the commitment of its client, so a frozen node that answers two
+# different slots is what its head-stall rule has to count.
+#
+# At the default lags every commitment answers the head, as the provider did
+# before commitments existed. A test that wants the shape of a real network sets
+# the lags, as the tests below do: measured on 2026-11-10, processed is the head
+# and confirmed and finalized are one slot below it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PUBKEY = "11111111111111111111111111111111"
+_COMMITMENTS = ("processed", "confirmed", "finalized")
+_SLOT_METHODS = ("getSlot", "getLatestBlockhash", "getBalance")
+_REAL_NETWORK_LAGS = {"processed_lag_slots": 0, "confirmed_lag_slots": 1, "finalized_lag_slots": 1}
+
+
+def _slot(url: str, method: str, commitment: str | None = None) -> int:
+    """The slot that one reply carries: the bare result of getSlot, the context slot of the rest."""
+    config = [] if commitment is None else [{"commitment": commitment}]
+    params = [_PUBKEY, *config] if method == "getBalance" else config
+    status, body = _rpc(url, method, params)
+    assert status == 200 and isinstance(body, dict) and "result" in body, (status, body)
+    result = body["result"]
+    return result if method == "getSlot" else result["context"]["slot"]
+
+
+def _slots(url: str, method: str = "getSlot") -> list[int]:
+    """The slot of each commitment, in the order processed, confirmed, finalized."""
+    return [_slot(url, method, c) for c in _COMMITMENTS]
+
+
+def _advance(sim, blocks: int) -> None:
+    status, body = _post(_ctrl(sim, "/advance"), {"chain": "solana", "blocks": blocks})
+    assert status == 200, body
+
+
+class TestSolanaCommitments:
+
+    @pytest.mark.parametrize("method", _SLOT_METHODS)
+    def test_at_the_default_lags_every_commitment_answers_the_head(self, sim, method):
+        assert _slots(_SOL_URLS["1"], method) == [SOLANA_BASE_SLOT] * 3
+        assert _slot(_SOL_URLS["1"], method) == SOLANA_BASE_SLOT
+
+    @pytest.mark.parametrize("method", _SLOT_METHODS)
+    def test_each_commitment_is_answered_at_its_slot_at_the_lags_of_a_real_network(self, sim, method):
+        """The numbers are written here, so a wrong default cannot pass its own test."""
+        _set_solana(sim, "1", **_REAL_NETWORK_LAGS)
+        assert _slots(_SOL_URLS["1"], method) == [419_709_627, 419_709_626, 419_709_626]
+
+    @pytest.mark.parametrize("method", _SLOT_METHODS)
+    def test_a_request_with_no_commitment_is_answered_at_the_finalized_slot(self, sim, method):
+        _set_solana(sim, "1", confirmed_lag_slots=1, finalized_lag_slots=5)
+        assert _slot(_SOL_URLS["1"], method) == SOLANA_BASE_SLOT - 5
+        assert _slot(_SOL_URLS["1"], method, "confirmed") == SOLANA_BASE_SLOT - 1
+
+    def test_a_test_sets_the_lag_of_each_commitment_and_one_provider_keeps_the_defaults(self, sim):
+        status, body = _set_solana(sim, "1", processed_lag_slots=2, confirmed_lag_slots=3, finalized_lag_slots=33)
+        assert status == 200, body
+        assert body["applied"]["solana-sim:1"] == {
+            "processed_lag_slots": 2,
+            "confirmed_lag_slots": 3,
+            "finalized_lag_slots": 33,
+        }
+        assert _slots(_SOL_URLS["1"]) == [SOLANA_BASE_SLOT - 2, SOLANA_BASE_SLOT - 3, SOLANA_BASE_SLOT - 33]
+        assert _slots(_SOL_URLS["2"]) == [SOLANA_BASE_SLOT] * 3
+        _, scen = _get(_ctrl(sim, "/scenario"))
+        assert scen["providers"]["solana-sim:1"]["finalized_lag_slots"] == 33, "GET /scenario echoes the lag"
+
+    @pytest.mark.parametrize("bad", [-1, "1", True, 1.5, None])
+    def test_a_lag_that_is_not_a_count_of_slots_is_400_and_applies_nothing(self, sim, bad):
+        status, body = _set_solana(sim, "1", confirmed_lag_slots=2, finalized_lag_slots=bad)
+        assert status == 400, body
+        assert "finalized_lag_slots must be a non-negative integer" in body["error"], body
+        assert _slots(_SOL_URLS["1"]) == [SOLANA_BASE_SLOT] * 3, "the valid lag of the refused request was not applied"
+
+    def test_a_lag_on_an_eth_provider_is_400(self, sim):
+        status, body = _post(_ctrl(sim, "/scenario"), {"providers": {"eth-sim:1": {"finalized_lag_slots": 5}}})
+        assert status == 400, body
+        assert "finalized_lag_slots" in body["error"], body
+
+    # Measured on 2026-11-10 on Solana mainnet, in one JSON-RPC batch to
+    # api.mainnet-beta.solana.com: getSlot with no commitment answered 467685357, finalized
+    # 467685357, confirmed 467685357 and processed 467685358, and {"commitment": "bogus"}
+    # answered 467685357, with no error. So an unknown commitment is no error: it is answered
+    # as a request that names none, at the finalized slot.
+    def test_a_commitment_that_is_none_of_the_three_is_answered_like_a_request_with_no_commitment(self, sim):
+        _set_solana(sim, "1", processed_lag_slots=0, confirmed_lag_slots=1, finalized_lag_slots=5)
+        status, body = _rpc(_SOL_URLS["1"], "getSlot", [{"commitment": "bogus"}])
+        assert status == 200
+        assert "error" not in body, body
+        assert body["result"] == SOLANA_BASE_SLOT - 5, "the finalized slot, and not the slot of another commitment"
+
+    def test_blocks_behind_moves_the_head_and_the_commitments_sit_below_it(self, sim):
+        _set_solana(sim, "1", blocks_behind=10, **_REAL_NETWORK_LAGS)
+        assert _slots(_SOL_URLS["1"]) == [SOLANA_BASE_SLOT - 10, SOLANA_BASE_SLOT - 11, SOLANA_BASE_SLOT - 11]
+        assert _slot(_SOL_URLS["2"], "getSlot", "processed") == SOLANA_BASE_SLOT, "a peer is not behind"
+
+    def test_a_frozen_head_is_accepted_and_the_provider_stands_still_while_the_head_advances(self, sim):
+        frozen = SOLANA_BASE_SLOT + 500
+        status, body = _set_solana(sim, "1", frozen_head=frozen, **_REAL_NETWORK_LAGS)
+        assert status == 200, body
+        _advance(sim, 100)
+        assert _slots(_SOL_URLS["1"]) == [frozen, frozen - 1, frozen - 1]
+        assert _slot(_SOL_URLS["2"], "getSlot", "processed") == SOLANA_BASE_SLOT + 100, "the unfrozen peer moved"
+
+    def test_a_frozen_node_alternates_between_its_confirmed_and_its_finalized_slot(self, sim):
+        """The node that the head-stall rule of the router meets. The router polls
+        getLatestBlockhash at finalized and harvests the slot of a relay at the commitment of
+        its client, here a getBalance at confirmed. The node is frozen, so the two answers
+        alternate between two slots and neither one moves while the chain head advances."""
+        frozen = SOLANA_BASE_SLOT + 500
+        _set_solana(sim, "1", frozen_head=frozen, confirmed_lag_slots=1, finalized_lag_slots=32)
+        answers = []
+        for _ in range(3):
+            answers.append(_slot(_SOL_URLS["1"], "getLatestBlockhash", "finalized"))
+            answers.append(_slot(_SOL_URLS["1"], "getBalance", "confirmed"))
+            _advance(sim, 50)
+        assert answers == [frozen - 32, frozen - 1] * 3

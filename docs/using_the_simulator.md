@@ -221,8 +221,8 @@ The 6 primitives below apply to every provider regardless of `chain_family`. The
 | `mode=rate_limit` | HTTP 429 + JSON-RPC error body | abort `RESOURCE_EXHAUSTED` |
 | `mode=error` | `http_status` + JSON-RPC error body using `error_code` / `error_message` | abort with `grpc.StatusCode` matched from `error_message` (symbolic name) or `error_code` (int) — falls back to `UNKNOWN` |
 | `corruption_mode` | byte-/structural-level corruption of the JSON body (truncated / invalid_json / empty_response / missing_field / wrong_type / null_body — the whole body becomes the JSON literal `null`) | `missing_field` clears the proto field; `truncated` / `empty_response` / `invalid_proto` / `null_body` abort `UNKNOWN`; `wrong_type` aborts `INTERNAL`; `invalid_json` is refused with HTTP 400 for a provider that has only gRPC endpoints |
-| `blocks_behind` | shifts `eth_blockNumber` head and named-tag block numbers | decrements `block.header.height` in `GetLatestBlockResponse` |
-| `frozen_head` | `eth_blockNumber` and the named-tag block numbers report this block while the head moves, and a numeric block above it is `null`. Reaches only the endpoints that `transports` and `ports` target | `block.header.height` in `GetLatestBlockResponse` is this block |
+| `blocks_behind` | shifts `eth_blockNumber` head and named-tag block numbers; on Solana it shifts the head that the slot of each commitment sits below | decrements `block.header.height` in `GetLatestBlockResponse` |
+| `frozen_head` | `eth_blockNumber` and the named-tag block numbers report this block while the head moves, and a numeric block above it is `null`. On Solana this block is the head that the slot of each commitment sits below, and no `slot_offset` moves it. Reaches only the endpoints that `transports` and `ports` target | `block.header.height` in `GetLatestBlockResponse` is this block |
 | `latency_ms` | `time.sleep` before responding | `await asyncio.sleep` before responding |
 | `pause_at` / `pause_ms` | send the reply's start, hold, then send the rest, with the whole body's `Content-Length` throughout. `mid_body` splits the body in half; `after_headers` holds before any body. A body-less reply (`empty_response`, or a REST `HEAD`) has no midpoint, so `mid_body` degrades to `after_headers` rather than doing nothing | **not supported.** gRPC has its own performer with no pause branch. A pause scoped away from the `http` transport is REFUSED rather than ignored, so this cannot be reached by accident |
 | `error_probability` | random `mode=error` per request | random gRPC abort per request |
@@ -306,6 +306,26 @@ curl -s -X POST "$SIM_CONTROL_URL/scenario" -H "Content-Type: application/json" 
 The REST listener serves the Cosmos REST routes that `stubs_rest.py` lists in `REST_METHOD_DEFAULTS`, keyed by verb and path template. A provider serves REST on the ports that `provider_simulator/topology.py` lists for its `rest` endpoint. A verb and path that the table does not hold answers `not_found`.
 
 The route `POST /cosmos/tx/v1beta1/txs` accepts a broadcast by default and answers a `tx_response` with `code` 0. To make one provider refuse it, set `http_status` and `body` for the key `["POST", "/cosmos/tx/v1beta1/txs"]` in `responses`. A `latency_ms` delays the answer, and `mode` `hang` holds the request for 30 seconds and then closes the connection. The simulator never reads the body of a REST request, so the answer does not depend on the transaction that was sent.
+
+## Solana surface
+
+A Solana provider answers JSON-RPC over `http`. `getSlot`, `getLatestBlockhash` and `getBalance` report a slot: `getSlot` as a bare number, the other two as `result.context.slot`. `getHealth` answers `"ok"`, and `getVersion` the version of the node. Any other method answers `null`, or the error `-32601` when the quirk `unknown_method_mode` is `error`.
+
+The slot of a reply is the slot of a COMMITMENT. The request names the commitment in the config object of its params, which is the last param of `getSlot` and `getLatestBlockhash` and the one after the address for `getBalance`: `{"commitment": "confirmed"}`. A request that names none, or a `commitment` of `null`, gets the `finalized` slot. So does a request that names a commitment that is none of `processed`, `confirmed` and `finalized`: on 2026-11-10, in one JSON-RPC batch to Solana mainnet, `getSlot` with no commitment answered 467685357, with `finalized` 467685357, with `confirmed` 467685357, with `processed` 467685358, and with `{"commitment": "bogus"}` 467685357, with no error. A second batch the same day gave `getSlot` the finalized slot, and no error, for `finalised`, `Finalized` and an empty name too. `getLatestBlockhash` and `getBalance` were not measured, because the public RPC refused them with HTTP 429; the simulator answers them the same way. A mistyped commitment name therefore reads the finalized slot, and no error tells the test so.
+
+The provider has one head: the chain head shifted by the quirk `slot_offset`, then `blocks_behind` or `frozen_head`. Each commitment answers below that head by its lag, and never below slot 0. A `frozen_head` is the head itself, and no `slot_offset` moves it.
+
+What a test sets on one provider:
+
+| Setting | Effect |
+|---|---|
+| quirk `processed_lag_slots`, `confirmed_lag_slots`, `finalized_lag_slots` | How many slots below the head a reply at that commitment sits. The defaults are 0, 0 and 0: no lag, so every commitment answers the head. A test that wants the shape of a real network sets 0, 1 and 1, which were measured on 2026-11-10: on Solana mainnet (a public RPC) processed minus confirmed had a median of 1 slot (1 to 6) and confirmed minus finalized was 0 in all 30 rounds, and on Solana testnet (a QuickNode node) the medians were 1 and 0 (each 0 to 1). Each lag is a setting of its own, so a write that names one keeps the other two, and a reset restores the defaults. A value that is not an integer of 0 or more is refused with HTTP 400, as is a lag on a provider of another chain. Lags that fall from processed to finalized after the write, such as a `processed_lag_slots` above the `confirmed_lag_slots`, are refused with HTTP 400 too, because no node answers so. |
+| quirk `slot_offset` | This provider's distance from the chain head, in slots. It adds to `blocks_behind`. |
+| quirk `slot_block_gap` | The distance between `context.slot` and `lastValidBlockHeight` in a `getLatestBlockhash` reply, at the commitment of the request. |
+| `blocks_behind` | The head of the provider is the chain head minus this number, and each commitment sits below it. `POST /advance` with `"chain": "solana"` moves the chain head. |
+| `frozen_head` | The head of the provider is this slot while the chain head moves, and each commitment sits below it. |
+
+The router polls the finalized slot and takes the slot of a relay at the commitment of its client. A frozen node that answers one slot for every commitment, as a provider does at the default lags, never shows it two different slots. To make one that does, freeze the provider and set `finalized_lag_slots` apart from `confirmed_lag_slots`: a `getLatestBlockhash` at `finalized` and a `getBalance` at `confirmed` then answer two slots, and neither moves while the chain head advances.
 
 ## GraphQL surface (Sui)
 

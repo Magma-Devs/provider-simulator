@@ -305,3 +305,34 @@ def test_a_frozen_head_reaches_only_the_address_its_ports_filter_names():
 
     assert int(_serve(frozen_door, "eth_blockNumber").body["result"], 16) == head - 3
     assert int(_serve(moving_door, "eth_blockNumber").body["result"], 16) == head, "the other address moved too"
+
+
+# ── a Solana provider answers the slot of the commitment through the listener ─
+
+
+def test_a_solana_provider_answers_each_commitment_and_its_frozen_head_obeys_the_ports_filter():
+    """The listener hands the scenario and the quirks of a Solana provider to its chain, so a
+    frozen head reaches only the address that the ports filter names, and the commitments sit
+    below the head of each address: blocks_behind and frozen_head choose that head."""
+    first, second = Endpoint("jsonrpc", "http", 18582), Endpoint("jsonrpc", "http", 18583)
+    provider = Pool(name="solana-sim", chain="solana").add_provider("1", [first, second])
+    frozen_door, moving_door = JsonRpcListener(provider, first), JsonRpcListener(provider, second)
+
+    def slots(door):
+        return [
+            _serve(door, "getSlot", [{"commitment": c}]).body["result"] for c in ("processed", "confirmed", "finalized")
+        ]
+
+    head = slots(moving_door)[0]
+    assert slots(moving_door) == [head, head, head], "no lag by default: every commitment answers the head"
+
+    # The shape of a real network, measured on 2026-11-10: confirmed and finalized one slot below the head.
+    provider.quirks.update({"confirmed_lag_slots": 1, "finalized_lag_slots": 1})
+    assert slots(moving_door) == [head, head - 1, head - 1]
+
+    provider.scenario.update({"frozen_head": head - 3, "ports": [18582]})
+    assert slots(frozen_door) == [head - 3, head - 4, head - 4]
+    assert slots(moving_door) == [head, head - 1, head - 1], "the other address moved too"
+
+    provider.scenario.update({"frozen_head": None, "ports": None, "blocks_behind": 7})
+    assert slots(frozen_door) == slots(moving_door) == [head - 7, head - 8, head - 8], "blocks_behind reaches both"
