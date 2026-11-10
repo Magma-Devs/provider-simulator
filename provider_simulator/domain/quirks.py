@@ -19,7 +19,12 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from provider_simulator.domain.introspective_config import IntrospectiveConfig
-from stubs_solana import SOLANA_DEFAULT_SLOT_BLOCK_GAP
+from stubs_solana import (
+    SOLANA_DEFAULT_CONFIRMED_LAG_SLOTS,
+    SOLANA_DEFAULT_FINALIZED_LAG_SLOTS,
+    SOLANA_DEFAULT_PROCESSED_LAG_SLOTS,
+    SOLANA_DEFAULT_SLOT_BLOCK_GAP,
+)
 from stubs_sui_graphql import SUI_CHAIN_ID, SUI_TESTNET_CHAIN_ID
 
 
@@ -36,9 +41,39 @@ class EthQuirks(Quirks):
 
 @dataclass
 class SolanaQuirks(Quirks):
+    """Settings of a simulated Solana provider.
+
+    ``slot_offset`` is this provider's distance from the chain head, and
+    ``slot_block_gap`` is the distance between ``context.slot`` and
+    ``lastValidBlockHeight``. ``processed_lag_slots``, ``confirmed_lag_slots`` and
+    ``finalized_lag_slots`` are how many slots below the head of the provider a
+    reply at each commitment sits. They start at 0, so that every commitment
+    answers the head; a test that wants the shape of a real network sets the lags
+    that were measured on real networks (see ``stubs_solana``). Each one is a
+    setting of its own, so an update that names one leaves the other two as they
+    are.
+    """
+
     slot_block_gap: int = SOLANA_DEFAULT_SLOT_BLOCK_GAP
     slot_offset: int = 0
     unknown_method_mode: str = "null"  # null | error
+    processed_lag_slots: int = SOLANA_DEFAULT_PROCESSED_LAG_SLOTS
+    confirmed_lag_slots: int = SOLANA_DEFAULT_CONFIRMED_LAG_SLOTS
+    finalized_lag_slots: int = SOLANA_DEFAULT_FINALIZED_LAG_SLOTS
+
+    def _validate(self, cfg: dict) -> None:
+        """Refuse a lag that is not a count of slots below the head.
+
+        ``True`` is refused although it is an int, and a text is refused although it
+        can name a number: the chain subtracts the lag from the head, so any other
+        type would fail on a request and not on the update.
+        """
+        for name in ("processed_lag_slots", "confirmed_lag_slots", "finalized_lag_slots"):
+            if name not in cfg:
+                continue
+            lag = cfg[name]
+            if isinstance(lag, bool) or not isinstance(lag, int) or lag < 0:
+                raise ValueError(f"{name} must be a non-negative integer (slots below the head), got {lag!r}")
 
 
 @dataclass

@@ -937,14 +937,36 @@ def test_a_frozen_head_beside_a_blocks_behind_is_400_also_when_one_of_them_is_st
     assert "only one of them can apply" in resp["error"], resp
 
 
-def test_a_frozen_head_on_a_chain_that_does_not_read_it_is_400():
-    """A Solana provider takes its slot from slot_offset and reads neither
-    blocks_behind nor frozen_head. Accepted, the setting would be stored and echoed,
-    and the provider would keep answering the moving slot."""
+def test_a_frozen_head_on_a_chain_that_does_not_read_it_is_400(monkeypatch):
+    """A chain that reports no head through ``reported_head`` would store the setting, echo it, and
+    keep answering the moving head. Every chain of the topology reads it now, so the rule is
+    pinned on a chain that is made not to read it for this test."""
+    monkeypatch.setattr(CHAINS["solana"], "reads_frozen_head", False)
     api = _api()
     st, resp = api.apply_scenario({"providers": {"solana-sim:1": {"frozen_head": 1_000}}})
     assert st == 400
     assert "the solana chain does not read it" in resp["error"], resp
+
+
+def test_a_frozen_head_is_accepted_on_solana_echoed_and_cleared():
+    """A Solana provider reports its head through ``reported_head``, so the setting reaches its replies."""
+    api = _api()
+    st, resp = api.apply_scenario({"providers": {"solana-sim:1": {"frozen_head": 419_709_000}}})
+    assert st == 200, resp
+    _, scen = api.get_scenario()
+    assert scen["providers"]["solana-sim:1"]["frozen_head"] == 419_709_000
+    st, resp = api.apply_scenario({"providers": {"solana-sim:1": {"frozen_head": None}}})
+    assert st == 200, resp
+    _, scen = api.get_scenario()
+    assert scen["providers"]["solana-sim:1"]["frozen_head"] is None
+
+
+def test_a_frozen_head_beside_a_blocks_behind_is_400_on_solana_too():
+    api = _api()
+    assert api.apply_scenario({"providers": {"solana-sim:1": {"blocks_behind": 3}}})[0] == 200
+    st, resp = api.apply_scenario({"providers": {"solana-sim:1": {"frozen_head": 419_709_000}}})
+    assert st == 400
+    assert "only one of them can apply" in resp["error"], resp
 
 
 @pytest.mark.parametrize("chain", sorted(CHAINS))
@@ -952,14 +974,60 @@ def test_a_frozen_head_is_accepted_on_each_chain_that_reads_it_and_refused_on_th
     """Each chain says whether it reports its head through reported_head
     (``Chain.reads_frozen_head``), and the control API reads that flag. Pinned per
     chain, so a flag set wrongly, or a new chain added with no decision, fails here
-    rather than as a freeze that a test of the router never sees."""
-    refused = {"solana"}
+    rather than as a freeze that a test of the router never sees. Each chain of the
+    topology reads it, so the set of the refused is empty."""
+    refused = set()
     api = _api()
     _, providers = api.get_providers({})
     key = next((k for k, v in providers["providers"].items() if v["chain"] == chain), None)
     assert key is not None, f"no provider of the chain {chain!r} in the topology"
     st, resp = api.apply_scenario({"providers": {key: {"frozen_head": 1_000}}})
     assert (st == 400) is (chain in refused), f"{key} on the chain {chain!r}: {st} {resp}"
+
+
+# ── the lag of each Solana commitment ─────────────────────────────────────────
+
+
+_LAGS = ("processed_lag_slots", "confirmed_lag_slots", "finalized_lag_slots")
+
+
+def _lags_of(api, key="solana-sim:1"):
+    _, scen = api.get_scenario()
+    return tuple(scen["providers"][key][name] for name in _LAGS)
+
+
+def test_a_commitment_lag_is_applied_echoed_merged_by_field_and_cleared_by_a_reset():
+    api = _api()
+    assert _lags_of(api) == (0, 0, 0), "no lag by default: every commitment answers the head"
+    st, resp = api.apply_scenario({"providers": {"solana-sim:1": {"finalized_lag_slots": 32}}})
+    assert st == 200, resp
+    assert resp["applied"]["solana-sim:1"] == {"finalized_lag_slots": 32}
+    assert _lags_of(api) == (0, 0, 32)
+    st, resp = api.apply_scenario({"providers": {"solana-sim:1": {"confirmed_lag_slots": 2}}})
+    assert st == 200, resp
+    assert _lags_of(api) == (0, 2, 32), "a later write that leaves a lag out keeps it"
+    assert _lags_of(api, "solana-sim:2") == (0, 0, 0), "a lag belongs to one provider"
+    assert api.reset()[0] == 200
+    assert _lags_of(api) == (0, 0, 0)
+
+
+@pytest.mark.parametrize("bad", [-1, "1", True, 1.5, None])
+def test_a_commitment_lag_that_is_not_a_count_of_slots_is_400_and_applies_nothing(bad):
+    api = _api()
+    block = {"confirmed_lag_slots": 2, "finalized_lag_slots": bad}
+    st, resp = api.apply_scenario({"providers": {"solana-sim:1": block}})
+    assert st == 400, resp
+    assert "finalized_lag_slots must be a non-negative integer" in resp["error"], resp
+    assert _lags_of(api) == (0, 0, 0), "a refused request applies nothing"
+
+
+def test_a_commitment_lag_on_a_provider_of_another_chain_is_400():
+    """A commitment is a Solana idea: the lag would be stored on a provider that answers no slot."""
+    api = _api()
+    for key in ("eth-sim:1", "btc-sim:1"):
+        st, resp = api.apply_scenario({"providers": {key: {"confirmed_lag_slots": 2}}})
+        assert st == 400, (key, resp)
+        assert "unknown field 'confirmed_lag_slots'" in resp["error"], resp
 
 
 def test_a_frozen_head_whose_filter_targets_no_endpoint_is_400():

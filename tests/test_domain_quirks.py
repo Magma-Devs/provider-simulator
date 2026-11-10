@@ -31,6 +31,42 @@ def test_solana_quirks_defaults_share_the_one_gap_constant():
     assert snap["unknown_method_mode"] == "null"
 
 
+def test_solana_quirks_lags_start_at_zero_so_every_commitment_answers_the_head():
+    """No lag by default. A real network's shape (measured on 2026-11-10: processed is the head,
+    confirmed and finalized one slot below it) is what a test sets, and no default."""
+    snap = SolanaQuirks().snapshot()
+    assert (snap["processed_lag_slots"], snap["confirmed_lag_slots"], snap["finalized_lag_slots"]) == (0, 0, 0)
+
+
+def test_solana_quirks_merge_a_lag_by_field_and_a_reset_restores_the_defaults():
+    q = SolanaQuirks()
+    q.update({"finalized_lag_slots": 32})
+    snap = q.snapshot()
+    assert (snap["processed_lag_slots"], snap["confirmed_lag_slots"], snap["finalized_lag_slots"]) == (0, 0, 32)
+    q.update({"confirmed_lag_slots": 2})
+    snap = q.snapshot()
+    assert (snap["processed_lag_slots"], snap["confirmed_lag_slots"], snap["finalized_lag_slots"]) == (0, 2, 32)
+    q.reset()
+    snap = q.snapshot()
+    assert (snap["processed_lag_slots"], snap["confirmed_lag_slots"], snap["finalized_lag_slots"]) == (0, 0, 0)
+
+
+@pytest.mark.parametrize("name", ["processed_lag_slots", "confirmed_lag_slots", "finalized_lag_slots"])
+@pytest.mark.parametrize("bad", [-1, "1", True, 1.5, None, [1]])
+def test_solana_quirks_refuse_a_lag_that_is_not_a_count_of_slots_and_write_nothing(name, bad):
+    q = SolanaQuirks()
+    before = q.snapshot()
+    with pytest.raises(ValueError, match=f"{name} must be a non-negative integer"):
+        q.update({name: bad})
+    assert q.snapshot() == before
+
+
+def test_solana_quirks_accept_a_lag_of_zero_for_every_commitment():
+    q = SolanaQuirks()
+    q.update({"processed_lag_slots": 0, "confirmed_lag_slots": 0, "finalized_lag_slots": 0})
+    assert q.snapshot()["finalized_lag_slots"] == 0
+
+
 def test_solana_quirks_reject_an_eth_field():
     q = SolanaQuirks()
     with pytest.raises(ValueError, match="logs_lag_mode"):
