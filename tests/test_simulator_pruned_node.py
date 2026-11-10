@@ -17,10 +17,14 @@ import urllib.request
 
 import pytest
 
-from provider_simulator.topology import port_of
+from provider_simulator.topology import port_of, ports_of
 
 _P1 = f"http://127.0.0.1:{port_of('eth-sim', '1')}"
 _P2 = f"http://127.0.0.1:{port_of('eth-sim', '2')}"
+# The one provider that serves one interface and transport at two addresses.
+_TWO_KEY = "eth-failover-twoaddr-sim:1"
+_TWO_PORTS = ports_of("eth-failover-twoaddr-sim", "1")
+_TWO_A, _TWO_B = (f"http://127.0.0.1:{port}" for port in _TWO_PORTS)
 _ADDRESS = "0x" + "a" * 40
 
 
@@ -109,3 +113,38 @@ def test_a_provider_of_another_chain_refuses_the_quirk(sim):
     status, body = _prune(sim, 10, key="btc-sim:1")
     assert status == 400, body
     assert "earliest_block" in json.dumps(body)
+
+
+def test_a_provider_pruned_at_one_of_its_addresses_is_an_archive_node_at_the_other(sim):
+    """``earliest_block_ports`` scopes the pruned node to the addresses it names, so a
+    router that checks each node url at its own address finds archive at one only."""
+    assert len(_TWO_PORTS) == 2, _TWO_PORTS
+    earliest = _head(_TWO_A) - 1_000
+    status, body = _post(
+        sim["control"] + "/scenario",
+        {"providers": {_TWO_KEY: {"earliest_block": earliest, "earliest_block_ports": [_TWO_PORTS[0]]}}},
+    )
+    assert status == 200, body
+
+    assert int(_rpc(_TWO_A, "eth_getBlockByNumber", ["earliest", False])["result"]["number"], 16) == earliest
+    assert _rpc(_TWO_B, "eth_getBlockByNumber", ["earliest", False])["result"]["number"] == "0x0"
+    assert _rpc(_TWO_A, "eth_getBlockByNumber", [hex(earliest - 1), False])["result"] is None
+    assert _rpc(_TWO_B, "eth_getBlockByNumber", [hex(earliest - 1), False])["result"]["number"] == hex(earliest - 1)
+    _, read = _get(sim["control"] + "/scenario")
+    assert read["providers"][_TWO_KEY]["earliest_block_ports"] == [_TWO_PORTS[0]]
+
+    status, body = _post(sim["control"] + "/scenario", {"providers": {_TWO_KEY: {"earliest_block_ports": None}}})
+    assert status == 200, body
+    assert (
+        int(_rpc(_TWO_B, "eth_getBlockByNumber", ["earliest", False])["result"]["number"], 16) == earliest
+    ), "with no ports named, the pruned node applies at every address"
+
+
+def test_earliest_block_ports_naming_an_address_the_provider_does_not_serve_is_refused(sim):
+    status, body = _post(
+        sim["control"] + "/scenario",
+        {"providers": {"eth-sim:1": {"earliest_block": 10, "earliest_block_ports": [_TWO_PORTS[0]]}}},
+    )
+    assert status == 400, body
+    assert "earliest_block_ports" in json.dumps(body)
+    assert _rpc(_P1, "eth_getBlockByNumber", ["earliest", False])["result"]["number"] == "0x0", "nothing was written"

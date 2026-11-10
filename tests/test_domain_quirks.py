@@ -18,9 +18,21 @@ def test_base_quirks_has_no_fields():
 
 def test_eth_quirks_fields_and_defaults():
     q = EthQuirks()
-    assert q.snapshot() == {"logs_indexed_up_to": None, "logs_lag_mode": "empty", "earliest_block": None}
-    q.update({"logs_indexed_up_to": 100, "logs_lag_mode": "partial", "earliest_block": 5})
-    assert q.snapshot() == {"logs_indexed_up_to": 100, "logs_lag_mode": "partial", "earliest_block": 5}
+    assert q.snapshot() == {
+        "logs_indexed_up_to": None,
+        "logs_lag_mode": "empty",
+        "earliest_block": None,
+        "earliest_block_ports": None,
+    }
+    q.update(
+        {"logs_indexed_up_to": 100, "logs_lag_mode": "partial", "earliest_block": 5, "earliest_block_ports": [18638]}
+    )
+    assert q.snapshot() == {
+        "logs_indexed_up_to": 100,
+        "logs_lag_mode": "partial",
+        "earliest_block": 5,
+        "earliest_block_ports": [18638],
+    }
 
 
 @pytest.mark.parametrize("bad", [-1, True, "0x10", 1.5])
@@ -36,6 +48,29 @@ def test_eth_quirks_accept_null_to_turn_the_pruned_node_off():
     q.update({"earliest_block": 10})
     q.update({"earliest_block": None})
     assert q.snapshot()["earliest_block"] is None
+
+
+@pytest.mark.parametrize("bad", [[], "18638", 18638, [True], [-1], [0], ["18638"]])
+def test_eth_quirks_refuse_earliest_block_ports_that_are_not_a_list_of_ports(bad):
+    q = EthQuirks()
+    with pytest.raises(ValueError, match="earliest_block_ports"):
+        q.update({"earliest_block_ports": bad})
+    assert q.snapshot()["earliest_block_ports"] is None, "a refused update writes nothing"
+
+
+def test_the_pruned_node_applies_only_at_the_ports_it_names():
+    q = EthQuirks()
+    q.update({"earliest_block": 7})
+    assert q.for_port(q.snapshot(), 1)["earliest_block"] == 7, "no ports named: every port"
+    q.update({"earliest_block_ports": [2]})
+    assert q.for_port(q.snapshot(), 2)["earliest_block"] == 7
+    assert q.for_port(q.snapshot(), 1)["earliest_block"] is None, "another port is an archive node"
+    assert q.snapshot()["earliest_block"] == 7, "the live config is not changed"
+
+
+def test_quirks_of_other_chains_apply_at_every_port():
+    q = SolanaQuirks()
+    assert q.for_port(q.snapshot(), 1) == q.snapshot()
 
 
 def test_solana_quirks_defaults_share_the_one_gap_constant():
