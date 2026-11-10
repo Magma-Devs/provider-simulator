@@ -476,3 +476,35 @@ def test_the_row_of_a_pushed_event_has_no_headers():
 
     row = registry.provider("eth-sim", "2").log.get_history()[0]
     assert (row["headers"], row["deadline_remaining_ms"], row["grpc_status"]) == ({}, None, None)
+
+
+# ── a fault reaches only the caller that its callers filter names ─────────────
+
+POD_A, POD_B = "10.42.0.26", "10.42.0.27"
+
+
+def _frame(caller: str) -> RawRequest:
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []}).encode()
+    return RawRequest(body=body, caller=caller, connection=WsConnection(queue.Queue()))
+
+
+def test_an_upgrade_is_refused_for_the_listed_caller_and_completed_for_its_peer():
+    listener, provider = _ws_listener()
+    provider.scenario.update({"mode": "rate_limit", "callers": [POD_A]})
+    assert listener.decide_upgrade({}, POD_A).status == 429
+    assert listener.decide_upgrade({}, POD_B).status == 101
+    assert [row["status"] for row in provider.log.get_history()] == ["rate_limit"], "the refusal is the only row"
+
+
+def test_the_chosen_headers_of_an_upgrade_go_to_the_listed_caller_only():
+    listener, provider = _ws_listener()
+    provider.scenario.update({"reply_headers": {"X-Note": "a"}, "callers": [POD_A]})
+    assert listener.decide_upgrade({}, POD_A).reply_headers == {"X-Note": "a"}
+    assert listener.decide_upgrade({}, POD_B).reply_headers == {}
+
+
+def test_a_frame_is_faulted_for_the_listed_caller_and_answered_for_its_peer():
+    listener, provider = _ws_listener()
+    provider.scenario.update({"mode": "error", "callers": [POD_A]})
+    assert "error" in listener.serve(_frame(POD_A)).body
+    assert "result" in listener.serve(_frame(POD_B)).body

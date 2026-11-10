@@ -632,3 +632,15 @@ def test_a_rest_row_keeps_the_path_empty():
     listener, provider = _listener()
     listener.serve(_get(_BLOCKS_LATEST))
     assert provider.log.get_history()[0]["path"] is None
+
+
+# ── a fault reaches only the caller that its callers filter names ─────────────
+
+POD_A, POD_B = "10.42.0.26", "10.42.0.27"
+
+
+def test_a_fault_reaches_only_the_caller_that_the_callers_filter_names():
+    listener, provider = _listener()
+    provider.scenario.update({"mode": "rate_limit", "callers": [POD_A]})
+    assert listener.serve(RawRequest(verb="GET", path=_BLOCKS_LATEST, caller=POD_A)).status == 429
+    assert listener.serve(RawRequest(verb="GET", path=_BLOCKS_LATEST, caller=POD_B)).status == 200

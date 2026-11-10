@@ -37,9 +37,9 @@ _PER_METHOD_MODES = _MODES - {"error", "port_closed"}
 # change before it answers with an error instead of a 200.
 _PORT_SETTLE_S = 5.0
 # What "port_closed" cannot be combined with: the fields that act on one request,
-# or on the reply to it, at an endpoint the block targets. Each is read only
-# while such a request is being served (fault_policy.resolve_mode and ladder,
-# Listener.serve), and a closed port serves none.
+# on the reply to it, or on the caller of it, at an endpoint the block targets.
+# Each is read only while such a request is being served (fault_policy.resolve_mode
+# and ladder, Listener.serve), and a closed port serves none.
 #   field -> (the value that means "not set", what the field does)
 _NEEDS_A_REQUEST = {
     "fail_first_n": (0, "counts the requests that arrive"),
@@ -47,6 +47,7 @@ _NEEDS_A_REQUEST = {
     "latency_ms": (0, "delays the reply to a request"),
     "corruption_mode": (None, "breaks the body of a reply"),
     "pause_at": (None, "holds a reply part way through"),
+    "callers": (None, "tells the callers of a request apart"),
 }
 _CORRUPTION_MODES = {
     "truncated",

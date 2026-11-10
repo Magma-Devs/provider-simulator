@@ -270,7 +270,7 @@ did not read before the close gets no row.
 It is a state of the port and not a fault on a request. That is why the control
 API refuses it in every place that needs a request to arrive: a per-method
 override, `then_mode`, and together with `fail_first_n`, `error_probability`,
-`latency_ms`, `corruption_mode` or `pause_at`. The control API also refuses it
+`latency_ms`, `corruption_mode`, `pause_at` or `callers`. The control API also refuses it
 for a block that targets no endpoint, and for a port with no listener. No
 scenario closes the control port, a cache simulator port or a RESP port: they
 have no gate.

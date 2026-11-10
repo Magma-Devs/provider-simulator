@@ -227,3 +227,91 @@ def test_ladder_keeps_a_string_error_code_and_the_integer_default_for_the_other_
     assert fault_policy.ladder("error", {"error_code": "REQUEST_TIMEOUT"}).error_code == "REQUEST_TIMEOUT"
     assert fault_policy.ladder("error", {"error_code": ""}).error_code == ""
     assert fault_policy.ladder("error", {}).error_code == -32000
+
+
+# ── the callers filter: naming ONE caller of two ──────────────────────────────
+#
+# Two pods of one router call the same provider. The address a request came from is the
+# only thing that tells them apart.
+
+POD_A = "10.42.0.26"
+POD_B = "10.42.0.27"
+
+
+def test_a_fault_with_no_callers_filter_reaches_every_caller_also_one_with_no_known_address():
+    """The baseline. Without it "one pod is faulted" means nothing, because a
+    provider that faulted only one pod anyway would satisfy the next test too."""
+    p = _provider()
+    sc = _sc(mode="down")
+    for caller in (POD_A, POD_B, ""):
+        assert fault_policy.decide(sc, HTTP, p, caller=caller).kind == "down", f"caller {caller!r}"
+
+
+def test_the_callers_filter_faults_the_listed_caller_and_leaves_its_peer_serving():
+    """The whole reason this field exists. A fault that reached both pods, or none,
+    fails here."""
+    p = _provider()
+    sc = _sc(mode="down", callers=[POD_A])
+    assert fault_policy.decide(sc, HTTP, p, caller=POD_A).kind == "down", "the listed pod must fault"
+    assert fault_policy.decide(sc, HTTP, p, caller=POD_B).kind == "none", "its peer must serve"
+
+
+def test_the_callers_filter_works_the_other_way_round_too():
+    """A filter that always faulted the first address that called passes the test
+    above and fails this one."""
+    p = _provider()
+    sc = _sc(mode="down", callers=[POD_B])
+    assert fault_policy.decide(sc, HTTP, p, caller=POD_A).kind == "none"
+    assert fault_policy.decide(sc, HTTP, p, caller=POD_B).kind == "down"
+
+
+def test_a_callers_filter_naming_both_pods_faults_both():
+    p = _provider()
+    sc = _sc(mode="down", callers=[POD_A, POD_B])
+    assert fault_policy.decide(sc, HTTP, p, caller=POD_A).kind == "down"
+    assert fault_policy.decide(sc, HTTP, p, caller=POD_B).kind == "down"
+
+
+def test_a_request_with_no_known_address_is_none_of_the_listed_callers():
+    """A peer with no IP address (a unix socket) must not be faulted by a filter that
+    names callers, and must not be exempt from one that names none."""
+    p = _provider()
+    assert fault_policy.decide(_sc(mode="down", callers=[POD_A]), HTTP, p, caller="").kind == "none"
+    assert fault_policy.decide(_sc(mode="down", callers=[POD_A]), HTTP, p).kind == "none", "no caller given"
+
+
+def test_transports_ports_and_callers_and_together():
+    """Three filters. An endpoint and a caller have to satisfy ALL of them. A policy
+    that ORed any two would fault one of the three requests below that fail one
+    filter each."""
+    p = _provider()  # http 18545, ws 18557
+    sc = _sc(mode="down", transports=["http"], ports=[18545], callers=[POD_A])
+    assert fault_policy.decide(sc, HTTP, p, caller=POD_A).kind == "down", "all three match"
+    assert fault_policy.decide(sc, HTTP, p, caller=POD_B).kind == "none", "only the caller fails"
+    assert fault_policy.decide(sc, WS, p, caller=POD_A).kind == "none", "the transport and the port fail"
+    sc = _sc(mode="down", transports=["http"], ports=[18557], callers=[POD_A])
+    assert fault_policy.decide(sc, HTTP, p, caller=POD_A).kind == "none", "only the port fails"
+
+
+def test_only_the_listed_caller_burns_the_fail_first_n_window():
+    """The stateful half has to respect the filter too. A request of the peer pod
+    must neither fault nor spend the window, or the pod under test would recover a
+    request early for no visible reason."""
+    p = _provider()
+    sc = _sc(mode="error", fail_first_n=1, callers=[POD_A])
+    assert fault_policy.decide(sc, HTTP, p, caller=POD_B).kind == "none"
+    assert p.peek_fail() == 0, "the peer pod must not consume the window"
+    assert fault_policy.decide(sc, HTTP, p, caller=POD_A).kind == "error"
+    assert p.peek_fail() == 1
+    assert fault_policy.decide(sc, HTTP, p, caller=POD_A).kind == "none", "window spent, recovers"
+
+
+def test_targets_leaves_the_callers_filter_out_when_no_request_is_in_question():
+    """The control API asks which endpoints a block names, and the loop of a port asks
+    which port to close. Neither has a caller. A block that names a caller still
+    names every endpoint that the other two filters name."""
+    assert fault_policy.targets({"callers": [POD_A]}, HTTP) is True
+    assert fault_policy.targets({"callers": [POD_A], "ports": [18546]}, HTTP) is False
+    assert fault_policy.targets({"callers": [POD_A]}, HTTP, POD_A) is True
+    assert fault_policy.targets({"callers": [POD_A]}, HTTP, POD_B) is False
+    assert fault_policy.targets({}, HTTP, POD_B) is True, "no filter targets every caller"
