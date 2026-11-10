@@ -51,7 +51,7 @@ SOLANA_DEFAULT_COMMITMENT = "finalized"
 # a test that needs a node whose confirmed and finalized slots differ sets them
 # apart. What a real network showed:
 #
-# MEASURED on 2026-11-10 (decision D5): 30 rounds on each network, and each round
+# MEASURED on 2026-11-10: 30 rounds on each network, and each round
 # asked the three commitments in one JSON-RPC batch, so that one node state
 # answered all three.
 #   Solana mainnet (a public RPC): processed - confirmed had a median of 1 slot
