@@ -855,7 +855,11 @@ class TestLavaProviderAddressHeader:
     """The WS smoke tests assert that the handshake response carries a
     Lava-Provider-Address header so the consumer can identify which provider
     answered the upgrade. Each ws endpoint sends "sim-provider-<pool:pid>"
-    naming its provider."""
+    naming its provider.
+
+    The router renamed that header of its own to Smart-Router-Provider-Address.
+    The handshake response carries both names with one value, so a test that
+    reads either of them finds the provider."""
 
     def _raw_handshake(self, host, port):
         """Open a raw TCP socket, send a valid WS upgrade, return the entire
@@ -891,6 +895,13 @@ class TestLavaProviderAddressHeader:
         resp = self._raw_handshake(_WS_HOST, _WS_PORTS[pid])
         assert b" 101 " in resp.split(b"\r\n", 1)[0], f"no 101 in: {resp!r}"
         expected = f"Lava-Provider-Address: sim-provider-eth-sim:{pid}".encode()
+        assert expected in resp, f"missing {expected!r} in: {resp!r}"
+
+    @pytest.mark.parametrize("pid", ["1", "2", "3"])
+    def test_smart_router_provider_address_header_present_in_upgrade_response(self, sim, pid):
+        resp = self._raw_handshake(_WS_HOST, _WS_PORTS[pid])
+        assert b" 101 " in resp.split(b"\r\n", 1)[0], f"no 101 in: {resp!r}"
+        expected = f"\r\nSmart-Router-Provider-Address: sim-provider-eth-sim:{pid}\r\n".encode()
         assert expected in resp, f"missing {expected!r} in: {resp!r}"
 
 
@@ -1425,10 +1436,18 @@ _HANDSHAKE_OF_PROVIDER_1 = (
     b"Connection: Upgrade\r\n"
     b"Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n"
     b"Lava-Provider-Address: sim-provider-eth-sim:1\r\n"
+    b"Smart-Router-Provider-Address: sim-provider-eth-sim:1\r\n"
     b"\r\n"
+)
+# The two lines in which the simulator names the provider, under the old name
+# of the router's header and under its new name.
+_PROVIDER_ADDRESS_LINES = (
+    b"Lava-Provider-Address: sim-provider-eth-sim:1\r\n" b"Smart-Router-Provider-Address: sim-provider-eth-sim:1\r\n"
 )
 
 _LAVA_HEADERS = {"lava-consumer-relay": "7", "lava-stateful-api": "true"}
+# The same two headers as a router sends them after its rename.
+_SMARTROUTER_HEADERS = {"smartrouter-consumer-relay": "7", "smartrouter-stateful-api": "true"}
 _RATE_LIMIT_TEXT = b"Rate limit exceeded. Reduce your request rate, or use an API key for a higher limit."
 _PORT = _WS_PORTS["1"]
 _SUBSCRIBE = {"jsonrpc": "2.0", "method": "eth_subscribe", "params": ["newHeads"], "id": 7}
@@ -1691,6 +1710,21 @@ class TestTheUpgradeRequest:
         assert _endpoint(rows[0]) == ("jsonrpc", "ws", _PORT)
         assert rows[0]["lava_headers"] == _LAVA_HEADERS
 
+    @pytest.mark.parametrize("sent", [_LAVA_HEADERS, _SMARTROUTER_HEADERS], ids=["old-names", "new-names"])
+    def test_the_row_of_a_refused_upgrade_has_the_headers_of_the_router_under_both_names(self, sim, sent):
+        """A router sends its headers under the old names (`lava-`) or the new
+        ones (`smartrouter-`). The row has them under the old names in
+        `lava_headers` and under the new names in `router_headers`, whichever
+        came. `headers` holds them as they came."""
+        _set_scenario(sim, {"mode": "rate_limit", "transports": ["ws"]})
+
+        _refusal(_request_upgrade(lava_headers=sent))
+
+        rows = _rows(sim)
+        assert rows[0]["lava_headers"] == _LAVA_HEADERS
+        assert rows[0]["router_headers"] == _SMARTROUTER_HEADERS
+        assert {name: rows[0]["headers"][name] for name in sent} == sent
+
     def test_a_hung_upgrade_gets_no_byte_and_writes_one_row(self, sim):
         """A `hang` provider sends no byte for the upgrade. The row is written
         before the wait, so a test can read it while the upgrade hangs."""
@@ -1936,9 +1970,12 @@ class TestTheUpgradeRequest:
 
         assert head == _HANDSHAKE_OF_PROVIDER_1[: -len(b"\r\n")] + b"Retry-After: 7\r\n\r\n"
 
-    def test_a_chosen_provider_address_replaces_the_one_of_the_simulator_on_the_101_reply(self, sim):
-        """As on an HTTP reply, a chosen header replaces the simulator's header of the same name."""
-        _set_scenario(sim, {"transports": ["ws"], "reply_headers": {"lava-provider-address": "chosen"}})
+    @pytest.mark.parametrize("name", ["lava-provider-address", "smart-router-provider-address"])
+    def test_a_chosen_provider_address_replaces_the_one_of_the_simulator_on_the_101_reply(self, sim, name):
+        """As on an HTTP reply, a chosen header replaces the simulator's header of the same name.
+        The simulator names the provider under two names, the old one of the router's header and
+        the new one. They are one header: a chosen header with either name replaces both lines."""
+        _set_scenario(sim, {"transports": ["ws"], "reply_headers": {name: "chosen"}})
 
         sock = _request_upgrade()
         try:
@@ -1946,9 +1983,7 @@ class TestTheUpgradeRequest:
         finally:
             sock.close()
 
-        assert head == _HANDSHAKE_OF_PROVIDER_1.replace(
-            b"Lava-Provider-Address: sim-provider-eth-sim:1", b"lava-provider-address: chosen"
-        )
+        assert head == _HANDSHAKE_OF_PROVIDER_1.replace(_PROVIDER_ADDRESS_LINES, f"{name}: chosen\r\n".encode())
 
     def test_the_101_reply_of_a_drop_after_the_headers_carries_the_chosen_headers(self, sim):
         _set_scenario(
@@ -2015,6 +2050,18 @@ class TestSubscribeAndUnsubscribeFrames:
         for row in rows:
             assert _endpoint(row) == ("jsonrpc", "ws", _PORT)
             assert row["lava_headers"] == _LAVA_HEADERS
+
+    def test_the_row_of_a_frame_has_the_headers_of_a_renamed_router_under_both_names(self, sim):
+        """The upgrade request of a router after its rename carries `smartrouter-`
+        headers. The row of each frame has them under both names."""
+        with _websocket(lava_headers=_SMARTROUTER_HEADERS) as sock:
+            _send_frame(sock, _BLOCK_NUMBER)
+            _reply(sock)
+            rows = _rows(sim)
+
+        assert [row["method"] for row in rows] == ["eth_blockNumber"]
+        assert rows[0]["lava_headers"] == _LAVA_HEADERS
+        assert rows[0]["router_headers"] == _SMARTROUTER_HEADERS
 
     @pytest.mark.parametrize(
         "subscribe, unsubscribe",

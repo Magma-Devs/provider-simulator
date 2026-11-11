@@ -514,6 +514,26 @@ class TestGrpcMetadataCapture:
         # Only lava-* headers are captured — authorization must be absent.
         assert "authorization" not in headers
 
+    def test_the_metadata_of_a_renamed_router_is_captured_under_both_names(self, sim):
+        """A router after its rename sends ``smart-router-guid`` and
+        ``smartrouter-stateful-api``. The row has them under the old names in
+        ``lava_headers`` and under the new names in ``router_headers``, and the
+        filter finds the row by either name."""
+        _call_get_latest_block(
+            _GRPC_ADDRS["1"],
+            metadata=(
+                ("smart-router-guid", "g-new"),
+                ("smartrouter-stateful-api", "true"),
+                ("authorization", "bearer ignored"),
+            ),
+        )
+        for query in ("lava_header_lava-guid=g-new", "router_header_smart-router-guid=g-new"):
+            _, hist = _get(_ctrl(sim, f"/history?pool=lava-sim-grpc&pid=1&{query}"))
+            assert hist["count"] == 1, query
+            row = hist["history"][0]
+            assert row["lava_headers"] == {"lava-guid": "g-new", "lava-stateful-api": "true"}
+            assert row["router_headers"] == {"smart-router-guid": "g-new", "smartrouter-stateful-api": "true"}
+
     def test_history_filter_by_lava_header(self, sim):
         """The existing /history?lava_header_<name>= filter must work for
         gRPC requests, not just JSON-RPC ones."""

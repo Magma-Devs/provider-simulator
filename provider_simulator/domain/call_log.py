@@ -24,7 +24,12 @@ Honest boundaries of the counters:
   the rows that pass it.
 
 What a row says about the request itself:
-- ``lava_headers`` holds the request headers whose name starts with ``lava-``.
+- ``lava_headers`` and ``router_headers`` hold the request headers of the
+  smart-router, the same ones in both. The router gave its headers new names:
+  ``lava_headers`` has each one under its old name (``Lava-Guid``,
+  ``lava-stateful-api``) and ``router_headers`` under its new name
+  (``Smart-Router-Guid``, ``smartrouter-stateful-api``), whichever of the two
+  the request carried. See ``provider_simulator/domain/router_headers.py``.
 - ``headers`` holds every request header. The log stores them as one compact
   JSON text and decodes the text for a reader: a full log holds up to
   ``history_max`` rows for each provider, and a text costs less memory than a
@@ -49,6 +54,7 @@ from collections import deque
 from collections.abc import Callable
 
 from constants import HISTORY_MAX
+from provider_simulator.domain.router_headers import under_current_names, under_legacy_names
 
 
 def _header_value_as_text(value: object) -> str:
@@ -101,7 +107,7 @@ class CallLog:
         # only repeat them — and it would repeat them in the exact shape of
         # Provider.key, the address the control API accepts, so it would read
         # like a name the router reported. Tests learn which provider served a
-        # request by matching the Lava-Provider-Address header against these
+        # request by matching the provider address header of the router against these
         # names, and no real name is ever empty. An empty name therefore cannot
         # be mistaken for a real one; "eth-sim:4" could.
         self._name = name
@@ -125,6 +131,13 @@ class CallLog:
         deadline_remaining_ms: int | None = None,
     ) -> dict:
         now, stamp = _now_fields()
+        # A bytes value is written as base64 text, as in ``headers``. gRPC
+        # gives the value of a ``-bin`` metadata key as bytes, and a row
+        # that holds bytes cannot be written as JSON.
+        of_the_router = {
+            name: (_header_value_as_text(value) if isinstance(value, (bytes, bytearray)) else value)
+            for name, value in (lava_headers or {}).items()
+        }
         return {
             "ts": now,
             "time": stamp,
@@ -132,13 +145,11 @@ class CallLog:
             "method": method,
             "status": status,
             "latency_ms": latency_ms,
-            # A bytes value is written as base64 text, as in ``headers``. gRPC
-            # gives the value of a ``-bin`` metadata key as bytes, and a row
-            # that holds bytes cannot be written as JSON.
-            "lava_headers": {
-                name: (_header_value_as_text(value) if isinstance(value, (bytes, bytearray)) else value)
-                for name, value in (lava_headers or {}).items()
-            },
+            # The same headers two times: under the old names of the router,
+            # and under its new names. ``lava_headers`` of this method holds
+            # them as they came, in either spelling.
+            "lava_headers": under_legacy_names(of_the_router),
+            "router_headers": under_current_names(of_the_router),
             "deadline_remaining_ms": deadline_remaining_ms,
             "grpc_status": None,
             "body_len": None,
@@ -325,7 +336,7 @@ class CallLog:
             for e in self._history:
                 if where is None or where(e):
                     row = {
-                        k: (dict(v) if k == "lava_headers" and isinstance(v, dict) else v)
+                        k: (dict(v) if k in ("lava_headers", "router_headers") and isinstance(v, dict) else v)
                         for k, v in e.items()
                         if not k.startswith("_")
                     }

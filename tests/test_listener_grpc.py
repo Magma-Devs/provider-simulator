@@ -913,6 +913,24 @@ def test_the_row_names_the_endpoint_and_keeps_the_lava_headers():
     assert row["lava_headers"] == {"lava-guid": "guid-1"}
 
 
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"lava-guid": "guid-1", "lava-stateful-api": "true"},
+        {"smart-router-guid": "guid-1", "smartrouter-stateful-api": "true"},
+    ],
+    ids=["old-names", "new-names"],
+)
+def test_the_row_keeps_the_metadata_of_the_router_under_both_names(metadata):
+    # gRPC metadata keys are in lower case. A router sends them under its old
+    # names or, after its rename, under its new names. The row is the same.
+    listener, provider = _listener()
+    _decide(listener, lava_headers=metadata)
+    row = provider.log.get_history()[0]
+    assert row["lava_headers"] == {"lava-guid": "guid-1", "lava-stateful-api": "true"}
+    assert row["router_headers"] == {"smart-router-guid": "guid-1", "smartrouter-stateful-api": "true"}
+
+
 def test_fail_first_n_gives_the_mode_to_the_first_calls_only():
     listener, provider = _listener()
     _upd(listener, {"mode": "down", "fail_first_n": 3, "then_mode": "success"})

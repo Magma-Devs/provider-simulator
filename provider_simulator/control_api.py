@@ -25,6 +25,7 @@ from provider_simulator.chains import CHAINS
 from provider_simulator.domain.call_log import decode_row_headers
 from provider_simulator.domain.endpoint import TRANSPORTS
 from provider_simulator.domain.registry import Registry
+from provider_simulator.domain.router_headers import legacy_name
 from provider_simulator.listeners.ws import WsSubscriptions
 from provider_simulator.port_gate import PortGate
 from provider_simulator.resp_proxy import RespProxyRegistry
@@ -64,6 +65,10 @@ _PAUSE_AT = _DROP_AT - {"before_headers"}
 _LOGS_LAG_MODES = {"empty", "partial"}
 # Two calls with the same (request_id, method) within this window are one group.
 _CORRELATION_WINDOW_S = 0.050
+
+# The two prefixes of the query parameter that filters GET /history by a header
+# of the router. They do the same: see ``_history_row_filter``.
+_ROUTER_HEADER_FILTERS = ("lava_header_", "router_header_")
 
 _ENUMS = {
     "mode": _MODES,
@@ -1207,10 +1212,17 @@ class ControlApi:
         high = _as_float(query["to"], float("inf")) if "to" in query else None
         # Header names are case-insensitive on the wire (clients may title-case
         # them) — match accordingly. The value is compared as it is written.
+        #
+        # ``lava_header_<name>`` and ``router_header_<name>`` are one filter
+        # with two spellings, and <name> is a header of the router under its old
+        # name or its new one (``lava-stateful-api``, ``smartrouter-stateful-api``).
+        # Each is looked up by the old name, in ``lava_headers`` of the row, which
+        # holds a header of the router under that name whichever way it came.
         headers = [
-            (key[len("lava_header_") :].lower(), value)
+            (legacy_name(key[len(prefix) :]).lower(), value)
             for key, value in query.items()
-            if key.startswith("lava_header_")
+            for prefix in _ROUTER_HEADER_FILTERS
+            if key.startswith(prefix)
         ]
         if not (
             equals

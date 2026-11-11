@@ -185,6 +185,40 @@ def test_block_at_effective_head_still_serializes_a_block():
     assert res.body["result"]["number"] == at_head
 
 
+def test_the_headers_of_a_renamed_router_are_captured_under_both_names():
+    # A router after its rename sends Smart-Router-<X> and smartrouter-<x>. The
+    # row has each one under its old name in ``lava_headers``, and as it came in
+    # ``router_headers``.
+    listener, provider = _listener()
+    _serve(
+        listener,
+        "eth_blockNumber",
+        headers={"Smart-Router-Guid": "GUID_1", "smartrouter-stateful-api": "true", "X-Other": "no"},
+    )
+    entry = provider.log.get_history()[0]
+    assert entry["lava_headers"] == {"Lava-Guid": "GUID_1", "lava-stateful-api": "true"}
+    assert entry["router_headers"] == {"Smart-Router-Guid": "GUID_1", "smartrouter-stateful-api": "true"}
+
+
+def test_the_headers_of_a_router_before_its_rename_are_captured_under_both_names():
+    listener, provider = _listener()
+    _serve(listener, "eth_blockNumber", headers={"Lava-Guid": "GUID_1", "lava-stateful-api": "true", "X-Other": "no"})
+    entry = provider.log.get_history()[0]
+    assert entry["lava_headers"] == {"Lava-Guid": "GUID_1", "lava-stateful-api": "true"}
+    assert entry["router_headers"] == {"Smart-Router-Guid": "GUID_1", "smartrouter-stateful-api": "true"}
+
+
+def test_a_header_that_the_router_sends_to_a_node_under_an_x_name_is_in_headers_only():
+    # X-LAVA-Provider, and X-Smart-Router-Provider after the rename, never
+    # started with ``lava-``. They stay out of the two objects, as before.
+    listener, provider = _listener()
+    sent = {"X-LAVA-Provider": "node-1", "X-Smart-Router-Provider": "node-1"}
+    _serve(listener, "eth_blockNumber", headers=sent)
+    entry = provider.log.get_history()[0]
+    assert (entry["lava_headers"], entry["router_headers"]) == ({}, {})
+    assert entry["headers"] == sent
+
+
 def _facts(row):
     return (row["method"], row["status"], row["latency_ms"], row["request_id"])
 

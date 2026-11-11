@@ -66,6 +66,7 @@ from constants import (
 from provider_simulator.cache_sim import CacheSimRegistry
 from provider_simulator.control_api import ControlApi
 from provider_simulator.domain.registry import Registry, build_registry
+from provider_simulator.domain.router_headers import PROVIDER_ADDRESS_NAMES
 from provider_simulator.domain.scenario import HTTP_TOKEN_CHARS
 from provider_simulator.listeners import (
     GraphQLListener,
@@ -353,14 +354,18 @@ class _ChosenReplyHeaders(BaseHTTPRequestHandler):
 def _upgrade_headers(provider_key: str, chosen: dict) -> dict:
     """The headers that the 101 reply to an upgrade carries after the three of the handshake.
 
-    The simulator names the provider in ``Lava-Provider-Address``. The chosen
-    headers of the scenario follow, and a chosen header replaces the
-    simulator's header of the same name, as ``_ChosenReplyHeaders`` does on
-    every other reply.
+    The simulator names the provider in ``Lava-Provider-Address``, and in
+    ``Smart-Router-Provider-Address`` too: the header has the name that the
+    router gives its own, and the router renamed it. The two hold the same
+    value. The chosen headers of the scenario follow, and a chosen header
+    replaces the simulator's header of the same name, as
+    ``_ChosenReplyHeaders`` does on every other reply. The two names are one
+    header here: a chosen header with either name replaces both.
     """
-    names = {name.lower() for name in chosen}
-    own = {"Lava-Provider-Address": f"sim-provider-{provider_key}"}
-    return {**{name: value for name, value in own.items() if name.lower() not in names}, **chosen}
+    own_names = {name.lower() for name in PROVIDER_ADDRESS_NAMES}
+    if any(name.lower() in own_names for name in chosen):
+        return dict(chosen)
+    return {**{name: f"sim-provider-{provider_key}" for name in PROVIDER_ADDRESS_NAMES}, **chosen}
 
 
 class _HttpListenerHandler(_ChosenReplyHeaders):
@@ -792,7 +797,7 @@ class _WsHandler(_ChosenReplyHeaders):
         # drop
         try:
             if decision.drop_at == "after_headers":
-                # Complete the 101 (with Lava-Provider-Address), then close.
+                # Complete the 101 (with the provider address headers), then close.
                 self.connection.sendall(
                     ws_protocol.build_handshake_response(
                         client_key,

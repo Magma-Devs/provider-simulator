@@ -116,7 +116,8 @@ curl -s "$SIM_CONTROL_URL/history?last=30" | python3 -m json.tool
 | `request_id=<id>` | text | Filter by the request id of a call. The id is the JSON-RPC `id` of the body, the REST query parameter `request_id` (or the header `X-Request-Id`), or the `address` of a gRPC `AllBalances` call. The filter compares text, so `request_id=1` also matches a REST row that holds the counter value 1. |
 | `body_sha256=<hex>` | text | REST and GraphQL: find the rows whose request body has this SHA-256, in any letter case. Hash the bytes that you sent |
 | `body_len=<n>` | int | REST and GraphQL: find the rows whose request body is this many bytes long |
-| `lava_header_<name>=<value>` | string | Filter by a captured Lava header. Underscores in `<name>` become hyphens — e.g. `lava_header_lava_stateful_api=true` matches header `lava-stateful-api: true`. Multiple `lava_header_*` filters AND together. |
+| `lava_header_<name>=<value>` | string | Filter by a captured header of the router. `<name>` is the header name as it is, hyphens included, in any letter case — e.g. `lava_header_lava-stateful-api=true` matches header `lava-stateful-api: true`. `<name>` may be the old name of the header or its new one (`smartrouter-stateful-api`): both find a row whichever of the two the router sent. Multiple filters AND together. |
+| `router_header_<name>=<value>` | string | The same filter under a second prefix — e.g. `router_header_smartrouter-stateful-api=true`. |
 
 ---
 
@@ -131,6 +132,7 @@ curl -s -X POST "$SIM_CONTROL_URL/history/clear"
 # 2. send your request
 curl -si -X POST "$SIM_ROUTER_URL" \
   -H "Content-Type: application/json" \
+  -H "smartrouter-force-cache-refresh: true" \
   -H "lava-force-cache-refresh: true" \
   -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 

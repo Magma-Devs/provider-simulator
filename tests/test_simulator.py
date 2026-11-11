@@ -2343,6 +2343,96 @@ class TestLavaHeadersFilter:
         assert "history" in hist
 
 
+class TestRouterHeadersOfBothGenerations:
+    """The router renamed its headers: ``lava-<x>`` became ``smartrouter-<x>``,
+    and ``Lava-<X>`` on a reply became ``Smart-Router-<X>``. A router knows only
+    the names of its own generation. A row holds what came under both names,
+    and the filter finds a row by either name, with either prefix."""
+
+    # A request as it comes from a router of each generation.
+    _SENT = {
+        "old-router": {"lava-stateful-api": "true", "Lava-Guid": "GUID_7"},
+        "new-router": {"smartrouter-stateful-api": "true", "Smart-Router-Guid": "GUID_7"},
+    }
+    # Each way to ask for those rows. All of them are one filter.
+    _FILTERS = [
+        "lava_header_lava-stateful-api=true",
+        "lava_header_smartrouter-stateful-api=true",
+        "router_header_lava-stateful-api=true",
+        "router_header_smartrouter-stateful-api=true",
+        "lava_header_Lava-Guid=GUID_7",
+        "lava_header_Smart-Router-Guid=GUID_7",
+        "router_header_lava-guid=GUID_7",
+        "router_header_smart-router-guid=GUID_7",
+        "lava_header_lava-stateful-api=true&router_header_smart-router-guid=GUID_7",
+    ]
+
+    def _send(self, sim, headers):
+        _post(_ctrl(sim, "/history/clear"), {})
+        # A row with no header of the router, which no filter may give.
+        _rpc(_P1, "eth_blockNumber")
+        status, _ = _post(_P1, {"jsonrpc": "2.0", "id": 7, "method": "eth_blockNumber", "params": []}, headers=headers)
+        assert status == 200
+
+    @pytest.mark.parametrize("sent", ["old-router", "new-router"])
+    def test_the_row_has_the_headers_under_the_old_names_and_under_the_new_names(self, sim, sent):
+        self._send(sim, self._SENT[sent])
+
+        _, hist = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1&request_id=7"))
+        row = hist["history"][-1]
+        # urllib changes the case of a header name that it sends, so the names
+        # are compared in lower case.
+        assert {name.lower(): value for name, value in row["lava_headers"].items()} == {
+            "lava-stateful-api": "true",
+            "lava-guid": "GUID_7",
+        }
+        assert {name.lower(): value for name, value in row["router_headers"].items()} == {
+            "smartrouter-stateful-api": "true",
+            "smart-router-guid": "GUID_7",
+        }
+        # ``headers`` has each header as it came, so it says which router sent the request.
+        came = {name.lower() for name in row["headers"]}
+        assert {name.lower() for name in self._SENT[sent]} <= came
+        other = "new-router" if sent == "old-router" else "old-router"
+        assert not {name.lower() for name in self._SENT[other]} & came
+
+    @pytest.mark.parametrize("sent", ["old-router", "new-router"])
+    @pytest.mark.parametrize("query", _FILTERS)
+    def test_each_spelling_of_the_filter_finds_the_row(self, sim, sent, query):
+        self._send(sim, self._SENT[sent])
+
+        _, hist = _get(_ctrl(sim, f"/history?last=60&{query}"))
+
+        assert hist["count"] == 1, hist
+        assert hist["history"][0]["request_id"] == 7
+
+    @pytest.mark.parametrize("sent", ["old-router", "new-router"])
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "lava_header_lava-stateful-api=false",
+            "router_header_smartrouter-stateful-api=false",
+            "router_header_smartrouter-stickiness=s1",
+            "lava_header_lava-stateful-api=true&router_header_smart-router-guid=OTHER",
+        ],
+    )
+    def test_a_filter_for_another_value_or_another_header_finds_no_row(self, sim, sent, query):
+        self._send(sim, self._SENT[sent])
+
+        _, hist = _get(_ctrl(sim, f"/history?last=60&{query}"))
+
+        assert hist["count"] == 0, hist
+
+    def test_a_row_with_no_header_of_the_router_has_two_empty_objects(self, sim):
+        _post(_ctrl(sim, "/history/clear"), {})
+        _rpc(_P1, "eth_blockNumber")
+
+        _, hist = _get(_ctrl(sim, "/history?last=60"))
+
+        row = hist["history"][-1]
+        assert (row["lava_headers"], row["router_headers"]) == ({}, {})
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # http_status applies in success mode (custom HTTP code with valid body)
 # ─────────────────────────────────────────────────────────────────────────────
