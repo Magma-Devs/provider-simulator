@@ -45,8 +45,8 @@ _Avoid_: provider address, provider name, pid string
 
 **Provider name**:
 What the router calls one provider. It lives in the topology table now, not
-only in a values file. The router reports it in the `Lava-Provider-Address`
-response header. It is not an address: the control API will not accept it.
+only in a values file. The router reports it in the `Smart-Router-Provider-Address`
+response header, and a router from before its rename in `Lava-Provider-Address`. It is not an address: the control API will not accept it.
 Use the provider key for that.
 
 The form is `<Pool><Role>Provider<slot>`, for example `EthPrimaryProvider1` and
@@ -335,7 +335,10 @@ _Avoid_: log, trace, calls
 
 **History row**:
 One call in the history of a provider. It holds every request header in
-`headers`, and the ones whose name starts with `lava-` in `lava_headers` too. A
+`headers`. The headers of the router are in two more fields, the same ones in
+both: in `lava_headers` under their old names (`lava-…`) and in
+`router_headers` under their new names (`smartrouter-…`, `Smart-Router-…`),
+whichever spelling the request carried. A
 gRPC row also holds `deadline_remaining_ms`, the time that the deadline of the
 caller had left, and `grpc_status`, the name of the status that the simulator
 sent.

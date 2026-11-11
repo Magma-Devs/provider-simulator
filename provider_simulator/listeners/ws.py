@@ -37,6 +37,7 @@ from provider_simulator import fault_policy
 from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.provider import Provider
 from provider_simulator.domain.registry import Registry
+from provider_simulator.domain.router_headers import router_headers_of
 from provider_simulator.listeners.base import RawRequest, ServeResult, with_reply_headers
 from provider_simulator.listeners.jsonrpc import JsonRpcListener
 
@@ -238,7 +239,7 @@ class JsonRpcWsListener(JsonRpcListener):
         result is a refusal: a JSON body with its HTTP status, a hang, or a
         drop with its drop point. A refusal writes one complete history row
         before this method returns. The row holds every header of ``headers``,
-        and the ``lava-`` ones in ``lava_headers`` too. An upgrade that
+        and the ones of the router in ``lava_headers`` and ``router_headers`` too. An upgrade that
         succeeds writes no row.
 
         The upgrade is not a request of ``serve()``. It applies no latency, no
@@ -255,7 +256,7 @@ class JsonRpcWsListener(JsonRpcListener):
         if verdict.kind == "none":
             return with_reply_headers(ServeResult(action="respond", status=101), chosen)
 
-        lava = {k: v for k, v in headers.items() if k.lower().startswith("lava-")}
+        lava = router_headers_of(headers)
 
         def _record(method: str, status: str) -> None:
             self.provider.log.push(

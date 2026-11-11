@@ -253,9 +253,20 @@ a tree with uncommitted changes reports `untagged` with `-dirty` in
 `GET /history` merges every provider's ring buffer, sorts by time, and adds
 `correlation_group` (the calls of one router relay) and `call_order`. Each entry
 carries `pool` / `pid` / `interface` / `transport` / `port`; filter by
-`pool` / `transport` / `method` / `status` / `request_id` / time / `lava_header_*`.
+`pool` / `transport` / `method` / `status` / `request_id` / time / `lava_header_*`
+(or `router_header_*`, the same filter).
 Each row also says what the provider received: `headers` (every request
-header), `lava_headers`, and for gRPC `deadline_remaining_ms` and `grpc_status`.
+header), `lava_headers` and `router_headers`, and for gRPC
+`deadline_remaining_ms` and `grpc_status`.
+
+The router renamed its headers: `Lava-<X>` on a reply is now `Smart-Router-<X>`,
+and every other `lava-<x>` is `smartrouter-<x>`. A router knows only the names
+of its own generation, and the simulator works behind both. A row has the
+router's request headers under the old names in `lava_headers` and under the
+new names in `router_headers`, whichever came, and both filter prefixes take
+either name: `lava_header_lava-stateful-api=true` and
+`router_header_smartrouter-stateful-api=true` find the same rows. `headers`
+has each header as it came.
 
 ## Deploy
 

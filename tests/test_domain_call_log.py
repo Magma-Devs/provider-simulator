@@ -240,6 +240,52 @@ def test_a_row_holds_every_request_header_and_the_log_stores_them_as_one_text():
     assert all(not key.startswith("_") for key in row)
 
 
+def test_a_row_holds_the_headers_of_the_router_under_the_old_names_and_under_the_new_names():
+    # A router from before its rename sends ``Lava-Guid`` and ``lava-stateful-api``.
+    # A router from after it sends ``Smart-Router-Guid`` and ``smartrouter-stateful-api``.
+    # The row is the same for both: ``lava_headers`` has the old names and
+    # ``router_headers`` has the new names.
+    old_names = {"Lava-Guid": "GUID_1", "lava-stateful-api": "true"}
+    new_names = {"Smart-Router-Guid": "GUID_1", "smartrouter-stateful-api": "true"}
+    for sent in (old_names, new_names):
+        log = _log()
+        log.record_arrival("jsonrpc", "http", 18545, lava_headers=sent, headers=sent)
+        log.push("eth_call", "success", 0, interface="jsonrpc", transport="http", port=18545, lava_headers=sent)
+
+        for row in log.get_history():
+            assert row["lava_headers"] == old_names
+            assert row["router_headers"] == new_names
+        # ``headers`` says which spelling came.
+        assert log.get_history()[0]["headers"] == sent
+
+
+def test_a_row_with_no_header_of_the_router_has_two_empty_objects():
+    log = _log()
+    log.push("eth_call", "success", 0, interface="jsonrpc", transport="http", port=18545)
+
+    row = log.get_history()[0]
+    assert (row["lava_headers"], row["router_headers"]) == ({}, {})
+
+
+def test_a_reader_cannot_change_the_router_headers_of_a_stored_row():
+    log = _log()
+    log.push("eth_call", "success", 0, interface="jsonrpc", transport="http", port=18545, lava_headers={"lava-x": "1"})
+
+    log.get_history()[0]["router_headers"]["smartrouter-x"] = "vandalized"
+
+    assert log.get_history()[0]["router_headers"] == {"smartrouter-x": "1"}
+
+
+def test_a_bytes_value_is_base64_text_under_both_names():
+    log = _log()
+    log.record_arrival("grpc", "http2", 18548, lava_headers={"smartrouter-x-bin": b"\x00\x01"})
+
+    row = log.get_history()[0]
+    assert row["lava_headers"] == {"lava-x-bin": "AAE="}
+    assert row["router_headers"] == {"smartrouter-x-bin": "AAE="}
+    json.dumps(row)
+
+
 def test_a_reader_that_changes_headers_does_not_change_the_log():
     log = _log()
     log.record_arrival("jsonrpc", "http", 18545, headers={"X-Kept": "1"})

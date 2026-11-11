@@ -122,14 +122,15 @@ curl -s -X POST "$SIM_CONTROL_URL/reset/all"
 
 ## Read history
 
-`GET /history` returns the merged, time-sorted ring buffer across all providers. Every entry carries `call_order` (1 = first attempted), `correlation_group` (groups calls within a 50ms window with the same request id + method), and `lava_headers`.
+`GET /history` returns the merged, time-sorted ring buffer across all providers. Every entry carries `call_order` (1 = first attempted), `correlation_group` (groups calls within a 50ms window with the same request id + method), `lava_headers` and `router_headers`.
 
 Every row also says what the provider received:
 
 | Field | What it holds | When it is empty |
 |---|---|---|
 | `headers` | Every request header, with its name as it came. A name that the request repeats keeps its last value, and two spellings that differ in case are two names. For gRPC it is the metadata of the call, and a `bytes` value of a `-bin` key is base64 text. A WebSocket frame has no headers of its own, so its row holds the headers of the upgrade request. | `{}` on the row of a pushed WebSocket event |
-| `lava_headers` | The headers of `headers` whose name starts with `lava-`, with the same values | `{}` |
+| `lava_headers` | The headers of the router in `headers`, each under its old name (`lava-stateful-api`, `Lava-Guid`), with the same values. A header that came under a new name (`smartrouter-stateful-api`, `Smart-Router-Guid`) is here under its old one, so a read by the old name works behind a router of either generation. A request with old names only gives the headers as they came. | `{}` |
+| `router_headers` | The same headers, each under its new name: `Smart-Router-<X>` for a header that the router puts on a reply (`Smart-Router-Guid`), `smartrouter-<x>` for each other one. A request with new names only gives the headers as they came. | `{}` |
 | `deadline_remaining_ms` | gRPC only: the milliseconds that the deadline of the caller had left when the call arrived. The gRPC library reports it, and the value can be some milliseconds above the deadline that the caller set. | `null` on every other interface, and on a gRPC call with no deadline |
 | `grpc_status` | gRPC only: the name of the status that the simulator sent, `OK` for a reply | `null` on every other interface. On a gRPC row it is `null` in three cases: the provider still holds the call, the caller went away during the wait, or the simulator could not build the reply message |
 | `body_len` | REST and GraphQL: the length in bytes of the request body. On REST it is set for a verb other than GET and HEAD. On GraphQL it is set for every request, a request with no body and a body that cannot be read included. An empty body gives 0. | `null` on every other interface, and on a REST GET or HEAD |
@@ -156,7 +157,9 @@ curl -s "$SIM_CONTROL_URL/history?last=60"
 curl -s "$SIM_CONTROL_URL/history?provider=2&status=error"
 curl -s "$SIM_CONTROL_URL/history?method=eth_getBlockByNumber"
 curl -s "$SIM_CONTROL_URL/history?request_id=1"
-curl -s "$SIM_CONTROL_URL/history?last=120&lava_header_lava_stateful_api=true"
+curl -s "$SIM_CONTROL_URL/history?last=120&lava_header_lava-stateful-api=true"
+# the same filter with the new names: it finds the same rows
+curl -s "$SIM_CONTROL_URL/history?last=120&router_header_smartrouter-stateful-api=true"
 curl -s "$SIM_CONTROL_URL/history?pool=<pool>&pid=1&body_sha256=<the SHA-256 of the body that you sent>&body_len=<its length>"
 ```
 

@@ -874,12 +874,15 @@ The smart router's pruning verification compares the requested block number with
 
 ### `lava_header_*` — dynamic filter on `/history`
 
-The `/history` endpoint accepts a dynamic-prefix filter: any query parameter beginning with `lava_header_` is interpreted as a captured-header filter. Underscores in the parameter name become hyphens when matching the actual header. Examples:
+The `/history` endpoint accepts a dynamic-prefix filter: any query parameter beginning with `lava_header_` (or `router_header_`, the same filter) is interpreted as a captured-header filter. The rest of the parameter name is the header name as it is, hyphens included, in any letter case. Examples:
 
-- `?lava_header_lava_stateful_api=true` → filter where the captured header `lava-stateful-api` equals `true`.
-- `?lava_header_lava_consumer_ip=10.0.0.1&lava_header_lava_session=42` → both must match (AND).
+- `?lava_header_lava-stateful-api=true` → filter where the captured header `lava-stateful-api` equals `true`.
+- `?lava_header_lava-consumer-ip=10.0.0.1&lava_header_lava-session=42` → both must match (AND).
+- `?router_header_smartrouter-stateful-api=true` → the same rows as the first example.
 
-Headers are captured at request time inside `JSONRPCHandler.do_POST`: every inbound header whose name starts with `lava-` (case-insensitive) is recorded in the history entry. Each `/history` entry exposes the full captured dict under `"lava_headers"`. Every request header, with or without that prefix, is under `"headers"`; the `lava_header_*` filters read `"lava_headers"` only.
+The router renamed its headers (`Lava-<X>` → `Smart-Router-<X>` on a reply, every other `lava-<x>` → `smartrouter-<x>`), and a router knows only the names of its own generation. Either name in the filter finds a row, whichever of the two the router sent.
+
+Headers are captured at request time inside `JSONRPCHandler.do_POST`: every inbound header whose name starts with `lava-`, `smartrouter-` or `smart-router-` (case-insensitive) is recorded in the history entry. Each `/history` entry exposes the captured headers two times: under their old names in `"lava_headers"` and under their new names in `"router_headers"`. Every request header, with or without such a prefix and with its name as it came, is under `"headers"`; the filters read `"lava_headers"` only.
 
 ### `responses` lookup order in the success path
 

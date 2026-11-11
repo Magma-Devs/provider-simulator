@@ -62,6 +62,7 @@ from provider_simulator import fault_policy
 from provider_simulator.chains import chain_for
 from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.provider import Provider
+from provider_simulator.domain.router_headers import router_headers_of
 
 # Verdict kind -> the status label recorded in call history.
 _STATUS_LABEL = {
@@ -206,10 +207,12 @@ class Listener(ABC):
     def arrive(self, headers: dict | None = None, deadline_remaining_ms: int | None = None) -> dict:
         """Record the arrival of one request, and return its row for
         ``serve(request, entry=...)``. The row keeps every header in
-        ``headers``, and the ``lava-`` ones in ``lava_headers`` too.
+        ``headers``, and the ones of the router in ``lava_headers`` and
+        ``router_headers`` too: a name that starts with ``lava-``, or with
+        ``smartrouter-`` or ``smart-router-`` from a router after its rename.
         ``deadline_remaining_ms`` is for a gRPC call: the time that the
         deadline of the caller had left."""
-        lava = {k: v for k, v in (headers or {}).items() if k.lower().startswith("lava-")}
+        lava = router_headers_of(headers)
         return self.provider.log.record_arrival(
             self.endpoint.interface,
             self.endpoint.transport,
