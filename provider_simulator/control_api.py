@@ -362,7 +362,7 @@ def _a_frozen_head_that_cannot_apply(provider: object, scenario_updates: dict) -
             "or frozen_head=null with blocks_behind"
         )
     chain = provider.pool.chain  # type: ignore[attr-defined]
-    if not CHAINS[chain].reads_frozen_head:
+    if not provider.pool.chain_object.reads_frozen_head:  # type: ignore[attr-defined]
         return (
             f"frozen_head cannot apply: the {chain} chain does not read it, so the provider would keep "
             "answering the moving head"
@@ -926,11 +926,11 @@ class ControlApi:
     def _scope(self, pool: str | None) -> tuple[list, list, str]:
         """Resolve a pool name into the providers and chains a reset may touch.
 
-        ``None`` means the whole simulator: every provider, every chain. A pool
-        name means that pool's providers and the single chain it serves (a pool
-        serves exactly one chain — ``build_registry`` refuses a pool that
-        declares two). Chains come back as ``(name, chain)`` pairs so the reply
-        can name them.
+        ``None`` means the whole simulator: every provider, every registered
+        chain. A pool name means that pool's providers and the single chain
+        object the pool holds (a pool serves exactly one chain —
+        ``build_registry`` refuses a pool that declares two). Chains come back
+        as ``(name, chain)`` pairs so the reply can name them.
 
         Returns ``(providers, chains, error)``; a non-empty error means the
         pool does not exist and nothing was touched.
@@ -942,9 +942,7 @@ class ControlApi:
         if pool not in self.registry.pools:
             return [], [], f"no pool {pool!r}; pools are {sorted(self.registry.pools)!r}"
         resolved = self.registry.pools[pool]
-        chain = CHAINS.get(resolved.chain)
-        chains = [(resolved.chain, chain)] if chain is not None else []
-        return list(resolved.providers.values()), chains, ""
+        return list(resolved.providers.values()), [(resolved.chain, resolved.chain_object)], ""
 
     # ── POST /advance ─────────────────────────────────────────────────────────
     def advance(self, body: object) -> tuple[int, dict]:

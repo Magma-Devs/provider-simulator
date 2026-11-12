@@ -59,7 +59,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, replace
 
 from provider_simulator import fault_policy
-from provider_simulator.chains import chain_for
 from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.provider import Provider
 
@@ -363,10 +362,10 @@ class Listener(ABC):
     def build_content(self, parsed: dict, scenario: dict, request: RawRequest) -> tuple[int, object]:
         """The success content of one request: its HTTP status and its body.
         The flow asks this hook only when the request gets no fault and no
-        canned body. Default: ask the chain of the provider. ``request`` is
-        the request of the adapter, for a listener that needs more than the
-        parsed fields."""
-        chain = chain_for(self.provider.pool.chain)
+        canned body. Default: ask the chain object of the pool of the
+        provider. ``request`` is the request of the adapter, for a listener
+        that needs more than the parsed fields."""
+        chain = self.provider.pool.chain_object
         return chain.build_success(parsed, scenario, self.provider.quirks.snapshot(), self.endpoint.interface)
 
     def corrupt(self, result: ServeResult, status_label: str, scenario: dict) -> str:
