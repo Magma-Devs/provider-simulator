@@ -75,6 +75,9 @@ def build_registry(rows=None) -> Registry:
         _validate_row(pool_name, chain, pid, endpoint_specs)
         pool = reg.pools.get(pool_name)
         if pool is None:
+            # Which chain object a pool holds is decided here. Built without one, the pool
+            # holds the registered chain of its name, so the pools of one chain share it.
+            # To give a pool a chain of its own, pass ``chain_object=``.
             pool = Pool(name=pool_name, chain=chain)
             reg.pools[pool_name] = pool
         elif pool.chain != chain:

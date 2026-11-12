@@ -18,11 +18,15 @@ through the Pool<->Provider cycle and make both types unhashable.
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from provider_simulator.domain.call_log import CallLog
 from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.quirks import Quirks, quirks_for
 from provider_simulator.domain.scenario import ScenarioConfig
+
+if TYPE_CHECKING:
+    from provider_simulator.chains.base import Chain
 
 # The most executed transactions that one provider remembers. The oldest is dropped
 # first. A transaction that fell off the end ran so long ago that the delay of
@@ -33,8 +37,21 @@ EXECUTED_MEMORY_CAP = 10_000
 @dataclass(eq=False)
 class Pool:
     name: str
-    chain: str  # chain name; becomes a Chain object in a later story
+    chain: str  # chain name: the key of the chain registry and of the quirks table
+    # The chain that the providers of this pool answer from. A reader that starts from a
+    # pool takes the chain here and never looks it up by name. A pool built without one
+    # holds the registered chain of its name, so the pools of one chain share one object
+    # and its head. A caller that wants a pool to have a chain of its own passes it.
+    chain_object: "Chain" = field(default=None, repr=False)  # type: ignore[assignment]  # a Chain after __post_init__
     providers: dict[str, "Provider"] = field(default_factory=dict, init=False)
+
+    def __post_init__(self) -> None:
+        if self.chain_object is None:
+            # Imported here and not at the top: chains.base imports domain.quirks, which
+            # loads this package, so an import at the top is circular.
+            from provider_simulator.chains import chain_for
+
+            self.chain_object = chain_for(self.chain)
 
     def add_provider(
         self,
