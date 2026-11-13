@@ -21,7 +21,7 @@ from provider_simulator import fault_policy
 from provider_simulator.build_info import build_info
 from provider_simulator.cache_sim import DEFAULT_MODE as DEFAULT_CACHE_MODE
 from provider_simulator.cache_sim import CacheEntry, CacheSimRegistry, UnknownMode
-from provider_simulator.chains import CHAINS
+from provider_simulator.chains import CHAINS, Chain
 from provider_simulator.domain.call_log import decode_row_headers
 from provider_simulator.domain.endpoint import TRANSPORTS
 from provider_simulator.domain.registry import Registry
@@ -804,16 +804,18 @@ class ControlApi:
     # providers.
     #
     # Block heads are a weaker guarantee, and the difference matters. Heads
-    # belong to the CHAIN, shared by every pool on it. Scoping moves the heads
-    # of the chains that pool serves instead of every chain, but seven pools
-    # serve eth, so an eth-sim reset still rewinds the head an eth-solo-sim
-    # test is watching. Providers are isolated; heads are narrowed.
+    # belong to a chain object, and every pool of one chain holds the same
+    # object today. Scoping moves the heads of the object that pool holds
+    # instead of every chain, but the pools of eth share one, so an eth-sim
+    # reset still rewinds the head an eth-solo-sim test is watching.
+    # Providers are isolated; heads are narrowed.
     #
-    # A chain can own SEVERAL heads, one per interface, and a scoped reset
-    # clears all of them — it cannot do otherwise, because the pool names the
-    # chain and the chain owns the set. Five pools serve lava, so resetting
-    # lava-sim-grpc rewinds the REST and Tendermint-RPC heads that the two
-    # lava-cv pools are watching, on interfaces the gRPC pool does not serve.
+    # A chain object can own SEVERAL heads, one per interface, and a scoped
+    # reset clears all of them — it cannot do otherwise, because the pool names
+    # the object and the object owns the set. The pools of lava share one
+    # object, so resetting lava-sim-grpc rewinds the REST and Tendermint-RPC
+    # heads that the two lava-cv pools are watching, on interfaces the gRPC
+    # pool does not serve.
     # That is wider than it looks and is the reason to reset deliberately
     # rather than as a habit.
     #
@@ -944,6 +946,21 @@ class ControlApi:
         resolved = self.registry.pools[pool]
         return list(resolved.providers.values()), [(resolved.chain, resolved.chain_object)], ""
 
+    def _pools_by_chain_object(self, chain_name: str) -> list[tuple[Chain, list[str]]]:
+        """The pools that serve a chain, grouped by the chain object each one holds.
+
+        Two pools are in one group only when they hold the very same object. The
+        test is identity, so two objects of one class are two groups. Names are
+        sorted inside a group and the groups are ordered by their first name, so
+        a reply and an error text read the same on every call.
+        """
+        by_object: dict[int, tuple[Chain, list[str]]] = {}
+        for name, pool in self.registry.pools.items():
+            if pool.chain == chain_name:
+                by_object.setdefault(id(pool.chain_object), (pool.chain_object, []))[1].append(name)
+        groups = [(chain_object, sorted(names)) for chain_object, names in by_object.values()]
+        return sorted(groups, key=lambda group: group[1][0])
+
     # ── POST /advance ─────────────────────────────────────────────────────────
     def advance(self, body: object) -> tuple[int, dict]:
         """Move a chain's head, or read it back without moving it.
@@ -951,6 +968,18 @@ class ControlApi:
         A body naming neither ``blocks`` nor ``per_second`` moves nothing and
         still answers with the head, so this is also the read. That is what a
         test comparing the router's reported tip against the truth asks for.
+
+        ``pool`` names the pool whose chain object the request reads or moves.
+        The pools of one chain can hold several chain objects, each with heads
+        of its own. While they hold one, the name is optional and the request
+        uses that object; a chain that no pool serves uses the registered one.
+        Once they hold several, a read and a move both need the name. A request
+        without it is refused with the groups of pools that share an object,
+        because there is no right object to pick and one request must never
+        move more than one. A body that names a pool and no ``chain`` takes the
+        chain of the pool. A named pool must exist and serve the chain, or the
+        answer is a 400 that says so. The reply carries the pool that was named
+        (null for none) and ``pools``, the pools that share the object it used.
 
         ``head`` names which one on a chain that serves several — lava answers
         a different height over REST, gRPC and Tendermint-RPC, so one name per
@@ -966,7 +995,18 @@ class ControlApi:
         """
         if not isinstance(body, dict):
             return 400, {"error": "request body must be a JSON object"}
-        chain_name = body.get("chain", "eth")
+        pool_name = body.get("pool")
+        pool = None
+        if pool_name is not None:
+            # The checks and the texts of a reset: a name that is not a string, or
+            # that no pool has, is a 400 that lists the pools.
+            _, _, error = self._scope(pool_name)
+            if error:
+                return 400, {"error": error}
+            pool = self.registry.pools[pool_name]
+        # No chain in the body means the chain of the named pool, and eth when
+        # no pool is named either.
+        chain_name = body["chain"] if "chain" in body else (pool.chain if pool is not None else "eth")
         # A non-string chain reaches ``CHAINS.get`` as an unhashable key and
         # raises straight out of the handler: ``do_POST`` does not catch what
         # ``advance`` raises, so the caller gets a dropped connection rather
@@ -974,10 +1014,31 @@ class ControlApi:
         # ``_scope`` checks its pool.
         if not isinstance(chain_name, str):
             return 400, {"error": f"chain must be a string, got {type(chain_name).__name__}"}
-        chain = CHAINS.get(chain_name)
-        if chain is None:
+        registered = CHAINS.get(chain_name)
+        if registered is None:
             return 400, {"error": f"there is no chain {chain_name!r}. Chains: {sorted(CHAINS)}"}
-        heads = dict(chain.iter_heads())
+        if pool is not None and pool.chain != chain_name:
+            return 400, {"error": f"pool {pool_name!r} serves chain {pool.chain!r}, not chain {chain_name!r}"}
+
+        # Which chain object the request uses, and which pools share it.
+        groups = self._pools_by_chain_object(chain_name)
+        if pool is not None:
+            chain_object = pool.chain_object
+            sharing_pools = next(names for held, names in groups if held is chain_object)
+        elif len(groups) > 1:
+            return 400, {
+                "error": (
+                    f'chain {chain_name!r} has {len(groups)} chain objects, so name the pool with "pool". '
+                    f"Pools that share one object: {[names for _, names in groups]!r}"
+                )
+            }
+        elif groups:
+            chain_object, sharing_pools = groups[0]
+        else:
+            # No pool serves this chain, so no provider answers from an object of it.
+            # The registered object takes the request.
+            chain_object, sharing_pools = registered, []
+        heads = dict(chain_object.iter_heads())
         if not heads:
             return 400, {"error": f"chain {chain_name!r} has no advanceable head"}
 
@@ -1025,6 +1086,11 @@ class ControlApi:
         return 200, {
             "status": "ok",
             "chain": chain_name,
+            # The pool the request named, as a reset also echoes it: null when it named none.
+            "pool": pool_name,
+            # Every pool that holds the object this call read or moved, so a caller sees
+            # who else answers from the head it just changed.
+            "pools": sharing_pools,
             "head_name": head_name,
             # Always every head, so a reader never has to ask twice or know in
             # advance which names this chain uses.

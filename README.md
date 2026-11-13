@@ -191,7 +191,7 @@ It is refused, never accepted and ignored:
 | `POST /reset` | Reset scenario config, keep history. Also returns a cache-sim to answering misses |
 | `POST /history/clear` | Clear history, keep config. Also clears each cache-sim's call log |
 | `POST /reset/all` | Reset both, cache-sims included |
-| `POST /advance` | Move a chain's simulated head (default `eth`; sync-freshness tests) |
+| `POST /advance` | Move a chain's simulated head, or read it back when the body has no `blocks` or `per_second` (default chain `eth`; sync-freshness tests). `pool` names the pool whose chain object (the record that holds the head) the request uses; with no `chain`, the chain of the pool. The reply names that pool and `pools`, the pools that share the object. A chain whose pools hold several chain objects needs `pool` for a read and for a move: without it the answer is a 400 that lists the groups of pools that share an object |
 | `POST /ws/emit` | Push a WebSocket event to a live subscription |
 | `GET /version` | Which build this simulator is: see below |
 | `GET /health` · `/ready` · `/scenario` · `/stats` · `/topology` · `/history` · `/ws/subscriptions` | Health / readiness (all listener ports bound, except a port a `port_closed` scenario closed) / config / counters / read-only provider/port topology per pool / call log / live subscriptions |
