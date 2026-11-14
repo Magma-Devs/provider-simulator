@@ -1088,8 +1088,10 @@ class ControlApi:
             "chain": chain_name,
             # The pool the request named, as a reset also echoes it: null when it named none.
             "pool": pool_name,
-            # Every pool that holds the object this call read or moved, so a caller sees
-            # who else answers from the head it just changed.
+            # Every pool that holds the object this call read or moved. The list goes by object,
+            # not by head: the ln pool answers from the btc head through an object of its own and
+            # is not in it, and a pool that holds a lava object may serve no interface that reads
+            # the head that moved.
             "pools": sharing_pools,
             "head_name": head_name,
             # Always every head, so a reader never has to ask twice or know in

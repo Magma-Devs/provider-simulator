@@ -226,7 +226,11 @@ one for each interface. A pool holds one, and its providers answer from it. Pool
 hold the very same object share its heads, so a move or a reset through one pool shows in
 the others. Today every pool of a chain holds the one object that is registered for that
 chain. `POST /advance` can name the pool whose chain object it reads or moves, and must
-name it once the pools of a chain hold more than one.
+name it once the pools of a chain hold more than one. Its reply lists the pools that hold
+the object it used. A pool can answer from a head that it does not hold: the `ln` pool
+reports the height of the `btc` head through a chain object of its own, so a move of `btc`
+shows in `ln`, and `ln` is not in that list.
+_Avoid_: chain state, chain instance, chain (the name of the blockchain, not the record)
 
 **Provider record**:
 Everything the simulator knows about one provider, served by `GET /providers`
