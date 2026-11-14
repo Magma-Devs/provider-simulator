@@ -243,13 +243,26 @@ def test_a_move_through_a_pool_of_another_chain_is_refused_and_moves_no_head():
     assert CHAINS["btc"].head.current() == btc_before
 
 
-def test_an_unknown_pool_is_refused_with_the_error_that_a_reset_gives_for_it():
+def test_an_unknown_chain_is_refused_as_an_unknown_chain_when_the_pool_is_valid():
+    status, reply = _api().advance({"chain": "no-such-chain", "pool": "eth-sim"})
+    assert status == 400
+    assert "there is no chain 'no-such-chain'" in reply["error"]
+
+
+@pytest.mark.parametrize(
+    "pool",
+    [
+        pytest.param("no-such-sim", id="a-name-that-no-pool-has"),
+        pytest.param("", id="an-empty-name"),
+    ],
+)
+def test_an_unknown_pool_is_refused_with_the_error_that_a_reset_gives_for_it(pool):
     api = _api()
-    status, reply = api.advance({"chain": "eth", "pool": "no-such-sim"})
-    reset_status, reset_reply = api.reset("no-such-sim")
+    status, reply = api.advance({"chain": "eth", "pool": pool})
+    reset_status, reset_reply = api.reset(pool)
     assert reset_status == 400
     assert (status, reply) == (400, reset_reply)
-    assert "no pool 'no-such-sim'" in reply["error"]
+    assert f"no pool {pool!r}" in reply["error"]
 
 
 @pytest.mark.parametrize(
@@ -259,6 +272,11 @@ def test_an_unknown_pool_is_refused_with_the_error_that_a_reset_gives_for_it():
         pytest.param(True, id="a-boolean"),
         pytest.param(["eth-sim"], id="a-list"),
         pytest.param({"name": "eth-sim"}, id="an-object"),
+        # Only null means no pool. A value that Python reads as false is a wrong name, not a missing one.
+        pytest.param(0, id="zero"),
+        pytest.param(False, id="false"),
+        pytest.param([], id="an-empty-list"),
+        pytest.param({}, id="an-empty-object"),
     ],
 )
 def test_a_pool_that_is_not_a_string_is_refused(pool):

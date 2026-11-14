@@ -220,6 +220,14 @@ The live objects built from the topology when the server starts. It refuses a
 table that would break at run time, such as one port used twice.
 _Avoid_: container, factory, world
 
+**Chain object**:
+The record that holds the state of one chain: its head, or its heads when the chain has
+one for each interface. A pool holds one, and its providers answer from it. Pools that
+hold the very same object share its heads, so a move or a reset through one pool shows in
+the others. Today every pool of a chain holds the one object that is registered for that
+chain. `POST /advance` can name the pool whose chain object it reads or moves, and must
+name it once the pools of a chain hold more than one.
+
 **Provider record**:
 Everything the simulator knows about one provider, served by `GET /providers`
 and keyed by the provider key: pool, pool slot, chain, name, backup flag, group,
