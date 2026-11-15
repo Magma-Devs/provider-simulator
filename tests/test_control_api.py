@@ -616,15 +616,28 @@ def test_advancing_one_lava_head_leaves_the_others_alone():
         api.reset()
 
 
-def test_a_reset_clears_every_lava_head_not_only_one():
-    """One un-reset head carries a test's advance into the next test."""
+@pytest.mark.parametrize("pool", [None, "lava-sim-rest"], ids=["every-pool", "the-pool"])
+def test_a_reset_clears_every_lava_head_not_only_one(pool):
+    """One un-reset head carries a test's advance into the next test.
+
+    A lava pool serves one interface, so the control API moves only the head of that interface
+    and refuses the other two. The chain object of the pool holds all three, and a reset must
+    rewind all three, so the test moves each head on the object itself.
+    """
     api = _api()
+    chain = api.registry.pools["lava-sim-rest"].chain_object
     try:
-        base = api.advance({"chain": "lava", "pool": "lava-sim-rest", "head": "rest"})[1]["heads"]
-        for name in ("rest", "grpc", "tendermintrpc"):
-            api.advance({"chain": "lava", "pool": "lava-sim-rest", "head": name, "blocks": 11})
-        api.reset()
-        after = api.advance({"chain": "lava", "pool": "lava-sim-rest", "head": "rest"})[1]["heads"]
+        base = {name: head.current() for name, head in chain.iter_heads()}
+        assert set(base) == {"rest", "grpc", "tendermintrpc"}, base
+        for _name, head in chain.iter_heads():
+            head.bump(11)
+        moved = {name: head.current() for name, head in chain.iter_heads()}
+        assert moved == {name: value + 11 for name, value in base.items()}, "every head must be moved"
+
+        status, _reply = api.reset(pool)
+
+        assert status == 200
+        after = {name: head.current() for name, head in chain.iter_heads()}
         assert after == base, f"a reset left a head moved: {base} then {after}"
     finally:
         api.reset()

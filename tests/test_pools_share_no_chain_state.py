@@ -313,6 +313,27 @@ def test_a_reset_of_a_pool_names_the_pool_and_the_pools_that_share_its_state():
     assert api.reset("ln-sim")[1]["pools"] == ["btc-sim", "ln-sim"]
 
 
+def test_a_reset_of_a_pool_that_follows_another_rewinds_no_head_of_the_pool_it_follows():
+    """The reply names btc-sim for a reset of ln-sim, because the two share a state.
+
+    The reset rewinds the heads that its own scope holds, and ln-sim holds none. So the head of
+    btc-sim stays where the test left it, and only a reset of btc-sim rewinds it.
+    """
+    api = _api(build_registry())
+    try:
+        before = api.advance({"chain": "btc", "pool": "btc-sim"})[1]["head"]
+        api.advance({"chain": "btc", "pool": "btc-sim", "blocks": 7})
+
+        status, reply = api.reset("ln-sim")
+
+        assert status == 200 and reply["pools"] == ["btc-sim", "ln-sim"], reply
+        assert api.advance({"chain": "btc", "pool": "btc-sim"})[1]["head"] == before + 7
+        api.reset("btc-sim")
+        assert api.advance({"chain": "btc", "pool": "btc-sim"})[1]["head"] == before
+    finally:
+        api.reset()
+
+
 def test_a_reset_of_every_pool_names_every_pool():
     registry = build_registry()
 

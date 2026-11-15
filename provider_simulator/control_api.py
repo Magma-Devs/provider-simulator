@@ -921,9 +921,13 @@ class ControlApi:
             "pool": pool,
             "providers": sorted(p.key for p in providers),
             "chains": sorted({name for name, _ in chains}) if scenario else [],
-            # The pools whose chain state this reset rewound: the pool, and every pool that shares
-            # its state. A reset of every pool names every pool. A reset of the history alone
-            # rewinds no chain state, so it names none.
+            # The pool, and every pool that shares chain state with it: a pool that holds the same
+            # chain object, a pool that follows it, and a pool that it follows. A reset rewinds the
+            # heads of the chain objects in its scope, and the head of a pool that the reset pool
+            # only follows is not one of them. So the list names the pools that are joined to the
+            # reset pool, and a reader who needs to know which heads moved reads the heads. A reset
+            # of every pool names every pool. A reset of the history alone rewinds no chain state,
+            # so it names none.
             "pools": (
                 self._pools_sharing_state([p.name for p in self.registry.pools.values()] if pool is None else [pool])
                 if scenario
