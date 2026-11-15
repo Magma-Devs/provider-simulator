@@ -19,6 +19,7 @@ import pytest
 
 from provider_simulator import topology
 from provider_simulator.chains import CHAINS, Chain
+from provider_simulator.chains.base import AdvancingHead
 from provider_simulator.chains.eth import EthChain
 from provider_simulator.chains.lava import LavaChain
 from provider_simulator.control_api import ControlApi
@@ -458,6 +459,17 @@ def test_a_chain_that_no_pool_serves_is_moved_through_the_registered_chain_objec
     assert CHAINS["eth"].head.current() == ETH_BASE + 3
 
 
+def test_a_reset_of_every_pool_rewinds_the_registered_object_that_a_chain_with_no_pool_moved():
+    api = ControlApi(Registry(), WsSubscriptions())
+    api.advance({"chain": "eth", "blocks": 3})
+    assert CHAINS["eth"].head.current() == ETH_BASE + 3
+
+    status, reply = api.reset()
+
+    assert status == 200, reply
+    assert CHAINS["eth"].head.current() == ETH_BASE
+
+
 # ── the rule for head names does not change when a pool is named ──────────────
 def test_a_move_on_a_chain_with_several_heads_still_needs_a_head_name_when_the_pool_is_named():
     """A pool name does not stand in for a head name: a move on a chain with several heads still names one."""
@@ -465,6 +477,34 @@ def test_a_move_on_a_chain_with_several_heads_still_needs_a_head_name_when_the_p
     status, reply = api.advance({"chain": "lava", "pool": "lava-sim-grpc", "blocks": 3})
     assert status == 400
     assert "serves several heads, so name the one to move with 'head'" in reply["error"]
+
+
+def test_a_chain_whose_several_heads_are_named_after_no_interface_answers_each_of_them(
+    monkeypatch,
+):
+    """Only the heads of a lava chain are named after interfaces, and only they can be refused.
+
+    A chain whose several heads are named after something else answers each of them, whatever
+    interfaces the pool serves. This pool has no provider, so it serves no interface at all.
+    """
+
+    class TwoHeadedChain(EthChain):
+        def __init__(self) -> None:
+            super().__init__()
+            self.heads = {"fast": AdvancingHead(100), "slow": AdvancingHead(50)}
+
+    held = TwoHeadedChain()
+    monkeypatch.setitem(CHAINS, "two-headed", held)
+    registry = Registry()
+    registry.pools["x-sim"] = Pool(name="x-sim", chain="two-headed", chain_object=held)
+
+    status, reply = ControlApi(registry, WsSubscriptions()).advance(
+        {"chain": "two-headed", "pool": "x-sim", "head": "fast", "blocks": 2}
+    )
+
+    assert status == 200, reply
+    assert held.heads["fast"].current() == 102
+    assert held.heads["slow"].current() == 50
 
 
 def test_a_read_through_a_named_pool_of_a_chain_with_several_heads_needs_no_head_name():
