@@ -311,15 +311,15 @@ def test_reset_of_another_pool_leaves_this_chains_head_where_it_was():
         st, resp = api.reset("eth-sim")
         assert st == 200
         assert resp["chains"] == ["eth"]
-        assert CHAINS["eth"].head.current() == base
+        assert eth_head.current() == base
     finally:
-        api.reset()  # heads are a shared singleton — don't leak into other tests
+        api.reset()  # the heads belong to the chain objects of the pools: put them all back
 
 
 def _chain_identifier_of(registry, pool: str, pid: str) -> str:
     """The answer of one provider to ``{ chainIdentifier }``, built by its chain from its own quirks."""
     provider = registry.provider(pool, pid)
-    chain = CHAINS[registry.pools[pool].chain]
+    chain = registry.pools[pool].chain_object
     request = {"graphql": parse_graphql_request(json.dumps({"query": "{ chainIdentifier }"}).encode())}
     status, body = chain.build_success(request, ScenarioConfig().snapshot(), provider.quirks.snapshot())
     assert status == 200, body
@@ -362,9 +362,9 @@ def test_moving_the_testnet_head_leaves_the_mainnet_head_where_it_was():
         st, resp = api.reset("sui-testnet-graphql-sim")
         assert st == 200
         assert resp["chains"] == ["suit"]
-        assert CHAINS["suit"].head.current() == suit
+        assert suit_head.current() == suit
     finally:
-        api.reset()  # heads are a shared singleton — don't leak into other tests
+        api.reset()  # the heads belong to the chain objects of the pools: put them all back
 
 
 def test_pool_scoped_reset_names_only_its_own_providers():
@@ -824,7 +824,7 @@ def test_advance_moves_every_chains_head_through_the_real_registry():
     """The control route has to reach the chain the LISTENER serves.
 
     The per-chain tests build their own chain object, so they cannot tell
-    whether a head is wired to the ``CHAINS`` singleton that answers real
+    whether a head is wired to the chain object of the pool that answers real
     traffic. Proven by mutation: taking the heads off btc and solana entirely
     left this whole file green, because only eth was ever driven through here.
 

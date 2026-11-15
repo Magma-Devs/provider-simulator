@@ -318,12 +318,17 @@ def test_release_removes_each_subscription_of_one_connection_and_no_other():
 def test_a_frame_of_another_method_gets_the_content_of_the_chain():
     listener, provider = _ws_listener()
     connection = WsConnection(queue.Queue())
+    # The pool answers from the head of its own chain object. Moving that head tells it apart
+    # from the head of the registered object, which nothing moves.
+    head = provider.pool.chain_object.head
+    head.bump(7)
 
     block_number = _serve_frame(listener, connection, "eth_blockNumber", [], 8)
     no_method = listener.serve(RawRequest(body=b"{}", connection=connection))
 
     assert block_number.body["id"] == 8
-    assert int(block_number.body["result"], 16) == chain_for("eth").head.current()
+    assert int(block_number.body["result"], 16) == head.current()
+    assert head.current() != chain_for("eth").head.current(), "the two heads must differ here"
     assert no_method.body == {"jsonrpc": "2.0", "id": 1, "result": "0x1"}
     assert [_facts(row) for row in provider.log.get_history()] == [
         ("eth_blockNumber", "success", 0, 8),

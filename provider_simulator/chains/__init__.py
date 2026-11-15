@@ -73,7 +73,12 @@ CHAINS: dict[str, Chain] = {
 
 
 def chain_for(name: str) -> Chain:
-    """Return the chain instance for a chain name; unknown names fail loudly."""
+    """Return the REGISTERED chain object of a chain name; unknown names fail loudly.
+
+    A pool does not answer from this object. It holds a chain object of its own, built with
+    ``new_chain``. The registered object answers for a chain that no pool serves, and it is what
+    the tests of a chain class ask for when they need a chain and no pool.
+    """
     try:
         return CHAINS[name]
     except KeyError:

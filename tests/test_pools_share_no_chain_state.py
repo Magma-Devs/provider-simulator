@@ -5,7 +5,8 @@ every ordered pair of pools of the topology, except a pair that ``topology.FOLLO
 pool reads the head of the BTC pool that it follows.
 
 The check below runs over the real topology. It reports how many pools and how many pairs it
-examined, so a check that examined nothing cannot pass. It is run again over a registry that is
+examined, so a check that examined nothing cannot pass. A pool that owns no head, as ln-sim does,
+has nothing to compare in a pair: what it answers is read by the tests that name it. It is run again over a registry that is
 built the way the simulator once was, with one chain object for every pool of a chain, and it must
 fail there. A check that cannot fail proves nothing.
 """
@@ -373,3 +374,30 @@ def test_a_read_of_the_head_of_btc_sim_names_ln_sim_which_answers_that_head():
     answer = JsonRpcListener(ln, ln.endpoints[0]).serve(RawRequest(body=request, headers={})).body
     assert answer["result"]["block_height"] == reply["head"], "ln-sim answers the head that was moved"
     assert reply["pools"] == ["btc-sim", "ln-sim"]
+
+
+def _the_height_that_ln_sim_answers(registry: Registry) -> int:
+    ln = registry.provider("ln-sim", "1")
+    request = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "getinfo"}).encode()
+    answer = JsonRpcListener(ln, ln.endpoints[0]).serve(RawRequest(body=request, headers={})).body
+    assert isinstance(answer, dict), answer
+    return int(answer["result"]["block_height"])
+
+
+def test_a_move_of_a_btc_pool_that_ln_sim_does_not_follow_leaves_the_height_that_ln_sim_answers():
+    """The pair check compares the heads of two chain objects, and ln-sim owns none.
+
+    So what ln-sim answers is read here: the height of btc-sim, and of no other pool.
+    """
+    registry = build_registry()
+    api = _api(registry)
+    assert registry.pools["btc-failover-sim"].chain == "btc"
+    before = _the_height_that_ln_sim_answers(registry)
+
+    status, reply = api.advance({"chain": "btc", "pool": "btc-failover-sim", "blocks": 9})
+    assert status == 200, reply
+    assert _the_height_that_ln_sim_answers(registry) == before
+
+    status, reply = api.advance({"chain": "btc", "pool": "btc-sim", "blocks": 4})
+    assert status == 200, reply
+    assert _the_height_that_ln_sim_answers(registry) == before + 4

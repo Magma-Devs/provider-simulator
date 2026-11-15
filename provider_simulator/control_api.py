@@ -803,21 +803,19 @@ class ControlApi:
     # so one router's clean-up can no longer reach into another router's
     # providers.
     #
-    # Block heads are a weaker guarantee, and the difference matters. Heads
-    # belong to a chain object, and every pool of one chain holds the same
-    # object today. Scoping moves the heads of the object that pool holds
-    # instead of every chain, but the pools of eth share one, so an eth-sim
-    # reset still rewinds the head an eth-solo-sim test is watching.
-    # Providers are isolated; heads are narrowed.
+    # Block heads follow the same scope. A head belongs to a chain object, and
+    # every pool holds a chain object of its own, so a reset that names a pool
+    # rewinds the heads of that pool's object and no head of another pool. One
+    # case reaches further than the pool: a pool that follows another (ln-sim
+    # follows btc-sim, ``topology.FOLLOWS``) owns no head and reads the head of
+    # the pool that it follows. A reset of the follower leaves that head where it
+    # is, and the reply names both pools because they share a state.
     #
     # A chain object can own SEVERAL heads, one per interface, and a scoped
     # reset clears all of them — it cannot do otherwise, because the pool names
-    # the object and the object owns the set. The pools of lava share one
-    # object, so resetting lava-sim-grpc rewinds the REST and Tendermint-RPC
-    # heads that the two lava-cv pools are watching, on interfaces the gRPC
-    # pool does not serve.
-    # That is wider than it looks and is the reason to reset deliberately
-    # rather than as a habit.
+    # the object and the object owns the set. That includes the heads of
+    # interfaces that the pool does not serve. No provider of the pool answers
+    # those, and no other pool holds them.
     #
     # Only the scenario reset moves a head at all — clearing history leaves
     # every head alone.
@@ -1100,9 +1098,11 @@ class ControlApi:
         if head_name is not None and head_name not in heads:
             return 400, {"error": (f"chain {chain_name!r} has no head {head_name!r}. Heads: {sorted(heads)}")}
         # A chain that serves a head for each interface (lava) is read over one interface by a
-        # pool that serves it. A head of an interface that the named pool does not serve is
-        # answered by no provider of that pool, so a move of it changes nothing that a test can
-        # see, and a read of it is a number that no provider reports. Both are refused.
+        # pool that serves it. A request that NAMES a head of an interface that the pool does not
+        # serve is refused, whether it moves that head or only reads it: no provider of the pool
+        # answers it, so a move changes nothing that a test can see, and a read is a number that
+        # no provider reports. A read that names no head returns every head of the chain object,
+        # and the caller picks the one of the interface that it needs.
         if pool is not None and head_name is not None and len(heads) > 1 and head_name in INTERFACES:
             served = {endpoint.interface for provider in pool.providers.values() for endpoint in provider.endpoints}
             if head_name not in served:
