@@ -1391,6 +1391,15 @@ TOPOLOGY: tuple[TopologyRow, ...] = (
 )
 
 
+# The one place where pools share chain state. Every pool answers from a chain object of its
+# own, so a head moved or a reset made through one pool never reaches another. A pool that is
+# listed here follows another: ``{follower: leader}``. The follower reads the leader's head, so a
+# move or a reset of the leader changes what the follower answers. The LN pool reports the height
+# of the BTC pool that it follows, and owns no head to move. A follower that serves the chain of
+# its leader holds the very same chain object. A leader cannot itself follow a pool.
+FOLLOWS: dict[str, str] = {"ln-sim": "btc-sim"}
+
+
 def ports_of(
     pool: str,
     pid: str,

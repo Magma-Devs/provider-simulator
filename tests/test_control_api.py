@@ -25,6 +25,19 @@ def _api():
     return ControlApi(build_registry(), WsSubscriptions())
 
 
+# Every pool answers from a chain object of its own, so a request that moves or reads a head names
+# the pool. The pool of each chain that these tests name: one pool of the chain, whichever.
+POOL_OF = {
+    "eth": "eth-sim",
+    "btc": "btc-sim",
+    "ln": "ln-sim",
+    "solana": "solana-sim",
+    "lava": "lava-sim-rest",
+    "sui": "sui-graphql-sim",
+    "suit": "sui-testnet-graphql-sim",
+}
+
+
 # ── POST /scenario ────────────────────────────────────────────────────────────
 def test_apply_scenario_by_pool_pid():
     api = _api()
@@ -286,14 +299,15 @@ def test_reset_of_another_pool_leaves_this_chains_head_where_it_was():
     chain height a different router was being measured against. eth is the only
     chain with a movable head today, so btc-sim is the unrelated pool here."""
     api = _api()
+    eth_head = api.registry.pools["eth-sim"].chain_object.head
     try:
-        base = CHAINS["eth"].head.current()
-        api.advance({"chain": "eth", "blocks": 5})
-        assert CHAINS["eth"].head.current() == base + 5
+        base = eth_head.current()
+        api.advance({"chain": "eth", "pool": "eth-sim", "blocks": 5})
+        assert eth_head.current() == base + 5
         st, resp = api.reset("btc-sim")
         assert st == 200
         assert resp["chains"] == ["btc"]
-        assert CHAINS["eth"].head.current() == base + 5
+        assert eth_head.current() == base + 5
         st, resp = api.reset("eth-sim")
         assert st == 200
         assert resp["chains"] == ["eth"]
@@ -334,15 +348,17 @@ def test_moving_the_testnet_head_leaves_the_mainnet_head_where_it_was():
     the head that the mainnet routers are measured against, and a reset of one pool rewinds its own
     chain only."""
     api = _api()
+    sui_head = api.registry.pools["sui-graphql-sim"].chain_object.head
+    suit_head = api.registry.pools["sui-testnet-graphql-sim"].chain_object.head
     try:
-        sui, suit = CHAINS["sui"].head.current(), CHAINS["suit"].head.current()
-        api.advance({"chain": "suit", "blocks": 5})
-        assert CHAINS["suit"].head.current() == suit + 5
-        assert CHAINS["sui"].head.current() == sui
+        sui, suit = sui_head.current(), suit_head.current()
+        api.advance({"chain": "suit", "pool": "sui-testnet-graphql-sim", "blocks": 5})
+        assert suit_head.current() == suit + 5
+        assert sui_head.current() == sui
         st, resp = api.reset("sui-graphql-sim")
         assert st == 200
         assert resp["chains"] == ["sui"]
-        assert CHAINS["suit"].head.current() == suit + 5
+        assert suit_head.current() == suit + 5
         st, resp = api.reset("sui-testnet-graphql-sim")
         assert st == 200
         assert resp["chains"] == ["suit"]
@@ -470,10 +486,10 @@ def test_topology_has_no_side_effects():
 # ── advance ───────────────────────────────────────────────────────────────────
 def test_advance_eth_head_then_reset():
     api = _api()
-    st, resp = api.advance({"blocks": 5})
+    st, resp = api.advance({"pool": "eth-sim", "blocks": 5})
     assert st == 200
     assert resp["chain"] == "eth"
-    api.reset()  # heads are a shared singleton — don't leak into other tests
+    api.reset()
 
 
 def test_advance_a_chain_with_no_head_is_400():
@@ -485,7 +501,7 @@ def test_advance_a_chain_with_no_head_is_400():
     head", which is a different refusal with its own test.
     """
     api = _api()
-    st, resp = api.advance({"chain": "ln", "blocks": 5})
+    st, resp = api.advance({"chain": "ln", "pool": "ln-sim", "blocks": 5})
     assert st == 400, resp
     assert "no advanceable head" in resp["error"], resp["error"]
 
@@ -557,8 +573,8 @@ def test_advance_reads_a_head_back_without_moving_it():
     """
     api = _api()
     try:
-        first = api.advance({"chain": "eth"})[1]["head"]
-        second = api.advance({"chain": "eth"})[1]["head"]
+        first = api.advance({"chain": "eth", "pool": "eth-sim"})[1]["head"]
+        second = api.advance({"chain": "eth", "pool": "eth-sim"})[1]["head"]
         assert first == second, f"reading the head moved it: {first} then {second}"
     finally:
         api.reset()
@@ -567,7 +583,7 @@ def test_advance_reads_a_head_back_without_moving_it():
 def test_lava_serves_one_head_per_interface():
     api = _api()
     try:
-        st, resp = api.advance({"chain": "lava", "head": "rest"})
+        st, resp = api.advance({"chain": "lava", "pool": "lava-sim-rest", "head": "rest"})
         assert st == 200
         assert sorted(resp["heads"]) == ["grpc", "rest", "tendermintrpc"]
         # The three differ on purpose. Equal values would mean one head was
@@ -582,7 +598,7 @@ def test_lava_serves_one_head_per_interface():
 def test_lava_without_a_head_name_is_refused_and_names_the_heads():
     """Refusing beats guessing: picking one silently would move the wrong one."""
     api = _api()
-    st, resp = api.advance({"chain": "lava", "blocks": 5})
+    st, resp = api.advance({"chain": "lava", "pool": "lava-sim-rest", "blocks": 5})
     assert st == 400
     for name in ("rest", "grpc", "tendermintrpc"):
         assert name in resp["error"], f"the refusal must name {name}: {resp['error']}"
@@ -591,8 +607,8 @@ def test_lava_without_a_head_name_is_refused_and_names_the_heads():
 def test_advancing_one_lava_head_leaves_the_others_alone():
     api = _api()
     try:
-        before = api.advance({"chain": "lava", "head": "rest"})[1]["heads"]
-        after = api.advance({"chain": "lava", "head": "rest", "blocks": 7})[1]["heads"]
+        before = api.advance({"chain": "lava", "pool": "lava-sim-rest", "head": "rest"})[1]["heads"]
+        after = api.advance({"chain": "lava", "pool": "lava-sim-rest", "head": "rest", "blocks": 7})[1]["heads"]
         assert after["rest"] == before["rest"] + 7
         assert after["grpc"] == before["grpc"]
         assert after["tendermintrpc"] == before["tendermintrpc"]
@@ -604,11 +620,11 @@ def test_a_reset_clears_every_lava_head_not_only_one():
     """One un-reset head carries a test's advance into the next test."""
     api = _api()
     try:
-        base = api.advance({"chain": "lava", "head": "rest"})[1]["heads"]
+        base = api.advance({"chain": "lava", "pool": "lava-sim-rest", "head": "rest"})[1]["heads"]
         for name in ("rest", "grpc", "tendermintrpc"):
-            api.advance({"chain": "lava", "head": name, "blocks": 11})
+            api.advance({"chain": "lava", "pool": "lava-sim-rest", "head": name, "blocks": 11})
         api.reset()
-        after = api.advance({"chain": "lava", "head": "rest"})[1]["heads"]
+        after = api.advance({"chain": "lava", "pool": "lava-sim-rest", "head": "rest"})[1]["heads"]
         assert after == base, f"a reset left a head moved: {base} then {after}"
     finally:
         api.reset()
@@ -632,7 +648,7 @@ def test_reading_a_many_headed_chain_needs_no_head_name():
     """
     api = _api()
     try:
-        st, resp = api.advance({"chain": "lava"})
+        st, resp = api.advance({"chain": "lava", "pool": "lava-sim-rest"})
         assert st == 200
         assert sorted(resp["heads"]) == ["grpc", "rest", "tendermintrpc"]
         assert resp["head_name"] is None
@@ -645,7 +661,7 @@ def test_moving_a_many_headed_chain_still_needs_a_head_name():
     """A move IS ambiguous, so it stays refused. The read relaxation is not a
     licence to guess which head a caller meant to move."""
     api = _api()
-    st, resp = api.advance({"chain": "lava", "blocks": 3})
+    st, resp = api.advance({"chain": "lava", "pool": "lava-sim-rest", "blocks": 3})
     assert st == 400
     assert "move" in resp["error"], resp["error"]
 
@@ -653,8 +669,8 @@ def test_moving_a_many_headed_chain_still_needs_a_head_name():
 def test_reading_a_many_headed_chain_moves_nothing():
     api = _api()
     try:
-        first = api.advance({"chain": "lava"})[1]["heads"]
-        second = api.advance({"chain": "lava"})[1]["heads"]
+        first = api.advance({"chain": "lava", "pool": "lava-sim-rest"})[1]["heads"]
+        second = api.advance({"chain": "lava", "pool": "lava-sim-rest"})[1]["heads"]
         assert first == second, f"the read moved a head: {first} then {second}"
     finally:
         api.reset()
@@ -664,10 +680,10 @@ def test_a_single_headed_chain_needs_no_name_either_way():
     """Eth has one head, so neither reading nor moving it forces a choice."""
     api = _api()
     try:
-        read = api.advance({"chain": "eth"})[1]
+        read = api.advance({"chain": "eth", "pool": "eth-sim"})[1]
         assert read["head_name"] == "default"
         assert read["head"] == read["heads"]["default"]
-        moved = api.advance({"chain": "eth", "blocks": 6})[1]
+        moved = api.advance({"chain": "eth", "pool": "eth-sim", "blocks": 6})[1]
         assert moved["head"] == read["head"] + 6
     finally:
         api.reset()
@@ -683,11 +699,11 @@ def test_a_wrong_head_name_is_refused_rather_than_silently_substituted():
     """
     api = _api()
     try:
-        before = api.advance({"chain": "lava"})[1]["heads"]
-        st, resp = api.advance({"chain": "lava", "head": "tendermint", "blocks": 100})
+        before = api.advance({"chain": "lava", "pool": "lava-sim-rest"})[1]["heads"]
+        st, resp = api.advance({"chain": "lava", "pool": "lava-sim-rest", "head": "tendermint", "blocks": 100})
         assert st == 400, f"a wrong head name must be refused, got {st} {resp}"
         assert "tendermint'" in resp["error"], resp["error"]
-        after = api.advance({"chain": "lava"})[1]["heads"]
+        after = api.advance({"chain": "lava", "pool": "lava-sim-rest"})[1]["heads"]
         assert after == before, f"the refused call moved something: {before} then {after}"
     finally:
         api.reset()
@@ -701,7 +717,7 @@ def test_blocks_zero_is_a_read_not_a_move():
     """
     api = _api()
     try:
-        st, resp = api.advance({"chain": "lava", "blocks": 0})
+        st, resp = api.advance({"chain": "lava", "pool": "lava-sim-rest", "blocks": 0})
         assert st == 200, f"blocks=0 is a read and must be allowed: {resp}"
         assert sorted(resp["heads"]) == ["grpc", "rest", "tendermintrpc"]
     finally:
@@ -711,7 +727,7 @@ def test_blocks_zero_is_a_read_not_a_move():
 def test_setting_a_rate_to_zero_still_counts_as_a_move():
     """Stopping an advancing head IS a change, so it still needs a name."""
     api = _api()
-    st, resp = api.advance({"chain": "lava", "per_second": 0})
+    st, resp = api.advance({"chain": "lava", "pool": "lava-sim-rest", "per_second": 0})
     assert st == 400, f"per_second is a move at any value, got {st} {resp}"
 
 
@@ -770,7 +786,7 @@ def test_a_malformed_move_is_refused_rather_than_answered_as_a_read():
     """
     api = _api()
     try:
-        before = api.advance({"chain": "lava"})[1]["heads"]
+        before = api.advance({"chain": "lava", "pool": "lava-sim-rest"})[1]["heads"]
         for field_name, wrong in (
             ("blocks", None),
             ("blocks", False),
@@ -781,11 +797,11 @@ def test_a_malformed_move_is_refused_rather_than_answered_as_a_read():
             ("per_second", "fast"),
             ("per_second", -1),
         ):
-            body = {"chain": "lava", "head": "rest", field_name: wrong}
+            body = {"chain": "lava", "pool": "lava-sim-rest", "head": "rest", field_name: wrong}
             st, resp = api.advance(body)
             assert st == 400, f"{field_name}={wrong!r} must be refused, got {st} {resp}"
             assert field_name in resp["error"], resp["error"]
-            after = api.advance({"chain": "lava"})[1]["heads"]
+            after = api.advance({"chain": "lava", "pool": "lava-sim-rest"})[1]["heads"]
             assert after == before, f"the refused {body} moved something: {before} then {after}"
     finally:
         api.reset()
@@ -805,15 +821,15 @@ def test_advance_moves_every_chains_head_through_the_real_registry():
     api = _api()
     try:
         names = ["eth", "btc", "solana"]
-        start = {c: api.advance({"chain": c})[1]["heads"]["default"] for c in names}
+        start = {c: api.advance({"chain": c, "pool": POOL_OF[c]})[1]["heads"]["default"] for c in names}
         for moving in names:
-            st, resp = api.advance({"chain": moving, "blocks": 3})
+            st, resp = api.advance({"chain": moving, "pool": POOL_OF[moving], "blocks": 3})
             assert st == 200, resp
             assert resp["heads"]["default"] == start[moving] + 3, resp
             for other in names:
                 if other == moving:
                     continue
-                now = api.advance({"chain": other})[1]["heads"]["default"]
+                now = api.advance({"chain": other, "pool": POOL_OF[other]})[1]["heads"]["default"]
                 expected = start[other] + (3 if names.index(other) < names.index(moving) else 0)
                 assert now == expected, f"moving {moving} disturbed {other}: {now} != {expected}"
     finally:
@@ -823,12 +839,12 @@ def test_advance_moves_every_chains_head_through_the_real_registry():
 def test_a_reset_rewinds_the_new_heads_too():
     """A head nothing rewinds leaks into whatever runs next."""
     api = _api()
-    start = {c: api.advance({"chain": c})[1]["heads"]["default"] for c in ("btc", "solana")}
+    start = {c: api.advance({"chain": c, "pool": POOL_OF[c]})[1]["heads"]["default"] for c in ("btc", "solana")}
     for chain in ("btc", "solana"):
-        api.advance({"chain": chain, "blocks": 250})
-    assert {c: api.advance({"chain": c})[1]["heads"]["default"] for c in ("btc", "solana")} != start
+        api.advance({"chain": chain, "pool": POOL_OF[chain], "blocks": 250})
+    assert {c: api.advance({"chain": c, "pool": POOL_OF[c]})[1]["heads"]["default"] for c in ("btc", "solana")} != start
     api.reset()
-    assert {c: api.advance({"chain": c})[1]["heads"]["default"] for c in ("btc", "solana")} == start
+    assert {c: api.advance({"chain": c, "pool": POOL_OF[c]})[1]["heads"]["default"] for c in ("btc", "solana")} == start
 
 
 # ── the ports filter, checked against the provider's own endpoints ────────────
@@ -941,8 +957,8 @@ def test_a_frozen_head_on_a_chain_that_does_not_read_it_is_400(monkeypatch):
     """A chain that reports no head through ``reported_head`` would store the setting, echo it, and
     keep answering the moving head. Every chain of the topology reads it now, so the rule is
     pinned on a chain that is made not to read it for this test."""
-    monkeypatch.setattr(CHAINS["solana"], "reads_frozen_head", False)
     api = _api()
+    monkeypatch.setattr(api.registry.pools["solana-sim"].chain_object, "reads_frozen_head", False)
     st, resp = api.apply_scenario({"providers": {"solana-sim:1": {"frozen_head": 1_000}}})
     assert st == 400
     assert "the solana chain does not read it" in resp["error"], resp
@@ -1081,16 +1097,16 @@ def test_a_frozen_provider_keeps_its_block_while_the_head_advances_at_a_rate():
     try:
         start = _block_of(backup_door)
         assert api.apply_scenario({"providers": {"eth-failover-pair-sim:1": {"frozen_head": start}}})[0] == 200
-        assert api.advance({"chain": "eth", "per_second": 200})[0] == 200
+        assert api.advance({"chain": "eth", "pool": "eth-failover-pair-sim", "per_second": 200})[0] == 200
         deadline = time.monotonic() + 5.0
         while _block_of(backup_door) < start + 20:
-            assert time.monotonic() < deadline, "the eth head did not advance"
+            assert time.monotonic() < deadline, "the head of eth-failover-pair-sim did not advance"
             time.sleep(0.02)
         assert _block_of(primary_door) == start, "the frozen provider moved with the head"
         assert api.apply_scenario({"providers": {"eth-failover-pair-sim:1": {"frozen_head": None}}})[0] == 200
         assert _block_of(primary_door) >= start + 20, "a cleared provider answers the head again"
     finally:
-        api.reset()  # the heads are a shared singleton
+        api.reset()
 
 
 def test_a_frozen_head_with_a_ports_filter_leaves_the_ws_address_of_the_provider_moving():
@@ -1107,7 +1123,7 @@ def test_a_frozen_head_with_a_ports_filter_leaves_the_ws_address_of_the_provider
         start = _block_of(http_door)
         block = {"frozen_head": start, "ports": [http.port]}
         assert api.apply_scenario({"providers": {"eth-failover-httpws-sim:1": block}})[0] == 200
-        assert api.advance({"chain": "eth", "blocks": 7})[0] == 200
+        assert api.advance({"chain": "eth", "pool": "eth-failover-httpws-sim", "blocks": 7})[0] == 200
         assert _block_of(http_door) == start
         assert _block_of(ws_door) == start + 7, "the freeze reached the ws address too"
     finally:

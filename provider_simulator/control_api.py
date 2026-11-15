@@ -921,6 +921,14 @@ class ControlApi:
             "pool": pool,
             "providers": sorted(p.key for p in providers),
             "chains": sorted({name for name, _ in chains}) if scenario else [],
+            # The pools whose chain state this reset rewound: the pool, and every pool that shares
+            # its state. A reset of every pool names every pool. A reset of the history alone
+            # rewinds no chain state, so it names none.
+            "pools": (
+                self._pools_sharing_state([p.name for p in self.registry.pools.values()] if pool is None else [pool])
+                if scenario
+                else []
+            ),
             "caches": sorted(cache_names),
             "resp_proxies": sorted(resp_names),
         }
@@ -945,6 +953,10 @@ class ControlApi:
             return [], [], f"no pool {pool!r}; pools are {sorted(self.registry.pools)!r}"
         resolved = self.registry.pools[pool]
         return list(resolved.providers.values()), [(resolved.chain, resolved.chain_object)], ""
+
+    def _pools_sharing_state(self, names: list[str]) -> list[str]:
+        """The pools of ``names`` and every pool that shares chain state with one of them, sorted."""
+        return sorted({member for name in names for member in self.registry.state_group(name)})
 
     def _pools_by_chain_object(self, chain_name: str) -> list[tuple[Chain, list[str]]]:
         """The pools that serve a chain, grouped by the chain object each one holds.
@@ -1038,6 +1050,9 @@ class ControlApi:
             # No pool serves this chain, so no provider answers from an object of it.
             # The registered object takes the request.
             chain_object, sharing_pools = registered, []
+        # The pools that hold the object, and the pools that follow it: a move or a read of the
+        # head is a move or a read for every one of them.
+        sharing_pools = self._pools_sharing_state(sharing_pools)
         heads = dict(chain_object.iter_heads())
         if not heads:
             return 400, {"error": f"chain {chain_name!r} has no advanceable head"}
@@ -1088,10 +1103,10 @@ class ControlApi:
             "chain": chain_name,
             # The pool the request named, as a reset also echoes it: null when it named none.
             "pool": pool_name,
-            # Every pool that holds the object this call read or moved. The list goes by object,
-            # not by head: the ln pool answers from the btc head through an object of its own and
-            # is not in it, and a pool that holds a lava object may serve no interface that reads
-            # the head that moved.
+            # Every pool that shares the state this call read or moved: the pools that hold the
+            # object, and the pools that follow it (the ln pool follows btc-sim, and answers
+            # the height of its head). The list goes by object, not by head: a pool that holds a
+            # lava object may serve no interface that reads the head that moved.
             "pools": sharing_pools,
             "head_name": head_name,
             # Always every head, so a reader never has to ask twice or know in
@@ -1198,6 +1213,9 @@ class ControlApi:
                 "chain": pool.chain,
                 "providers": providers,
                 "names": names,
+                # The other pools whose chain state this pool shares. Empty for a pool that
+                # answers from a chain object of its own.
+                "shares_state_with": [other for other in self.registry.state_group(pool_name) if other != pool_name],
             }
         return 200, {"topology": topology}
 
