@@ -479,10 +479,62 @@ def test_a_read_through_a_named_pool_of_a_chain_with_several_heads_needs_no_head
 
 
 def test_a_named_head_through_a_named_pool_moves_only_that_head_of_the_chain_object_that_pool_holds():
-    own = LavaChain()
-    api = _api_where_pools_hold({"lava-sim-grpc": own})
-    own_before, registered_before = _heads_of(own), _heads_of(CHAINS["lava"])
-    status, reply = api.advance({"chain": "lava", "pool": "lava-sim-grpc", "head": "rest", "blocks": 3})
+    api = _api()
+    own = api.registry.pools["lava-sim-rest"].chain_object
+    other = api.registry.pools["lava-sim-grpc"].chain_object
+    own_before, other_before, registered_before = _heads_of(own), _heads_of(other), _heads_of(CHAINS["lava"])
+    status, reply = api.advance({"chain": "lava", "pool": "lava-sim-rest", "head": "rest", "blocks": 3})
     assert status == 200, reply
     assert _heads_of(own) == {**own_before, "rest": own_before["rest"] + 3}
+    assert _heads_of(other) == other_before
     assert _heads_of(CHAINS["lava"]) == registered_before
+
+
+# ── a head that the pool does not serve ───────────────────────────────────────
+# A chain that serves one head for each interface is read over one interface by a pool that serves
+# it. Only the head of an interface that the pool serves is a head that its providers answer.
+@pytest.mark.parametrize(
+    "pool, head",
+    [("lava-sim-rest", "rest"), ("lava-sim-grpc", "grpc"), ("lava-sim-tm", "tendermintrpc")],
+    ids=["rest", "grpc", "tendermintrpc"],
+)
+def test_a_head_of_an_interface_that_the_pool_serves_is_moved_and_read(pool, head):
+    api = _api()
+    before = api.advance({"chain": "lava", "pool": pool, "head": head})[1]["heads"][head]
+    status, reply = api.advance({"chain": "lava", "pool": pool, "head": head, "blocks": 4})
+    assert status == 200, reply
+    assert reply["heads"][head] == before + 4
+
+
+@pytest.mark.parametrize("blocks", [0, 3], ids=["a-read", "a-move"])
+def test_a_head_of_an_interface_that_the_pool_does_not_serve_is_refused_and_nothing_moves(blocks):
+    api = _api()
+    own = api.registry.pools["lava-sim-grpc"].chain_object
+    before = _heads_of(own)
+    status, reply = api.advance({"chain": "lava", "pool": "lava-sim-grpc", "head": "rest", "blocks": blocks})
+    assert status == 400, reply
+    assert reply == {
+        "error": "pool 'lava-sim-grpc' serves no 'rest' interface, so no provider of it answers the head "
+        "'rest'. Heads it answers: ['grpc']"
+    }
+    assert _heads_of(own) == before
+
+
+def test_a_change_of_the_rate_of_a_head_that_the_pool_does_not_serve_is_refused():
+    api = _api()
+    status, reply = api.advance({"chain": "lava", "pool": "lava-sim-rest", "head": "grpc", "per_second": 5})
+    assert status == 400, reply
+    assert "serves no 'grpc' interface" in reply["error"], reply
+
+
+def test_a_read_through_a_pool_that_names_no_head_still_answers_every_head_of_the_chain_object():
+    api = _api()
+    status, reply = api.advance({"chain": "lava", "pool": "lava-sim-grpc"})
+    assert status == 200, reply
+    assert reply["head_name"] is None
+    assert sorted(reply["heads"]) == ["grpc", "rest", "tendermintrpc"]
+
+
+def test_a_head_that_is_not_the_name_of_an_interface_is_not_checked_against_the_interfaces_of_the_pool():
+    status, reply = _api().advance({"chain": "eth", "pool": "eth-sim", "head": "default", "blocks": 1})
+    assert status == 200, reply

@@ -23,7 +23,7 @@ from provider_simulator.cache_sim import DEFAULT_MODE as DEFAULT_CACHE_MODE
 from provider_simulator.cache_sim import CacheEntry, CacheSimRegistry, UnknownMode
 from provider_simulator.chains import CHAINS, Chain
 from provider_simulator.domain.call_log import decode_row_headers
-from provider_simulator.domain.endpoint import TRANSPORTS
+from provider_simulator.domain.endpoint import INTERFACES, TRANSPORTS
 from provider_simulator.domain.registry import Registry
 from provider_simulator.listeners.ws import WsSubscriptions
 from provider_simulator.port_gate import PortGate
@@ -936,9 +936,9 @@ class ControlApi:
     def _scope(self, pool: str | None) -> tuple[list, list, str]:
         """Resolve a pool name into the providers and chains a reset may touch.
 
-        ``None`` means the whole simulator: every provider, every registered
-        chain. A pool name means that pool's providers and the single chain
-        object the pool holds (a pool serves exactly one chain —
+        ``None`` means the whole simulator: every provider, the chain object of
+        every pool and the registered chain objects. A pool name means that
+        pool's providers and the single chain object the pool holds (a pool serves exactly one chain —
         ``build_registry`` refuses a pool that declares two). Chains come back
         as ``(name, chain)`` pairs so the reply can name them.
 
@@ -946,7 +946,13 @@ class ControlApi:
         pool does not exist and nothing was touched.
         """
         if pool is None:
-            return self.registry.all_providers(), list(CHAINS.items()), ""
+            # Every chain object that something answers from: the object each pool holds, and the
+            # registered object of each chain, which a request for a chain that no pool serves
+            # moves. A chain object that two pools hold is reset once.
+            objects = {id(chain): (name, chain) for name, chain in CHAINS.items()}
+            for held in self.registry.pools.values():
+                objects[id(held.chain_object)] = (held.chain, held.chain_object)
+            return self.registry.all_providers(), list(objects.values()), ""
         if not isinstance(pool, str):
             return [], [], f"pool must be a string, got {type(pool).__name__}"
         if pool not in self.registry.pools:
@@ -1089,6 +1095,19 @@ class ControlApi:
                 }
         if head_name is not None and head_name not in heads:
             return 400, {"error": (f"chain {chain_name!r} has no head {head_name!r}. Heads: {sorted(heads)}")}
+        # A chain that serves a head for each interface (lava) is read over one interface by a
+        # pool that serves it. A head of an interface that the named pool does not serve is
+        # answered by no provider of that pool, so a move of it changes nothing that a test can
+        # see, and a read of it is a number that no provider reports. Both are refused.
+        if pool is not None and head_name is not None and len(heads) > 1 and head_name in INTERFACES:
+            served = {endpoint.interface for provider in pool.providers.values() for endpoint in provider.endpoints}
+            if head_name not in served:
+                return 400, {
+                    "error": (
+                        f"pool {pool_name!r} serves no {head_name!r} interface, so no provider of it answers "
+                        f"the head {head_name!r}. Heads it answers: {sorted(name for name in heads if name in served)}"
+                    )
+                }
 
         if head_name is not None:
             head = heads[head_name]

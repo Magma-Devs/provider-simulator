@@ -11,7 +11,6 @@ on the first request.
 """
 
 from provider_simulator import topology
-from provider_simulator.chains import new_chain
 from provider_simulator.domain.endpoint import INTERFACES, TRANSPORTS, Endpoint
 from provider_simulator.domain.provider import Pool, Provider
 from provider_simulator.domain.quirks import quirks_for
@@ -102,6 +101,10 @@ def build_registry(rows=None, follows=None) -> Registry:
     own chain holds the leader's chain object. An entry whose follower is not in the rows is
     left out, so a table of a few rows needs no entry for pools that it does not have.
     """
+    # Imported here and not at the top: chains.base imports domain.quirks, which loads this package,
+    # so an import at the top is circular and fails when the chains package is imported first.
+    from provider_simulator.chains import new_chain
+
     if rows is None:
         rows = topology.TOPOLOGY
     if follows is None:

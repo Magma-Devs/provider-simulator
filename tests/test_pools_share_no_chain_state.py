@@ -18,6 +18,7 @@ from provider_simulator import topology
 from provider_simulator.chains import CHAINS, EthChain, LnChain, new_chain
 from provider_simulator.chains.btc import BtcChain
 from provider_simulator.control_api import ControlApi
+from provider_simulator.domain.endpoint import INTERFACES
 from provider_simulator.domain.provider import Pool
 from provider_simulator.domain.registry import Registry, build_registry
 from provider_simulator.listeners import JsonRpcListener, RawRequest
@@ -36,9 +37,19 @@ def _heads_of(pool: Pool) -> dict[str, int]:
     return {name: head.current() for name, head in pool.chain_object.iter_heads()}
 
 
+def _heads_that_a_pool_serves(pool: Pool) -> list[str]:
+    """The heads of the chain object of a pool that a provider of the pool answers.
+
+    A head that is named for an interface is answered by a pool that serves the interface. Any
+    other head, such as the single head of eth, is answered by every pool of the chain.
+    """
+    served = {endpoint.interface for provider in pool.providers.values() for endpoint in provider.endpoints}
+    return [name for name in _heads_of(pool) if name not in INTERFACES or name in served]
+
+
 def _move_every_head(api: ControlApi, pool: Pool, blocks: int) -> None:
-    """Move each head of the chain object of a pool through the control API, naming the pool."""
-    for head_name in _heads_of(pool):
+    """Move each head that a pool serves, through the control API, naming the pool."""
+    for head_name in _heads_that_a_pool_serves(pool):
         status, reply = api.advance({"chain": pool.chain, "pool": pool.name, "head": head_name, "blocks": blocks})
         assert status == 200, reply
 
@@ -129,6 +140,53 @@ def test_only_the_pools_that_the_topology_declares_share_chain_state():
 
     assert joined == set(topology.FOLLOWS) | set(topology.FOLLOWS.values())
     assert topology.FOLLOWS == {"ln-sim": "btc-sim"}
+
+
+# ── The reset of every pool ───────────────────────────────────────────────
+
+
+def test_a_reset_of_every_pool_rewinds_the_head_of_a_chain_object_that_only_one_pool_holds():
+    registry = build_registry()
+    api = _api(registry)
+    base = {name: _heads_of(pool) for name, pool in registry.pools.items()}
+    for name in ("eth-sim", "btc-sim", "solana-sim", "lava-sim-grpc", "sui-graphql-sim"):
+        _move_every_head(api, registry.pools[name], 5)
+    assert {name: _heads_of(pool) for name, pool in registry.pools.items()} != base, "the moves must show"
+
+    status, reply = api.reset()
+
+    assert status == 200, reply
+    assert {name: _heads_of(pool) for name, pool in registry.pools.items()} == base
+    assert reply["chains"] == sorted({row[1] for row in topology.TOPOLOGY})
+
+
+def test_a_reset_of_every_pool_also_rewinds_the_registered_chain_object_that_no_pool_holds():
+    api = _api(Registry())
+    registered = CHAINS["eth"].head
+    before = registered.current()
+    registered.bump(3)
+    try:
+        status, reply = api.reset()
+        assert status == 200, reply
+        assert registered.current() == before
+    finally:
+        registered.reset()
+
+
+def test_a_reset_of_every_pool_rewinds_a_chain_object_that_two_pools_hold():
+    registry = Registry()
+    shared = EthChain()
+    for name in ("a-sim", "b-sim"):
+        registry.pools[name] = Pool(name=name, chain="eth", chain_object=shared)
+    base = shared.head.current()
+    shared.head.bump(6)
+
+    status, reply = _api(registry).reset()
+
+    assert status == 200, reply
+    assert shared.head.current() == base
+    assert reply["chains"] == sorted(CHAINS), "the registered chain objects are rewound too, so every chain is named"
+    assert reply["pools"] == ["a-sim", "b-sim"]
 
 
 # ── The chain factory ──────────────────────────────────────────────────────
