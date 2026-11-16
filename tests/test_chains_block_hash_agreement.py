@@ -11,10 +11,11 @@ test. Nothing would turn red. The test would pass, having measured something
 else, and nobody would look.
 
 Today the property holds for a structural reason rather than a decided one.
-Chain objects are process singletons (``provider_simulator/chains/__init__.py``)
-and the only per-provider inputs that reach ``build_success`` are the scenario
-and quirks snapshots — a provider's NAME never arrives, so nothing can salt a
-hash with it. That is not a guarantee. ``slot_offset`` already travels in
+Every pool holds a chain object of its own (``new_chain`` in
+``provider_simulator/chains/__init__.py``), and the only inputs that reach
+``build_success`` are that object's head and the scenario and quirks snapshots
+— a provider's NAME never arrives, and an object carries no salt, so nothing
+can salt a hash with either. That is not a guarantee. ``slot_offset`` already travels in
 quirks and is per-provider, so a hash salted from a quirk would compile, ship
 and read plausibly.
 
@@ -44,6 +45,7 @@ import pytest
 from provider_simulator.chains import CHAINS, SuiChain, chain_for
 from provider_simulator.chains.base import Chain
 from provider_simulator.domain.quirks import known_chains, quirks_for
+from provider_simulator.domain.registry import build_registry
 from provider_simulator.domain.scenario import ScenarioConfig
 from provider_simulator.graphql_document import parse_graphql_request
 from stubs_btc import btc_block_hash
@@ -281,6 +283,75 @@ def test_two_providers_at_different_heads_agree_on_one_heights_hash(chain_name: 
         compared += len(leader)
 
     assert compared, f"{chain_name} compared zero hash fields"
+
+
+def _pools_by_chain() -> dict[str, list]:
+    registry = build_registry()
+    by_chain: dict[str, list] = {}
+    for name in sorted(registry.pools):
+        by_chain.setdefault(registry.pools[name].chain, []).append(registry.pools[name])
+    return by_chain
+
+
+#: The chains with per-height probes that more than one pool serves. A chain with one pool has no second pool to ask.
+CHAINS_WITH_TWO_POOLS = sorted(
+    chain for chain, pools in _pools_by_chain().items() if PER_HEIGHT_HASH_PROBES.get(chain) and len(pools) > 1
+)
+
+#: How far the second pool is moved. Odd on purpose, so that a hash salted from the parity of a head differs too.
+MOVED = 777
+
+
+@pytest.mark.parametrize("chain_name", CHAINS_WITH_TWO_POOLS)
+def test_two_pools_of_one_chain_answer_the_same_hashes_for_one_height(chain_name: str) -> None:
+    """Each pool holds a chain object of its own, so two pools of a chain are two objects.
+
+    The second pool is moved ``MOVED`` blocks and the first stays where it is. Both are asked about the same absolute
+    height. A hash is a function of the height, so it cannot depend on which object answers: two routers on two pools
+    of one chain would otherwise read a fork in the simulator.
+    """
+    pools = _pools_by_chain()[chain_name]
+    first, second = pools[0], pools[-1]
+    assert (
+        first.chain_object is not second.chain_object
+    ), f"{first.name} and {second.name} hold one chain object, so this compares an object with itself"
+    for _head_name, head in second.chain_object.iter_heads():
+        head.bump(MOVED)
+
+    # First prove that the two pools are in different places, as the guard above does for two providers.
+    lag_probe = LAG_IS_VISIBLE_AT[chain_name]
+    request = probe_request(chain_name, lag_probe)
+    where = [
+        reply_of(
+            chain_name, pool.chain_object.build_success(request, _scenario(), _quirks(chain_name), lag_probe[0])[1]
+        )
+        for pool in (first, second)
+    ]
+    assert (
+        where[0] != where[1]
+    ), f"{chain_name}: both pools answered {lag_probe[1]} with {where[0]!r}, so the move did not reach it"
+
+    compared = 0
+    for probe in PER_HEIGHT_HASH_PROBES[chain_name]:
+        leader = ask(first.chain_object, chain_name, probe, {}, {})
+        moved = ask(second.chain_object, chain_name, probe, {}, {})
+        assert leader, f"{chain_name} {probe[1]} returned no hash at all, so this probe compared nothing"
+        split = disagreements(leader, moved)
+        assert not split, (
+            f"{chain_name} {probe[1]} at height {HEIGHT}: {first.name} and {second.name} disagree about the same block.\n"
+            + "".join(f"  {field}: {a} != {b}\n" for field, (a, b) in split.items())
+            + "The router reads a disagreement like this as a chain fork."
+        )
+        compared += len(leader)
+    assert compared, f"{chain_name} compared zero hash fields"
+
+
+def test_the_one_checked_chain_with_a_single_pool_is_the_one_left_out_of_the_two_pool_check() -> None:
+    """A chain that gets a second pool must join the check, so its absence is pinned here."""
+    checked = {chain for chain, probes in PER_HEIGHT_HASH_PROBES.items() if probes}
+
+    assert checked - set(CHAINS_WITH_TWO_POOLS) == {"suit"}, sorted(checked - set(CHAINS_WITH_TWO_POOLS))
+    assert set(CHAINS_WITH_TWO_POOLS) == {"btc", "eth", "lava", "sui"}
 
 
 def test_a_chain_whose_only_hash_is_a_constant_still_agrees_across_providers() -> None:
