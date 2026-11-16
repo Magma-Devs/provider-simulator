@@ -162,7 +162,7 @@ class TestDefaults:
     def test_eth_getLogs_unaffected_when_primitive_unset(self, sim):
         """Without logs_indexed_up_to, eth_getLogs returns configured response.
 
-        Kraken-CCIP risk control: the primitive must not change behaviour for
+        CCIP risk control: the primitive must not change behaviour for
         callers that don't opt in — existing baseline tests stay green.
         """
         _post(
@@ -193,8 +193,8 @@ class TestEmptyMode:
     def test_empty_mode_returns_empty_array_when_range_exceeds_indexed(self, sim):
         """Query touches a block above logs_indexed_up_to → response forced to [].
 
-        Kraken-CCIP risk: a stale-indexed provider claiming 'no events here'
-        is the silent-failure case Kraken-CCIP polls would hit without CV.
+        CCIP risk: a stale-indexed provider claiming 'no events here'
+        is the silent-failure case a CCIP poller would hit without CV.
         """
         _post(
             _ctrl(sim, "/scenario"),
@@ -266,7 +266,7 @@ class TestPartialMode:
     def test_partial_mode_filters_entries_past_indexed(self, sim):
         """logs_lag_mode='partial' keeps only entries with blockNumber <= indexed.
 
-        Kraken-CCIP risk: some providers index partially during a lag window —
+        CCIP risk: some providers index partially during a lag window —
         a CCIPMessageReceived event in the lagged range would be silently
         omitted from the response. CV catches the divergence with other
         providers that have caught up.
@@ -345,7 +345,7 @@ class TestMethodIsolation:
     def test_eth_blockNumber_unaffected_by_logs_lag(self, sim):
         """logs_indexed_up_to does NOT shift eth_blockNumber.
 
-        Kraken-CCIP risk: the WHOLE POINT of the primitive is head-fresh +
+        CCIP risk: the WHOLE POINT of the primitive is head-fresh +
         logs-lagged. If eth_blockNumber were also shifted, this would
         collapse into the existing blocks_behind primitive and we'd lose
         the divergence-vs-consensus contrast the test bundle relies on.
