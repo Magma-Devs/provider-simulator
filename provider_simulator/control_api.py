@@ -999,7 +999,9 @@ class ControlApi:
         move more than one. A body that names a pool and no ``chain`` takes the
         chain of the pool. A named pool must exist and serve the chain, or the
         answer is a 400 that says so. The reply carries the pool that was named
-        (null for none) and ``pools``, the pools that share the object it used.
+        (null for none) and ``pools``, every pool that shares chain state with
+        the object it used: the pools that hold it, the pools that follow it,
+        and the pool that it follows.
 
         ``head`` names which one on a chain that serves several — lava answers
         a different height over REST, gRPC and Tendermint-RPC, so one name per

@@ -61,9 +61,10 @@ curl -si -X POST "$SIM_CONTROL_URL/reset/all"
 # providers only.
 #
 # Chain heights are different, and only /reset and /reset/all move them —
-# /history/clear never does. A height is one value per chain shared by every
-# pool on it, so a pool scope narrows which chains get rewound but a sibling
-# pool on the same chain still sees it.
+# /history/clear never does. Each pool holds a chain object of its own, so a
+# height is one value per pool, and a pool scope rewinds the height of that
+# pool only. The ln-sim pool follows btc-sim and reports its head, so a move or
+# a reset of btc-sim shows in ln-sim.
 #
 # The reply names the scope it actually cleared, so a caller can check rather
 # than assume.

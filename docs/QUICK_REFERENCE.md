@@ -84,10 +84,11 @@ Router ─→ Provider 1/2/3 (ports 18545-47) ─→ JSONRPCHandler ─→ Read 
 - All three take an optional `{"pool": "<pool>"}` body. Without it they clear
   every pool. With it they touch that pool's providers only. An unknown pool
   is a 400 naming the pools that exist.
-- Chain heights follow a weaker rule, and only `/reset` and `/reset/all` move
-  them at all — clearing history never does. A height is one value per chain,
-  shared by every pool on it, so scoping narrows which chains are rewound but
-  cannot stop a sibling pool on the same chain from seeing it.
+- Only `/reset` and `/reset/all` move chain heights — clearing history never
+  does. Each pool holds a chain object of its own, so a height is one value per
+  pool, and a reset that names a pool rewinds the height of that pool only. The
+  `ln-sim` pool follows `btc-sim`: it reports the height of the `btc-sim` head,
+  so a move or a reset of `btc-sim` shows in `ln-sim`.
 - `GET /scenario` → Read current state
 - `GET /health` → Health check
 - `GET /stats` → Per-provider counters

@@ -575,6 +575,22 @@ def test_a_read_through_a_pool_that_names_no_head_still_answers_every_head_of_th
     assert sorted(reply["heads"]) == ["grpc", "rest", "tendermintrpc"]
 
 
+def test_a_pool_whose_providers_serve_different_interfaces_answers_the_head_of_each_one_of_them():
+    """A pool serves an interface when any of its providers does, and not only the first provider."""
+    rows = (
+        ("l-sim", "lava", "1", "l-provider-1", False, "", (("rest", "http", 30_100),)),
+        ("l-sim", "lava", "2", "l-provider-2", False, "", (("grpc", "http2", 30_101),)),
+    )
+    api = _api(build_registry(rows, follows={}))
+
+    for head in ("rest", "grpc"):
+        status, reply = api.advance({"chain": "lava", "pool": "l-sim", "head": head, "blocks": 1})
+        assert status == 200, reply
+    status, reply = api.advance({"chain": "lava", "pool": "l-sim", "head": "tendermintrpc", "blocks": 1})
+    assert status == 400, reply
+    assert "serves no 'tendermintrpc' interface" in reply["error"], reply
+
+
 def test_a_head_that_is_not_the_name_of_an_interface_is_not_checked_against_the_interfaces_of_the_pool():
     status, reply = _api().advance({"chain": "eth", "pool": "eth-sim", "head": "default", "blocks": 1})
     assert status == 200, reply

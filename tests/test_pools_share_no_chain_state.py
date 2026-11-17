@@ -303,6 +303,26 @@ def test_a_registry_that_holds_one_object_for_two_pools_puts_them_in_one_group()
     assert registry.state_group("c-sim") == ["c-sim"]
 
 
+@pytest.mark.parametrize(
+    "follows_in_order",
+    [("b2-sim", "l-sim"), ("l-sim", "b2-sim")],
+    ids=["follower-of-its-own-chain-first", "follower-of-another-chain-first"],
+)
+def test_the_pools_that_follow_one_leader_are_one_group_whatever_the_order_of_the_table(follows_in_order):
+    """The group is closed: a pool that joins it brings in every pool that holds the same chain object.
+
+    ``l-sim`` follows ``b-sim`` and brings ``b-sim`` in. ``b2-sim`` follows ``b-sim`` on its own chain, so it
+    holds the object of ``b-sim``, and it joins the group only after ``b-sim`` did. A table that lists ``b2-sim``
+    first has no entry that brings it in during the first pass.
+    """
+    follows = {name: "b-sim" for name in follows_in_order}
+    registry = build_registry(_rows(("b-sim", "btc"), ("b2-sim", "btc"), ("l-sim", "ln")), follows=follows)
+
+    assert registry.pools["b2-sim"].chain_object is registry.pools["b-sim"].chain_object
+    group = ["b-sim", "b2-sim", "l-sim"]
+    assert registry.state_group("l-sim") == registry.state_group("b2-sim") == registry.state_group("b-sim") == group
+
+
 # ── The replies name the pools that share a state ──────────────────────────
 
 

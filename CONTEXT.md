@@ -222,14 +222,15 @@ _Avoid_: container, factory, world
 
 **Chain object**:
 The record that holds the state of one chain: its head, or its heads when the chain has
-one for each interface. A pool holds one, and its providers answer from it. Pools that
-hold the very same object share its heads, so a move or a reset through one pool shows in
-the others. Today every pool of a chain holds the one object that is registered for that
-chain. `POST /advance` can name the pool whose chain object it reads or moves, and must
-name it once the pools of a chain hold more than one. Its reply lists the pools that hold
-the object it used. A pool can answer from a head that it does not hold: the `ln` pool
-reports the height of the `btc` head through a chain object of its own, so a move of `btc`
-shows in `ln`, and `ln` is not in that list.
+one for each interface. Every pool holds a chain object of its own, and its providers
+answer from it, so a move or a reset through one pool never shows in another pool.
+`POST /advance` names the pool whose chain object it reads or moves, and it must name the
+pool when the pools that serve the chain hold more than one chain object. Its reply lists
+the pools that share chain state with the object it used: the pools that hold it, the
+pools that follow it, and the pool that it follows. A pool can answer from a head that it
+does not hold: the `ln-sim` pool follows `btc-sim` and reports the height of the `btc-sim`
+head through a chain object of its own, so a move or a reset of `btc-sim` shows in
+`ln-sim`, and a reply that names one of the two names the other.
 _Avoid_: chain state, chain instance, chain (the name of the blockchain, not the record)
 
 **Provider record**:
