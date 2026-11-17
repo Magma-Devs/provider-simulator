@@ -416,10 +416,10 @@ def test_sui_cv_graphql_sim_has_providers_and_ports_of_its_own():
     """The two Sui GraphQL pools are separate Provider objects on separate ports.
 
     A scenario armed on a provider of one pool does not reach a provider of the
-    other. The pools do share one thing: every pool of the chain sui serves the one
-    SuiChain object in CHAINS, so there is one checkpoint head, and a reset addressed
-    to one of those pools rewinds that head for all of them. The pool of the chain
-    suit has a head of its own. The registry already refuses a port
+    other. Each pool holds a chain object of its own, so a checkpoint head moved
+    through one of them is not the head of the other, and a reset addressed to one
+    of them rewinds its head only. The pool of the chain suit has a head of its own
+    too. The registry already refuses a port
     that two providers share, so a clash stops build_registry() before the
     assertions below run: they state the separation of the two pools in one place
     and cannot fail on their own.

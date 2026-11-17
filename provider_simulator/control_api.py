@@ -23,7 +23,7 @@ from provider_simulator.cache_sim import DEFAULT_MODE as DEFAULT_CACHE_MODE
 from provider_simulator.cache_sim import CacheEntry, CacheSimRegistry, UnknownMode
 from provider_simulator.chains import CHAINS, Chain
 from provider_simulator.domain.call_log import decode_row_headers
-from provider_simulator.domain.endpoint import TRANSPORTS
+from provider_simulator.domain.endpoint import INTERFACES, TRANSPORTS
 from provider_simulator.domain.registry import Registry
 from provider_simulator.listeners.ws import WsSubscriptions
 from provider_simulator.port_gate import PortGate
@@ -803,21 +803,19 @@ class ControlApi:
     # so one router's clean-up can no longer reach into another router's
     # providers.
     #
-    # Block heads are a weaker guarantee, and the difference matters. Heads
-    # belong to a chain object, and every pool of one chain holds the same
-    # object today. Scoping moves the heads of the object that pool holds
-    # instead of every chain, but the pools of eth share one, so an eth-sim
-    # reset still rewinds the head an eth-solo-sim test is watching.
-    # Providers are isolated; heads are narrowed.
+    # Block heads follow the same scope. A head belongs to a chain object, and
+    # every pool holds a chain object of its own, so a reset that names a pool
+    # rewinds the heads of that pool's object and no head of another pool. One
+    # case reaches further than the pool: a pool that follows another (ln-sim
+    # follows btc-sim, ``topology.FOLLOWS``) owns no head and reads the head of
+    # the pool that it follows. A reset of the follower leaves that head where it
+    # is, and the reply names both pools because they share a state.
     #
     # A chain object can own SEVERAL heads, one per interface, and a scoped
     # reset clears all of them — it cannot do otherwise, because the pool names
-    # the object and the object owns the set. The pools of lava share one
-    # object, so resetting lava-sim-grpc rewinds the REST and Tendermint-RPC
-    # heads that the two lava-cv pools are watching, on interfaces the gRPC
-    # pool does not serve.
-    # That is wider than it looks and is the reason to reset deliberately
-    # rather than as a habit.
+    # the object and the object owns the set. That includes the heads of
+    # interfaces that the pool does not serve. No provider of the pool answers
+    # those, and no other pool holds them.
     #
     # Only the scenario reset moves a head at all — clearing history leaves
     # every head alone.
@@ -921,6 +919,18 @@ class ControlApi:
             "pool": pool,
             "providers": sorted(p.key for p in providers),
             "chains": sorted({name for name, _ in chains}) if scenario else [],
+            # The pool, and every pool that shares chain state with it: a pool that holds the same
+            # chain object, a pool that follows it, and a pool that it follows. A reset rewinds the
+            # heads of the chain objects in its scope, and the head of a pool that the reset pool
+            # only follows is not one of them. So the list names the pools that are joined to the
+            # reset pool, and a reader who needs to know which heads moved reads the heads. A reset
+            # of every pool names every pool. A reset of the history alone rewinds no chain state,
+            # so it names none.
+            "pools": (
+                self._pools_sharing_state([p.name for p in self.registry.pools.values()] if pool is None else [pool])
+                if scenario
+                else []
+            ),
             "caches": sorted(cache_names),
             "resp_proxies": sorted(resp_names),
         }
@@ -928,9 +938,9 @@ class ControlApi:
     def _scope(self, pool: str | None) -> tuple[list, list, str]:
         """Resolve a pool name into the providers and chains a reset may touch.
 
-        ``None`` means the whole simulator: every provider, every registered
-        chain. A pool name means that pool's providers and the single chain
-        object the pool holds (a pool serves exactly one chain —
+        ``None`` means the whole simulator: every provider, the chain object of
+        every pool and the registered chain objects. A pool name means that
+        pool's providers and the single chain object the pool holds (a pool serves exactly one chain —
         ``build_registry`` refuses a pool that declares two). Chains come back
         as ``(name, chain)`` pairs so the reply can name them.
 
@@ -938,13 +948,23 @@ class ControlApi:
         pool does not exist and nothing was touched.
         """
         if pool is None:
-            return self.registry.all_providers(), list(CHAINS.items()), ""
+            # Every chain object that something answers from: the object each pool holds, and the
+            # registered object of each chain, which a request for a chain that no pool serves
+            # moves. A chain object that two pools hold is reset once.
+            objects = {id(chain): (name, chain) for name, chain in CHAINS.items()}
+            for held in self.registry.pools.values():
+                objects[id(held.chain_object)] = (held.chain, held.chain_object)
+            return self.registry.all_providers(), list(objects.values()), ""
         if not isinstance(pool, str):
             return [], [], f"pool must be a string, got {type(pool).__name__}"
         if pool not in self.registry.pools:
             return [], [], f"no pool {pool!r}; pools are {sorted(self.registry.pools)!r}"
         resolved = self.registry.pools[pool]
         return list(resolved.providers.values()), [(resolved.chain, resolved.chain_object)], ""
+
+    def _pools_sharing_state(self, names: list[str]) -> list[str]:
+        """The pools of ``names`` and every pool that shares chain state with one of them, sorted."""
+        return sorted({member for name in names for member in self.registry.state_group(name)})
 
     def _pools_by_chain_object(self, chain_name: str) -> list[tuple[Chain, list[str]]]:
         """The pools that serve a chain, grouped by the chain object each one holds.
@@ -979,7 +999,9 @@ class ControlApi:
         move more than one. A body that names a pool and no ``chain`` takes the
         chain of the pool. A named pool must exist and serve the chain, or the
         answer is a 400 that says so. The reply carries the pool that was named
-        (null for none) and ``pools``, the pools that share the object it used.
+        (null for none) and ``pools``, every pool that shares chain state with
+        the object it used: the pools that hold it, the pools that follow it,
+        and the pool that it follows.
 
         ``head`` names which one on a chain that serves several — lava answers
         a different height over REST, gRPC and Tendermint-RPC, so one name per
@@ -1038,6 +1060,9 @@ class ControlApi:
             # No pool serves this chain, so no provider answers from an object of it.
             # The registered object takes the request.
             chain_object, sharing_pools = registered, []
+        # The pools that hold the object, and the pools that follow it: a move or a read of the
+        # head is a move or a read for every one of them.
+        sharing_pools = self._pools_sharing_state(sharing_pools)
         heads = dict(chain_object.iter_heads())
         if not heads:
             return 400, {"error": f"chain {chain_name!r} has no advanceable head"}
@@ -1074,6 +1099,21 @@ class ControlApi:
                 }
         if head_name is not None and head_name not in heads:
             return 400, {"error": (f"chain {chain_name!r} has no head {head_name!r}. Heads: {sorted(heads)}")}
+        # A chain that serves a head for each interface (lava) is read over one interface by a
+        # pool that serves it. A request that NAMES a head of an interface that the pool does not
+        # serve is refused, whether it moves that head or only reads it: no provider of the pool
+        # answers it, so a move changes nothing that a test can see, and a read is a number that
+        # no provider reports. A read that names no head returns every head of the chain object,
+        # and the caller picks the one of the interface that it needs.
+        if pool is not None and head_name is not None and len(heads) > 1 and head_name in INTERFACES:
+            served = {endpoint.interface for provider in pool.providers.values() for endpoint in provider.endpoints}
+            if head_name not in served:
+                return 400, {
+                    "error": (
+                        f"pool {pool_name!r} serves no {head_name!r} interface, so no provider of it answers "
+                        f"the head {head_name!r}. Heads it answers: {sorted(name for name in heads if name in served)}"
+                    )
+                }
 
         if head_name is not None:
             head = heads[head_name]
@@ -1088,10 +1128,10 @@ class ControlApi:
             "chain": chain_name,
             # The pool the request named, as a reset also echoes it: null when it named none.
             "pool": pool_name,
-            # Every pool that holds the object this call read or moved. The list goes by object,
-            # not by head: the ln pool answers from the btc head through an object of its own and
-            # is not in it, and a pool that holds a lava object may serve no interface that reads
-            # the head that moved.
+            # Every pool that shares the state this call read or moved: the pools that hold the
+            # object, and the pools that follow it (the ln pool follows btc-sim, and answers
+            # the height of its head). The list goes by object, not by head: a pool that holds a
+            # lava object may serve no interface that reads the head that moved.
             "pools": sharing_pools,
             "head_name": head_name,
             # Always every head, so a reader never has to ask twice or know in
@@ -1198,6 +1238,9 @@ class ControlApi:
                 "chain": pool.chain,
                 "providers": providers,
                 "names": names,
+                # The other pools whose chain state this pool shares. Empty for a pool that
+                # answers from a chain object of its own.
+                "shares_state_with": [other for other in self.registry.state_group(pool_name) if other != pool_name],
             }
         return 200, {"topology": topology}
 

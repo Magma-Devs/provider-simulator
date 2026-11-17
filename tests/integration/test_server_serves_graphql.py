@@ -23,7 +23,6 @@ import pytest
 
 import server as server_module
 from provider_simulator import topology
-from provider_simulator.chains import CHAINS
 from stubs_sui_graphql import SUI_BASE_CHECKPOINT, SUI_CHAIN_ID
 
 _PROVIDER_PORT, _CONTROL_PORT, _RESP_CONTROL_PORT = 28771, 29771, 29772
@@ -171,13 +170,13 @@ def test_a_path_that_starts_with_two_slashes_is_recorded_with_one():
 
 def test_advance_moves_the_tip_over_the_wire():
     try:
-        status, moved = _control_post("/advance", {"chain": "sui", "blocks": 5})
+        status, moved = _control_post("/advance", {"chain": "sui", "pool": _POOL, "blocks": 5})
         assert status == 200
         assert moved["heads"] == {"default": SUI_BASE_CHECKPOINT + 5}
         _status, polled, _headers = _graphql(_HEAD_POLL)
         assert polled["data"]["serviceConfig"]["availableRange"]["last"]["sequenceNumber"] == SUI_BASE_CHECKPOINT + 5
     finally:
-        CHAINS["sui"].head.reset()
+        _control_post("/reset", {"pool": _POOL})
     _status, polled, _headers = _graphql(_HEAD_POLL)
     assert polled["data"]["serviceConfig"]["availableRange"]["last"]["sequenceNumber"] == SUI_BASE_CHECKPOINT
 

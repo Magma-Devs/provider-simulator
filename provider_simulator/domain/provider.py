@@ -40,8 +40,9 @@ class Pool:
     chain: str  # chain name: the key of the chain registry and of the quirks table
     # The chain that the providers of this pool answer from. A reader that starts from a
     # pool takes the chain here and never looks it up by name. A pool built without one
-    # holds the registered chain of its name, so the pools of one chain share one object
-    # and its head. A caller that wants a pool to have a chain of its own passes it.
+    # builds a chain object of its own, with a head of its own, so no other pool sees a head
+    # moved or reset through this one. A caller that wants pools to share a chain object
+    # passes the same one to each.
     chain_object: "Chain" = field(default=None, repr=False)  # type: ignore[assignment]  # a Chain after __post_init__
     providers: dict[str, "Provider"] = field(default_factory=dict, init=False)
 
@@ -49,9 +50,9 @@ class Pool:
         if self.chain_object is None:
             # Imported here and not at the top: chains.base imports domain.quirks, which
             # loads this package, so an import at the top is circular.
-            from provider_simulator.chains import chain_for
+            from provider_simulator.chains import new_chain
 
-            self.chain_object = chain_for(self.chain)
+            self.chain_object = new_chain(self.chain)
 
     def add_provider(
         self,

@@ -618,7 +618,7 @@ def _slots(url: str, method: str = "getSlot") -> list[int]:
 
 
 def _advance(sim, blocks: int) -> None:
-    status, body = _post(_ctrl(sim, "/advance"), {"chain": "solana", "blocks": blocks})
+    status, body = _post(_ctrl(sim, "/advance"), {"chain": "solana", "pool": "solana-sim", "blocks": blocks})
     assert status == 200, body
 
 
