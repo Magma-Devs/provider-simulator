@@ -14,7 +14,8 @@ new format — a stale client fails loudly, never silently.
 import json
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import fields
 
 from provider_simulator import fault_policy
@@ -565,6 +566,58 @@ def _normalise_responses(responses: object) -> object:
     raise ValueError("responses must be an object (or a list of pairs for REST)")
 
 
+class PoolLocks:
+    """One lock for each pool, for everything that can move a port of that pool.
+
+    A scenario write or a reset takes the lock of each pool it touches, so two
+    calls that touch different pools never wait for each other. A call that
+    takes more than one lock takes them in name order, so two such calls cannot
+    each hold a lock that the other waits for. A pool gets its lock the first
+    time a call asks for it.
+    """
+
+    def __init__(self) -> None:
+        self._locks: dict[str, threading.Lock] = {}
+        self._guard = threading.Lock()
+
+    def _lock_of(self, pool: str) -> threading.Lock:
+        with self._guard:
+            return self._locks.setdefault(pool, threading.Lock())
+
+    @contextmanager
+    def of(self, pools: Iterable[str]) -> Iterator[None]:
+        """Hold the lock of each of these pools. Waits as long as it takes for each one."""
+        held: list[threading.Lock] = []
+        try:
+            for name in sorted(set(pools)):
+                lock = self._lock_of(name)
+                lock.acquire()
+                held.append(lock)
+            yield
+        finally:
+            for lock in reversed(held):
+                lock.release()
+
+    @contextmanager
+    def within(self, pools: Iterable[str], timeout_s: float) -> Iterator[None]:
+        """Hold the lock of each of these pools that is free soon enough.
+
+        The wait is ``timeout_s`` in all, not for each lock. A lock that is still
+        held when the time is up is left out, and the body runs without it.
+        """
+        deadline = time.monotonic() + timeout_s
+        held: list[threading.Lock] = []
+        try:
+            for name in sorted(set(pools)):
+                lock = self._lock_of(name)
+                if lock.acquire(timeout=max(deadline - time.monotonic(), 0.0)):
+                    held.append(lock)
+            yield
+        finally:
+            for lock in reversed(held):
+                lock.release()
+
+
 class ControlApi:
     def __init__(
         self,
@@ -595,18 +648,42 @@ class ControlApi:
         # sockets holds none and refuses mode="port_closed" instead of storing
         # a fault nothing performs.
         self.port_gates: dict[int, PortGate] = {}
-        # One writer at a time through everything that can move a provider port:
+        # A lock for each pool, for everything that can move a provider port:
         # POST /scenario, the two scenario resets and the scenario time-to-live
-        # sweep. Each holds it from its first check until its ports have
-        # settled, so the state a caller waits for is the state its own write
-        # asked for, and no second writer can change it meanwhile. /ready takes
-        # it for its read, so it never probes a port part way through a change.
-        self.port_lock = threading.Lock()
+        # sweep. A call holds the lock of each pool it touches from its first
+        # check until its ports have settled, so the state a caller waits for is
+        # the state its own write asked for, and no second writer to that pool
+        # can change it meanwhile. A call on another pool does not wait for any
+        # of this. /ready takes every lock for its read, so it never probes a
+        # port part way through a change.
+        self.port_locks = PoolLocks()
 
     # ── POST /scenario ──────────────────────────────────────────────────────
     def apply_scenario(self, body: object) -> tuple[int, dict]:
-        with self.port_lock:
+        with self.port_locks.of(self._pools_named_in(body)):
             return self._apply_scenario(body)
+
+    def _pools_named_in(self, body: object) -> list[str]:
+        """The pools of a scenario body, for the locks the write takes.
+
+        A key that names no pool, and a body that is not a scenario, take no
+        lock: the write refuses them before it changes anything.
+        """
+        providers = body.get("providers") if isinstance(body, dict) else None
+        if not isinstance(providers, dict):
+            return []
+        named = {str(key).split(":", 1)[0] for key in providers}
+        return sorted(name for name in named if name in self.registry.pools)
+
+    def _pools_in_scope(self, pool: object) -> list[str]:
+        """The pools of a reset, for the locks it takes: every pool, or the named one.
+
+        A pool that does not exist takes no lock: the reset refuses it before it
+        changes anything.
+        """
+        if pool is None:
+            return list(self.registry.pools)
+        return [pool] if isinstance(pool, str) and pool in self.registry.pools else []
 
     def _apply_scenario(self, body: object) -> tuple[int, dict]:
         if not isinstance(body, dict):
@@ -729,10 +806,11 @@ class ControlApi:
     def _port_wishes(self, provider: object) -> list:
         """``(gate, want_open)`` for each port of one provider that has a gate.
 
-        Read straight after this call's own write, with ``port_lock`` held, so
-        the state waited for is the one THIS call asked for. No second caller
-        can change the scenario before this one has settled: it waits for the
-        lock, and is then answered for its own write.
+        Read straight after this call's own write, with the lock of the
+        provider's pool held, so the state waited for is the one THIS call asked
+        for. No second caller can change the scenario of that pool before this
+        one has settled: it waits for the lock, and is then answered for its
+        own write.
         """
         wishes = []
         for endpoint in provider.endpoints:  # type: ignore[attr-defined]
@@ -781,8 +859,9 @@ class ControlApi:
         """Wait for every port of these providers; "" when each is where its
         scenario puts it.
 
-        For a writer outside this class, which holds ``port_lock`` around its
-        write and this call: the scenario time-to-live sweep.
+        For a writer outside this class, which holds the lock of the pool of
+        these providers around its write and this call: the scenario
+        time-to-live sweep.
         """
         wishes: list = []
         for provider in providers:
@@ -820,19 +899,24 @@ class ControlApi:
     # Only the scenario reset moves a head at all — clearing history leaves
     # every head alone.
     #
+    # A scenario reset takes the lock of each pool it touches (see PoolLocks).
+    # A reset of one pool waits for a write to that pool and for none to another
+    # pool. A reset of every pool waits for a write to any pool. Clearing history
+    # takes no lock, because it moves no port.
+    #
     # An unknown pool name is a 400 that lists the pools that exist. Resetting
     # nothing and reporting success is the failure this scoping exists to
     # prevent: the test still runs, still passes, and measures the previous
     # test's leftovers.
     def reset(self, pool: str | None = None) -> tuple[int, dict]:
-        with self.port_lock:
+        with self.port_locks.of(self._pools_in_scope(pool)):
             return self._perform_reset(pool, scenario=True, history=False, status="scenario reset")
 
     def clear_history(self, pool: str | None = None) -> tuple[int, dict]:
         return self._perform_reset(pool, scenario=False, history=True, status="history cleared")
 
     def reset_all(self, pool: str | None = None) -> tuple[int, dict]:
-        with self.port_lock:
+        with self.port_locks.of(self._pools_in_scope(pool)):
             return self._perform_reset(pool, scenario=True, history=True, status="scenario reset and history cleared")
 
     def _perform_reset(self, pool: str | None, *, scenario: bool, history: bool, status: str) -> tuple[int, dict]:

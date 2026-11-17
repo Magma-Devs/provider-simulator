@@ -10,6 +10,9 @@ test_simulator_grpc_port_closed.py for a gRPC port, and in
 integration/test_http_and_ws_port_closed.py for an http port and a ws port.
 """
 
+import threading
+import time
+
 import pytest
 
 from provider_simulator import control_api
@@ -182,3 +185,141 @@ def test_a_malformed_filter_is_still_refused_by_the_scenario_itself(bad_filter, 
     st, resp = api.apply_scenario({"providers": {KEY: {"mode": "port_closed", **bad_filter}}})
     assert st == 400
     assert reason in resp["error"]
+
+
+# ── a call on one pool does not wait for the port of another pool ─────────────
+#
+# A write that has a port to wait for is held in that wait until the test lets
+# it go. That keeps the pool of the write inside its lock for as long as the
+# test needs, with no sleep and no listener. A call with no port to wait for
+# passes at once, as it does in production, so a call that waits here waits for
+# a lock and for nothing else.
+
+POOLS = ("btc-sim", "eth-sim", "lava-sim-grpc")  # in name order: the sweep test relies on it
+ORDERED_PAIRS = [(first, second) for first in POOLS for second in POOLS if first != second]
+
+
+@pytest.fixture
+def a_write_that_waits_for_its_port(monkeypatch):
+    """The first call that has a port to wait for stays in that wait. Yields ``(inside, release)``."""
+    inside, release = threading.Event(), threading.Event()
+
+    def settle(self, wishes):
+        if wishes and not inside.is_set():
+            inside.set()
+            release.wait(timeout=10)
+        return ""
+
+    monkeypatch.setattr(ControlApi, "_settle_ports", settle)
+    yield inside, release
+    release.set()
+
+
+def _start_a_write_that_waits_for_its_port(api, pool, inside):
+    """Close a port of ``pool`` with a write that cannot finish. Returns once the write is inside its wait."""
+    provider = api.registry.provider(pool, "1")
+    for endpoint in provider.endpoints:
+        api.port_gates[endpoint.port] = PortGate(provider, endpoint)
+    threading.Thread(
+        target=api.apply_scenario, args=({"providers": {f"{pool}:1": {"mode": "port_closed"}}},), daemon=True
+    ).start()
+    assert inside.wait(timeout=5), f"the write to {pool} never reached its wait for the port"
+
+
+def _run(call, done, answer):
+    try:
+        answer.append(call())
+    finally:
+        done.set()
+
+
+def _run_each(calls):
+    """Start each call on a thread of its own. Returns ``{name: (event set when it returned, [its answer])}``."""
+    started = {}
+    for name, call in calls.items():
+        done, answer = threading.Event(), []
+        threading.Thread(target=_run, args=(call, done, answer), daemon=True).start()
+        started[name] = (done, answer)
+    return started
+
+
+@pytest.mark.parametrize("waiting_pool, other_pool", ORDERED_PAIRS)
+def test_a_call_on_one_pool_does_not_wait_for_a_write_that_waits_for_the_port_of_another_pool(
+    a_write_that_waits_for_its_port, waiting_pool, other_pool
+):
+    """A reset, a scenario write, and a write that names two pools, none of them the pool of the waiting write."""
+    inside, _release = a_write_that_waits_for_its_port
+    api = _api()
+    _start_a_write_that_waits_for_its_port(api, waiting_pool, inside)
+    third_pool = next(pool for pool in POOLS if pool not in (waiting_pool, other_pool))
+    started = _run_each(
+        {
+            "reset": lambda: api.reset(pool=other_pool),
+            "reset_all": lambda: api.reset_all(pool=other_pool),
+            "a write to the pool": lambda: api.apply_scenario({"providers": {f"{other_pool}:1": {"mode": "down"}}}),
+            "a write to the pool and a third pool": lambda: api.apply_scenario(
+                {"providers": {f"{other_pool}:1": {"mode": "down"}, f"{third_pool}:1": {"mode": "down"}}}
+            ),
+        }
+    )
+    deadline = time.monotonic() + 3.0
+    waited = [name for name, (done, _) in started.items() if not done.wait(max(deadline - time.monotonic(), 0.0))]
+    assert (
+        waited == []
+    ), f"a write to {waiting_pool} was waiting for its port, and these calls on {other_pool} waited for it: {waited}"
+    assert {name: answer[0][0] for name, (_, answer) in started.items()} == {name: 200 for name in started}
+
+
+def test_a_call_on_a_pool_waits_for_a_write_that_waits_for_the_port_of_that_pool(a_write_that_waits_for_its_port):
+    """The lock still keeps two writers of one pool apart, and a reset of every pool waits for any pool."""
+    inside, release = a_write_that_waits_for_its_port
+    api = _api()
+    _start_a_write_that_waits_for_its_port(api, "eth-sim", inside)
+    started = _run_each(
+        {
+            "reset": lambda: api.reset(pool="eth-sim"),
+            "reset_all": lambda: api.reset_all(pool="eth-sim"),
+            "a write to the pool": lambda: api.apply_scenario({"providers": {"eth-sim:1": {"mode": "down"}}}),
+            "a write to the pool and another pool": lambda: api.apply_scenario(
+                {"providers": {"eth-sim:1": {"mode": "down"}, "btc-sim:1": {"mode": "down"}}}
+            ),
+            "a reset of every pool": lambda: api.reset(),
+        }
+    )
+    time.sleep(0.5)  # a call that took no lock would have returned by now
+    returned_early = [name for name, (done, _) in started.items() if done.is_set()]
+    release.set()
+    never_returned = [name for name, (done, _) in started.items() if not done.wait(3.0)]
+    assert (
+        returned_early == []
+    ), f"these calls returned while a write to eth-sim still waited for its port: {returned_early}"
+    assert never_returned == [], f"these calls did not return after the waiting write was let go: {never_returned}"
+
+
+def test_the_sweep_reverts_a_stale_scenario_of_one_pool_while_a_write_to_another_pool_waits(
+    a_write_that_waits_for_its_port,
+):
+    """The pools go in name order, so btc-sim is done before the sweep reaches the waiting lava-sim-grpc."""
+    import server as server_module
+
+    inside, release = a_write_that_waits_for_its_port
+    api = _api()
+    assert api.apply_scenario({"providers": {"btc-sim:1": {"mode": "down"}}})[0] == 200
+    _start_a_write_that_waits_for_its_port(api, "lava-sim-grpc", inside)
+    provider = api.registry.provider("btc-sim", "1")
+    # At this time every scenario written just now is older than the 900 s limit.
+    sweeper = threading.Thread(
+        target=server_module._revert_stale_scenarios, args=(api, 900, time.time() + 901), daemon=True
+    )
+    sweeper.start()
+    deadline = time.monotonic() + 3.0
+    while provider.scenario.snapshot()["mode"] != "success" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    reverted, still_sweeping = provider.scenario.snapshot()["mode"] == "success", sweeper.is_alive()
+    release.set()
+    sweeper.join(timeout=10)
+    assert (reverted, still_sweeping) == (True, True), (
+        "the sweep must revert btc-sim and then wait at lava-sim-grpc, "
+        f"got reverted={reverted} still_sweeping={still_sweeping}"
+    )
+    assert not sweeper.is_alive(), "the sweep did not finish after the waiting write was let go"

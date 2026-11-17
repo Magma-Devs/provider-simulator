@@ -672,10 +672,10 @@ def test_closing_and_opening_one_provider_at_the_same_moment_never_answers_500(s
 
 def test_the_time_to_live_sweep_waits_for_a_control_write_in_progress(sim):
     """The sweep pass is the fourth writer that moves a port, and it answers
-    nobody, so the test above cannot see it lose. Here the lock is held as a
-    control call holds it between its write and its settle: the pass must leave
-    the scenario alone until the lock is free, and then revert it and wait for
-    the port.
+    nobody, so the test above cannot see it lose. Here the lock of the pool is
+    held as a control call holds it between its write and its settle: the pass
+    must leave the scenario alone until the lock is free, and then revert it and
+    wait for the port.
     """
     control, api, key = sim["control"], sim["server"].control, f"{POOL}:1"
     status, body = _close(sim)
@@ -683,7 +683,7 @@ def test_the_time_to_live_sweep_waits_for_a_control_write_in_progress(sim):
     sweeper = threading.Thread(
         target=server_module._revert_stale_scenarios, args=(api, 900, time.time() + 901), daemon=True
     )
-    with api.port_lock:
+    with api.port_locks.of([POOL]):
         sweeper.start()
         sweeper.join(timeout=0.5)
         waiting, stored_meanwhile = sweeper.is_alive(), _mode(control, key)
@@ -719,9 +719,9 @@ def test_ready_asked_part_way_through_a_reopen_waits_for_it(sim, monkeypatch):
     """/ready is asked BETWEEN the write that reverts the scenario and the port
     accepting again, which is where a sweep pass on its own thread leaves it.
 
-    The test plays the pass step by step, holding the lock the pass holds:
-    revert the scenario, ask /ready from another thread, then wait for the
-    port and let go. /ready must wait for the lock and then answer 200.
+    The test plays the pass step by step, holding the lock of the pool that the
+    pass holds: revert the scenario, ask /ready from another thread, then wait
+    for the port and let go. /ready must wait for the lock and then answer 200.
 
     The listener's own poll is slowed first, so the port moves only when it is
     asked to and stays closed for as long as the test needs it closed.
@@ -737,7 +737,7 @@ def test_ready_asked_part_way_through_a_reopen_waits_for_it(sim, monkeypatch):
         answer["ready"] = _get(f"{control}/ready")
 
     asker = threading.Thread(target=ask_ready)
-    with api.port_lock:
+    with api.port_locks.of([POOL]):
         provider.scenario.reset()  # the wish says open; the port is still closed
         assert _connect(_PORT["1"]) == errno.ECONNREFUSED, "the port must still be closed when /ready is asked"
         asker.start()
