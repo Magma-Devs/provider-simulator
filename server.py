@@ -944,9 +944,10 @@ def _dispatch_cache_get(control: ControlApi, path: str) -> tuple[int, dict]:
     return 404, {"error": f"unknown cache-sim action {action!r}", "actions": ["calls", "(none, for the cache itself)"]}
 
 
-# How long /ready waits for a control write that is moving a provider port. A
-# port changes in a few milliseconds; a write that takes longer than this is
-# waiting on a port that does not change, and /ready answers without it.
+# How long /ready waits for the control writes that are moving provider ports,
+# for all pools together. A port changes in a few milliseconds; a write that
+# takes longer than this is waiting on a port that does not change, and /ready
+# answers without it.
 _READY_LOCK_WAIT_S = 1.0
 
 
@@ -1025,25 +1026,21 @@ class _ControlHandler(BaseHTTPRequestHandler):
         self._reply(status, payload)
 
     def _ready(self) -> tuple[int, dict]:
-        """``_read_ready`` with the control API's port lock held.
+        """``_read_ready`` with the control API's port locks held.
 
         A control call, a reset and the scenario time-to-live sweep each hold
-        that lock from their write until the ports have followed it. Read
-        without it, a port whose scenario was just reverted is expected to
-        accept while its listener is still coming back, and is reported
-        missing.
+        the lock of the pools they touch from their write until the ports have
+        followed it. Read without the locks, a port whose scenario was just
+        reverted is expected to accept while its listener is still coming back,
+        and is reported missing.
 
-        The wait for the lock is bounded. A listener that cannot reach its
-        state keeps a writer waiting for the whole settle time, and the probe
-        must still be answered: it then reads without the lock and names that
-        port as missing, which is what it is."""
-        lock = self.server.control.port_lock
-        held = lock.acquire(timeout=_READY_LOCK_WAIT_S)
-        try:
+        The wait for the locks is bounded, for all of them together. A listener
+        that cannot reach its state keeps a writer waiting for the whole settle
+        time, and the probe must still be answered: it then reads without the
+        lock of that pool and names that port as missing, which is what it is."""
+        control = self.server.control
+        with control.port_locks.within(control.registry.pools, _READY_LOCK_WAIT_S):
             return self._read_ready()
-        finally:
-            if held:
-                lock.release()
 
     def _read_ready(self) -> tuple[int, dict]:
         """Real readiness: every registry port accepts a TCP connection — not
@@ -1561,25 +1558,27 @@ def _revert_stale_scenarios(control: ControlApi, ttl_s: int, now: float) -> None
     the interval, and can say what time it is instead of sleeping until then.
 
     A reverted ``mode="port_closed"`` has reopened its port when this returns.
-    The pass is a control write like ``POST /reset``: it holds the control API's
-    port lock and waits for the ports of every provider it reverted. /ready
-    takes the same lock, so it never reads a port between the revert and the
-    listener returning.
+    The pass is a control write like ``POST /reset``, one pool at a time: it
+    holds the lock of a pool while it reverts the providers of that pool and
+    waits for their ports, and a control call on another pool does not wait for
+    it. /ready takes the same locks, so it never reads a port between the revert
+    and the listener returning.
     """
-    reverted = []
-    with control.port_lock:
-        for provider in control.registry.all_providers():
-            age = now - provider.scenario.last_write_at
-            if age <= ttl_s:
-                continue
-            if provider.scenario.snapshot().get("mode") == "success":
-                continue
-            provider.scenario.reset()
-            reverted.append(provider)
-            _log.info(f"[ttl-sweep] reverted provider {provider.key} (idle {age:.0f}s > {ttl_s}s TTL)")
-        err = control.settle_ports_of(reverted)
-    if err:
-        _log.warning(f"[ttl-sweep] {err}")
+    for pool in sorted(control.registry.pools.values(), key=lambda held: held.name):
+        with control.port_locks.of([pool.name]):
+            reverted = []
+            for provider in pool.providers.values():
+                age = now - provider.scenario.last_write_at
+                if age <= ttl_s:
+                    continue
+                if provider.scenario.snapshot().get("mode") == "success":
+                    continue
+                provider.scenario.reset()
+                reverted.append(provider)
+                _log.info(f"[ttl-sweep] reverted provider {provider.key} (idle {age:.0f}s > {ttl_s}s TTL)")
+            err = control.settle_ports_of(reverted)
+        if err:
+            _log.warning(f"[ttl-sweep] {err}")
 
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
