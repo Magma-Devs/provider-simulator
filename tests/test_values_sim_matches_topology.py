@@ -82,7 +82,7 @@ _ANY_URL_LINE = re.compile(r"^\s*- url:", re.M)
 class ValuesProvider(NamedTuple):
     """One ``nodes:`` entry — the router's own name for a provider, and the
     urls it dials it on. The simulator never sees this name; it is the string
-    the router reports in ``Lava-Provider-Address``."""
+    the router reports in ``Router-Provider-Address``."""
 
     name: str
     urls: tuple[str, ...]

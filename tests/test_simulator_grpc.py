@@ -9,7 +9,7 @@ so cross-pool isolation is structural, not gated.
 Coverage:
   Happy-path                 — GetLatestBlock / GetNodeInfo respond with a
                                 well-formed protobuf.
-  Metadata capture            — lava-* request metadata shows up in /history.
+  Metadata capture            — router-* request metadata shows up in /history.
   Fault primitives            — hang / status / dropped / corrupt / stale /
                                 latency_ms / error_probability all behave
                                 correctly over gRPC.
@@ -181,7 +181,7 @@ def _call_get_latest_block(
     """Open an insecure channel, call GetLatestBlock, return the response.
 
     ``metadata`` is forwarded as gRPC client metadata so tests can verify
-    the metadata-capture path (``lava-guid`` etc.).
+    the metadata-capture path (``router-guid`` etc.).
     """
 
     async def _do():
@@ -480,51 +480,51 @@ class TestGrpcHappy:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Lava metadata capture
+# Router metadata capture
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 class TestGrpcMetadataCapture:
-    """lava-* request metadata must show up in /history under the recorded
+    """router-* request metadata must show up in /history under the recorded
     entry so the router's observable behaviour can be verified."""
 
-    def test_lava_guid_captured(self, sim):
-        _call_get_latest_block(_GRPC_ADDRS["1"], metadata=(("lava-guid", "abc123"),))
+    def test_router_guid_captured(self, sim):
+        _call_get_latest_block(_GRPC_ADDRS["1"], metadata=(("router-guid", "abc123"),))
         _, hist = _get(_ctrl(sim, "/history?pool=lava-sim-grpc&pid=1"))
         assert hist["count"] >= 1
         last = hist["history"][-1]
         assert last["method"] == "GetLatestBlock"
-        assert last["lava_headers"].get("lava-guid") == "abc123"
+        assert last["router_headers"].get("router-guid") == "abc123"
         assert last["interface"] == "grpc"
         assert last["transport"] == "http2"
 
-    def test_multiple_lava_headers_captured(self, sim):
+    def test_multiple_router_headers_captured(self, sim):
         _call_get_latest_block(
             _GRPC_ADDRS["1"],
             metadata=(
-                ("lava-guid", "g1"),
-                ("lava-stateful-api", "true"),
-                ("authorization", "bearer ignored"),  # non-lava header — should be dropped
+                ("router-guid", "g1"),
+                ("router-stateful-api", "true"),
+                ("authorization", "bearer ignored"),  # non-router header — should be dropped
             ),
         )
         _, hist = _get(_ctrl(sim, "/history?pool=lava-sim-grpc&pid=1"))
-        headers = hist["history"][-1]["lava_headers"]
-        assert headers.get("lava-guid") == "g1"
-        assert headers.get("lava-stateful-api") == "true"
-        # Only lava-* headers are captured — authorization must be absent.
+        headers = hist["history"][-1]["router_headers"]
+        assert headers.get("router-guid") == "g1"
+        assert headers.get("router-stateful-api") == "true"
+        # Only router-* headers are captured — authorization must be absent.
         assert "authorization" not in headers
 
-    def test_history_filter_by_lava_header(self, sim):
-        """The existing /history?lava_header_<name>= filter must work for
+    def test_history_filter_by_router_header(self, sim):
+        """The existing /history?router_header_<name>= filter must work for
         gRPC requests, not just JSON-RPC ones."""
-        _call_get_latest_block(_GRPC_ADDRS["1"], metadata=(("lava-guid", "match-me"),))
-        _call_get_latest_block(_GRPC_ADDRS["1"], metadata=(("lava-guid", "other"),))
-        _, hist = _get(_ctrl(sim, "/history?lava_header_lava-guid=match-me"))
+        _call_get_latest_block(_GRPC_ADDRS["1"], metadata=(("router-guid", "match-me"),))
+        _call_get_latest_block(_GRPC_ADDRS["1"], metadata=(("router-guid", "other"),))
+        _, hist = _get(_ctrl(sim, "/history?router_header_router-guid=match-me"))
         assert hist["count"] == 1
 
-    def test_a_lava_header_that_comes_two_times_keeps_its_last_value(self, sim):
-        _call_get_latest_block(_GRPC_ADDRS["1"], metadata=(("lava-guid", "first"), ("lava-guid", "last")))
-        assert [row["lava_headers"] for row in _rows(sim)] == [{"lava-guid": "last"}]
+    def test_a_router_header_that_comes_two_times_keeps_its_last_value(self, sim):
+        _call_get_latest_block(_GRPC_ADDRS["1"], metadata=(("router-guid", "first"), ("router-guid", "last")))
+        assert [row["router_headers"] for row in _rows(sim)] == [{"router-guid": "last"}]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1878,11 +1878,11 @@ class TestGrpcRowRecordsWhatTheProviderReceived:
     time that the deadline of the caller had left, and the name of the status
     that the simulator sent."""
 
-    def test_headers_holds_every_metadata_key_and_lava_headers_the_lava_ones(self, sim):
-        _call_get_latest_block(_GRPC_ADDRS["1"], metadata=(("lava-guid", "abc123"), ("x-sim-caller", "grpc-test")))
+    def test_headers_holds_every_metadata_key_and_router_headers_the_router_ones(self, sim):
+        _call_get_latest_block(_GRPC_ADDRS["1"], metadata=(("router-guid", "abc123"), ("x-sim-caller", "grpc-test")))
         row = _rows(sim)[-1]
-        assert row["lava_headers"] == {"lava-guid": "abc123"}
-        assert row["headers"]["lava-guid"] == "abc123"
+        assert row["router_headers"] == {"router-guid": "abc123"}
+        assert row["headers"]["router-guid"] == "abc123"
         assert row["headers"]["x-sim-caller"] == "grpc-test"
         # The gRPC library of the caller adds a key of its own.
         assert "user-agent" in row["headers"], sorted(row["headers"])
@@ -1937,13 +1937,13 @@ class TestGrpcRowRecordsWhatTheProviderReceived:
         assert code.name == want
         assert [row["grpc_status"] for row in _rows(sim)] == [want]
 
-    def test_a_binary_lava_metadata_value_is_base64_text_in_both_fields_and_the_read_answers(self, sim):
+    def test_a_binary_router_metadata_value_is_base64_text_in_both_fields_and_the_read_answers(self, sim):
         """A row that held bytes could not be written as JSON. So one call with
         such a key made every read that returned its row fail."""
-        _call_get_latest_block(_GRPC_ADDRS["1"], metadata=(("lava-x-bin", b"\x00\x01"),))
+        _call_get_latest_block(_GRPC_ADDRS["1"], metadata=(("router-x-bin", b"\x00\x01"),))
         row = _rows(sim)[-1]
-        assert row["lava_headers"] == {"lava-x-bin": "AAE="}
-        assert row["headers"]["lava-x-bin"] == "AAE="
+        assert row["router_headers"] == {"router-x-bin": "AAE="}
+        assert row["headers"]["router-x-bin"] == "AAE="
 
     def test_a_metadata_key_that_the_call_repeats_keeps_its_last_value(self, sim):
         _call_get_latest_block(_GRPC_ADDRS["1"], metadata=(("x-multi", "first"), ("x-multi", "last")))

@@ -353,13 +353,13 @@ class _ChosenReplyHeaders(BaseHTTPRequestHandler):
 def _upgrade_headers(provider_key: str, chosen: dict) -> dict:
     """The headers that the 101 reply to an upgrade carries after the three of the handshake.
 
-    The simulator names the provider in ``Lava-Provider-Address``. The chosen
+    The simulator names the provider in ``Router-Provider-Address``. The chosen
     headers of the scenario follow, and a chosen header replaces the
     simulator's header of the same name, as ``_ChosenReplyHeaders`` does on
     every other reply.
     """
     names = {name.lower() for name in chosen}
-    own = {"Lava-Provider-Address": f"sim-provider-{provider_key}"}
+    own = {"Router-Provider-Address": f"sim-provider-{provider_key}"}
     return {**{name: value for name, value in own.items() if name.lower() not in names}, **chosen}
 
 
@@ -730,7 +730,7 @@ class _WsHandler(_ChosenReplyHeaders):
 
         client_key = self.headers["Sec-WebSocket-Key"]
         # Every header of the upgrade request goes to the listener. It keeps
-        # them all on a history row, and the lava-* ones a second time.
+        # them all on a history row, and the router-* ones a second time.
         headers = dict(self.headers.items())
 
         # The listener decides the upgrade BEFORE the handshake completes, so a
@@ -792,7 +792,7 @@ class _WsHandler(_ChosenReplyHeaders):
         # drop
         try:
             if decision.drop_at == "after_headers":
-                # Complete the 101 (with Lava-Provider-Address), then close.
+                # Complete the 101 (with Router-Provider-Address), then close.
                 self.connection.sendall(
                     ws_protocol.build_handshake_response(
                         client_key,
@@ -1304,7 +1304,7 @@ def _run_grpc_in_thread(grpc_listener, port: int, host: str, gate: PortGate) -> 
 
     async def _perform(method: str, request, context):
         metadata = context.invocation_metadata() or []
-        # The history row keeps every metadata key, and the lava-* ones a second
+        # The history row keeps every metadata key, and the router-* ones a second
         # time. The listener gets the request message: it knows which field of
         # which method carries the request id.
         headers = {k: v for (k, v) in metadata}

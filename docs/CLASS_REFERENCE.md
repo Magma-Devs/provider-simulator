@@ -196,7 +196,7 @@ def clear_history(self) -> None:
 
 ```python
 def push_call_to_buffer(self, method: str, status: str, latency_ms: int,
-                        request_id: object = None, lava_headers: dict = None) -> None:
+                        request_id: object = None, router_headers: dict = None) -> None:
     now = time.time()
     with self.lock:
         self.history.append({
@@ -206,7 +206,7 @@ def push_call_to_buffer(self, method: str, status: str, latency_ms: int,
             "method":       method,
             "status":       status,
             "latency_ms":   latency_ms,
-            "lava_headers": lava_headers or {},
+            "router_headers": router_headers or {},
         })
         self.total_calls += 1
         self.calls_by_status[status] = self.calls_by_status.get(status, 0) + 1
@@ -222,7 +222,7 @@ def push_call_to_buffer(self, method: str, status: str, latency_ms: int,
 **Special values:**
 - `method="*"` is used for `mode="down"` calls, where the body is never parsed. Filter with `?method=*` to find rejected requests.
 - `request_id=None` for those same down-mode calls (no body → no `id` field to echo).
-- `lava_headers` is the dict of all `lava-*` request headers captured by the handler.
+- `router_headers` is the dict of all `router-*` request headers captured by the handler.
 
 ---
 
@@ -739,7 +739,7 @@ def do_GET(self):
 
 **Case 4: GET /history**
 - Returns merged, ordered call history across all providers
-- Supports query params: `last`, `from`, `to`, `provider`, `method`, `status`, `request_id`, and the dynamic-prefix `lava_header_<name>=<value>` (underscores in `<name>` become hyphens — e.g. `?lava_header_lava_stateful_api=true` matches header `lava-stateful-api: true`; multiple `lava_header_*` filters AND together)
+- Supports query params: `last`, `from`, `to`, `provider`, `method`, `status`, `request_id`, and the dynamic-prefix `router_header_<name>=<value>` (`<name>` is the header name as it is written, in any letter case — e.g. `?router_header_router-stateful-api=true` matches header `router-stateful-api: true`; multiple `router_header_*` filters AND together)
 
 ---
 

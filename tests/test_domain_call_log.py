@@ -117,7 +117,7 @@ def test_a_log_built_without_a_name_leaves_the_name_empty():
     "eth-sim:1" would only repeat them — in the exact shape of Provider.key, the
     address the control API accepts, so it would read like a name the router
     reported. Tests learn which provider served a request by matching the
-    Lava-Provider-Address header against these names, and no real name is ever
+    Router-Provider-Address header against these names, and no real name is ever
     empty. An empty name cannot be mistaken for a real one; "eth-sim:1" could.
     """
     log = _log()  # no name= — the shape every direct construction in the tests uses
@@ -147,7 +147,7 @@ def _push_calls(log, count):
             "success",
             0,
             request_id=i,
-            lava_headers={"Lava-Stateful-Api": "true"} if i < 4 else None,
+            router_headers={"Router-Stateful-Api": "true"} if i < 4 else None,
             interface="jsonrpc",
             transport="http",
             port=18545,
@@ -159,7 +159,7 @@ def test_get_history_with_a_filter_gives_only_the_rows_that_pass_it_in_buffer_or
     _push_calls(log, 6)
     rows = log.get_history(where=lambda row: row["method"] == "eth_call")
     assert [row["request_id"] for row in rows] == [1, 3, 5]
-    rows = log.get_history(where=lambda row: "Lava-Stateful-Api" in row["lava_headers"] and row["request_id"] > 1)
+    rows = log.get_history(where=lambda row: "Router-Stateful-Api" in row["router_headers"] and row["request_id"] > 1)
     assert [row["request_id"] for row in rows] == [2, 3]
 
 
@@ -170,9 +170,11 @@ def test_rows_read_through_a_filter_are_independent_sanitized_copies():
     assert all(not key.startswith("_") for row in rows for key in row)
     # Editing what the reader got must not reach the log, the headers included.
     rows[0]["status"] = "vandalized"
-    rows[0]["lava_headers"]["Lava-Stateful-Api"] = "vandalized"
+    rows[0]["router_headers"]["Router-Stateful-Api"] = "vandalized"
     again = log.get_history(where=lambda row: row["request_id"] in (1, 2))
-    assert [(row["status"], row["lava_headers"]) for row in again] == [("success", {"Lava-Stateful-Api": "true"})] * 2
+    assert [(row["status"], row["router_headers"]) for row in again] == [
+        ("success", {"Router-Stateful-Api": "true"})
+    ] * 2
 
 
 def test_a_filter_that_passes_no_row_reads_nothing_and_removes_nothing():
@@ -226,17 +228,17 @@ def test_a_row_holds_every_request_header_and_the_log_stores_them_as_one_text():
     # headers as one JSON text under a private key, and it has no ``headers``
     # key. A ``where`` test is given the stored row, so it can show that row.
     log = _log()
-    sent = {"Lava-Guid": "GUID_1", "Content-Type": "application/json"}
-    log.record_arrival("jsonrpc", "http", 18545, lava_headers={"Lava-Guid": "GUID_1"}, headers=sent)
+    sent = {"Router-Guid": "GUID_1", "Content-Type": "application/json"}
+    log.record_arrival("jsonrpc", "http", 18545, router_headers={"Router-Guid": "GUID_1"}, headers=sent)
 
     stored: list[dict] = []
     log.get_history(where=lambda entry: stored.append(dict(entry)) is None)
-    assert stored[0]["_headers_json"] == '{"Lava-Guid":"GUID_1","Content-Type":"application/json"}'
+    assert stored[0]["_headers_json"] == '{"Router-Guid":"GUID_1","Content-Type":"application/json"}'
     assert "headers" not in stored[0]
 
     row = log.get_history()[0]
     assert row["headers"] == sent
-    assert row["lava_headers"] == {"Lava-Guid": "GUID_1"}
+    assert row["router_headers"] == {"Router-Guid": "GUID_1"}
     assert all(not key.startswith("_") for key in row)
 
 
@@ -306,7 +308,7 @@ def test_a_reader_that_cuts_first_takes_the_headers_as_text_and_decodes_the_rows
     assert row["headers"] == {"X-Kept": "1"}
 
 
-def test_a_bytes_value_in_lava_headers_is_read_as_base64_text_and_the_rows_are_valid_json():
+def test_a_bytes_value_in_router_headers_is_read_as_base64_text_and_the_rows_are_valid_json():
     # A row that held bytes could not be written as JSON. So one such row made
     # every read that returned it fail.
     log = _log()
@@ -314,12 +316,12 @@ def test_a_bytes_value_in_lava_headers_is_read_as_base64_text_and_the_rows_are_v
         "grpc",
         "http2",
         19090,
-        lava_headers={"lava-x-bin": b"\x00\x01", "lava-guid": "g1"},
-        headers={"lava-x-bin": b"\x00\x01"},
+        router_headers={"router-x-bin": b"\x00\x01", "router-guid": "g1"},
+        headers={"router-x-bin": b"\x00\x01"},
     )
     row = log.get_history()[0]
-    assert row["lava_headers"] == {"lava-x-bin": "AAE=", "lava-guid": "g1"}
-    assert row["headers"] == {"lava-x-bin": "AAE="}
+    assert row["router_headers"] == {"router-x-bin": "AAE=", "router-guid": "g1"}
+    assert row["headers"] == {"router-x-bin": "AAE="}
     assert json.loads(json.dumps(log.get_history())) == log.get_history()
 
 

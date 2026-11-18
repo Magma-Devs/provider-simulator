@@ -257,11 +257,11 @@ def test_the_get_form_uses_the_same_per_method_entry_as_the_post_form():
 
 
 def test_arrive_keeps_every_header_of_the_call_in_headers():
-    # ``headers`` holds each header, with its name as it came. ``lava_headers``
-    # holds the lava ones only, as before. The two gRPC fields stay empty.
+    # ``headers`` holds each header, with its name as it came. ``router_headers``
+    # holds the router ones only. The two gRPC fields stay empty.
     listener, provider = _listener()
-    listener.arrive({"Lava-Guid": "GUID_1", "X-Other": "kept"})
+    listener.arrive({"Router-Guid": "GUID_1", "X-Other": "kept"})
     row = provider.log.get_history()[0]
-    assert row["headers"] == {"Lava-Guid": "GUID_1", "X-Other": "kept"}
-    assert row["lava_headers"] == {"Lava-Guid": "GUID_1"}
+    assert row["headers"] == {"Router-Guid": "GUID_1", "X-Other": "kept"}
+    assert row["router_headers"] == {"Router-Guid": "GUID_1"}
     assert (row["deadline_remaining_ms"], row["grpc_status"]) == (None, None)

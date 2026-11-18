@@ -872,14 +872,14 @@ Most stubs in `stubs.py` are static (e.g. `eth_blockNumber` always returns `"0x1
 
 The smart router's pruning verification compares the requested block number with the block object's `number` field. Without the rewrite, every `eth_getBlockByNumber` call would return `0x1312D00` regardless of input and the router would reject the response.
 
-### `lava_header_*` — dynamic filter on `/history`
+### `router_header_*` — dynamic filter on `/history`
 
-The `/history` endpoint accepts a dynamic-prefix filter: any query parameter beginning with `lava_header_` is interpreted as a captured-header filter. Underscores in the parameter name become hyphens when matching the actual header. Examples:
+The `/history` endpoint accepts a dynamic-prefix filter: any query parameter beginning with `router_header_` is interpreted as a captured-header filter. The rest of the parameter name is the header name as it is written, matched in any letter case; the value is compared as it is written. Examples:
 
-- `?lava_header_lava_stateful_api=true` → filter where the captured header `lava-stateful-api` equals `true`.
-- `?lava_header_lava_consumer_ip=10.0.0.1&lava_header_lava_session=42` → both must match (AND).
+- `?router_header_router-stateful-api=true` → filter where the captured header `router-stateful-api` equals `true`.
+- `?router_header_router-stateful-api=true&router_header_router-stickiness=s1` → both must match (AND).
 
-Headers are captured at request time inside `JSONRPCHandler.do_POST`: every inbound header whose name starts with `lava-` (case-insensitive) is recorded in the history entry. Each `/history` entry exposes the full captured dict under `"lava_headers"`. Every request header, with or without that prefix, is under `"headers"`; the `lava_header_*` filters read `"lava_headers"` only.
+Headers are captured when a request arrives (`Listener.arrive`, and `JsonRpcWsListener.decide_upgrade` for a refused WebSocket upgrade): every inbound header whose name starts with `router-` (case-insensitive) is recorded in the history entry. Each `/history` entry exposes the full captured dict under `"router_headers"`. Every request header, with or without that prefix, is under `"headers"`; the `router_header_*` filters read `"router_headers"` only.
 
 ### `responses` lookup order in the success path
 

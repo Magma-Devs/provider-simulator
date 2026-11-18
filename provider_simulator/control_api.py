@@ -1401,9 +1401,9 @@ class ControlApi:
         # Header names are case-insensitive on the wire (clients may title-case
         # them) — match accordingly. The value is compared as it is written.
         headers = [
-            (key[len("lava_header_") :].lower(), value)
+            (key[len("router_header_") :].lower(), value)
             for key, value in query.items()
-            if key.startswith("lava_header_")
+            if key.startswith("router_header_")
         ]
         if not (
             equals
@@ -1434,7 +1434,7 @@ class ControlApi:
             for name, value in headers:
                 if not any(
                     header.lower() == name and header_value == value
-                    for header, header_value in row.get("lava_headers", {}).items()
+                    for header, header_value in row.get("router_headers", {}).items()
                 ):
                     return False
             return True
