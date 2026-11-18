@@ -770,14 +770,14 @@ class TestConcurrentSubscriptions:
         assert by_sub == {sid1: "A", sid2: "B"}
 
 
-class TestLavaHeaderCapture:
+class TestRouterHeaderCapture:
 
-    def test_lava_headers_from_upgrade_request_recorded_in_history(self, sim):
-        """lava-* headers sent on the HTTP Upgrade request must be captured
+    def test_router_headers_from_upgrade_request_recorded_in_history(self, sim):
+        """router-* headers sent on the HTTP Upgrade request must be captured
         and recorded in /history for every frame that arrives on the
-        connection — the WS adapter reuses the same lava-header capture
+        connection — the WS adapter reuses the same router-header capture
         pattern as the request/response adapters."""
-        # Build the raw Upgrade request by hand so we can attach lava-* headers.
+        # Build the raw Upgrade request by hand so we can attach router-* headers.
         s = socket.create_connection((_WS_HOST, _WS_PORTS["1"]), timeout=2)
         s.sendall(
             b"GET /ws HTTP/1.1\r\n"
@@ -786,8 +786,8 @@ class TestLavaHeaderCapture:
             b"Connection: Upgrade\r\n"
             b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
             b"Sec-WebSocket-Version: 13\r\n"
-            b"lava-stateful-api: true\r\n"
-            b"lava-consumer-relay: 7\r\n"
+            b"router-stateful-api: true\r\n"
+            b"router-consumer-relay: 7\r\n"
             b"\r\n"
         )
         # Read until end of handshake response.
@@ -809,12 +809,12 @@ class TestLavaHeaderCapture:
             pass
         s.close()
 
-        # Now confirm /history shows the lava-* headers we sent.
+        # Now confirm /history shows the router-* headers we sent.
         _, body = _control(sim, "GET", "/history?pool=eth-sim&pid=1&method=eth_blockNumber&transport=ws")
         assert body["count"] >= 1
         entry = body["history"][-1]
-        assert entry["lava_headers"].get("lava-stateful-api") == "true"
-        assert entry["lava_headers"].get("lava-consumer-relay") == "7"
+        assert entry["router_headers"].get("router-stateful-api") == "true"
+        assert entry["router_headers"].get("router-consumer-relay") == "7"
         assert entry["transport"] == "ws"
         assert entry["port"] == _WS_PORTS["1"]
 
@@ -851,9 +851,9 @@ class TestFaultCorruptionConsistency:
             json.loads(frame.payload.decode("utf-8"))
 
 
-class TestLavaProviderAddressHeader:
+class TestRouterProviderAddressHeader:
     """The WS smoke tests assert that the handshake response carries a
-    Lava-Provider-Address header so the consumer can identify which provider
+    Router-Provider-Address header so the consumer can identify which provider
     answered the upgrade. Each ws endpoint sends "sim-provider-<pool:pid>"
     naming its provider."""
 
@@ -887,11 +887,13 @@ class TestLavaProviderAddressHeader:
         return buf
 
     @pytest.mark.parametrize("pid", ["1", "2", "3"])
-    def test_lava_provider_address_header_present_in_upgrade_response(self, sim, pid):
+    def test_router_provider_address_header_present_in_upgrade_response(self, sim, pid):
         resp = self._raw_handshake(_WS_HOST, _WS_PORTS[pid])
         assert b" 101 " in resp.split(b"\r\n", 1)[0], f"no 101 in: {resp!r}"
-        expected = f"Lava-Provider-Address: sim-provider-eth-sim:{pid}".encode()
+        expected = f"Router-Provider-Address: sim-provider-eth-sim:{pid}".encode()
         assert expected in resp, f"missing {expected!r} in: {resp!r}"
+        # One header names the provider, under one name.
+        assert resp.lower().count(b"provider-address:") == 1, resp
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1424,11 +1426,11 @@ _HANDSHAKE_OF_PROVIDER_1 = (
     b"Upgrade: websocket\r\n"
     b"Connection: Upgrade\r\n"
     b"Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n"
-    b"Lava-Provider-Address: sim-provider-eth-sim:1\r\n"
+    b"Router-Provider-Address: sim-provider-eth-sim:1\r\n"
     b"\r\n"
 )
 
-_LAVA_HEADERS = {"lava-consumer-relay": "7", "lava-stateful-api": "true"}
+_ROUTER_HEADERS = {"router-consumer-relay": "7", "router-stateful-api": "true"}
 _RATE_LIMIT_TEXT = b"Rate limit exceeded. Reduce your request rate, or use an API key for a higher limit."
 _PORT = _WS_PORTS["1"]
 _SUBSCRIBE = {"jsonrpc": "2.0", "method": "eth_subscribe", "params": ["newHeads"], "id": 7}
@@ -1495,7 +1497,7 @@ def _emit(sim, body):
         return refusal.code, json.loads(refusal.read())
 
 
-def _request_upgrade(port=_PORT, path="/ws", upgrade_headers=True, lava_headers=None):
+def _request_upgrade(port=_PORT, path="/ws", upgrade_headers=True, router_headers=None):
     """Open a connection and send one request for an upgrade. Return the socket."""
     lines = [f"GET {path} HTTP/1.1", "Host: x"]
     if upgrade_headers:
@@ -1505,7 +1507,7 @@ def _request_upgrade(port=_PORT, path="/ws", upgrade_headers=True, lava_headers=
             f"Sec-WebSocket-Key: {_SAMPLE_KEY}",
             "Sec-WebSocket-Version: 13",
         ]
-    lines += [f"{name}: {value}" for name, value in (lava_headers or {}).items()]
+    lines += [f"{name}: {value}" for name, value in (router_headers or {}).items()]
     sock = socket.create_connection((_WS_HOST, port), timeout=3)
     sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("ascii"))
     return sock
@@ -1556,9 +1558,9 @@ def _read_the_handshake(sock):
 
 
 @contextlib.contextmanager
-def _websocket(port=_PORT, lava_headers=None):
+def _websocket(port=_PORT, router_headers=None):
     """Open a WebSocket with the sample key. Give the socket after the handshake."""
-    sock = _request_upgrade(port, lava_headers=lava_headers)
+    sock = _request_upgrade(port, router_headers=router_headers)
     try:
         head = _read_the_handshake(sock)
         assert head.startswith(b"HTTP/1.1 101 "), f"the upgrade did not succeed: {head!r}"
@@ -1679,24 +1681,24 @@ class TestTheUpgradeRequest:
         """Each fault that answers refuses the upgrade with its own HTTP status
         and its own JSON body. The refusal writes one complete row. Its method
         is `*` for `down` and `ws_upgrade` for each other fault. The row has
-        `latency_ms` 0, no request id, and the lava headers of the upgrade
+        `latency_ms` 0, no request id, and the router headers of the upgrade
         request."""
         _set_scenario(sim, {**block, "transports": ["ws"]})
 
-        answer = _refusal(_request_upgrade(lava_headers=_LAVA_HEADERS))
+        answer = _refusal(_request_upgrade(router_headers=_ROUTER_HEADERS))
 
         assert answer == (status, body)
         rows = _rows(sim)
         assert [_facts(row) for row in rows] == [(method, row_status, 0, None)]
         assert _endpoint(rows[0]) == ("jsonrpc", "ws", _PORT)
-        assert rows[0]["lava_headers"] == _LAVA_HEADERS
+        assert rows[0]["router_headers"] == _ROUTER_HEADERS
 
     def test_a_hung_upgrade_gets_no_byte_and_writes_one_row(self, sim):
         """A `hang` provider sends no byte for the upgrade. The row is written
         before the wait, so a test can read it while the upgrade hangs."""
         _set_scenario(sim, {"mode": "hang", "transports": ["ws"]})
 
-        sock = _request_upgrade(lava_headers=_LAVA_HEADERS)
+        sock = _request_upgrade(router_headers=_ROUTER_HEADERS)
         try:
             _assert_no_frame(sock)
             rows = _rows_when_complete(sim, 1)
@@ -1705,7 +1707,7 @@ class TestTheUpgradeRequest:
 
         assert [_facts(row) for row in rows] == [("ws_upgrade", "hang", 0, None)]
         assert _endpoint(rows[0]) == ("jsonrpc", "ws", _PORT)
-        assert rows[0]["lava_headers"] == _LAVA_HEADERS
+        assert rows[0]["router_headers"] == _ROUTER_HEADERS
 
     def test_a_hung_upgrade_ends_after_30_seconds_with_a_closed_connection_and_no_byte(self, sim):
         """The adapter holds a hung upgrade for 30 seconds. Then it closes the
@@ -1742,7 +1744,7 @@ class TestTheUpgradeRequest:
             block["drop_at"] = drop_at
         _set_scenario(sim, block)
 
-        sock = _request_upgrade(lava_headers=_LAVA_HEADERS)
+        sock = _request_upgrade(router_headers=_ROUTER_HEADERS)
         try:
             received = _read_until_the_close(sock)
         finally:
@@ -1752,12 +1754,12 @@ class TestTheUpgradeRequest:
         rows = _rows(sim)
         assert [_facts(row) for row in rows] == [("ws_upgrade", "drop_connection", 0, None)]
         assert _endpoint(rows[0]) == ("jsonrpc", "ws", _PORT)
-        assert rows[0]["lava_headers"] == _LAVA_HEADERS
+        assert rows[0]["router_headers"] == _ROUTER_HEADERS
 
     def test_an_upgrade_that_succeeds_gets_the_101_reply_and_writes_no_row(self, sim):
         """An upgrade with no fault gets the 101 reply with the provider name,
         and the simulator writes no history row for it."""
-        sock = _request_upgrade(lava_headers=_LAVA_HEADERS)
+        sock = _request_upgrade(router_headers=_ROUTER_HEADERS)
         try:
             head = _read_the_handshake(sock)
         finally:
@@ -1938,7 +1940,7 @@ class TestTheUpgradeRequest:
 
     def test_a_chosen_provider_address_replaces_the_one_of_the_simulator_on_the_101_reply(self, sim):
         """As on an HTTP reply, a chosen header replaces the simulator's header of the same name."""
-        _set_scenario(sim, {"transports": ["ws"], "reply_headers": {"lava-provider-address": "chosen"}})
+        _set_scenario(sim, {"transports": ["ws"], "reply_headers": {"router-provider-address": "chosen"}})
 
         sock = _request_upgrade()
         try:
@@ -1947,7 +1949,7 @@ class TestTheUpgradeRequest:
             sock.close()
 
         assert head == _HANDSHAKE_OF_PROVIDER_1.replace(
-            b"Lava-Provider-Address: sim-provider-eth-sim:1", b"lava-provider-address: chosen"
+            b"Router-Provider-Address: sim-provider-eth-sim:1", b"router-provider-address: chosen"
         )
 
     def test_the_101_reply_of_a_drop_after_the_headers_carries_the_chosen_headers(self, sim):
@@ -1994,8 +1996,8 @@ class TestSubscribeAndUnsubscribeFrames:
         """Three frames: a subscribe frame, an unsubscribe frame that removes
         the subscription, and an unsubscribe frame that removes nothing. Each
         one writes one `success` row with the method and the id of the frame.
-        Each row carries the lava headers of the upgrade request."""
-        with _websocket(lava_headers=_LAVA_HEADERS) as sock:
+        Each row carries the router headers of the upgrade request."""
+        with _websocket(router_headers=_ROUTER_HEADERS) as sock:
             _send_frame(sock, {"jsonrpc": "2.0", "method": "eth_subscribe", "params": ["newHeads"], "id": 41})
             subscription_id = _reply(sock)["result"]
             _send_frame(sock, {"jsonrpc": "2.0", "method": "eth_unsubscribe", "params": [subscription_id], "id": 42})
@@ -2014,7 +2016,7 @@ class TestSubscribeAndUnsubscribeFrames:
         ]
         for row in rows:
             assert _endpoint(row) == ("jsonrpc", "ws", _PORT)
-            assert row["lava_headers"] == _LAVA_HEADERS
+            assert row["router_headers"] == _ROUTER_HEADERS
 
     @pytest.mark.parametrize(
         "subscribe, unsubscribe",
@@ -2111,7 +2113,7 @@ class TestSubscribeAndUnsubscribeFrames:
         connection closes with no wait. A `down` provider does not read the
         frame. So the row has the method `*`, no request id and `latency_ms`
         0, as the `down` row of each other frame."""
-        with _websocket(lava_headers=_LAVA_HEADERS) as sock:
+        with _websocket(router_headers=_ROUTER_HEADERS) as sock:
             _set_scenario(sim, {"mode": "down", "latency_ms": 1500, "transports": ["ws"]})
             started = time.monotonic()
             _send_frame(sock, _SUBSCRIBE)
@@ -2123,7 +2125,7 @@ class TestSubscribeAndUnsubscribeFrames:
         rows = _rows(sim)
         assert [_facts(row) for row in rows] == [("*", "down", 0, None)]
         assert _endpoint(rows[0]) == ("jsonrpc", "ws", _PORT)
-        assert rows[0]["lava_headers"] == _LAVA_HEADERS
+        assert rows[0]["router_headers"] == _ROUTER_HEADERS
         assert _subscriptions(sim) == []
 
     def test_a_subscribe_frame_of_a_hung_provider_gets_no_reply_and_the_connection_stays_open(self, sim):
@@ -2690,8 +2692,8 @@ class TestAPushedEvent:
         """One pushed event writes one `success` row. Its method is the
         envelope of the subscribe method and the word `push`. Its request id is
         the subscription id. It names the ws endpoint of the provider, and it
-        carries no lava header, also when the upgrade request had some."""
-        with _websocket(lava_headers=_LAVA_HEADERS) as sock:
+        carries no router header, also when the upgrade request had some."""
+        with _websocket(router_headers=_ROUTER_HEADERS) as sock:
             subscription_id = _subscribe(sock, subscribe)
             answer = _emit(sim, {"subscription_id": subscription_id, "event": {"tag": "A"}})
             _reply(sock)
@@ -2703,7 +2705,7 @@ class TestAPushedEvent:
             (row_method, "success", 0, subscription_id),
         ]
         assert _endpoint(rows[1]) == ("jsonrpc", "ws", _PORT)
-        assert rows[1]["lava_headers"] == {}
+        assert rows[1]["router_headers"] == {}
 
     @pytest.mark.parametrize(
         "body",
@@ -3097,9 +3099,9 @@ class TestMoreOfWhatWebSocketDoesToday:
 class TestEveryUpgradeHeaderOnTheFrameRow:
     def test_the_row_of_a_frame_holds_every_header_of_the_upgrade_request(self, sim):
         """A frame has no headers of its own. Its row holds every header of the
-        upgrade request that opened the connection, and ``lava_headers`` holds
-        the lava ones only."""
-        sock = _request_upgrade(lava_headers={"lava-stateful-api": "true", "X-Sim-Caller": "ws-test"})
+        upgrade request that opened the connection, and ``router_headers`` holds
+        the router ones only."""
+        sock = _request_upgrade(router_headers={"router-stateful-api": "true", "X-Sim-Caller": "ws-test"})
         try:
             _read_the_handshake(sock)
             payload = json.dumps({"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1}).encode()
@@ -3118,8 +3120,8 @@ class TestEveryUpgradeHeaderOnTheFrameRow:
             "Connection": "Upgrade",
             "Sec-WebSocket-Key": _SAMPLE_KEY,
             "Sec-WebSocket-Version": "13",
-            "lava-stateful-api": "true",
+            "router-stateful-api": "true",
             "X-Sim-Caller": "ws-test",
         }
-        assert row["lava_headers"] == {"lava-stateful-api": "true"}
+        assert row["router_headers"] == {"router-stateful-api": "true"}
         assert (row["deadline_remaining_ms"], row["grpc_status"]) == (None, None)

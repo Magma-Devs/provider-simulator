@@ -30,9 +30,9 @@ def _upd(listener, cfg):
     listener.provider.scenario.update(cfg)
 
 
-def _serve(listener, method="GetLatestBlock", request=None, lava_headers=None):
+def _serve(listener, method="GetLatestBlock", request=None, router_headers=None):
     """One call through the request flow, as the gRPC adapter makes it."""
-    return listener.serve(RawRequest(path=method, headers=lava_headers or {}, message=request))
+    return listener.serve(RawRequest(path=method, headers=router_headers or {}, message=request))
 
 
 def test_success_carries_the_data_of_the_latest_block():
@@ -333,8 +333,8 @@ class _Decision(NamedTuple):
     clears: str | None  # the field that the adapter clears in the reply message
 
 
-def _decide(listener, method="GetLatestBlock", request=None, lava_headers=None):
-    result = _serve(listener, method, request, lava_headers)
+def _decide(listener, method="GetLatestBlock", request=None, router_headers=None):
+    result = _serve(listener, method, request, router_headers)
     if isinstance(result.body, GrpcStatus):
         drop_at = result.drop_at if result.action == "drop" else None
         return _Decision(result.body.code, result.body.text, result.latency_ms, result.action == "hang", drop_at, None)
@@ -904,13 +904,13 @@ def test_the_row_is_complete_when_serve_returns():
     assert provider.log.stats()["calls_by_status"] == {"success": 1}
 
 
-def test_the_row_names_the_endpoint_and_keeps_the_lava_headers():
+def test_the_row_names_the_endpoint_and_keeps_the_router_headers():
     listener, provider = _listener()
-    _decide(listener, lava_headers={"lava-guid": "guid-1"})
+    _decide(listener, router_headers={"router-guid": "guid-1"})
     row = provider.log.get_history()[0]
     assert (row["pool"], row["pid"]) == ("lava-sim-grpc", "1")
     assert (row["interface"], row["transport"], row["port"]) == ("grpc", "http2", 18548)
-    assert row["lava_headers"] == {"lava-guid": "guid-1"}
+    assert row["router_headers"] == {"router-guid": "guid-1"}
 
 
 def test_fail_first_n_gives_the_mode_to_the_first_calls_only():
@@ -1032,10 +1032,10 @@ def test_arrive_keeps_every_metadata_key_and_the_deadline_and_status_sent_writes
     # The adapter gives the listener the metadata of the call and the time that
     # the deadline had left. It names the status after the wait of the call.
     listener, provider = _listener()
-    entry = listener.arrive({"lava-guid": "GUID_1", "user-agent": "grpc-go/1.60"}, deadline_remaining_ms=4850)
+    entry = listener.arrive({"router-guid": "GUID_1", "user-agent": "grpc-go/1.60"}, deadline_remaining_ms=4850)
     row = provider.log.get_history()[0]
-    assert row["headers"] == {"lava-guid": "GUID_1", "user-agent": "grpc-go/1.60"}
-    assert row["lava_headers"] == {"lava-guid": "GUID_1"}
+    assert row["headers"] == {"router-guid": "GUID_1", "user-agent": "grpc-go/1.60"}
+    assert row["router_headers"] == {"router-guid": "GUID_1"}
     assert (row["deadline_remaining_ms"], row["grpc_status"]) == (4850, None)
 
     listener.status_sent(entry, "NOT_FOUND")

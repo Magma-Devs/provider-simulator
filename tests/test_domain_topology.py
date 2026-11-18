@@ -834,7 +834,7 @@ AGREED_BACKUPS = (
 
 
 def test_every_row_carries_the_agreed_name():
-    """The name is what the router reports in Lava-Provider-Address, and it is
+    """The name is what the router reports in Router-Provider-Address, and it is
     the only thing a test can use to learn which provider served a request.
     Until it lived here it was written by hand in three repositories, and no
     two copies were ever compared."""

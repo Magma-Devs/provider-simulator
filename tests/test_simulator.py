@@ -15,7 +15,7 @@ Coverage
   /reset/all                both together
   /history                  filter params:
                               ?last=, ?from=, ?to=, ?pool=, ?pid=, ?method=,
-                              ?status=, ?request_id=, ?max=, ?lava_header_*=
+                              ?status=, ?request_id=, ?max=, ?router_header_*=
                             call_order sequential numbering
   provider modes            success, error, rate_limit, down,
                             error_probability, latency_ms
@@ -2077,36 +2077,36 @@ class TestStatsEdgeCases:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Lava headers capture
+# Router headers capture
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestLavaHeadersCapture:
-    """Verify that all lava-* headers from the router are captured in history entries."""
+class TestRouterHeadersCapture:
+    """Verify that all router-* headers from the router are captured in history entries."""
 
-    def test_lava_headers_field_exists_in_history_entries(self, sim):
-        """Every history entry must have a lava_headers field (dict, never None)."""
+    def test_router_headers_field_exists_in_history_entries(self, sim):
+        """Every history entry must have a router_headers field (dict, never None)."""
         _post(_ctrl(sim, "/history/clear"), {})
         _rpc(_P1, "eth_blockNumber")
 
         _, hist = _get(_ctrl(sim, "/history?last=60"))
         assert len(hist["history"]) >= 1
         entry = hist["history"][0]
-        assert "lava_headers" in entry, "lava_headers field missing from history entry"
-        assert isinstance(entry["lava_headers"], dict), "lava_headers must be a dict"
+        assert "router_headers" in entry, "router_headers field missing from history entry"
+        assert isinstance(entry["router_headers"], dict), "router_headers must be a dict"
 
-    def test_lava_headers_empty_when_no_headers_sent(self, sim):
-        """lava_headers dict is empty {} when router sends no lava-* headers."""
+    def test_router_headers_empty_when_no_headers_sent(self, sim):
+        """router_headers dict is empty {} when router sends no router-* headers."""
         _post(_ctrl(sim, "/history/clear"), {})
-        # Direct HTTP POST with no lava headers
+        # Direct HTTP POST with no router headers
         _rpc(_P1, "eth_blockNumber")
 
         _, hist = _get(_ctrl(sim, "/history?last=60"))
         entry = hist["history"][0]
-        assert entry["lava_headers"] == {}, "lava_headers should be empty dict when no headers sent"
+        assert entry["router_headers"] == {}, "router_headers should be empty dict when no headers sent"
 
-    def test_lava_headers_preserved_across_all_modes(self, sim):
-        """lava_headers captured regardless of provider mode (success/error/rate_limit/down)."""
+    def test_router_headers_preserved_across_all_modes(self, sim):
+        """router_headers captured regardless of provider mode (success/error/rate_limit/down)."""
         modes = ["success", "error", "rate_limit", "down"]
 
         for mode in modes:
@@ -2117,11 +2117,11 @@ class TestLavaHeadersCapture:
             _, hist = _get(_ctrl(sim, "/history?last=60"))
             assert len(hist["history"]) >= 1
             entry = hist["history"][0]
-            assert "lava_headers" in entry, f"lava_headers missing in {mode} mode"
-            assert isinstance(entry["lava_headers"], dict), f"lava_headers not dict in {mode} mode"
+            assert "router_headers" in entry, f"router_headers missing in {mode} mode"
+            assert isinstance(entry["router_headers"], dict), f"router_headers not dict in {mode} mode"
 
-    def test_lava_headers_field_independent_per_provider(self, sim):
-        """Each provider's history has independent lava_headers."""
+    def test_router_headers_field_independent_per_provider(self, sim):
+        """Each provider's history has independent router_headers."""
         _post(_ctrl(sim, "/history/clear"), {})
         _rpc(_P1, "eth_blockNumber")
         _rpc(_P2, "eth_blockNumber")
@@ -2131,8 +2131,8 @@ class TestLavaHeadersCapture:
         assert len(hist["history"]) >= 3
 
         for entry in hist["history"]:
-            assert "lava_headers" in entry
-            assert isinstance(entry["lava_headers"], dict)
+            assert "router_headers" in entry
+            assert isinstance(entry["router_headers"], dict)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2232,64 +2232,64 @@ class TestCorrelationGroup:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Lava headers filter
+# Router headers filter
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class TestLavaHeadersFilter:
-    """GET /history supports filtering by lava_header_<header-name> query
+class TestRouterHeadersFilter:
+    """GET /history supports filtering by router_header_<header-name> query
     params — the name after the prefix is the header name verbatim (dashes
     included)."""
 
-    def test_lava_header_filter_param_syntax(self, sim):
-        """Query param ?lava_header_X=Y is accepted (doesn't cause 404)."""
+    def test_router_header_filter_param_syntax(self, sim):
+        """Query param ?router_header_X=Y is accepted (doesn't cause 404)."""
         _post(_ctrl(sim, "/history/clear"), {})
         _rpc(_P1, "eth_blockNumber")
 
-        # Query with lava_header filter should not 404
-        status, hist = _get(_ctrl(sim, "/history?last=60&lava_header_lava-stateful-api=true"))
-        assert status == 200, f"lava_header filter should return 200, got {status}"
+        # Query with router_header filter should not 404
+        status, hist = _get(_ctrl(sim, "/history?last=60&router_header_router-stateful-api=true"))
+        assert status == 200, f"router_header filter should return 200, got {status}"
         assert "history" in hist, "response should have history field"
 
-    def test_lava_header_filter_matches_sent_header(self, sim):
-        """A request that DID carry the lava header is matched by the filter."""
+    def test_router_header_filter_matches_sent_header(self, sim):
+        """A request that DID carry the router header is matched by the filter."""
         _post(_ctrl(sim, "/history/clear"), {})
         _post(
             _P1,
             {"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []},
-            headers={"lava-stateful-api": "true"},
+            headers={"router-stateful-api": "true"},
         )
-        _, hist = _get(_ctrl(sim, "/history?last=60&lava_header_lava-stateful-api=true"))
+        _, hist = _get(_ctrl(sim, "/history?last=60&router_header_router-stateful-api=true"))
         assert hist["count"] == 1
         # The recorded key keeps the client's wire casing; compare lowercased.
-        recorded = {k.lower(): v for k, v in hist["history"][0]["lava_headers"].items()}
-        assert recorded.get("lava-stateful-api") == "true"
+        recorded = {k.lower(): v for k, v in hist["history"][0]["router_headers"].items()}
+        assert recorded.get("router-stateful-api") == "true"
 
-    def test_lava_header_filter_empty_when_no_match(self, sim):
-        """Filtering for lava-header that wasn't sent returns empty history."""
+    def test_router_header_filter_empty_when_no_match(self, sim):
+        """Filtering for a router header that wasn't sent returns empty history."""
         _post(_ctrl(sim, "/history/clear"), {})
-        _rpc(_P1, "eth_blockNumber")  # No lava headers sent
+        _rpc(_P1, "eth_blockNumber")  # No router headers sent
 
-        _, hist = _get(_ctrl(sim, "/history?last=60&lava_header_lava-stateful-api=true"))
+        _, hist = _get(_ctrl(sim, "/history?last=60&router_header_router-stateful-api=true"))
         # Should be empty because no headers matched
         assert hist["count"] == 0, "filtering for non-existent header should return empty"
         assert hist["history"] == [], "history should be empty list"
 
-    def test_lava_header_filter_returns_matching_entries(self, sim):
-        """When entries have matching lava headers, they appear in filtered results."""
+    def test_router_header_filter_returns_matching_entries(self, sim):
+        """When entries have matching router headers, they appear in filtered results."""
         _post(_ctrl(sim, "/history/clear"), {})
         _rpc(_P1, "eth_blockNumber")
 
         _, hist_all = _get(_ctrl(sim, "/history?last=60"))
-        # All entries have empty lava_headers since we didn't send any
+        # All entries have empty router_headers since we didn't send any
         assert hist_all["count"] >= 1
 
         # Filtering for a header that doesn't exist returns 0
-        _, hist_filtered = _get(_ctrl(sim, "/history?last=60&lava_header_lava-stateful-api=true"))
+        _, hist_filtered = _get(_ctrl(sim, "/history?last=60&router_header_router-stateful-api=true"))
         assert hist_filtered["count"] == 0
 
-    def test_multiple_lava_header_filters_use_and_logic(self, sim):
-        """Multiple lava_header filters are combined with AND (all must match)."""
+    def test_multiple_router_header_filters_use_and_logic(self, sim):
+        """Multiple router_header filters are combined with AND (all must match)."""
         _post(_ctrl(sim, "/history/clear"), {})
         _rpc(_P1, "eth_blockNumber")
 
@@ -2297,37 +2297,37 @@ class TestLavaHeadersFilter:
         status, hist = _get(
             _ctrl(
                 sim,
-                "/history?last=60&lava_header_lava-stateful-api=true&lava_header_lava-user-request-type=broadcast",
+                "/history?last=60&router_header_router-stateful-api=true&router_header_router-user-request-type=broadcast",
             )
         )
         assert status == 200
         # Should be empty because headers weren't sent
         assert hist["count"] == 0
 
-    def test_lava_header_filter_combines_with_existing_filters(self, sim):
-        """lava_header filters work alongside pool/pid/method/status filters."""
+    def test_router_header_filter_combines_with_existing_filters(self, sim):
+        """router_header filters work alongside pool/pid/method/status filters."""
         _post(_ctrl(sim, "/history/clear"), {})
         _rpc(_P1, "eth_blockNumber")
         _rpc(_P2, "eth_gasPrice")
 
-        # Combine lava_header filter with pid and method filters
+        # Combine router_header filter with pid and method filters
         status, hist = _get(
             _ctrl(
                 sim,
-                "/history?last=60&pool=eth-sim&pid=1&method=eth_blockNumber&lava_header_lava-stateful-api=true",
+                "/history?last=60&pool=eth-sim&pid=1&method=eth_blockNumber&router_header_router-stateful-api=true",
             )
         )
         assert status == 200
         # Should still be empty (no headers were sent)
         assert hist["count"] == 0
 
-        # But without the lava_header filter, we should get the entries
+        # But without the router_header filter, we should get the entries
         status, hist = _get(_ctrl(sim, "/history?last=60&pool=eth-sim&pid=1&method=eth_blockNumber"))
         assert status == 200
         assert hist["count"] >= 1
 
-    def test_lava_header_filter_survives_other_query_params(self, sim):
-        """lava_header filters don't interfere with last/from/to/pool/pid/method/status."""
+    def test_router_header_filter_survives_other_query_params(self, sim):
+        """router_header filters don't interfere with last/from/to/pool/pid/method/status."""
         _post(_ctrl(sim, "/history/clear"), {})
         _rpc(_P1, "eth_blockNumber")
 
@@ -2335,7 +2335,7 @@ class TestLavaHeadersFilter:
         status, hist = _get(
             _ctrl(
                 sim,
-                "/history?last=60&pool=eth-sim&pid=1&method=eth_blockNumber&status=success&lava_header_lava-test=value",
+                "/history?last=60&pool=eth-sim&pid=1&method=eth_blockNumber&status=success&router_header_router-test=value",
             )
         )
         assert status == 200
@@ -2803,7 +2803,7 @@ class TestCancelDuringResponseRecordsArrival:
     faster peer it sends a TCP RST on the cancelled peer's connection, that
     read raises ``ConnectionResetError``, and without an arrival stub the
     handler dies before the history entry is written. The invariant
-    ``Lava-Retries + 1 == history_count`` then fails because the router still
+    ``Router-Retries + 1 == history_count`` then fails because the router still
     counts the cancelled attempt in its retries header.
 
     The adapter therefore records arrival BEFORE the body read, so even a
@@ -2885,9 +2885,9 @@ class TestCancelDuringResponseRecordsArrival:
             f"{[e['status'] for e in entries]}"
         )
 
-    def test_arrival_stub_carries_lava_headers(self, sim):
+    def test_arrival_stub_carries_router_headers(self, sim):
         """Diagnostic value: cancelled-mid-handler entries must keep their
-        captured lava-* headers so /history filters by GUID still match.
+        captured router-* headers so /history filters by GUID still match.
         The headers are read off the request before the body read, so they're
         available at the arrival moment.
         """
@@ -2899,7 +2899,7 @@ class TestCancelDuringResponseRecordsArrival:
             b"POST / HTTP/1.1\r\n"
             b"Host: localhost\r\n"
             b"Content-Type: application/json\r\n"
-            b"Lava-Guid: test-cancel-during-response-guid\r\n"
+            b"Router-Guid: test-cancel-during-response-guid\r\n"
             b"Content-Length: 50\r\n"
             b"\r\n"
         )
@@ -2917,10 +2917,10 @@ class TestCancelDuringResponseRecordsArrival:
 
         assert entries, "no arrival entry recorded for cancelled request"
         # Header casing follows the wire; match case-insensitively.
-        captured = entries[0].get("lava_headers", {})
+        captured = entries[0].get("router_headers", {})
         captured_lower = {k.lower(): v for k, v in captured.items()}
-        assert captured_lower.get("lava-guid") == "test-cancel-during-response-guid", (
-            f"lava-guid header lost on cancelled-mid-handler entry; " f"got {captured}"
+        assert captured_lower.get("router-guid") == "test-cancel-during-response-guid", (
+            f"router-guid header lost on cancelled-mid-handler entry; " f"got {captured}"
         )
 
     def test_unit_level_arrival_then_finalize_does_not_double_count(self, sim):
@@ -2933,7 +2933,7 @@ class TestCancelDuringResponseRecordsArrival:
         log = provider.log
         log.clear()
 
-        stub = log.record_arrival("jsonrpc", "http", 18545, lava_headers={"Lava-Guid": "g1"})
+        stub = log.record_arrival("jsonrpc", "http", 18545, router_headers={"Router-Guid": "g1"})
         stats = log.stats()
         assert stats["calls_by_status"].get("in_flight") == 1
         assert stats["total_calls"] == 1
@@ -2962,7 +2962,7 @@ class TestCancelDuringResponseRecordsArrival:
         log = provider.log
         log.clear()
 
-        stub = log.record_arrival("jsonrpc", "http", 18545, lava_headers={"Lava-Guid": "g-reset-mid"})
+        stub = log.record_arrival("jsonrpc", "http", 18545, router_headers={"Router-Guid": "g-reset-mid"})
         stats = log.stats()
         assert stats["total_calls"] == 1
         assert stats["history_entries"] == 1
@@ -2988,25 +2988,25 @@ class TestCancelDuringResponseRecordsArrival:
             "and the re-append path only bumps the final status"
         )
         # The re-appended entry carries the final values and the captured
-        # lava header from arrival.
+        # router header from arrival.
         entry = log.get_history()[0]
         assert entry["status"] == "success"
         assert entry["method"] == "eth_blockNumber"
         assert entry["request_id"] == 99
-        assert entry.get("lava_headers", {}).get("Lava-Guid") == "g-reset-mid"
+        assert entry.get("router_headers", {}).get("Router-Guid") == "g-reset-mid"
 
 
 class TestEveryRequestHeaderOnTheRow:
-    def test_headers_holds_every_request_header_and_lava_headers_the_lava_ones(self, sim):
+    def test_headers_holds_every_request_header_and_router_headers_the_router_ones(self, sim):
         """A row of an HTTP request holds every request header in ``headers``.
-        ``lava_headers`` holds the lava ones only, and the two gRPC fields are
+        ``router_headers`` holds the router ones only, and the two gRPC fields are
         null. urllib changes the case of a header name that it sends, so this
         test compares the names in lower case."""
         _post(_ctrl(sim, "/history/clear"), {})
         request = urllib.request.Request(
             _P1,
             data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []}).encode(),
-            headers={"Content-Type": "application/json", "Lava-Guid": "GUID_1", "X-Sim-Caller": "http-test"},
+            headers={"Content-Type": "application/json", "Router-Guid": "GUID_1", "X-Sim-Caller": "http-test"},
         )
         with urllib.request.urlopen(request, timeout=5) as response:
             assert response.status == 200
@@ -3015,9 +3015,9 @@ class TestEveryRequestHeaderOnTheRow:
         row = hist["history"][-1]
         headers = {name.lower(): value for name, value in row["headers"].items()}
         assert headers["x-sim-caller"] == "http-test"
-        assert headers["lava-guid"] == "GUID_1"
+        assert headers["router-guid"] == "GUID_1"
         assert headers["content-type"] == "application/json"
-        assert {name.lower(): value for name, value in row["lava_headers"].items()} == {"lava-guid": "GUID_1"}
+        assert {name.lower(): value for name, value in row["router_headers"].items()} == {"router-guid": "GUID_1"}
         assert (row["deadline_remaining_ms"], row["grpc_status"]) == (None, None)
 
     def test_a_header_that_the_request_repeats_keeps_its_last_value_and_two_spellings_are_two_names(self, sim):

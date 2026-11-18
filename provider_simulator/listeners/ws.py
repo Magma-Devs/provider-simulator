@@ -150,7 +150,7 @@ class WsSubscriptions:
             transport="ws",
             port=ws_endpoint.port if ws_endpoint else 0,
             request_id=sub_id,
-            lava_headers={},
+            router_headers={},
         )
         return "emitted"
 
@@ -238,7 +238,7 @@ class JsonRpcWsListener(JsonRpcListener):
         result is a refusal: a JSON body with its HTTP status, a hang, or a
         drop with its drop point. A refusal writes one complete history row
         before this method returns. The row holds every header of ``headers``,
-        and the ``lava-`` ones in ``lava_headers`` too. An upgrade that
+        and the ``router-`` ones in ``router_headers`` too. An upgrade that
         succeeds writes no row.
 
         The upgrade is not a request of ``serve()``. It applies no latency, no
@@ -255,7 +255,7 @@ class JsonRpcWsListener(JsonRpcListener):
         if verdict.kind == "none":
             return with_reply_headers(ServeResult(action="respond", status=101), chosen)
 
-        lava = {k: v for k, v in headers.items() if k.lower().startswith("lava-")}
+        router_only = {k: v for k, v in headers.items() if k.lower().startswith("router-")}
 
         def _record(method: str, status: str) -> None:
             self.provider.log.push(
@@ -265,7 +265,7 @@ class JsonRpcWsListener(JsonRpcListener):
                 interface=self.endpoint.interface,
                 transport=self.endpoint.transport,
                 port=self.endpoint.port,
-                lava_headers=lava,
+                router_headers=router_only,
                 headers=headers,
             )
 

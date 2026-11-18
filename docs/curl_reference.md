@@ -117,7 +117,7 @@ curl -s "$SIM_CONTROL_URL/history?last=30" | python3 -m json.tool
 | `request_id=<id>` | text | Filter by the request id of a call. The id is the JSON-RPC `id` of the body, the REST query parameter `request_id` (or the header `X-Request-Id`), or the `address` of a gRPC `AllBalances` call. The filter compares text, so `request_id=1` also matches a REST row that holds the counter value 1. |
 | `body_sha256=<hex>` | text | REST and GraphQL: find the rows whose request body has this SHA-256, in any letter case. Hash the bytes that you sent |
 | `body_len=<n>` | int | REST and GraphQL: find the rows whose request body is this many bytes long |
-| `lava_header_<name>=<value>` | string | Filter by a captured Lava header. Underscores in `<name>` become hyphens — e.g. `lava_header_lava_stateful_api=true` matches header `lava-stateful-api: true`. Multiple `lava_header_*` filters AND together. |
+| `router_header_<name>=<value>` | string | Filter by a captured router header. `<name>` is the header name as it is written, in any letter case — e.g. `router_header_router-stateful-api=true` matches header `router-stateful-api: true`. Multiple `router_header_*` filters AND together. |
 
 ---
 
@@ -132,7 +132,7 @@ curl -s -X POST "$SIM_CONTROL_URL/history/clear"
 # 2. send your request
 curl -si -X POST "$SIM_ROUTER_URL" \
   -H "Content-Type: application/json" \
-  -H "lava-force-cache-refresh: true" \
+  -H "router-force-cache-refresh: true" \
   -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 
 # 3. read history — no filters needed, only your request is in there

@@ -55,7 +55,7 @@ routers:
         min_groups:
           floor: 2
       # Operator forbids CV outright for eth_chainId — caller
-      # lava-cross-validation-* headers are ignored for this method.
+      # router-cross-validation-* headers are ignored for this method.
       - method: "eth_chainId"
         forbid_caller_cv: true
     nodes:
@@ -98,7 +98,7 @@ routers:
       # commit dc65672. Updating these URLs here is required — without the
       # change, every backup request lands on the TM handler.
       #
-      # Addons must match the primary tier or `lava-extension: archive`
+      # Addons must match the primary tier or `router-extension: archive`
       # requests skip the backup pool silently via IsSupportingAddon
       # (consumer_session_manager.go:1361).
       - name: "EthBackupProvider4"
@@ -346,8 +346,8 @@ routers:
   # Why a dedicated router rather than policies on lava-sim-rest: an operator
   # policy (enabled: true) makes cross-validation MANDATORY for that method for
   # every caller, and lava-sim-rest is shared by 30 existing tests. A
-  # cross-validated reply carries the lava-cross-validation-* headers INSTEAD of
-  # lava-provider-address, and those tests assert lava-provider-address as proof
+  # cross-validated reply carries the router-cross-validation-* headers INSTEAD of
+  # router-provider-address, and those tests assert router-provider-address as proof
   # the router is in the request path, so eight of them failed the moment a
   # policy was added there. Group diversity has no request header — min_groups is
   # operator-only — so the rules below cannot be reached caller-side either.
@@ -686,9 +686,9 @@ routers:
   #
   # Why a dedicated router rather than policies on lava-sim-tm: an operator
   # policy (enabled: true) makes cross-validation MANDATORY for that method for
-  # every caller. A cross-validated reply carries the lava-cross-validation-*
-  # headers INSTEAD of lava-provider-address, and the tests already on
-  # lava-sim-tm assert lava-provider-address as proof the router is in the
+  # every caller. A cross-validated reply carries the router-cross-validation-*
+  # headers INSTEAD of router-provider-address, and the tests already on
+  # lava-sim-tm assert router-provider-address as proof the router is in the
   # request path. That is exactly what broke eight tests when a policy was put
   # on the shared REST router. Group diversity has no request header —
   # min_groups is operator-only — so the rules below cannot be reached

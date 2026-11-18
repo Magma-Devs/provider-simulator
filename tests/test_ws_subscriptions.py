@@ -146,15 +146,15 @@ def test_what_the_listener_decides_for_an_upgrade(block, decision, rows):
     assert [_facts(row) for row in provider.log.get_history()] == rows
 
 
-def test_the_row_of_a_refused_upgrade_names_the_ws_endpoint_and_carries_the_lava_headers_only():
+def test_the_row_of_a_refused_upgrade_names_the_ws_endpoint_and_carries_the_router_headers_only():
     listener, provider = _ws_listener()
     provider.scenario.update({"mode": "rate_limit"})
 
-    listener.decide_upgrade({"Lava-Guid": "GUID_1", "Upgrade": "websocket"})
+    listener.decide_upgrade({"Router-Guid": "GUID_1", "Upgrade": "websocket"})
 
     rows = provider.log.get_history()
     assert [(row["interface"], row["transport"], row["port"]) for row in rows] == [("jsonrpc", "ws", 18557)]
-    assert rows[0]["lava_headers"] == {"Lava-Guid": "GUID_1"}
+    assert rows[0]["router_headers"] == {"Router-Guid": "GUID_1"}
 
 
 def test_each_upgrade_decision_uses_one_count_of_the_fail_first_n_window():
@@ -182,7 +182,7 @@ def test_emit_with_a_registry_writes_one_push_row_for_the_ws_endpoint_of_the_pro
     rows = registry.provider("eth-sim", "2").log.get_history()
     assert [_facts(row) for row in rows] == [("solana_account push", "success", 0, "0xabc")]
     assert (rows[0]["interface"], rows[0]["transport"], rows[0]["port"]) == ("jsonrpc", "ws", 18558)
-    assert rows[0]["lava_headers"] == {}
+    assert rows[0]["router_headers"] == {}
 
 
 def test_emit_on_a_full_queue_writes_no_row():
@@ -463,11 +463,11 @@ def test_the_row_of_a_refused_upgrade_keeps_every_header_of_the_upgrade_request(
     listener, provider = _ws_listener()
     provider.scenario.update({"mode": "rate_limit"})
 
-    listener.decide_upgrade({"Lava-Guid": "GUID_1", "Upgrade": "websocket"})
+    listener.decide_upgrade({"Router-Guid": "GUID_1", "Upgrade": "websocket"})
 
     row = provider.log.get_history()[0]
-    assert row["headers"] == {"Lava-Guid": "GUID_1", "Upgrade": "websocket"}
-    assert row["lava_headers"] == {"Lava-Guid": "GUID_1"}
+    assert row["headers"] == {"Router-Guid": "GUID_1", "Upgrade": "websocket"}
+    assert row["router_headers"] == {"Router-Guid": "GUID_1"}
     assert (row["deadline_remaining_ms"], row["grpc_status"]) == (None, None)
 
 

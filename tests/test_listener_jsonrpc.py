@@ -106,14 +106,24 @@ def test_per_method_error_stub_via_chain():
     assert provider.log.get_history()[0]["status"] == "error"
 
 
-def test_lava_headers_captured_on_the_entry():
+def test_router_headers_captured_on_the_entry():
     listener, provider = _listener()
-    _serve(listener, "eth_blockNumber", headers={"Lava-Guid": "GUID_1", "X-Other": "no"})
+    _serve(listener, "eth_blockNumber", headers={"Router-Guid": "GUID_1", "X-Other": "no"})
     entry = provider.log.get_history()[0]
-    assert entry["lava_headers"] == {"Lava-Guid": "GUID_1"}
+    assert entry["router_headers"] == {"Router-Guid": "GUID_1"}
     assert entry["interface"] == "jsonrpc"
     assert entry["transport"] == "http"
     assert entry["port"] == 18545
+
+
+def test_a_header_outside_the_router_prefix_is_not_a_router_header():
+    # ``router_headers`` takes a name that starts with ``router-`` and no other
+    # prefix: a ``lava-`` header is an ordinary header, in ``headers`` only.
+    listener, provider = _listener()
+    listener.arrive({"Router-Guid": "GUID_1", "Lava-Guid": "GUID_2", "X-Other": "no"})
+    row = provider.log.get_history()[0]
+    assert row["router_headers"] == {"Router-Guid": "GUID_1"}
+    assert row["headers"] == {"Router-Guid": "GUID_1", "Lava-Guid": "GUID_2", "X-Other": "no"}
 
 
 def test_latency_is_carried_on_the_serve_result():
@@ -189,26 +199,26 @@ def _facts(row):
     return (row["method"], row["status"], row["latency_ms"], row["request_id"])
 
 
-def test_arrive_writes_one_row_in_flight_with_the_lava_headers_of_the_call():
+def test_arrive_writes_one_row_in_flight_with_the_router_headers_of_the_call():
     # An adapter calls arrive before it reads the body of a request. The row
-    # names the endpoint, and it keeps the lava headers only.
+    # names the endpoint, and it keeps the router headers only.
     listener, provider = _listener()
-    listener.arrive({"Lava-Guid": "GUID_1", "X-Other": "no"})
+    listener.arrive({"Router-Guid": "GUID_1", "X-Other": "no"})
     rows = provider.log.get_history()
     assert [_facts(row) for row in rows] == [("*", "in_flight", 0, None)]
-    assert rows[0]["lava_headers"] == {"Lava-Guid": "GUID_1"}
+    assert rows[0]["router_headers"] == {"Router-Guid": "GUID_1"}
     assert (rows[0]["interface"], rows[0]["transport"], rows[0]["port"]) == ("jsonrpc", "http", 18545)
 
 
 def test_serve_finishes_the_row_that_arrive_wrote():
     # serve does not write a second row: it completes the row of arrive.
     listener, provider = _listener()
-    entry = listener.arrive({"Lava-Guid": "GUID_1"})
+    entry = listener.arrive({"Router-Guid": "GUID_1"})
     res = listener.serve(RawRequest(body=_raw("eth_blockNumber")), entry=entry)
     assert res.action == "respond"
     rows = provider.log.get_history()
     assert [_facts(row) for row in rows] == [("eth_blockNumber", "success", 0, 1)]
-    assert rows[0]["lava_headers"] == {"Lava-Guid": "GUID_1"}
+    assert rows[0]["router_headers"] == {"Router-Guid": "GUID_1"}
     assert provider.log.stats()["calls_by_status"] == {"success": 1}
 
 
@@ -279,13 +289,13 @@ def test_the_flow_asks_build_content_for_a_success_and_not_for_a_fault_or_a_cann
 
 
 def test_arrive_keeps_every_header_of_the_call_in_headers():
-    # ``headers`` holds each header, with its name as it came. ``lava_headers``
-    # holds the lava ones only, as before. The two gRPC fields stay empty.
+    # ``headers`` holds each header, with its name as it came. ``router_headers``
+    # holds the router ones only. The two gRPC fields stay empty.
     listener, provider = _listener()
-    listener.arrive({"Lava-Guid": "GUID_1", "X-Other": "kept"})
+    listener.arrive({"Router-Guid": "GUID_1", "X-Other": "kept"})
     row = provider.log.get_history()[0]
-    assert row["headers"] == {"Lava-Guid": "GUID_1", "X-Other": "kept"}
-    assert row["lava_headers"] == {"Lava-Guid": "GUID_1"}
+    assert row["headers"] == {"Router-Guid": "GUID_1", "X-Other": "kept"}
+    assert row["router_headers"] == {"Router-Guid": "GUID_1"}
     assert (row["deadline_remaining_ms"], row["grpc_status"]) == (None, None)
 
 

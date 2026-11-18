@@ -253,9 +253,9 @@ a tree with uncommitted changes reports `untagged` with `-dirty` in
 `GET /history` merges every provider's ring buffer, sorts by time, and adds
 `correlation_group` (the calls of one router relay) and `call_order`. Each entry
 carries `pool` / `pid` / `interface` / `transport` / `port`; filter by
-`pool` / `transport` / `method` / `status` / `request_id` / time / `lava_header_*`.
+`pool` / `transport` / `method` / `status` / `request_id` / time / `router_header_*`.
 Each row also says what the provider received: `headers` (every request
-header), `lava_headers`, and for gRPC `deadline_remaining_ms` and `grpc_status`.
+header), `router_headers` (the `router-*` ones), and for gRPC `deadline_remaining_ms` and `grpc_status`.
 
 ## Deploy
 

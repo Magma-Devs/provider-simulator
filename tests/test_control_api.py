@@ -1672,10 +1672,10 @@ _HISTORY_METHODS = ("eth_blockNumber", "eth_call", "getblockcount", "getSlot", "
 _HISTORY_STATUSES = ("success", "error", "rate_limit", "down")
 _HISTORY_HEADERS: tuple[dict[str, str], ...] = (
     {},
-    {"lava-stateful-api": "true"},
-    {"Lava-Stateful-Api": "false"},
-    {"LAVA-STATEFUL-API": "true", "Lava-Stickiness": "s1"},
-    {"Lava-Stickiness": "s2"},
+    {"router-stateful-api": "true"},
+    {"Router-Stateful-Api": "false"},
+    {"ROUTER-STATEFUL-API": "true", "Router-Stickiness": "s1"},
+    {"Router-Stickiness": "s2"},
 )
 _HISTORY_ROWS = 84
 
@@ -1728,7 +1728,7 @@ def _fill_history(api, monkeypatch):
             transport=endpoint.transport,
             port=endpoint.port,
             request_id=request_id,
-            lava_headers=_HISTORY_HEADERS[i % 5],
+            router_headers=_HISTORY_HEADERS[i % 5],
         )
         pushed.append((provider.key, request_id))
     return pushed
@@ -1758,12 +1758,12 @@ def _history_the_old_way(api, query):
         high = _number(query["to"], float("inf"), float)
         rows = [row for row in rows if row.get("ts", 0.0) <= high]
     for key, value in query.items():
-        if key.startswith("lava_header_"):
-            wanted = key[len("lava_header_") :].lower()
+        if key.startswith("router_header_"):
+            wanted = key[len("router_header_") :].lower()
             rows = [
                 row
                 for row in rows
-                if any(name.lower() == wanted and header == value for name, header in row["lava_headers"].items())
+                if any(name.lower() == wanted and header == value for name, header in row["router_headers"].items())
             ]
     rows.sort(key=lambda row: row.get("ts", 0.0))
     groups, last_group = {}, 0
@@ -1808,9 +1808,9 @@ _HISTORY_QUERIES = {
     "to alone": {"to": "1002.0"},
     "from that is not a number": {"from": "abc"},
     "from that is nan": {"from": "nan"},
-    "lava header, name in another case": {"lava_header_Lava-Stateful-Api": "true"},
-    "lava header, value in another case": {"lava_header_lava-stateful-api": "True"},
-    "two lava headers": {"lava_header_lava-stateful-api": "true", "lava_header_lava-stickiness": "s1"},
+    "router header, name in another case": {"router_header_Router-Stateful-Api": "true"},
+    "router header, value in another case": {"router_header_router-stateful-api": "True"},
+    "two router headers": {"router_header_router-stateful-api": "true", "router_header_router-stickiness": "s1"},
     "last": {"last": "10"},
     "last 0": {"last": "0"},
     "last that is not a number": {"last": "abc"},
@@ -1820,11 +1820,11 @@ _HISTORY_QUERIES = {
     "max that is not a number": {"max": "abc"},
     "last and max": {"last": "20", "max": "5"},
     "pool, method and status": {"pool": "alpha-sim", "method": "eth_call", "status": "error"},
-    "pid, time window, lava header and last": {
+    "pid, time window, router header and last": {
         "pid": "1",
         "from": "1001.0",
         "to": "1012.0",
-        "lava_header_lava-stateful-api": "true",
+        "router_header_router-stateful-api": "true",
         "last": "3",
     },
 }
@@ -1837,7 +1837,7 @@ _HISTORY_COUNT = {
     "pid that the pool does not have": 0,
     "from that is not a number": _HISTORY_ROWS,
     "from that is nan": 0,
-    "lava header, value in another case": 0,  # the value is compared as it is written
+    "router header, value in another case": 0,  # the value is compared as it is written
     "last 0": 0,
     "last that is not a number": _HISTORY_ROWS,
     "max 0": 0,
@@ -2010,7 +2010,7 @@ def test_history_read_does_not_ask_the_logs_of_providers_the_pool_and_pid_leave_
         {"transport": "ws"},
         {"interface": "rest"},
         {"from": "1003.0", "to": "1008.0"},
-        {"lava_header_Lava-Stateful-Api": "true"},
+        {"router_header_Router-Stateful-Api": "true"},
         {"pool": "gamma-sim", "request_id": "1"},
     ],
     ids=lambda query: "&".join(f"{k}={v}" for k, v in query.items()),
