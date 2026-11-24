@@ -258,7 +258,7 @@ _Avoid_: config, state, fault config
 
 **Quirks**:
 The extra settings only some chains need, kept out of the scenario. Ethereum
-models a lagging log index; Solana models the slot gap, the slot offset and the
+models a lagging log index and a pruned node, at every address or at chosen ones; Solana models the slot gap, the slot offset and the
 lag of each commitment (how many slots below its head a reply at `processed`,
 `confirmed` or `finalized` sits).
 _Avoid_: chain config, extras, options

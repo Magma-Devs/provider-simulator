@@ -367,7 +367,10 @@ class Listener(ABC):
         provider. ``request`` is the request of the adapter, for a listener
         that needs more than the parsed fields."""
         chain = self.provider.pool.chain_object
-        return chain.build_success(parsed, scenario, self.provider.quirks.snapshot(), self.endpoint.interface)
+        quirks = self.provider.quirks
+        return chain.build_success(
+            parsed, scenario, quirks.for_port(quirks.snapshot(), self.endpoint.port), self.endpoint.interface
+        )
 
     def corrupt(self, result: ServeResult, status_label: str, scenario: dict) -> str:
         """Apply the corruption of the scenario to a reply of this endpoint, and
