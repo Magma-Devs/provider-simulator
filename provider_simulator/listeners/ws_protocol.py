@@ -180,8 +180,9 @@ def build_handshake_response(client_key: str, extra_headers: "dict[str, str] | N
         client_key:    The Sec-WebSocket-Key request header value.
         extra_headers: Optional name→value mapping appended to the response
                        after the three mandatory upgrade headers. Used by the
-                       WS adapter to attach Lava-Provider-Address so smoke
-                       tests can assert which simulated provider answered.
+                       WS adapter to attach Router-Provider-Address and
+                       Lava-Provider-Address so smoke tests can assert which
+                       simulated provider answered.
 
     Returns:
         Bytes ready for sendall(). Includes the terminating CRLF CRLF.

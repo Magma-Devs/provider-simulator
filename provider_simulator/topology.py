@@ -16,10 +16,10 @@ that reads them is ``ControlApi.get_providers``, which serves them on GET
 /providers so a caller can ask instead of writing them down:
 
   * ``name`` is what the router calls this provider. The router reports it in
-    the ``Lava-Provider-Address`` response header, and a test reads that header
-    to learn which provider served a request. Before it lived here it was
-    written by hand in three repositories and no two copies were compared. The
-    form is pool, then role, then the word Provider, then the pid, for example
+    the ``Router-Provider-Address`` response header (``Lava-Provider-Address``
+    on a router before v1.7.0), and a test reads that header to learn which
+    provider served a request. Before it lived here it was written by hand in
+    three repositories and no two copies were compared. The form is pool, then role, then the word Provider, then the pid, for example
     ``EthBackupProvider4``. The helm chart lowercases it before the router
     reads it, so ``EthBackupProvider4`` arrives as ``ethbackupprovider4`` and
     every comparison must lowercase. Two providers on one chain and

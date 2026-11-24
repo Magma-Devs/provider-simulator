@@ -37,6 +37,7 @@ from provider_simulator import fault_policy
 from provider_simulator.domain.endpoint import Endpoint
 from provider_simulator.domain.provider import Provider
 from provider_simulator.domain.registry import Registry
+from provider_simulator.domain.router_headers import headers_by_family
 from provider_simulator.listeners.base import RawRequest, ServeResult, with_reply_headers
 from provider_simulator.listeners.jsonrpc import JsonRpcListener
 
@@ -150,7 +151,6 @@ class WsSubscriptions:
             transport="ws",
             port=ws_endpoint.port if ws_endpoint else 0,
             request_id=sub_id,
-            lava_headers={},
         )
         return "emitted"
 
@@ -238,7 +238,8 @@ class JsonRpcWsListener(JsonRpcListener):
         result is a refusal: a JSON body with its HTTP status, a hang, or a
         drop with its drop point. A refusal writes one complete history row
         before this method returns. The row holds every header of ``headers``,
-        and the ``lava-`` ones in ``lava_headers`` too. An upgrade that
+        the ``lava-`` ones in ``lava_headers`` too, and the ``router-`` ones in
+        ``router_headers``. An upgrade that
         succeeds writes no row.
 
         The upgrade is not a request of ``serve()``. It applies no latency, no
@@ -255,7 +256,7 @@ class JsonRpcWsListener(JsonRpcListener):
         if verdict.kind == "none":
             return with_reply_headers(ServeResult(action="respond", status=101), chosen)
 
-        lava = {k: v for k, v in headers.items() if k.lower().startswith("lava-")}
+        families = headers_by_family(headers)
 
         def _record(method: str, status: str) -> None:
             self.provider.log.push(
@@ -265,8 +266,8 @@ class JsonRpcWsListener(JsonRpcListener):
                 interface=self.endpoint.interface,
                 transport=self.endpoint.transport,
                 port=self.endpoint.port,
-                lava_headers=lava,
                 headers=headers,
+                **families,
             )
 
         if verdict.kind == "down":
