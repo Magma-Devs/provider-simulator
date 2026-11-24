@@ -893,6 +893,16 @@ class TestLavaProviderAddressHeader:
         expected = f"Lava-Provider-Address: sim-provider-eth-sim:{pid}".encode()
         assert expected in resp, f"missing {expected!r} in: {resp!r}"
 
+    @pytest.mark.parametrize("pid", ["1", "2", "3"])
+    def test_router_provider_address_header_present_in_upgrade_response(self, sim, pid):
+        """A router of v1.7.0 or later reads Router-Provider-Address, one before
+        v1.7.0 Lava-Provider-Address: the 101 reply carries both."""
+        resp = self._raw_handshake(_WS_HOST, _WS_PORTS[pid])
+        assert b" 101 " in resp.split(b"\r\n", 1)[0], f"no 101 in: {resp!r}"
+        for family in ("Router", "Lava"):
+            expected = f"{family}-Provider-Address: sim-provider-eth-sim:{pid}".encode()
+            assert expected in resp, f"missing {expected!r} in: {resp!r}"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-method FAULT overrides on WS
@@ -1424,6 +1434,7 @@ _HANDSHAKE_OF_PROVIDER_1 = (
     b"Upgrade: websocket\r\n"
     b"Connection: Upgrade\r\n"
     b"Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n"
+    b"Router-Provider-Address: sim-provider-eth-sim:1\r\n"
     b"Lava-Provider-Address: sim-provider-eth-sim:1\r\n"
     b"\r\n"
 )
@@ -1948,6 +1959,24 @@ class TestTheUpgradeRequest:
 
         assert head == _HANDSHAKE_OF_PROVIDER_1.replace(
             b"Lava-Provider-Address: sim-provider-eth-sim:1", b"lava-provider-address: chosen"
+        )
+
+    def test_a_chosen_router_provider_address_replaces_that_header_only_on_the_101_reply(self, sim):
+        """A chosen Router-Provider-Address replaces the simulator's header of that
+        name, and the 101 reply keeps the simulator's Lava-Provider-Address."""
+        _set_scenario(sim, {"transports": ["ws"], "reply_headers": {"router-provider-address": "chosen"}})
+
+        sock = _request_upgrade()
+        try:
+            head = _read_the_handshake(sock)
+        finally:
+            sock.close()
+
+        assert head == (
+            _HANDSHAKE_OF_PROVIDER_1.replace(b"Router-Provider-Address: sim-provider-eth-sim:1\r\n", b"")[
+                : -len(b"\r\n")
+            ]
+            + b"router-provider-address: chosen\r\n\r\n"
         )
 
     def test_the_101_reply_of_a_drop_after_the_headers_carries_the_chosen_headers(self, sim):
@@ -3123,3 +3152,15 @@ class TestEveryUpgradeHeaderOnTheFrameRow:
         }
         assert row["lava_headers"] == {"lava-stateful-api": "true"}
         assert (row["deadline_remaining_ms"], row["grpc_status"]) == (None, None)
+
+    def test_the_row_of_a_frame_keeps_each_family_of_the_upgrade_request_in_its_own_field(self, sim):
+        sent = {"Router-Stateful-Api": "true", "lava-stateful-api": "true", "X-Router-Guid": "no"}
+        with _websocket(lava_headers=sent) as sock:
+            _send_frame(sock, {"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1})
+            _reply(sock)
+
+        _, body = _control(sim, "GET", "/history?pool=eth-sim&pid=1&method=eth_blockNumber&transport=ws")
+        row = body["history"][-1]
+        assert row["router_headers"] == {"Router-Stateful-Api": "true"}
+        assert row["lava_headers"] == {"lava-stateful-api": "true"}
+        assert row["headers"]["X-Router-Guid"] == "no"

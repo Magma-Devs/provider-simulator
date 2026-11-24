@@ -2343,6 +2343,47 @@ class TestLavaHeadersFilter:
         assert "history" in hist
 
 
+class TestRouterHeadersFilter:
+    """A router of v1.7.0 or later sends router-* headers, one before v1.7.0
+    lava-* headers. Over HTTP, a row keeps each family in its own field, and
+    GET /history filters by router_header_<name> and lava_header_<name>."""
+
+    def _send(self, request_id, headers):
+        _post(_P1, {"jsonrpc": "2.0", "id": request_id, "method": "eth_blockNumber", "params": []}, headers=headers)
+
+    def _ids(self, sim, query):
+        status, hist = _get(_ctrl(sim, f"/history?pool=eth-sim&pid=1&{query}"))
+        assert status == 200, hist
+        return [row["request_id"] for row in hist["history"]]
+
+    def test_each_family_is_recorded_and_filtered_on_its_own(self, sim):
+        _post(_ctrl(sim, "/history/clear"), {})
+        router, lava, both, neither = 1, 2, 3, 4
+        self._send(router, {"Router-Stateful-Api": "true"})
+        self._send(lava, {"lava-stateful-api": "true"})
+        self._send(both, {"router-stateful-api": "true", "Lava-Stateful-Api": "true"})
+        self._send(neither, {"X-Router-Stateful-Api": "true"})
+
+        _, hist = _get(_ctrl(sim, "/history?pool=eth-sim&pid=1"))
+        rows = {row["request_id"]: row for row in hist["history"]}
+
+        def lower(found):
+            # The client may change the letter case of a header name on the wire.
+            return {name.lower(): value for name, value in found.items()}
+
+        assert lower(rows[router]["router_headers"]) == {"router-stateful-api": "true"}
+        assert rows[router]["lava_headers"] == {}
+        assert lower(rows[lava]["lava_headers"]) == {"lava-stateful-api": "true"}
+        assert rows[lava]["router_headers"] == {}
+        assert lower(rows[both]["router_headers"]) == {"router-stateful-api": "true"}
+        assert lower(rows[both]["lava_headers"]) == {"lava-stateful-api": "true"}
+        assert (rows[neither]["router_headers"], rows[neither]["lava_headers"]) == ({}, {})
+
+        assert self._ids(sim, "router_header_ROUTER-STATEFUL-API=true") == [router, both]
+        assert self._ids(sim, "lava_header_lava-stateful-api=true") == [lava, both]
+        assert self._ids(sim, "router_header_router-stateful-api=true&lava_header_lava-stateful-api=true") == [both]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # http_status applies in success mode (custom HTTP code with valid body)
 # ─────────────────────────────────────────────────────────────────────────────

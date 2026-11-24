@@ -222,7 +222,7 @@ def push_call_to_buffer(self, method: str, status: str, latency_ms: int,
 **Special values:**
 - `method="*"` is used for `mode="down"` calls, where the body is never parsed. Filter with `?method=*` to find rejected requests.
 - `request_id=None` for those same down-mode calls (no body → no `id` field to echo).
-- `lava_headers` is the dict of all `lava-*` request headers captured by the handler.
+- `lava_headers` is the dict of all `lava-*` request headers captured by the handler, and `router_headers` the dict of the `router-*` ones. A row has both, `{}` when empty (`provider_simulator/domain/router_headers.py` holds the table of the two families).
 
 ---
 
@@ -739,7 +739,7 @@ def do_GET(self):
 
 **Case 4: GET /history**
 - Returns merged, ordered call history across all providers
-- Supports query params: `last`, `from`, `to`, `provider`, `method`, `status`, `request_id`, and the dynamic-prefix `lava_header_<name>=<value>` (underscores in `<name>` become hyphens — e.g. `?lava_header_lava_stateful_api=true` matches header `lava-stateful-api: true`; multiple `lava_header_*` filters AND together)
+- Supports query params: `last`, `from`, `to`, `provider`, `method`, `status`, `request_id`, and the dynamic prefixes `lava_header_<name>=<value>` (reads `lava_headers`, the headers of a router before v1.7.0) and `router_header_<name>=<value>` (reads `router_headers`, v1.7.0 and later). `<name>` is the header name as it is written, in any letter case — e.g. `?router_header_router-stateful-api=true` matches header `router-stateful-api: true`; several filters, of one family or both, AND together
 
 ---
 

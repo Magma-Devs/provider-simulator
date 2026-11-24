@@ -24,7 +24,10 @@ Honest boundaries of the counters:
   the rows that pass it.
 
 What a row says about the request itself:
-- ``lava_headers`` holds the request headers whose name starts with ``lava-``.
+- ``lava_headers`` holds the request headers whose name starts with ``lava-``,
+  and ``router_headers`` the ones whose name starts with ``router-``, each in
+  any letter case (``router_headers.py`` holds the table of the two families).
+  A row has both fields; a field with no header is ``{}``.
 - ``headers`` holds every request header. The log stores them as one compact
   JSON text and decodes the text for a reader: a full log holds up to
   ``history_max`` rows for each provider, and a text costs less memory than a
@@ -49,6 +52,7 @@ from collections import deque
 from collections.abc import Callable
 
 from constants import HISTORY_MAX
+from provider_simulator.domain.router_headers import ROUTER_HEADER_FAMILIES, ROW_FIELDS
 
 
 def _header_value_as_text(value: object) -> str:
@@ -101,7 +105,8 @@ class CallLog:
         # only repeat them — and it would repeat them in the exact shape of
         # Provider.key, the address the control API accepts, so it would read
         # like a name the router reported. Tests learn which provider served a
-        # request by matching the Lava-Provider-Address header against these
+        # request by matching the Router-Provider-Address header (Lava-Provider-Address
+        # on a router before v1.7.0) against these
         # names, and no real name is ever empty. An empty name therefore cannot
         # be mistaken for a real one; "eth-sim:4" could.
         self._name = name
@@ -120,7 +125,7 @@ class CallLog:
         status: str,
         latency_ms: int,
         request_id: int | str | None,
-        lava_headers: dict | None,
+        family_headers: dict[str, dict | None],
         headers: dict | None = None,
         deadline_remaining_ms: int | None = None,
     ) -> dict:
@@ -135,9 +140,12 @@ class CallLog:
             # A bytes value is written as base64 text, as in ``headers``. gRPC
             # gives the value of a ``-bin`` metadata key as bytes, and a row
             # that holds bytes cannot be written as JSON.
-            "lava_headers": {
-                name: (_header_value_as_text(value) if isinstance(value, (bytes, bytearray)) else value)
-                for name, value in (lava_headers or {}).items()
+            **{
+                family.row_field: {
+                    name: (_header_value_as_text(value) if isinstance(value, (bytes, bytearray)) else value)
+                    for name, value in (family_headers.get(family.row_field) or {}).items()
+                }
+                for family in ROUTER_HEADER_FAMILIES
             },
             "deadline_remaining_ms": deadline_remaining_ms,
             "grpc_status": None,
@@ -161,13 +169,17 @@ class CallLog:
         lava_headers: dict | None = None,
         headers: dict | None = None,
         deadline_remaining_ms: int | None = None,
+        router_headers: dict | None = None,
     ) -> dict:
         """Append an in_flight stub the moment a request arrives; return it for
         finalize(). The returned dict is the log's own bookkeeping object —
         treat it as opaque, pass it back to finalize, never edit it directly.
 
-        ``headers`` is every request header. ``deadline_remaining_ms`` is the
-        time that the deadline of a gRPC caller had left at the arrival."""
+        ``headers`` is every request header. ``lava_headers`` and
+        ``router_headers`` are the row's fields of the two families, stored as
+        given (``headers_by_family`` makes them from ``headers``).
+        ``deadline_remaining_ms`` is the time that the deadline of a gRPC
+        caller had left at the arrival."""
         entry = self._new_entry(
             interface,
             transport,
@@ -176,7 +188,7 @@ class CallLog:
             "in_flight",
             0,
             None,
-            lava_headers,
+            {"lava_headers": lava_headers, "router_headers": router_headers},
             headers=headers,
             deadline_remaining_ms=deadline_remaining_ms,
         )
@@ -270,6 +282,7 @@ class CallLog:
         request_id: int | str | None = None,
         lava_headers: dict | None = None,
         headers: dict | None = None,
+        router_headers: dict | None = None,
     ) -> dict:
         """Append a fully-known record directly (paths with no arrival stub).
         Endpoint identity is required — every row names its listener. Returns
@@ -277,7 +290,15 @@ class CallLog:
         a provisional status); it carries the generation stamp, so finalize
         updates in place instead of double-counting."""
         entry = self._new_entry(
-            interface, transport, port, method, status, latency_ms, request_id, lava_headers, headers=headers
+            interface,
+            transport,
+            port,
+            method,
+            status,
+            latency_ms,
+            request_id,
+            {"lava_headers": lava_headers, "router_headers": router_headers},
+            headers=headers,
         )
         with self._lock:
             entry["_reset_gen"] = self._reset_generation
@@ -325,7 +346,7 @@ class CallLog:
             for e in self._history:
                 if where is None or where(e):
                     row = {
-                        k: (dict(v) if k == "lava_headers" and isinstance(v, dict) else v)
+                        k: (dict(v) if k in ROW_FIELDS and isinstance(v, dict) else v)
                         for k, v in e.items()
                         if not k.startswith("_")
                     }

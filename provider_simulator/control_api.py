@@ -26,6 +26,7 @@ from provider_simulator.chains import CHAINS, Chain
 from provider_simulator.domain.call_log import decode_row_headers
 from provider_simulator.domain.endpoint import INTERFACES, TRANSPORTS
 from provider_simulator.domain.registry import Registry
+from provider_simulator.domain.router_headers import ROUTER_HEADER_FAMILIES
 from provider_simulator.listeners.ws import WsSubscriptions
 from provider_simulator.port_gate import PortGate
 from provider_simulator.resp_proxy import RespProxyRegistry
@@ -1398,12 +1399,15 @@ class ControlApi:
         wanted_len = _strict_int("body_len", query["body_len"]) if "body_len" in query else None
         low = _as_float(query["from"], float("-inf")) if "from" in query else None
         high = _as_float(query["to"], float("inf")) if "to" in query else None
-        # Header names are case-insensitive on the wire (clients may title-case
-        # them) — match accordingly. The value is compared as it is written.
+        # One (row field, header name, value) for each lava_header_<name> and
+        # router_header_<name>. Header names are case-insensitive on the wire
+        # (clients may title-case them) — match accordingly. The value is
+        # compared as it is written.
         headers = [
-            (key[len("lava_header_") :].lower(), value)
+            (family.row_field, key[len(family.filter_prefix) :].lower(), value)
             for key, value in query.items()
-            if key.startswith("lava_header_")
+            for family in ROUTER_HEADER_FAMILIES
+            if key.startswith(family.filter_prefix)
         ]
         if not (
             equals
@@ -1431,10 +1435,10 @@ class ControlApi:
                 return False
             if high is not None and not row.get("ts", 0.0) <= high:
                 return False
-            for name, value in headers:
+            for row_field, name, value in headers:
                 if not any(
                     header.lower() == name and header_value == value
-                    for header, header_value in row.get("lava_headers", {}).items()
+                    for header, header_value in row.get(row_field, {}).items()
                 ):
                     return False
             return True

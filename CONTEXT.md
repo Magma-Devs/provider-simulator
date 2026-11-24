@@ -45,8 +45,8 @@ _Avoid_: provider address, provider name, pid string
 
 **Provider name**:
 What the router calls one provider. It lives in the topology table now, not
-only in a values file. The router reports it in the `Lava-Provider-Address`
-response header. It is not an address: the control API will not accept it.
+only in a values file. The router reports it in the `Router-Provider-Address`
+response header (`Lava-Provider-Address` on a router before v1.7.0). It is not an address: the control API will not accept it.
 Use the provider key for that.
 
 The form is `<Pool><Role>Provider<slot>`, for example `EthPrimaryProvider1` and
@@ -348,7 +348,10 @@ _Avoid_: log, trace, calls
 
 **History row**:
 One call in the history of a provider. It holds every request header in
-`headers`, and the ones whose name starts with `lava-` in `lava_headers` too. A
+`headers`, the ones whose name starts with `lava-` in `lava_headers` too, and the
+ones whose name starts with `router-` in `router_headers`, in any letter case. A
+router before v1.7.0 sends the `lava-*` headers; v1.7.0 and later sends the
+`router-*` ones. Both fields are on every row, `{}` when empty. A
 gRPC row also holds `deadline_remaining_ms`, the time that the deadline of the
 caller had left, and `grpc_status`, the name of the status that the simulator
 sent.
