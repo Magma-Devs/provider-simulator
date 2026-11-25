@@ -379,7 +379,7 @@ metadata:
   namespace: smart-router
 spec:
   selector:
-    app.lavanet.io/router: eth
+    app.smart-router-id: eth
   ports:
     - port: 9999
       targetPort: 9999
@@ -425,7 +425,7 @@ bash scripts/install_gateway_api_tls_certificate.sh
 kubectl get service eth-router-debug -n smart-router
 kubectl get httproute eth-router-debug-httproute -n smart-router
 
-ETH_POD=$(kubectl get pods -n smart-router -l app.lavanet.io/router=eth -o jsonpath='{.items[0].metadata.name}')
+ETH_POD=$(kubectl get pods -n smart-router -l app.smart-router-id=eth -o jsonpath='{.items[0].metadata.name}')
 kubectl logs -n smart-router "$ETH_POD" | grep "Debug HTTP server started"
 
 curl -s "https://debug.${BASE_DOMAIN}/debug/time" | python3 -m json.tool
@@ -494,7 +494,7 @@ kubectl get httproute eth-router-debug-httproute -n smart-router
 Check debug server started in router pod:
 
 ```bash
-ETH_POD=$(kubectl get pods -n smart-router -l app.lavanet.io/router=eth -o jsonpath='{.items[0].metadata.name}')
+ETH_POD=$(kubectl get pods -n smart-router -l app.smart-router-id=eth -o jsonpath='{.items[0].metadata.name}')
 kubectl logs -n smart-router "$ETH_POD" | grep "Debug HTTP server started"
 ```
 
